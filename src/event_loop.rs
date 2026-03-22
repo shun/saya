@@ -636,15 +636,12 @@ mod tests {
     async fn drain_returns_empty_when_no_pending_events() {
         let (mut coordinator, sender) = EventLoopCoordinator::new();
 
-        sender
-            .send(UiEvent::Input(KeyInput::Char('x')))
-            .await
-            .unwrap();
+        sender.send(UiEvent::Redraw).await.unwrap();
 
         // 1 個だけ recv
         coordinator.next_action().await;
 
-        // channel にはもう何もない
+        // channel にはもう何もない。Redrawは pending_events に入らない
         let drained = coordinator.drain_pending();
         assert!(
             drained.is_empty(),
