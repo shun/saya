@@ -7,10 +7,10 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{prepare_launch, BootstrapOutcome};
+use saya::bootstrap::{BootstrapOutcome, prepare_launch};
 use saya::cli::{ConfigSource, LaunchRequest};
 use saya::editor_session::{EditorSessionState, QuitDecision};
-use saya::host_io::{write_to_path, SaveResult};
+use saya::host_io::{SaveResult, write_to_path};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -66,7 +66,7 @@ fn save_success_clears_dirty_state_and_allows_quit() {
 #[test]
 fn save_failure_keeps_dirty_state_and_warns_on_quit() {
     let mut outcome = launch_with_content("initial\n");
-    
+
     // 不正なパスに変更して保存失敗を引き起こす
     let bad_path = PathBuf::from("/nonexistent/dir/file.txt");
     let mut session_state = EditorSessionState::new(Some(bad_path.clone()));
@@ -84,7 +84,7 @@ fn save_failure_keeps_dirty_state_and_warns_on_quit() {
 
     // ホストへの保存処理（失敗する）
     let result = write_to_path(&request);
-    
+
     match result {
         SaveResult::Failed { message } => {
             session_state.record_save_failure(message);
@@ -97,7 +97,10 @@ fn save_failure_keeps_dirty_state_and_warns_on_quit() {
     assert!(session_state.last_save_error().is_some());
 
     // 通常終了は警告になる
-    assert_eq!(session_state.evaluate_quit(false), QuitDecision::WarnUnsaved);
+    assert_eq!(
+        session_state.evaluate_quit(false),
+        QuitDecision::WarnUnsaved
+    );
 }
 
 // ---- 9.3.3: 未保存終了警告の確認 ----
@@ -112,11 +115,11 @@ fn unsaved_changes_prevent_immediate_quit() {
     outcome.core_bridge.dispatch_key("Y").unwrap();
     outcome.core_bridge.dispatch_key("\x1b").unwrap();
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
-    
+
     // quit は警告を返す
     let decision = session_state.evaluate_quit(false);
     assert_eq!(decision, QuitDecision::WarnUnsaved);
-    
+
     // もう一度編集を継続できる
     outcome.core_bridge.dispatch_key("x").unwrap();
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
@@ -135,7 +138,7 @@ fn force_quit_allows_exit_even_when_dirty() {
     outcome.core_bridge.dispatch_key("Z").unwrap();
     outcome.core_bridge.dispatch_key("\x1b").unwrap();
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
-    
+
     // force=true の quit は許可される
     let decision = session_state.evaluate_quit(true);
     assert_eq!(decision, QuitDecision::ForceQuit);

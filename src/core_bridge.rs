@@ -41,7 +41,9 @@ impl CoreBridge {
         let snapshot = self.session.snapshot();
         log::debug!(
             "[core_bridge] snapshot captured: revision={}, dirty={}, pending_host_actions={}",
-            snapshot.revision, snapshot.dirty, snapshot.pending_host_actions
+            snapshot.revision,
+            snapshot.dirty,
+            snapshot.pending_host_actions
         );
         snapshot
     }
@@ -76,11 +78,11 @@ impl CoreBridge {
 
     /// ex コマンドを vim-core-rs セッションに適用する。
     /// `:w`, `:q`, `:q!` などの実行に使用する。
-    pub fn apply_ex_command(&mut self, command: &str) -> Result<CoreCommandOutcome, CoreSessionError> {
-        log::debug!(
-            "[core_bridge] applying ex command: {:?}",
-            command
-        );
+    pub fn apply_ex_command(
+        &mut self,
+        command: &str,
+    ) -> Result<CoreCommandOutcome, CoreSessionError> {
+        log::debug!("[core_bridge] applying ex command: {:?}", command);
         let outcome = self
             .session
             .apply_ex_command(command)
@@ -327,7 +329,10 @@ mod tests {
 
         bridge.dispatch_key("j").expect("j キーで下移動");
         let snapshot = bridge.snapshot();
-        assert_eq!(snapshot.cursor_row, 1, "j キーでカーソルが 1 行下に移動すること");
+        assert_eq!(
+            snapshot.cursor_row, 1,
+            "j キーでカーソルが 1 行下に移動すること"
+        );
         assert_eq!(snapshot.cursor_col, 0, "j キーで列は変わらないこと");
     }
 
@@ -337,8 +342,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("hello\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
 
         bridge.dispatch_key("l").expect("l キーで右移動");
         let snapshot = bridge.snapshot();
@@ -352,8 +356,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("hello\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
 
         // まず右に移動してから左に戻る
         bridge.dispatch_key("ll").expect("l で右に 2 回移動");
@@ -370,8 +373,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge = CoreBridge::new("first\nsecond\nthird\n")
-            .expect("core bridge should initialize");
+        let mut bridge =
+            CoreBridge::new("first\nsecond\nthird\n").expect("core bridge should initialize");
 
         bridge.dispatch_key("jj").expect("j で 2 行下に移動");
         assert_eq!(bridge.snapshot().cursor_row, 2);
@@ -387,10 +390,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge = CoreBridge::new("abcde\nfghij\nklmno\n")
-            .expect("core bridge should initialize");
+        let mut bridge =
+            CoreBridge::new("abcde\nfghij\nklmno\n").expect("core bridge should initialize");
 
-        bridge.dispatch_key("jll").expect("j で 1 行下、ll で 2 列右");
+        bridge
+            .dispatch_key("jll")
+            .expect("j で 1 行下、ll で 2 列右");
         let snapshot = bridge.snapshot();
         assert_eq!(snapshot.cursor_row, 1, "複合移動後の行位置");
         assert_eq!(snapshot.cursor_col, 2, "複合移動後の列位置");
@@ -410,7 +415,9 @@ mod tests {
         bridge.dispatch_key("i").expect("insert mode");
         bridge.dispatch_key("H").expect("H を入力");
         bridge.dispatch_key("i").expect("i を入力");
-        bridge.dispatch_key("\x1b").expect("Escape でノーマルモードに復帰");
+        bridge
+            .dispatch_key("\x1b")
+            .expect("Escape でノーマルモードに復帰");
 
         let snapshot = bridge.snapshot();
         assert_eq!(snapshot.mode, CoreMode::Normal, "ノーマルモードに復帰");
@@ -448,8 +455,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("line1\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("line1\n").expect("core bridge should initialize");
 
         bridge.dispatch_key("i").expect("insert mode");
         bridge.dispatch_key("X").expect("X を入力");
@@ -475,8 +481,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("abcde\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("abcde\n").expect("core bridge should initialize");
 
         bridge.dispatch_key("x").expect("x キーで文字削除");
         let snapshot = bridge.snapshot();
@@ -492,8 +497,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("hello\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
 
         assert!(!bridge.snapshot().dirty, "初期状態は dirty でないこと");
 
@@ -508,8 +512,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge = CoreBridge::new("first\nsecond\nthird\n")
-            .expect("core bridge should initialize");
+        let mut bridge =
+            CoreBridge::new("first\nsecond\nthird\n").expect("core bridge should initialize");
 
         bridge.dispatch_key("dd").expect("dd で行削除");
         let snapshot = bridge.snapshot();
@@ -526,8 +530,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("abc\ndef\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("abc\ndef\n").expect("core bridge should initialize");
 
         bridge.dispatch_key("x").expect("最初の x で削除");
         assert!(bridge.snapshot().dirty, "最初の削除後は dirty");
@@ -576,8 +579,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("hello\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
 
         let text = bridge.buffer_text();
         assert_eq!(text, "hello\n", "buffer_text が現在の内容を返すこと");
@@ -603,8 +605,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("content\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("content\n").expect("core bridge should initialize");
 
         bridge
             .apply_ex_command(":q")
@@ -628,8 +629,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("content\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("content\n").expect("core bridge should initialize");
 
         bridge
             .apply_ex_command(":q!")

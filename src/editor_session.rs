@@ -29,6 +29,8 @@ pub enum QuitDecision {
 pub struct EditorSessionState {
     /// 対象ファイルパス（新規バッファの場合は None）
     target_path: Option<PathBuf>,
+    /// 描画時のタブ幅
+    tab_size: u16,
     /// 現在 dirty 状態かどうか
     dirty: bool,
     /// 直近の保存失敗メッセージ
@@ -38,12 +40,20 @@ pub struct EditorSessionState {
 impl EditorSessionState {
     /// 新しいセッション状態を作成する。
     pub fn new(target_path: Option<PathBuf>) -> Self {
+        Self::new_with_tab_size(target_path, 8)
+    }
+
+    /// タブ幅を指定して新しいセッション状態を作成する。
+    pub fn new_with_tab_size(target_path: Option<PathBuf>, tab_size: u16) -> Self {
+        let tab_size = tab_size.max(1);
         log::debug!(
-            "[editor_session] new session state: target_path={:?}",
-            target_path
+            "[editor_session] new session state: target_path={:?}, tab_size={}",
+            target_path,
+            tab_size
         );
         Self {
             target_path,
+            tab_size,
             dirty: false,
             last_save_error: None,
         }
@@ -83,7 +93,8 @@ impl EditorSessionState {
     pub fn update_dirty(&mut self, dirty: bool) {
         log::debug!(
             "[editor_session] dirty state updated: {} -> {}",
-            self.dirty, dirty
+            self.dirty,
+            dirty
         );
         self.dirty = dirty;
     }
@@ -109,7 +120,8 @@ impl EditorSessionState {
     pub fn record_save_failure(&mut self, message: String) {
         log::debug!(
             "[editor_session] save failure recorded: message={}, dirty={}",
-            message, self.dirty
+            message,
+            self.dirty
         );
         self.last_save_error = Some(message);
     }
@@ -118,7 +130,8 @@ impl EditorSessionState {
     pub fn evaluate_quit(&self, force: bool) -> QuitDecision {
         log::debug!(
             "[editor_session] evaluating quit: force={}, dirty={}",
-            force, self.dirty
+            force,
+            self.dirty
         );
         if force {
             log::debug!("[editor_session] quit decision: ForceQuit");
@@ -135,6 +148,11 @@ impl EditorSessionState {
     /// 対象パスの参照を返す。
     pub fn target_path(&self) -> Option<&PathBuf> {
         self.target_path.as_ref()
+    }
+
+    /// 描画時のタブ幅を返す。
+    pub fn tab_size(&self) -> u16 {
+        self.tab_size
     }
 }
 
@@ -195,10 +213,7 @@ mod tests {
 
         state.record_save_success();
 
-        assert!(
-            !state.is_dirty(),
-            "保存成功後は dirty が解除されること"
-        );
+        assert!(!state.is_dirty(), "保存成功後は dirty が解除されること");
     }
 
     #[test]
@@ -240,10 +255,7 @@ mod tests {
 
         state.record_save_failure("disk full".to_string());
 
-        assert!(
-            state.is_dirty(),
-            "保存失敗後も dirty 状態が維持されること"
-        );
+        assert!(state.is_dirty(), "保存失敗後も dirty 状態が維持されること");
     }
 
     #[test]
@@ -267,14 +279,14 @@ mod tests {
 
         // 保存失敗後も dirty 更新が可能であること
         state.update_dirty(true);
-        assert!(state.is_dirty(), "保存失敗後も編集状態の更新が可能であること");
+        assert!(
+            state.is_dirty(),
+            "保存失敗後も編集状態の更新が可能であること"
+        );
 
         // 再度保存要求を生成できること
         let request = state.build_save_request("updated content");
-        assert!(
-            request.is_ok(),
-            "保存失敗後も保存要求を再生成できること"
-        );
+        assert!(request.is_ok(), "保存失敗後も保存要求を再生成できること");
     }
 
     // ---- タスク 5.4: 通常終了と強制終了の分岐テスト ----
@@ -365,10 +377,7 @@ mod tests {
 
         // 警告後も保存要求を生成できる
         let request = state.build_save_request("content");
-        assert!(
-            request.is_ok(),
-            "警告後も保存操作が可能であること"
-        );
+        assert!(request.is_ok(), "警告後も保存操作が可能であること");
     }
 
     #[test]
@@ -404,5 +413,19 @@ mod tests {
             QuitDecision::Allow,
             "保存成功後は通常終了が許可されること"
         );
+    }
+
+    #[test]
+    fn new_with_tab_size_preserves_requested_value() {
+        let state = EditorSessionState::new_with_tab_size(None, 4);
+
+        assert_eq!(state.tab_size(), 4);
+    }
+
+    #[test]
+    fn new_with_tab_size_clamps_zero_to_one() {
+        let state = EditorSessionState::new_with_tab_size(None, 0);
+
+        assert_eq!(state.tab_size(), 1);
     }
 }

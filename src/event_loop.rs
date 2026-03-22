@@ -121,7 +121,8 @@ impl EventLoopCoordinator {
             UiEvent::Resize { columns, rows } => {
                 log::debug!(
                     "[event_loop] resize event processed: columns={}, rows={}",
-                    columns, rows
+                    columns,
+                    rows
                 );
                 self.redraw_pending = true;
                 LoopAction::NeedRedraw
@@ -603,9 +604,7 @@ mod tests {
 
         // Shutdown が drain 結果に含まれる
         assert!(
-            drained
-                .iter()
-                .any(|e| matches!(e, UiEvent::Shutdown(_))),
+            drained.iter().any(|e| matches!(e, UiEvent::Shutdown(_))),
             "drain 中に Shutdown イベントが失われないこと: {:?}",
             drained
         );
@@ -733,10 +732,7 @@ mod tests {
         assert!(!seq.is_complete(), "session 解放だけでは未完了");
 
         seq.record_terminal_restored(Ok(()));
-        assert!(
-            seq.is_complete(),
-            "全 4 ステップ完了で complete"
-        );
+        assert!(seq.is_complete(), "全 4 ステップ完了で complete");
     }
 
     #[test]

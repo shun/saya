@@ -14,3 +14,4 @@ ratatui = "0.29.0"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 futures = "0.3"
 log = "0.4.29"
+unicode-width = "0.2.0"

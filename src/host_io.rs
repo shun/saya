@@ -30,10 +30,7 @@ pub fn write_to_path(request: &SaveRequest) -> SaveResult {
 
     match std::fs::write(&request.path, &request.contents) {
         Ok(()) => {
-            log::debug!(
-                "[host_io] write succeeded: path={}",
-                request.path.display()
-            );
+            log::debug!("[host_io] write succeeded: path={}", request.path.display());
             SaveResult::Saved
         }
         Err(error) => {

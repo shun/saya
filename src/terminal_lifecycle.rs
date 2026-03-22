@@ -45,7 +45,8 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
     pub fn record_resize(&mut self, size: TerminalSize) {
         log::debug!(
             "[terminal] resize observed: columns={}, rows={}",
-            size.columns, size.rows
+            size.columns,
+            size.rows
         );
         self.latest_size = Some(size);
         self.redraw_requested = true;

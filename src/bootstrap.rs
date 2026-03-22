@@ -2,6 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::cli::{ConfigSource, LaunchRequest};
+use crate::config_runtime::{
+    ConfigApplyState, ConfigLoadResult, ConfigSourceResult, apply_config_commands, evaluate_config,
+};
 use crate::core_bridge::CoreBridge;
 use crate::session_guard::{SessionGuard, SessionGuardError};
 use vim_core_rs::CoreSnapshot;
@@ -10,6 +13,7 @@ use vim_core_rs::CoreSnapshot;
 pub struct BootstrapOutcome {
     pub target_path: Option<PathBuf>,
     pub loaded_config: LoadedConfig,
+    pub initial_tab_size: u16,
     pub initial_snapshot: CoreSnapshot,
     pub core_bridge: CoreBridge,
     pub warnings: Vec<BootstrapWarning>,
@@ -81,18 +85,21 @@ fn prepare_launch_with_guard(
 
     let mut warnings = Vec::new();
     let loaded_config = load_config_with_fallback(request.config_source, &mut warnings);
+    let initial_tab_size = resolve_initial_tab_size(&loaded_config);
 
     log::debug!(
-        "[bootstrap] startup preflight completed: warnings={}, target_present={}, mode={:?}, dirty={}",
+        "[bootstrap] startup preflight completed: warnings={}, target_present={}, mode={:?}, dirty={}, tab_size={}",
         warnings.len(),
         request.target_path.is_some(),
         initial_snapshot.mode,
-        initial_snapshot.dirty
+        initial_snapshot.dirty,
+        initial_tab_size
     );
 
     Ok(BootstrapOutcome {
         target_path: request.target_path,
         loaded_config,
+        initial_tab_size,
         initial_snapshot,
         core_bridge,
         warnings,
@@ -132,6 +139,51 @@ fn load_config_with_fallback(
     }
 }
 
+fn resolve_initial_tab_size(loaded_config: &LoadedConfig) -> u16 {
+    let mut state = ConfigApplyState::default_state();
+    let source_result = match loaded_config {
+        LoadedConfig::Default => ConfigSourceResult::Default,
+        LoadedConfig::File { path, source } => ConfigSourceResult::Loaded {
+            path: path.clone(),
+            source: source.clone(),
+        },
+    };
+
+    match evaluate_config(&source_result) {
+        ConfigLoadResult::Success { commands } => {
+            let result = apply_config_commands(&commands, &mut state);
+            log::debug!(
+                "[bootstrap] resolved initial tab size from config: applied={}, errors={}, tab_size={}",
+                result.applied_count,
+                result.errors.len(),
+                state.tab_size
+            );
+        }
+        ConfigLoadResult::DefaultUsed => {
+            log::debug!(
+                "[bootstrap] resolved initial tab size from default config: {}",
+                state.tab_size
+            );
+        }
+        ConfigLoadResult::ReadFailed { path, message } => {
+            log::debug!(
+                "[bootstrap] keeping default tab size because config read failed: path={}, message={}",
+                path.display(),
+                message
+            );
+        }
+        ConfigLoadResult::EvalFailed { path, message } => {
+            log::debug!(
+                "[bootstrap] keeping default tab size because config eval failed: path={}, message={}",
+                path.display(),
+                message
+            );
+        }
+    }
+
+    u16::try_from(state.tab_size).unwrap_or(8).max(1)
+}
+
 fn map_session_guard_error(error: SessionGuardError) -> BootstrapError {
     match error {
         SessionGuardError::AlreadyInitialized => BootstrapError::SessionAlreadyInitialized,
@@ -146,7 +198,7 @@ mod tests {
 
     use vim_core_rs::CoreMode;
 
-    use crate::bootstrap::{prepare_launch, BootstrapError, BootstrapWarning, LoadedConfig};
+    use crate::bootstrap::{BootstrapError, BootstrapWarning, LoadedConfig, prepare_launch};
     use crate::cli::{ConfigSource, LaunchRequest};
     use crate::session_guard::SessionGuard;
 
@@ -196,10 +248,7 @@ mod tests {
         match result {
             Err(BootstrapError::TargetReadFailed { path, message }) => {
                 assert_eq!(path, missing_path);
-                assert!(
-                    !message.is_empty(),
-                    "失敗メッセージは空でない必要がある"
-                );
+                assert!(!message.is_empty(), "失敗メッセージは空でない必要がある");
                 log::debug!(
                     "[test] nonexistent target error message for display: {}",
                     message
@@ -380,6 +429,27 @@ mod tests {
                 source: "export default {};\n".to_string(),
             }
         );
+        assert_eq!(outcome.initial_tab_size, 8);
+        assert!(outcome.warnings.is_empty());
+
+        std::fs::remove_file(config_path).expect("cleanup config file");
+    }
+
+    #[test]
+    fn extracts_initial_tab_size_from_config_file() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config_path = unique_path("config-tab-size");
+        std::fs::write(&config_path, "{ \"tabSize\": 4 }\n").expect("config file");
+
+        let outcome = prepare_launch(LaunchRequest {
+            target_path: None,
+            config_source: ConfigSource::File(config_path.clone()),
+        })
+        .expect("existing config should load");
+
+        assert_eq!(outcome.initial_tab_size, 4);
         assert!(outcome.warnings.is_empty());
 
         std::fs::remove_file(config_path).expect("cleanup config file");

@@ -1,9 +1,9 @@
-use std::io::{self, Stdout};
+use crate::screen_model::ScreenModel;
+use crate::terminal_lifecycle::TerminalBackend;
 use crossterm::{execute, terminal};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use crate::screen_model::ScreenModel;
-use crate::terminal_lifecycle::TerminalBackend;
+use std::io::{self, Stdout};
 
 pub struct CrosstermBackendImpl;
 
@@ -54,7 +54,11 @@ impl TuiRenderer {
             } else {
                 format!("{} | {}", model.file_name, model.mode_label)
             };
-            let status_msg = if model.dirty { format!("{} [+]!", status_msg) } else { status_msg };
+            let status_msg = if model.dirty {
+                format!("{} [+]!", status_msg)
+            } else {
+                status_msg
+            };
 
             let status_bar = Paragraph::new(status_msg)
                 .style(Style::default().bg(Color::White).fg(Color::Black));

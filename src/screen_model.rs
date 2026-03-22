@@ -4,6 +4,7 @@
 //! 抽出し、ScreenModel として TuiRenderer に渡す。
 //! 描画側は ScreenModel だけを入力とし、CoreSnapshot に直接依存しない。
 
+use unicode_width::UnicodeWidthChar;
 use vim_core_rs::{CoreMode, CoreSnapshot};
 
 use crate::editor_session::EditorSessionState;
@@ -55,14 +56,25 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let file_name = resolve_file_name(input.snapshot, input.session_state);
     let mode_label = mode_to_label(input.snapshot.mode);
     let dirty = input.snapshot.dirty;
-    let lines = split_text_to_lines(&input.snapshot.text);
+    let lines = split_text_to_lines(&input.snapshot.text, input.session_state.tab_size());
     let cursor_row = input.snapshot.cursor_row as u16;
-    let cursor_col = input.snapshot.cursor_col as u16;
+    let cursor_col = resolve_cursor_col(
+        &input.snapshot.text,
+        input.snapshot.cursor_row,
+        input.snapshot.cursor_col,
+        input.session_state.tab_size(),
+    );
     let status_message = resolve_status_message(input.session_state, input.transient_message);
 
     log::debug!(
         "[screen_model] projected: file_name={:?}, mode_label={:?}, dirty={}, lines_count={}, cursor=({},{}), status_message={:?}",
-        file_name, mode_label, dirty, lines.len(), cursor_row, cursor_col, status_message,
+        file_name,
+        mode_label,
+        dirty,
+        lines.len(),
+        cursor_row,
+        cursor_col,
+        status_message,
     );
 
     ScreenModel {
@@ -115,10 +127,82 @@ fn mode_to_label(mode: CoreMode) -> String {
 }
 
 /// テキストを行に分割する。
-fn split_text_to_lines(text: &str) -> Vec<String> {
-    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+fn split_text_to_lines(text: &str, tab_size: u16) -> Vec<String> {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| expand_tabs(line, usize::from(tab_size.max(1))))
+        .collect();
     log::debug!("[screen_model] split text to {} lines", lines.len());
     lines
+}
+
+/// vim-core-rs のバイト列ベースカーソル位置を terminal の表示セル列へ変換する。
+fn resolve_cursor_col(text: &str, cursor_row: usize, cursor_col: usize, tab_size: u16) -> u16 {
+    let line = text.split('\n').nth(cursor_row).unwrap_or("");
+    let clamped_col = cursor_col.min(line.len());
+    let boundary_col = clamp_to_char_boundary(line, clamped_col);
+    let display_col = display_width(&line[..boundary_col], usize::from(tab_size.max(1)));
+    let display_col = u16::try_from(display_col).unwrap_or(u16::MAX);
+
+    log::debug!(
+        "[screen_model] resolved cursor col: row={}, raw_col={}, boundary_col={}, display_col={}",
+        cursor_row,
+        cursor_col,
+        boundary_col,
+        display_col
+    );
+
+    display_col
+}
+
+fn clamp_to_char_boundary(text: &str, col: usize) -> usize {
+    let mut boundary = col.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+fn expand_tabs(line: &str, tab_size: usize) -> String {
+    let mut expanded = String::new();
+    let mut display_col = 0usize;
+
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = next_tab_stop(display_col, tab_size) - display_col;
+            expanded.push_str(&" ".repeat(spaces));
+            display_col += spaces;
+            continue;
+        }
+
+        expanded.push(ch);
+        display_col += char_display_width(ch);
+    }
+
+    expanded
+}
+
+fn display_width(text: &str, tab_size: usize) -> usize {
+    let mut display_col = 0usize;
+
+    for ch in text.chars() {
+        if ch == '\t' {
+            display_col = next_tab_stop(display_col, tab_size);
+        } else {
+            display_col += char_display_width(ch);
+        }
+    }
+
+    display_col
+}
+
+fn next_tab_stop(display_col: usize, tab_size: usize) -> usize {
+    let tab_size = tab_size.max(1);
+    display_col + (tab_size - (display_col % tab_size)).min(tab_size)
+}
+
+fn char_display_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 /// ステータスメッセージを解決する。
@@ -130,18 +214,12 @@ fn resolve_status_message(
     transient_message: Option<&str>,
 ) -> Option<String> {
     if let Some(msg) = transient_message {
-        log::debug!(
-            "[screen_model] status message from transient: {:?}",
-            msg
-        );
+        log::debug!("[screen_model] status message from transient: {:?}", msg);
         return Some(msg.to_string());
     }
 
     if let Some(error) = session_state.last_save_error() {
-        log::debug!(
-            "[screen_model] status message from save error: {:?}",
-            error
-        );
+        log::debug!("[screen_model] status message from save error: {:?}", error);
         return Some(format!("保存失敗: {}", error));
     }
 
@@ -174,8 +252,7 @@ mod tests {
 
         let bridge = CoreBridge::new("hello\n").expect("core bridge");
         let snapshot = bridge.snapshot();
-        let session_state =
-            EditorSessionState::new(Some(PathBuf::from("/tmp/hello.txt")));
+        let session_state = EditorSessionState::new(Some(PathBuf::from("/tmp/hello.txt")));
 
         let model = project(&ProjectionInput {
             snapshot: &snapshot,
@@ -302,10 +379,7 @@ mod tests {
             transient_message: None,
         });
 
-        assert!(
-            !model.dirty,
-            "未編集バッファは dirty=false であること"
-        );
+        assert!(!model.dirty, "未編集バッファは dirty=false であること");
     }
 
     #[test]
@@ -328,10 +402,7 @@ mod tests {
             transient_message: None,
         });
 
-        assert!(
-            model.dirty,
-            "編集後のバッファは dirty=true であること"
-        );
+        assert!(model.dirty, "編集後のバッファは dirty=true であること");
     }
 
     #[test]
@@ -360,8 +431,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("abcde\nfghij\n").expect("core bridge");
+        let mut bridge = CoreBridge::new("abcde\nfghij\n").expect("core bridge");
         bridge.dispatch_key("jll").expect("j, ll for movement");
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
@@ -382,8 +452,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("line1\nline2\n").expect("core bridge");
+        let mut bridge = CoreBridge::new("line1\nline2\n").expect("core bridge");
 
         // 初回投影
         let snapshot1 = bridge.snapshot();
@@ -617,8 +686,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("abcdef\nghijkl\n").expect("core bridge");
+        let mut bridge = CoreBridge::new("abcdef\nghijkl\n").expect("core bridge");
         bridge.dispatch_key("jlll").expect("move to row=1, col=3");
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
@@ -634,20 +702,91 @@ mod tests {
     }
 
     #[test]
+    fn projects_display_cursor_col_for_multibyte_character() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("あa\n").expect("core bridge");
+        bridge
+            .dispatch_key("l")
+            .expect("move right over multibyte char");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+
+        assert_eq!(
+            snapshot.cursor_col, 3,
+            "vim-core-rs の cursor_col は UTF-8 バイト位置で進むこと"
+        );
+
+        let model = project(&ProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            transient_message: None,
+        });
+
+        assert_eq!(model.cursor_row, 0, "行位置はそのまま反映されること");
+        assert_eq!(
+            model.cursor_col, 2,
+            "全角 1 文字ぶんは terminal 上で 2 セルとして描画されること"
+        );
+    }
+
+    #[test]
+    fn projects_tab_as_spaces_using_default_tab_size() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("\ta\n").expect("core bridge");
+        bridge.dispatch_key("l").expect("move right over tab");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+
+        let model = project(&ProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            transient_message: None,
+        });
+
+        assert_eq!(model.lines[0], "        a");
+        assert_eq!(model.cursor_col, 8);
+    }
+
+    #[test]
+    fn projects_tab_using_configured_tab_size() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("\ta\n").expect("core bridge");
+        bridge.dispatch_key("l").expect("move right over tab");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size(None, 4);
+
+        let model = project(&ProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            transient_message: None,
+        });
+
+        assert_eq!(model.lines[0], "    a");
+        assert_eq!(model.cursor_col, 4);
+    }
+
+    #[test]
     fn screen_model_contains_all_draw_fields() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge =
-            CoreBridge::new("first\nsecond\n").expect("core bridge");
+        let mut bridge = CoreBridge::new("first\nsecond\n").expect("core bridge");
         bridge.dispatch_key("i").expect("insert mode");
         bridge.dispatch_key("X").expect("insert X");
         bridge.dispatch_key("\x1b").expect("normal mode");
         let snapshot = bridge.snapshot();
 
-        let session_state =
-            EditorSessionState::new(Some(PathBuf::from("/tmp/test.txt")));
+        let session_state = EditorSessionState::new(Some(PathBuf::from("/tmp/test.txt")));
 
         let model = project(&ProjectionInput {
             snapshot: &snapshot,

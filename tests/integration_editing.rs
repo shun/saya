@@ -6,11 +6,11 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{prepare_launch, BootstrapOutcome};
+use saya::bootstrap::{BootstrapOutcome, prepare_launch};
 use saya::cli::{ConfigSource, LaunchRequest};
 use saya::editor_session::EditorSessionState;
-use saya::input_router::{resolve_intent, EditorIntent, KeyInput};
-use saya::screen_model::{project, ProjectionInput};
+use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::screen_model::{ProjectionInput, project};
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -116,10 +116,7 @@ fn cursor_movement_reflected_in_screen_model() {
     assert_eq!(model.cursor_col, 0);
 
     // j で 1 行下に移動
-    outcome
-        .core_bridge
-        .dispatch_key("j")
-        .expect("j dispatch");
+    outcome.core_bridge.dispatch_key("j").expect("j dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
@@ -130,14 +127,8 @@ fn cursor_movement_reflected_in_screen_model() {
     assert_eq!(model.cursor_col, 0);
 
     // l を2回 で 2 列右に移動
-    outcome
-        .core_bridge
-        .dispatch_key("l")
-        .expect("l dispatch");
-    outcome
-        .core_bridge
-        .dispatch_key("l")
-        .expect("l dispatch");
+    outcome.core_bridge.dispatch_key("l").expect("l dispatch");
+    outcome.core_bridge.dispatch_key("l").expect("l dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
@@ -148,10 +139,7 @@ fn cursor_movement_reflected_in_screen_model() {
     assert_eq!(model.cursor_col, 2);
 
     // k で 1 行上に移動
-    outcome
-        .core_bridge
-        .dispatch_key("k")
-        .expect("k dispatch");
+    outcome.core_bridge.dispatch_key("k").expect("k dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
@@ -167,10 +155,7 @@ fn cursor_movement_reflected_in_screen_model() {
     outcome.core_bridge.dispatch_key("l").unwrap();
 
     // h で 1 列左に移動
-    outcome
-        .core_bridge
-        .dispatch_key("h")
-        .expect("h dispatch");
+    outcome.core_bridge.dispatch_key("h").expect("h dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
@@ -206,13 +191,67 @@ fn text_input_reflected_in_screen_model_lines() {
     });
 
     assert!(
-        model
-            .lines
-            .iter()
-            .any(|line| line.contains("Hi")),
+        model.lines.iter().any(|line| line.contains("Hi")),
         "入力した 'Hi' が行データに含まれること: {:?}",
         model.lines
     );
+}
+
+#[test]
+fn multibyte_text_input_keeps_screen_cursor_in_display_cells() {
+    let mut outcome = launch_empty();
+    let session_state = EditorSessionState::new(None);
+
+    let enter_insert = resolve_intent(&KeyInput::Char('i'));
+    assert_eq!(enter_insert, EditorIntent::EditKey("i".to_string()));
+    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
+
+    let input = resolve_intent(&KeyInput::Char('あ'));
+    assert_eq!(input, EditorIntent::EditKey("あ".to_string()));
+    outcome
+        .core_bridge
+        .dispatch_key("あ")
+        .expect("multibyte input");
+
+    let snapshot = outcome.core_bridge.snapshot();
+    assert_eq!(
+        snapshot.cursor_col, 3,
+        "vim-core-rs は UTF-8 バイト位置でカーソル列を返すこと"
+    );
+
+    let model = project(&ProjectionInput {
+        snapshot: &snapshot,
+        session_state: &session_state,
+        transient_message: None,
+    });
+
+    assert_eq!(model.mode_label, "INSERT");
+    assert!(
+        model.lines.iter().any(|line| line.contains('あ')),
+        "入力した全角文字が描画行へ反映されること: {:?}",
+        model.lines
+    );
+    assert_eq!(
+        model.cursor_col, 2,
+        "全角文字入力後の描画カーソル列は表示セル幅で 2 になること"
+    );
+}
+
+#[test]
+fn tab_size_setting_changes_screen_projection_for_tabs() {
+    let mut outcome = launch_with_content("\ta\n");
+    let session_state = EditorSessionState::new_with_tab_size(outcome.target_path.clone(), 4);
+
+    outcome.core_bridge.dispatch_key("l").expect("l dispatch");
+    let snapshot = outcome.core_bridge.snapshot();
+    let model = project(&ProjectionInput {
+        snapshot: &snapshot,
+        session_state: &session_state,
+        transient_message: None,
+    });
+
+    assert_eq!(model.lines[0], "    a");
+    assert_eq!(model.cursor_col, 4);
 }
 
 // ---- 9.2.4: 削除操作が ScreenModel に反映される ----
@@ -224,26 +263,17 @@ fn delete_operations_reflected_in_screen_model() {
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
     // x で先頭文字を削除
-    outcome
-        .core_bridge
-        .dispatch_key("x")
-        .expect("x dispatch");
+    outcome.core_bridge.dispatch_key("x").expect("x dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
         session_state: &session_state,
         transient_message: None,
     });
-    assert_eq!(
-        model.lines[0], "bcde",
-        "x で先頭の 'a' が削除されること"
-    );
+    assert_eq!(model.lines[0], "bcde", "x で先頭の 'a' が削除されること");
 
     // dd で行全体を削除
-    outcome
-        .core_bridge
-        .dispatch_key("dd")
-        .expect("dd dispatch");
+    outcome.core_bridge.dispatch_key("dd").expect("dd dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
@@ -298,10 +328,7 @@ fn dirty_state_set_after_delete_operation() {
     assert!(!outcome.initial_snapshot.dirty, "起動直後は clean");
 
     // x で文字削除
-    outcome
-        .core_bridge
-        .dispatch_key("x")
-        .expect("x dispatch");
+    outcome.core_bridge.dispatch_key("x").expect("x dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
@@ -325,10 +352,7 @@ fn full_editing_flow_mode_move_insert_delete() {
     assert!(!outcome.initial_snapshot.dirty);
 
     // Step 2: j で 2 行目に移動
-    outcome
-        .core_bridge
-        .dispatch_key("j")
-        .expect("j dispatch");
+    outcome.core_bridge.dispatch_key("j").expect("j dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     assert_eq!(snapshot.cursor_row, 1);
 
@@ -362,10 +386,7 @@ fn full_editing_flow_mode_move_insert_delete() {
     );
 
     // Step 5: dd で行削除
-    outcome
-        .core_bridge
-        .dispatch_key("dd")
-        .expect("dd dispatch");
+    outcome.core_bridge.dispatch_key("dd").expect("dd dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput {
         snapshot: &snapshot,
@@ -375,8 +396,5 @@ fn full_editing_flow_mode_move_insert_delete() {
     assert!(model.dirty);
 
     // 削除後の行データの検証
-    eprintln!(
-        "[integ-test] 編集フロー完了後の行データ: {:?}",
-        model.lines
-    );
+    eprintln!("[integ-test] 編集フロー完了後の行データ: {:?}", model.lines);
 }

@@ -222,9 +222,6 @@ mod tests {
             save, edit,
             "Ctrl+S の Save と通常の 's' EditKey は区別されること"
         );
-        assert_ne!(
-            save, quit,
-            "Save と Quit は異なる intent であること"
-        );
+        assert_ne!(save, quit, "Save と Quit は異なる intent であること");
     }
 }

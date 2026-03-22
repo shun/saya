@@ -1,10 +1,10 @@
-use saya::bootstrap::{prepare_launch, BootstrapError};
-use saya::cli::{parse_launch_request, CliParseError};
+use saya::bootstrap::{BootstrapError, prepare_launch};
+use saya::cli::{CliParseError, parse_launch_request};
 use saya::editor_session::{EditorSessionState, QuitDecision};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
-use saya::host_io::{write_to_path, SaveResult};
-use saya::input_router::{resolve_intent, EditorIntent, KeyInput};
-use saya::screen_model::{project, ProjectionInput};
+use saya::host_io::{SaveResult, write_to_path};
+use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::screen_model::{ProjectionInput, project};
 use saya::terminal_lifecycle::TerminalLifecycle;
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use vim_core_rs::CoreMode;
@@ -40,7 +40,10 @@ async fn main() {
     };
 
     let mut renderer = TuiRenderer::new().expect("TUI Renderer init failed");
-    let mut session_state = EditorSessionState::new(outcome.target_path.clone());
+    let mut session_state = EditorSessionState::new_with_tab_size(
+        outcome.target_path.clone(),
+        outcome.initial_tab_size,
+    );
     let mut transient_msg: Option<String> = None;
 
     // イベントループ初期化
@@ -74,7 +77,8 @@ async fn main() {
                             if input_sender.blocking_send(UiEvent::Input(key)).is_err() {
                                 break;
                             }
-                        }                    }
+                        }
+                    }
                     Event::Resize(cols, rows) => {
                         if input_sender
                             .blocking_send(UiEvent::Resize {
@@ -161,15 +165,21 @@ async fn main() {
                             match action {
                                 vim_core_rs::CoreHostAction::Write { .. } => {
                                     let snapshot = outcome.core_bridge.snapshot();
-                                    if let Ok(req) = session_state.build_save_request(&snapshot.text) {
+                                    if let Ok(req) =
+                                        session_state.build_save_request(&snapshot.text)
+                                    {
                                         match write_to_path(&req) {
                                             SaveResult::Saved => {
                                                 session_state.record_save_success();
-                                                transient_msg = Some("Saved successfully".to_string());
+                                                transient_msg =
+                                                    Some("Saved successfully".to_string());
                                             }
                                             SaveResult::Failed { message } => {
                                                 session_state.record_save_failure(message);
-                                                transient_msg = Some(format!("Save failed: {}", session_state.last_save_error().unwrap_or("")));
+                                                transient_msg = Some(format!(
+                                                    "Save failed: {}",
+                                                    session_state.last_save_error().unwrap_or("")
+                                                ));
                                             }
                                         }
                                     } else {
@@ -183,7 +193,10 @@ async fn main() {
                                             std::process::exit(0);
                                         }
                                         QuitDecision::WarnUnsaved => {
-                                            transient_msg = Some("No write since last change (add ! to override)".to_string());
+                                            transient_msg = Some(
+                                                "No write since last change (add ! to override)"
+                                                    .to_string(),
+                                            );
                                         }
                                     }
                                 }
@@ -191,13 +204,14 @@ async fn main() {
                             }
                         }
                     } else if let KeyInput::Char(':') = key
-                        && outcome.core_bridge.snapshot().mode == CoreMode::Normal {
-                            command_line_mode = true;
-                            command_line_buffer.clear();
-                            transient_msg = Some(":".to_string());
-                            handled = true;
-                            need_redraw = true;
-                        }
+                        && outcome.core_bridge.snapshot().mode == CoreMode::Normal
+                    {
+                        command_line_mode = true;
+                        command_line_buffer.clear();
+                        transient_msg = Some(":".to_string());
+                        handled = true;
+                        need_redraw = true;
+                    }
 
                     if !handled {
                         let intent = resolve_intent(&key);
@@ -209,19 +223,28 @@ async fn main() {
                                     match action {
                                         vim_core_rs::CoreHostAction::Write { .. } => {
                                             let snapshot = outcome.core_bridge.snapshot();
-                                            if let Ok(req) = session_state.build_save_request(&snapshot.text) {
+                                            if let Ok(req) =
+                                                session_state.build_save_request(&snapshot.text)
+                                            {
                                                 match write_to_path(&req) {
                                                     SaveResult::Saved => {
                                                         session_state.record_save_success();
-                                                        transient_msg = Some("Saved successfully".to_string());
+                                                        transient_msg =
+                                                            Some("Saved successfully".to_string());
                                                     }
                                                     SaveResult::Failed { message } => {
                                                         session_state.record_save_failure(message);
-                                                        transient_msg = Some(format!("Save failed: {}", session_state.last_save_error().unwrap_or("")));
+                                                        transient_msg = Some(format!(
+                                                            "Save failed: {}",
+                                                            session_state
+                                                                .last_save_error()
+                                                                .unwrap_or("")
+                                                        ));
                                                     }
                                                 }
                                             } else {
-                                                transient_msg = Some("No file name to save".to_string());
+                                                transient_msg =
+                                                    Some("No file name to save".to_string());
                                             }
                                         }
                                         vim_core_rs::CoreHostAction::Quit { force, .. } => {
@@ -252,7 +275,10 @@ async fn main() {
                                         }
                                         SaveResult::Failed { message } => {
                                             session_state.record_save_failure(message);
-                                            transient_msg = Some(format!("Save failed: {}", session_state.last_save_error().unwrap_or("")));
+                                            transient_msg = Some(format!(
+                                                "Save failed: {}",
+                                                session_state.last_save_error().unwrap_or("")
+                                            ));
                                         }
                                     }
                                 } else {
@@ -266,7 +292,10 @@ async fn main() {
                                         break 'main;
                                     }
                                     QuitDecision::WarnUnsaved => {
-                                        transient_msg = Some("No write since last change (add force to override)".to_string());
+                                        transient_msg = Some(
+                                            "No write since last change (add force to override)"
+                                                .to_string(),
+                                        );
                                         need_redraw = true;
                                     }
                                 }
@@ -323,5 +352,3 @@ fn format_bootstrap_error(error: BootstrapError) -> String {
         }
     }
 }
-
-

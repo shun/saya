@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::config_runtime::{load_and_apply_config, ConfigInput};
+use saya::config_runtime::{ConfigInput, load_and_apply_config};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -29,7 +29,10 @@ fn valid_config_applied_correctly() {
 
     let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
 
-    assert!(warnings.is_empty(), "Warnings should be empty for valid config");
+    assert!(
+        warnings.is_empty(),
+        "Warnings should be empty for valid config"
+    );
     assert_eq!(state.tab_size, 4);
     assert!(state.line_numbers);
 }
@@ -46,7 +49,10 @@ fn invalid_config_falls_back_to_defaults_with_warning() {
 
     assert!(!warnings.is_empty(), "Should produce warnings");
     assert_eq!(state.tab_size, 8, "Should fallback to default tabSize");
-    assert!(!state.line_numbers, "Should fallback to default lineNumbers");
+    assert!(
+        !state.line_numbers,
+        "Should fallback to default lineNumbers"
+    );
 }
 
 #[test]
@@ -55,7 +61,10 @@ fn missing_config_falls_back_to_defaults_with_warning() {
 
     let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(missing_path.clone()));
 
-    assert!(!warnings.is_empty(), "Should produce warnings for missing file");
+    assert!(
+        !warnings.is_empty(),
+        "Should produce warnings for missing file"
+    );
     assert_eq!(state.tab_size, 8);
     assert!(!state.line_numbers);
 }
@@ -64,7 +73,10 @@ fn missing_config_falls_back_to_defaults_with_warning() {
 fn no_config_input_uses_defaults_without_warning() {
     let (state, warnings) = load_and_apply_config(&ConfigInput::None);
 
-    assert!(warnings.is_empty(), "Should not produce warnings for None config");
+    assert!(
+        warnings.is_empty(),
+        "Should not produce warnings for None config"
+    );
     assert_eq!(state.tab_size, 8);
     assert!(!state.line_numbers);
 }

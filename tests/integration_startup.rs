@@ -6,10 +6,10 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{prepare_launch, BootstrapError, BootstrapWarning, LoadedConfig};
-use saya::cli::{parse_launch_request, ConfigSource, LaunchRequest};
+use saya::bootstrap::{BootstrapError, BootstrapWarning, LoadedConfig, prepare_launch};
+use saya::cli::{ConfigSource, LaunchRequest, parse_launch_request};
 use saya::editor_session::EditorSessionState;
-use saya::screen_model::{project, ProjectionInput};
+use saya::screen_model::{ProjectionInput, project};
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -35,8 +35,7 @@ fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
     assert_eq!(request.target_path, Some(target_path.clone()));
 
     // 2. 起動準備
-    let outcome =
-        prepare_launch(request).expect("既存ファイルでの起動が成功すること");
+    let outcome = prepare_launch(request).expect("既存ファイルでの起動が成功すること");
 
     // 3. 起動結果の検証
     assert_eq!(outcome.target_path, Some(target_path.clone()));
@@ -121,10 +120,7 @@ fn read_failure_startup_flow_returns_fatal_error() {
     match result {
         Err(BootstrapError::TargetReadFailed { path, message }) => {
             assert_eq!(path, missing_path);
-            assert!(
-                !message.is_empty(),
-                "エラーメッセージは空でないこと"
-            );
+            assert!(!message.is_empty(), "エラーメッセージは空でないこと");
         }
         other => panic!(
             "存在しないファイルは TargetReadFailed を返すこと, got: {:?}",
@@ -162,10 +158,7 @@ fn read_failure_startup_flow_for_permission_denied() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            &restricted_path,
-            std::fs::Permissions::from_mode(0o644),
-        );
+        let _ = std::fs::set_permissions(&restricted_path, std::fs::Permissions::from_mode(0o644));
     }
     let _ = std::fs::remove_file(&restricted_path);
 }

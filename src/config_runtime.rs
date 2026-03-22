@@ -49,21 +49,13 @@ pub enum ConfigKeyMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigLoadResult {
     /// 設定コマンドの適用成功
-    Success {
-        commands: Vec<ConfigCommand>,
-    },
+    Success { commands: Vec<ConfigCommand> },
     /// 設定なし（既定値使用）
     DefaultUsed,
     /// 読み込み失敗（warning 付きで継続）
-    ReadFailed {
-        path: PathBuf,
-        message: String,
-    },
+    ReadFailed { path: PathBuf, message: String },
     /// 評価失敗（warning 付きで継続）
-    EvalFailed {
-        path: PathBuf,
-        message: String,
-    },
+    EvalFailed { path: PathBuf, message: String },
 }
 
 /// 設定入力のソースを表す。
@@ -87,10 +79,7 @@ pub fn read_config_source(input: &ConfigInput) -> ConfigSourceResult {
             ConfigSourceResult::Default
         }
         ConfigInput::FilePath(path) => {
-            log::debug!(
-                "[config_runtime] reading config file: {}",
-                path.display()
-            );
+            log::debug!("[config_runtime] reading config file: {}", path.display());
             match std::fs::read_to_string(path) {
                 Ok(source) => {
                     log::debug!(
@@ -256,7 +245,8 @@ fn is_vim_script_syntax(source: &str) -> bool {
             if line.starts_with(pattern) {
                 log::debug!(
                     "[config_runtime] vim script pattern detected: {:?} in line: {:?}",
-                    pattern, line
+                    pattern,
+                    line
                 );
                 return true;
             }
@@ -453,32 +443,36 @@ fn apply_single_command(
     state: &mut ConfigApplyState,
 ) -> Result<(), String> {
     match command {
-        ConfigCommand::SetOption { name, value } => {
-            match (name, value) {
-                (ConfigOptionName::TabSize, ConfigOptionValue::Number(n)) => {
-                    if *n < 1 || *n > 32 {
-                        return Err(format!("tabSize の値は 1〜32 の範囲で指定してください: {}", n));
-                    }
-                    log::debug!("[config_runtime] setting tabSize: {} -> {}", state.tab_size, n);
-                    state.tab_size = *n;
-                    Ok(())
+        ConfigCommand::SetOption { name, value } => match (name, value) {
+            (ConfigOptionName::TabSize, ConfigOptionValue::Number(n)) => {
+                if *n < 1 || *n > 32 {
+                    return Err(format!(
+                        "tabSize の値は 1〜32 の範囲で指定してください: {}",
+                        n
+                    ));
                 }
-                (ConfigOptionName::LineNumbers, ConfigOptionValue::Boolean(b)) => {
-                    log::debug!(
-                        "[config_runtime] setting lineNumbers: {} -> {}",
-                        state.line_numbers, b
-                    );
-                    state.line_numbers = *b;
-                    Ok(())
-                }
-                (name, value) => {
-                    Err(format!(
-                        "オプション {:?} に対して不正な値型 {:?} が指定されました",
-                        name, value
-                    ))
-                }
+                log::debug!(
+                    "[config_runtime] setting tabSize: {} -> {}",
+                    state.tab_size,
+                    n
+                );
+                state.tab_size = *n;
+                Ok(())
             }
-        }
+            (ConfigOptionName::LineNumbers, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting lineNumbers: {} -> {}",
+                    state.line_numbers,
+                    b
+                );
+                state.line_numbers = *b;
+                Ok(())
+            }
+            (name, value) => Err(format!(
+                "オプション {:?} に対して不正な値型 {:?} が指定されました",
+                name, value
+            )),
+        },
         ConfigCommand::MapKey { mode, lhs, rhs } => {
             if lhs.is_empty() {
                 return Err("キーマッピングの lhs が空です".to_string());
@@ -488,7 +482,9 @@ fn apply_single_command(
             }
             log::debug!(
                 "[config_runtime] adding key mapping: mode={:?}, lhs={:?}, rhs={:?}",
-                mode, lhs, rhs
+                mode,
+                lhs,
+                rhs
             );
             state.key_mappings.push(AppliedKeyMapping {
                 mode: mode.clone(),
@@ -504,9 +500,7 @@ fn apply_single_command(
 ///
 /// 読み込み -> 評価 -> 適用 を一貫して実行し、
 /// 失敗時は warning 付きで既定値を返す。
-pub fn load_and_apply_config(
-    input: &ConfigInput,
-) -> (ConfigApplyState, Vec<String>) {
+pub fn load_and_apply_config(input: &ConfigInput) -> (ConfigApplyState, Vec<String>) {
     log::debug!("[config_runtime] starting full config load-and-apply flow");
     let mut warnings = Vec::new();
     let mut state = ConfigApplyState::default_state();
@@ -605,10 +599,7 @@ mod tests {
                 assert_eq!(path, config_path);
                 assert_eq!(source, "{ \"tabSize\": 4 }");
             }
-            other => panic!(
-                "既存ファイルは Loaded を返すこと, got: {:?}",
-                other
-            ),
+            other => panic!("既存ファイルは Loaded を返すこと, got: {:?}", other),
         }
 
         std::fs::remove_file(config_path).expect("cleanup");
@@ -623,10 +614,7 @@ mod tests {
         match result {
             ConfigSourceResult::ReadFailed { path, message } => {
                 assert_eq!(path, missing_path);
-                assert!(
-                    !message.is_empty(),
-                    "読み込み失敗メッセージは空でないこと"
-                );
+                assert!(!message.is_empty(), "読み込み失敗メッセージは空でないこと");
             }
             other => panic!(
                 "存在しないファイルは ReadFailed を返すこと, got: {:?}",
@@ -711,11 +699,7 @@ mod tests {
 
         match result {
             ConfigLoadResult::Success { commands } => {
-                assert_eq!(
-                    commands.len(),
-                    2,
-                    "複数オプションが全てパースされること"
-                );
+                assert_eq!(commands.len(), 2, "複数オプションが全てパースされること");
             }
             other => panic!("Success を返すこと, got: {:?}", other),
         }
@@ -739,10 +723,7 @@ mod tests {
                     message
                 );
             }
-            other => panic!(
-                "Vim script は EvalFailed を返すこと, got: {:?}",
-                other
-            ),
+            other => panic!("Vim script は EvalFailed を返すこと, got: {:?}", other),
         }
     }
 
@@ -905,10 +886,7 @@ mod tests {
 
         assert!(!result.is_fully_applied());
         assert_eq!(result.errors.len(), 1);
-        assert_eq!(
-            state.tab_size, 8,
-            "不正な値の場合は既定値が維持されること"
-        );
+        assert_eq!(state.tab_size, 8, "不正な値の場合は既定値が維持されること");
     }
 
     #[test]
@@ -958,10 +936,7 @@ mod tests {
 
         let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(missing_path));
 
-        assert_eq!(
-            state.tab_size, 8,
-            "読み込み失敗時は既定値で起動すること"
-        );
+        assert_eq!(state.tab_size, 8, "読み込み失敗時は既定値で起動すること");
         assert_eq!(
             warnings.len(),
             1,
@@ -985,11 +960,7 @@ mod tests {
             state.tab_size, 8,
             "Vim script 設定は無視され既定値になること"
         );
-        assert_eq!(
-            warnings.len(),
-            1,
-            "評価失敗時は warning が 1 つ出ること"
-        );
+        assert_eq!(warnings.len(), 1, "評価失敗時は warning が 1 つ出ること");
         assert!(
             warnings[0].contains("評価に失敗"),
             "評価失敗の warning メッセージ: {}",
@@ -1005,8 +976,7 @@ mod tests {
         std::fs::write(&config_path, "{ \"tabSize\": 4, \"lineNumbers\": true }")
             .expect("write config");
 
-        let (state, warnings) =
-            load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
+        let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
 
         assert_eq!(state.tab_size, 4, "tabSize が設定値に変更されること");
         assert!(state.line_numbers, "lineNumbers が設定値に変更されること");
@@ -1023,17 +993,10 @@ mod tests {
         let config_path = unique_path("config-empty");
         std::fs::write(&config_path, "{}").expect("write empty config");
 
-        let (state, warnings) =
-            load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
+        let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
 
-        assert_eq!(
-            state.tab_size, 8,
-            "空設定は既定値のまま"
-        );
-        assert!(
-            warnings.is_empty(),
-            "空設定は warning なし"
-        );
+        assert_eq!(state.tab_size, 8, "空設定は既定値のまま");
+        assert!(warnings.is_empty(), "空設定は warning なし");
 
         std::fs::remove_file(config_path).expect("cleanup");
     }
@@ -1061,8 +1024,7 @@ mod tests {
     fn read_failure_and_eval_failure_share_common_fallback() {
         // 読み込み失敗と評価失敗の両方が同じ既定値 fallback を使うこと
         let missing_path = unique_path("config-read-fail");
-        let (state_read_fail, _) =
-            load_and_apply_config(&ConfigInput::FilePath(missing_path));
+        let (state_read_fail, _) = load_and_apply_config(&ConfigInput::FilePath(missing_path));
 
         let vim_config = unique_path("config-eval-fail");
         std::fs::write(&vim_config, "set number").expect("write vim config");
