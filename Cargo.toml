@@ -3,6 +3,10 @@ name = "saya"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "sy"
+path = "src/main.rs"
+
 [dependencies]
 vim-core-rs = { path = "../vim-core-rs" }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "rt-multi-thread"] }
