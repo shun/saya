@@ -1,7 +1,7 @@
 use std::io::{self, Stdout};
 use crossterm::{execute, terminal};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use crate::screen_model::ScreenModel;
 use crate::terminal_lifecycle::TerminalBackend;
 

@@ -1,7 +1,7 @@
-/// キー入力を editor intent へ変換するモジュール。
-///
-/// terminal のキーイベントを EditorIntent に正規化することで、
-/// 後続の event loop が入力元に依存しない設計を実現する。
+//! キー入力を editor intent へ変換するモジュール。
+//!
+//! terminal のキーイベントを EditorIntent に正規化することで、
+//! 後続の event loop が入力元に依存しない設計を実現する。
 
 /// 入力元に依存しないキー入力の抽象表現。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,7 +1,7 @@
-/// TypeScript 設定の評価を担当するモジュール。
-///
-/// 設定ファイルの読み込み、限定 API での評価、設定コマンドの生成を行う。
-/// Vim script を前提としない公開面を提供し、失敗時は default 設定へ fallback する。
+//! TypeScript 設定の評価を担当するモジュール。
+//!
+//! 設定ファイルの読み込み、限定 API での評価、設定コマンドの生成を行う。
+//! Vim script を前提としない公開面を提供し、失敗時は default 設定へ fallback する。
 
 use std::path::PathBuf;
 
@@ -176,7 +176,7 @@ pub fn evaluate_config(source_result: &ConfigSourceResult) -> ConfigLoadResult {
 ///
 /// MVP では JSON ベースの設定形式を受け付ける。
 /// deno_core による TypeScript 評価は後続タスクで拡張する。
-fn evaluate_config_source(path: &PathBuf, source: &str) -> ConfigLoadResult {
+fn evaluate_config_source(path: &std::path::Path, source: &str) -> ConfigLoadResult {
     log::debug!(
         "[config_runtime] parsing config source: path={}, source_preview={:?}",
         path.display(),
@@ -190,7 +190,7 @@ fn evaluate_config_source(path: &PathBuf, source: &str) -> ConfigLoadResult {
             path.display()
         );
         return ConfigLoadResult::EvalFailed {
-            path: path.clone(),
+            path: path.to_path_buf(),
             message: "Vim script 形式の設定は受け付けません。TypeScript 形式で記述してください。"
                 .to_string(),
         };
@@ -212,7 +212,7 @@ fn evaluate_config_source(path: &PathBuf, source: &str) -> ConfigLoadResult {
                 message
             );
             ConfigLoadResult::EvalFailed {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 message,
             }
         }

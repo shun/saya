@@ -1,8 +1,8 @@
-/// 描画専用モデルと投影ロジック。
-///
-/// CoreSnapshot と EditorSessionState から描画に必要な情報だけを
-/// 抽出し、ScreenModel として TuiRenderer に渡す。
-/// 描画側は ScreenModel だけを入力とし、CoreSnapshot に直接依存しない。
+//! 描画専用モデルと投影ロジック。
+//!
+//! CoreSnapshot と EditorSessionState から描画に必要な情報だけを
+//! 抽出し、ScreenModel として TuiRenderer に渡す。
+//! 描画側は ScreenModel だけを入力とし、CoreSnapshot に直接依存しない。
 
 use vim_core_rs::{CoreMode, CoreSnapshot};
 

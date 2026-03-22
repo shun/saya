@@ -1,7 +1,7 @@
-/// 統合テスト: 設定機能の検証
-///
-/// 有効設定の反映と失敗時 fallback が要件を満たすことを確認する。
-/// Requirements: 4.1, 4.2, 4.3, 4.4
+//! 統合テスト: 設定機能の検証
+//!
+//! 有効設定の反映と失敗時 fallback が要件を満たすことを確認する。
+//! Requirements: 4.1, 4.2, 4.3, 4.4
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,7 +31,7 @@ fn valid_config_applied_correctly() {
 
     assert!(warnings.is_empty(), "Warnings should be empty for valid config");
     assert_eq!(state.tab_size, 4);
-    assert_eq!(state.line_numbers, true);
+    assert!(state.line_numbers);
 }
 
 // ---- 9.5.2: 失敗時の fallback ----
@@ -46,7 +46,7 @@ fn invalid_config_falls_back_to_defaults_with_warning() {
 
     assert!(!warnings.is_empty(), "Should produce warnings");
     assert_eq!(state.tab_size, 8, "Should fallback to default tabSize");
-    assert_eq!(state.line_numbers, false, "Should fallback to default lineNumbers");
+    assert!(!state.line_numbers, "Should fallback to default lineNumbers");
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn missing_config_falls_back_to_defaults_with_warning() {
 
     assert!(!warnings.is_empty(), "Should produce warnings for missing file");
     assert_eq!(state.tab_size, 8);
-    assert_eq!(state.line_numbers, false);
+    assert!(!state.line_numbers);
 }
 
 #[test]
@@ -66,5 +66,5 @@ fn no_config_input_uses_defaults_without_warning() {
 
     assert!(warnings.is_empty(), "Should not produce warnings for None config");
     assert_eq!(state.tab_size, 8);
-    assert_eq!(state.line_numbers, false);
+    assert!(!state.line_numbers);
 }

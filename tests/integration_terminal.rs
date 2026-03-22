@@ -1,8 +1,8 @@
-/// 統合テスト: terminal lifecycle と表示更新の検証
-///
-/// terminal 切り替えと restore が起動終了で成立することを確認する。
-/// file name、mode、dirty、status message が表示へ反映されることを確認する。
-/// Requirements: 2.5, 3.1, 3.4
+//! 統合テスト: terminal lifecycle と表示更新の検証
+//!
+//! terminal 切り替えと restore が起動終了で成立することを確認する。
+//! file name、mode、dirty、status message が表示へ反映されることを確認する。
+//! Requirements: 2.5, 3.1, 3.4
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};

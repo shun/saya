@@ -1,17 +1,15 @@
-use saya::bootstrap::{prepare_launch, BootstrapError, BootstrapWarning};
+use saya::bootstrap::{prepare_launch, BootstrapError};
 use saya::cli::{parse_launch_request, CliParseError};
 use saya::editor_session::{EditorSessionState, QuitDecision};
-use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
-use saya::host_io::{write_to_path, SaveRequest, SaveResult};
+use saya::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
+use saya::host_io::{write_to_path, SaveResult};
 use saya::input_router::{resolve_intent, EditorIntent, KeyInput};
 use saya::screen_model::{project, ProjectionInput};
-use saya::terminal_lifecycle::{TerminalBackend, TerminalLifecycle};
+use saya::terminal_lifecycle::TerminalLifecycle;
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use vim_core_rs::CoreMode;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
-use futures::StreamExt;
-use std::io;
+use crossterm::event::{Event, KeyCode, KeyModifiers};
 
 #[tokio::main]
 async fn main() {
@@ -112,7 +110,7 @@ async fn main() {
     'main: loop {
         let action = coordinator.next_action().await;
 
-        let mut events_to_process = coordinator.drain_pending();
+        let events_to_process = coordinator.drain_pending();
         // action が NeedRedraw などで event 自体が drained に含まれないことは修正済みなので
         // drained に Input などのイベントが入っている。
         // ※ next_action が Exit なら終了処理
@@ -192,15 +190,14 @@ async fn main() {
                                 _ => {}
                             }
                         }
-                    } else if let KeyInput::Char(':') = key {
-                        if outcome.core_bridge.snapshot().mode == CoreMode::Normal {
+                    } else if let KeyInput::Char(':') = key
+                        && outcome.core_bridge.snapshot().mode == CoreMode::Normal {
                             command_line_mode = true;
                             command_line_buffer.clear();
                             transient_msg = Some(":".to_string());
                             handled = true;
                             need_redraw = true;
                         }
-                    }
 
                     if !handled {
                         let intent = resolve_intent(&key);
@@ -327,14 +324,4 @@ fn format_bootstrap_error(error: BootstrapError) -> String {
     }
 }
 
-fn format_bootstrap_warning(warning: &BootstrapWarning) -> String {
-    match warning {
-        BootstrapWarning::ConfigLoadFailed { path, message } => {
-            format!(
-                "設定ファイルの読み込みに失敗したため既定値で起動します ({}): {}",
-                path.display(),
-                message
-            )
-        }
-    }
-}
+

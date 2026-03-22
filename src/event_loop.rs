@@ -226,6 +226,12 @@ pub struct ShutdownSequence {
     restore_error: Option<String>,
 }
 
+impl Default for ShutdownSequence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ShutdownSequence {
     /// 新しいシーケンスを作成する。
     pub fn new() -> Self {
