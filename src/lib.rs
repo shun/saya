@@ -1,0 +1,12 @@
+pub mod bootstrap;
+pub mod cli;
+pub mod config_runtime;
+pub mod core_bridge;
+pub mod editor_session;
+pub mod event_loop;
+pub mod host_io;
+pub mod input_router;
+pub mod screen_model;
+pub mod session_guard;
+pub mod terminal_lifecycle;
+pub mod tui_renderer;

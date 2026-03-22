@@ -1,0 +1,12 @@
+[package]
+name = "saya"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vim-core-rs = { path = "../vim-core-rs" }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "rt-multi-thread"] }
+ratatui = "0.29.0"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+futures = "0.3"
+log = "0.4.29"
