@@ -4,13 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::prepare_launch;
 use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::cli::{LaunchRequest, ConfigSource};
-use saya::screen_model::{ProjectionInput, project};
+use saya::cli::{ConfigSource, LaunchRequest};
 use saya::saya_live_runtime::{
     BoxFuture, BufferEventPayload, CallbackRegistryBuilder, HostCapabilityBridge,
-    ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot,
-    RuntimeCommandError, RuntimeEventPayload, RuntimeMode, SayaLiveRuntime,
+    ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
+    RuntimeEventPayload, RuntimeMode, SayaLiveRuntime,
 };
+use saya::screen_model::{ProjectionInput, project};
 use tokio::sync::Mutex;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -58,7 +58,11 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
     assert_eq!(outcome.callback_registry.events().len(), 1);
 
     let session_state = outcome.editor_session_state();
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
 
     assert_eq!(model.lines[0], "1 alpha");
     assert_eq!(model.lines[1], "2 beta");
@@ -90,7 +94,11 @@ fn startup_config_failure_keeps_default_session_and_presentation_state() {
     )));
 
     let session_state = outcome.editor_session_state();
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
 
     assert_eq!(session_state.tab_size(), 8);
     assert!(!session_state.line_numbers());
@@ -208,9 +216,10 @@ async fn runtime_event_dispatch_executes_registered_command_headlessly() {
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_surface_is_frozen_and_does_not_expose_registration_apis() {
     let host_bridge = Arc::new(RecordingHostBridge::new());
-    let seed = CallbackRegistrySeed::from_startup_entries(vec![saya::config_runtime::StartupRegistryEntry::Event {
-        name: "bufferOpen".to_string(),
-        callback_source: r#"
+    let seed = CallbackRegistrySeed::from_startup_entries(vec![
+        saya::config_runtime::StartupRegistryEntry::Event {
+            name: "bufferOpen".to_string(),
+            callback_source: r#"
             async (payload) => {
                 if (!Object.isFrozen(saya)) {
                     throw new Error("runtime saya surface should be frozen");
@@ -241,8 +250,9 @@ async fn runtime_surface_is_frozen_and_does_not_expose_registration_apis() {
                 }
             }
         "#
-        .to_string(),
-    }]);
+            .to_string(),
+        },
+    ]);
 
     let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge, seed)
         .expect("runtime should initialize with frozen public surface");

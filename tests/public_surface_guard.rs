@@ -36,4 +36,3 @@ fn runtime_surface_excludes_compatibility_string_apis() {
         "runtime surface should not expose vim namespace"
     );
 }
-

@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use saya::startup_runtime::{
-    evaluate_startup_module, startup_forbidden_surface_names, startup_public_surface_names,
+use saya::callback_registry_seed::CallbackRegistrySeed;
+use saya::saya_live_runtime::{
+    BoxFuture, HostCapabilityBridge, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot,
+    RuntimeCommandError, RuntimeMode,
 };
 use saya::saya_live_runtime::{
     BufferEventPayload, ReadonlyBufferSnapshot, RuntimeEventPayload, SayaLiveRuntime,
     runtime_forbidden_surface_names, runtime_public_surface_names,
 };
 use saya::startup_runtime::StartupRegistryEntry;
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::saya_live_runtime::{
-    BoxFuture, HostCapabilityBridge, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot,
-    RuntimeCommandError, RuntimeMode,
+use saya::startup_runtime::{
+    evaluate_startup_module, startup_forbidden_surface_names, startup_public_surface_names,
 };
 
 #[test]
@@ -20,7 +20,10 @@ fn startup_surface_excludes_filesystem_and_network_capabilities() {
     let surface = startup_public_surface_names();
 
     assert_eq!(surface, &["options", "keymap", "commands", "events"]);
-    assert_eq!(startup_forbidden_surface_names(), &["filesystem", "network"]);
+    assert_eq!(
+        startup_forbidden_surface_names(),
+        &["filesystem", "network"]
+    );
     assert!(!surface.contains(&"filesystem"));
     assert!(!surface.contains(&"network"));
 }
@@ -46,7 +49,10 @@ fn runtime_surface_excludes_filesystem_and_network_capabilities() {
     let surface = runtime_public_surface_names();
 
     assert_eq!(surface, &["commands", "buffer", "window", "editor"]);
-    assert_eq!(runtime_forbidden_surface_names(), &["filesystem", "network"]);
+    assert_eq!(
+        runtime_forbidden_surface_names(),
+        &["filesystem", "network"]
+    );
     assert!(!surface.contains(&"filesystem"));
     assert!(!surface.contains(&"network"));
 }

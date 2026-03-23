@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{launch_test_lock, prepare_launch, StartupKeymapAction};
+use saya::bootstrap::{StartupKeymapAction, launch_test_lock, prepare_launch};
 use saya::cli::{ConfigSource, LaunchRequest};
 
 fn unique_path(name: &str) -> PathBuf {

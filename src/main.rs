@@ -1,7 +1,7 @@
 use saya::bootstrap::{BootstrapError, prepare_launch};
 use saya::cli::{CliParseError, parse_launch_request};
 use saya::editor_session::QuitDecision;
-use saya::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
+use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::host_io::{SaveResult, write_to_path};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::screen_model::{ProjectionInput, project};
@@ -11,6 +11,7 @@ use saya::viewport::ViewportState;
 use vim_core_rs::CoreMode;
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
+use vim_core_rs::CoreHostAction;
 
 #[tokio::main]
 async fn main() {
@@ -103,7 +104,11 @@ async fn main() {
     // 初期描画
     let snapshot = outcome.core_bridge.snapshot();
     let body_height = current_body_height();
-    viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, buffer_line_count(&snapshot.text));
+    viewport.ensure_cursor_visible(
+        snapshot.cursor_row,
+        body_height,
+        buffer_line_count(&snapshot.text),
+    );
     let model = project(
         &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
             .with_viewport(viewport.top_line(), body_height),
@@ -111,15 +116,16 @@ async fn main() {
     let _ = renderer.draw(&model);
 
     // メインループ
-    'main: loop {
+    let shutdown_reason = 'main: loop {
         let action = coordinator.next_action().await;
 
         let events_to_process = coordinator.drain_pending();
         // action が NeedRedraw などで event 自体が drained に含まれないことは修正済みなので
         // drained に Input などのイベントが入っている。
         // ※ next_action が Exit なら終了処理
-        if let LoopAction::Exit(_) = action {
-            break 'main;
+        if let LoopAction::Exit(reason) = action {
+            log::debug!("[main] coordinator requested shutdown: reason={:?}", reason);
+            break 'main reason;
         }
 
         let mut need_redraw = coordinator.take_redraw_pending();
@@ -161,47 +167,12 @@ async fn main() {
                         handled = true;
                         need_redraw = true;
 
-                        for action in outcome.core_bridge.take_pending_host_actions() {
-                            match action {
-                                vim_core_rs::CoreHostAction::Write { .. } => {
-                                    let snapshot = outcome.core_bridge.snapshot();
-                                    if let Ok(req) =
-                                        session_state.build_save_request(&snapshot.text)
-                                    {
-                                        match write_to_path(&req) {
-                                            SaveResult::Saved => {
-                                                session_state.record_save_success();
-                                                transient_msg =
-                                                    Some("Saved successfully".to_string());
-                                            }
-                                            SaveResult::Failed { message } => {
-                                                session_state.record_save_failure(message);
-                                                transient_msg = Some(format!(
-                                                    "Save failed: {}",
-                                                    session_state.last_save_error().unwrap_or("")
-                                                ));
-                                            }
-                                        }
-                                    } else {
-                                        transient_msg = Some("No file name to save".to_string());
-                                    }
-                                }
-                                vim_core_rs::CoreHostAction::Quit { force, .. } => {
-                                    match session_state.evaluate_quit(force) {
-                                        QuitDecision::Allow | QuitDecision::ForceQuit => {
-                                            drop(terminal_session);
-                                            std::process::exit(0);
-                                        }
-                                        QuitDecision::WarnUnsaved => {
-                                            transient_msg = Some(
-                                                "No write since last change (add ! to override)"
-                                                    .to_string(),
-                                            );
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
+                        if let Some(reason) = process_pending_host_actions(
+                            &mut outcome,
+                            &mut session_state,
+                            &mut transient_msg,
+                        ) {
+                            break 'main reason;
                         }
                     } else if let KeyInput::Char(':') = key
                         && outcome.core_bridge.snapshot().mode == CoreMode::Normal
@@ -219,47 +190,12 @@ async fn main() {
                             EditorIntent::EditKey(k) => {
                                 let _ = outcome.core_bridge.dispatch_key(&k);
 
-                                for action in outcome.core_bridge.take_pending_host_actions() {
-                                    match action {
-                                        vim_core_rs::CoreHostAction::Write { .. } => {
-                                            let snapshot = outcome.core_bridge.snapshot();
-                                            if let Ok(req) =
-                                                session_state.build_save_request(&snapshot.text)
-                                            {
-                                                match write_to_path(&req) {
-                                                    SaveResult::Saved => {
-                                                        session_state.record_save_success();
-                                                        transient_msg =
-                                                            Some("Saved successfully".to_string());
-                                                    }
-                                                    SaveResult::Failed { message } => {
-                                                        session_state.record_save_failure(message);
-                                                        transient_msg = Some(format!(
-                                                            "Save failed: {}",
-                                                            session_state
-                                                                .last_save_error()
-                                                                .unwrap_or("")
-                                                        ));
-                                                    }
-                                                }
-                                            } else {
-                                                transient_msg =
-                                                    Some("No file name to save".to_string());
-                                            }
-                                        }
-                                        vim_core_rs::CoreHostAction::Quit { force, .. } => {
-                                            match session_state.evaluate_quit(force) {
-                                                QuitDecision::Allow | QuitDecision::ForceQuit => {
-                                                    drop(terminal_session);
-                                                    std::process::exit(0);
-                                                }
-                                                QuitDecision::WarnUnsaved => {
-                                                    transient_msg = Some("No write since last change (add ! to override)".to_string());
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
+                                if let Some(reason) = process_pending_host_actions(
+                                    &mut outcome,
+                                    &mut session_state,
+                                    &mut transient_msg,
+                                ) {
+                                    break 'main reason;
                                 }
 
                                 session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
@@ -287,18 +223,15 @@ async fn main() {
                                 need_redraw = true;
                             }
                             EditorIntent::Quit { force } => {
-                                match session_state.evaluate_quit(force) {
-                                    QuitDecision::Allow | QuitDecision::ForceQuit => {
-                                        break 'main;
-                                    }
-                                    QuitDecision::WarnUnsaved => {
-                                        transient_msg = Some(
-                                            "No write since last change (add force to override)"
-                                                .to_string(),
-                                        );
-                                        need_redraw = true;
-                                    }
+                                let decision = session_state.evaluate_quit(force);
+                                if let Some(reason) = shutdown_reason_from_quit_decision(
+                                    decision,
+                                    force,
+                                    &mut transient_msg,
+                                ) {
+                                    break 'main reason;
                                 }
+                                need_redraw = true;
                             }
                         }
                     }
@@ -306,8 +239,12 @@ async fn main() {
                 UiEvent::Resize { .. } => {
                     need_redraw = true;
                 }
-                UiEvent::Shutdown(_) => {
-                    break 'main;
+                UiEvent::Shutdown(reason) => {
+                    log::debug!(
+                        "[main] explicit shutdown event received in drain: reason={:?}",
+                        reason
+                    );
+                    break 'main reason;
                 }
                 _ => {}
             }
@@ -327,14 +264,118 @@ async fn main() {
             );
             let _ = renderer.draw(&model);
         }
+    };
+
+    log::debug!(
+        "[main] beginning unified shutdown: reason={:?}",
+        shutdown_reason
+    );
+    let mut shutdown_sequence = coordinator.begin_shutdown(shutdown_reason);
+    shutdown_sequence.record_loop_stopped();
+
+    drop(renderer);
+    log::debug!("[main] dropping editor outcome for session cleanup");
+    drop(outcome);
+    shutdown_sequence.record_session_released();
+
+    let restore_result = terminal_session
+        .restore()
+        .map_err(|error| format!("{error:?}"));
+    shutdown_sequence.record_terminal_restored(restore_result);
+
+    if let Some(error) = shutdown_sequence.restore_error() {
+        log::debug!("[main] terminal restore error recorded during shutdown: {error}");
+    }
+    log::debug!(
+        "[main] unified shutdown completed: steps={:?}, complete={}",
+        shutdown_sequence.steps(),
+        shutdown_sequence.is_complete()
+    );
+}
+
+fn process_pending_host_actions(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+) -> Option<ShutdownReason> {
+    for action in outcome.core_bridge.take_pending_host_actions() {
+        match action {
+            CoreHostAction::Write { .. } => {
+                handle_write_host_action(outcome, session_state, transient_msg);
+            }
+            CoreHostAction::Quit { force, .. } => {
+                let decision = session_state.evaluate_quit(force);
+                if let Some(reason) =
+                    shutdown_reason_from_quit_decision(decision, force, transient_msg)
+                {
+                    return Some(reason);
+                }
+            }
+            _ => {}
+        }
     }
 
-    drop(terminal_session);
-    std::process::exit(0);
+    None
+}
+
+fn handle_write_host_action(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+) {
+    let snapshot = outcome.core_bridge.snapshot();
+    log::debug!(
+        "[main] processing write host action: path_present={}, contents_len={}",
+        session_state.target_path().is_some(),
+        snapshot.text.len()
+    );
+    if let Ok(req) = session_state.build_save_request(&snapshot.text) {
+        match write_to_path(&req) {
+            SaveResult::Saved => {
+                session_state.record_save_success();
+                *transient_msg = Some("Saved successfully".to_string());
+            }
+            SaveResult::Failed { message } => {
+                session_state.record_save_failure(message);
+                *transient_msg = Some(format!(
+                    "Save failed: {}",
+                    session_state.last_save_error().unwrap_or("")
+                ));
+            }
+        }
+    } else {
+        *transient_msg = Some("No file name to save".to_string());
+    }
+}
+
+fn shutdown_reason_from_quit_decision(
+    decision: QuitDecision,
+    force: bool,
+    transient_msg: &mut Option<String>,
+) -> Option<ShutdownReason> {
+    log::debug!(
+        "[main] evaluating quit decision for shutdown: force={}, decision={:?}",
+        force,
+        decision
+    );
+    match decision {
+        QuitDecision::Allow => Some(ShutdownReason::UserQuit),
+        QuitDecision::ForceQuit => Some(ShutdownReason::UserForceQuit),
+        QuitDecision::WarnUnsaved => {
+            *transient_msg = Some(if force {
+                "No write since last change (add ! to override)".to_string()
+            } else {
+                "No write since last change (add force to override)".to_string()
+            });
+            None
+        }
+    }
 }
 
 fn current_body_height() -> usize {
-    let rows = crossterm::terminal::size().map(|(_, rows)| rows).unwrap_or(2);
+    let rows = crossterm::terminal::size()
+        .map(|(_, rows)| rows)
+        .unwrap_or(2);
     usize::from(rows.saturating_sub(1).max(1))
 }
 
@@ -364,5 +405,49 @@ fn format_bootstrap_error(error: BootstrapError) -> String {
                 message
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_reason_maps_clean_quit_to_user_quit() {
+        let mut transient_msg = None;
+
+        let reason =
+            shutdown_reason_from_quit_decision(QuitDecision::Allow, false, &mut transient_msg);
+
+        assert_eq!(reason, Some(ShutdownReason::UserQuit));
+        assert_eq!(transient_msg, None);
+    }
+
+    #[test]
+    fn shutdown_reason_maps_forced_quit_to_force_quit() {
+        let mut transient_msg = None;
+
+        let reason =
+            shutdown_reason_from_quit_decision(QuitDecision::ForceQuit, true, &mut transient_msg);
+
+        assert_eq!(reason, Some(ShutdownReason::UserForceQuit));
+        assert_eq!(transient_msg, None);
+    }
+
+    #[test]
+    fn shutdown_reason_keeps_loop_running_when_quit_is_rejected() {
+        let mut transient_msg = None;
+
+        let reason = shutdown_reason_from_quit_decision(
+            QuitDecision::WarnUnsaved,
+            false,
+            &mut transient_msg,
+        );
+
+        assert_eq!(reason, None);
+        assert_eq!(
+            transient_msg,
+            Some("No write since last change (add force to override)".to_string())
+        );
     }
 }

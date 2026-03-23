@@ -28,13 +28,22 @@ fn callback_registry_seed_preserves_command_and_event_registration_order() {
     assert_eq!(seed.events().len(), 2);
     assert_eq!(seed.commands()[0].slot(), 0);
     assert_eq!(seed.commands()[0].name(), "firstCommand");
-    assert_eq!(seed.commands()[0].callback_source(), "() => console.log(\"first\")");
+    assert_eq!(
+        seed.commands()[0].callback_source(),
+        "() => console.log(\"first\")"
+    );
     assert_eq!(seed.commands()[1].slot(), 1);
     assert_eq!(seed.commands()[1].name(), "secondCommand");
-    assert_eq!(seed.commands()[1].callback_source(), "() => console.log(\"second\")");
+    assert_eq!(
+        seed.commands()[1].callback_source(),
+        "() => console.log(\"second\")"
+    );
     assert_eq!(seed.events()[0].slot(), 0);
     assert_eq!(seed.events()[0].name(), "firstEvent");
-    assert_eq!(seed.events()[0].callback_source(), "(payload) => console.log(payload)");
+    assert_eq!(
+        seed.events()[0].callback_source(),
+        "(payload) => console.log(payload)"
+    );
     assert_eq!(seed.events()[1].slot(), 1);
     assert_eq!(seed.events()[1].name(), "secondEvent");
     assert_eq!(
@@ -71,7 +80,10 @@ fn callback_registry_seed_keeps_duplicate_callbacks_in_source_order() {
             .iter()
             .map(|entry| entry.callback_source())
             .collect::<Vec<_>>(),
-        vec!["() => console.log(\"first\")", "() => console.log(\"second\")"]
+        vec![
+            "() => console.log(\"first\")",
+            "() => console.log(\"second\")"
+        ]
     );
     assert_eq!(
         seed.events()

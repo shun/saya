@@ -898,7 +898,10 @@ fn extract_arrow_callback_body(callback_source: &str) -> Option<String> {
     let after_arrow = normalized[arrow_index + 2..].trim();
 
     if after_arrow.starts_with('{') {
-        let inner = after_arrow.trim_start_matches('{').trim_end_matches('}').trim();
+        let inner = after_arrow
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .trim();
         return Some(collapse_whitespace(inner));
     }
 
@@ -1110,7 +1113,12 @@ fn detect_unsupported_capability(statement: &str) -> Option<String> {
 
     for prefix in unsupported_prefixes {
         if statement.starts_with(prefix) {
-            return Some(prefix.trim_end_matches('(').trim_end_matches('.').to_string());
+            return Some(
+                prefix
+                    .trim_end_matches('(')
+                    .trim_end_matches('.')
+                    .to_string(),
+            );
         }
     }
 
@@ -1638,11 +1646,13 @@ mod tests {
 
         match result {
             CapabilityLoadResult::Success {
-                registry,
-                commands,
-                ..
+                registry, commands, ..
             } => {
-                assert_eq!(commands.len(), 2, "startup option は 2 件の command に正規化されること");
+                assert_eq!(
+                    commands.len(),
+                    2,
+                    "startup option は 2 件の command に正規化されること"
+                );
                 assert_eq!(
                     registry.entries(),
                     &[
@@ -1705,7 +1715,9 @@ mod tests {
         let result = evaluate_capability_source(&source);
 
         match result {
-            CapabilityLoadResult::Success { registry, commands, .. } => {
+            CapabilityLoadResult::Success {
+                registry, commands, ..
+            } => {
                 assert_eq!(
                     commands.len(),
                     1,

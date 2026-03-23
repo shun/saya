@@ -53,7 +53,11 @@ fn mode_transition_flow_through_input_router_to_screen_model() {
 
     // 起動直後はノーマルモード
     let session_state = EditorSessionState::new(outcome.target_path.clone());
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
     assert_eq!(model.mode_label, "NORMAL");
 
     // InputRouter で 'i' キーを intent 変換
@@ -96,7 +100,11 @@ fn cursor_movement_reflected_in_screen_model() {
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
     // 初期位置
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
     assert_eq!(model.cursor_row, 0);
     assert_eq!(model.cursor_col, 0);
 
@@ -139,22 +147,10 @@ fn vertical_motion_restores_preferred_column_after_shorter_line() {
     let mut outcome = launch_with_content("abcdef\nx\nuvwxyz\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
-    outcome
-        .core_bridge
-        .dispatch_key("l")
-        .expect("1 列目へ移動");
-    outcome
-        .core_bridge
-        .dispatch_key("l")
-        .expect("2 列目へ移動");
-    outcome
-        .core_bridge
-        .dispatch_key("l")
-        .expect("3 列目へ移動");
-    outcome
-        .core_bridge
-        .dispatch_key("l")
-        .expect("4 列目へ移動");
+    outcome.core_bridge.dispatch_key("l").expect("1 列目へ移動");
+    outcome.core_bridge.dispatch_key("l").expect("2 列目へ移動");
+    outcome.core_bridge.dispatch_key("l").expect("3 列目へ移動");
+    outcome.core_bridge.dispatch_key("l").expect("4 列目へ移動");
 
     outcome.core_bridge.dispatch_key("j").expect("短い行へ移動");
     let short_snapshot = outcome.core_bridge.snapshot();
@@ -164,7 +160,11 @@ fn vertical_motion_restores_preferred_column_after_shorter_line() {
 
     outcome.core_bridge.dispatch_key("j").expect("長い行へ移動");
     let restored_snapshot = outcome.core_bridge.snapshot();
-    let restored_model = project(&ProjectionInput::new(&restored_snapshot, &session_state, None));
+    let restored_model = project(&ProjectionInput::new(
+        &restored_snapshot,
+        &session_state,
+        None,
+    ));
     assert_eq!(restored_model.cursor_row, 2);
     assert_eq!(restored_model.cursor_col, 4);
 }
@@ -179,7 +179,11 @@ fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
     for _ in 0..4 {
         outcome.core_bridge.dispatch_key("j").expect("j dispatch");
         let snapshot = outcome.core_bridge.snapshot();
-        viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, snapshot.text.lines().count());
+        viewport.ensure_cursor_visible(
+            snapshot.cursor_row,
+            body_height,
+            snapshot.text.lines().count(),
+        );
     }
 
     let snapshot = outcome.core_bridge.snapshot();
@@ -188,7 +192,11 @@ fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
             .with_viewport(viewport.top_line(), body_height),
     );
 
-    assert_eq!(viewport.top_line(), 2, "4 行目移動時に viewport が追従すること");
+    assert_eq!(
+        viewport.top_line(),
+        2,
+        "4 行目移動時に viewport が追従すること"
+    );
     assert_eq!(model.lines, vec!["line3", "line4", "line5"]);
     assert_eq!(model.cursor_row, 2, "カーソルが本文領域内へ保たれること");
 }
@@ -302,7 +310,11 @@ fn dirty_state_follows_editing_in_screen_model() {
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
     // 起動直後は clean
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
     assert!(!model.dirty, "起動直後は dirty=false");
 
     // 文字入力で dirty になる

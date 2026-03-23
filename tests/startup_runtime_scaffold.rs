@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use saya::startup_runtime::{
-    collect_startup_registry, evaluate_startup_module, load_init_module, prepare_init_module,
-    resolve_init_module_specifier, SayaKeyMode, SayaKeymapAction, StartupModuleLoadResult,
-    StartupModulePrepareResult, StartupOptionName, StartupOptionValue, StartupRegistryEntry,
+    SayaKeyMode, SayaKeymapAction, StartupModuleLoadResult, StartupModulePrepareResult,
+    StartupOptionName, StartupOptionValue, StartupRegistryEntry, collect_startup_registry,
+    evaluate_startup_module, load_init_module, prepare_init_module, resolve_init_module_specifier,
 };
 
 fn unique_path(name: &str) -> PathBuf {
@@ -80,7 +80,11 @@ fn init_ts_module_transpiles_into_executable_javascript() {
     match result {
         StartupModulePrepareResult::Success(module) => {
             assert!(module.executable_source_text.contains("const tabSize = 4;"));
-            assert!(module.executable_source_text.contains("saya.options.tabSize = tabSize;"));
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("saya.options.tabSize = tabSize;")
+            );
             assert_eq!(module.path, config_path);
         }
         other => panic!("Success を返すこと, got: {:?}", other),

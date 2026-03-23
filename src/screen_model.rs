@@ -502,9 +502,8 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None).with_viewport(2, 2),
-        );
+        let model =
+            project(&ProjectionInput::new(&snapshot, &session_state, None).with_viewport(2, 2));
 
         assert_eq!(model.lines, vec!["line3", "line4"]);
         assert_eq!(model.cursor_row, 1, "viewport 内の相対行へ変換されること");
@@ -589,7 +588,11 @@ mod tests {
         let mut session_state = EditorSessionState::new(None);
         session_state.record_save_failure("old error".to_string());
 
-        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("未保存の変更があります")));
+        let model = project(&ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            Some("未保存の変更があります"),
+        ));
 
         assert_eq!(
             model.status_message,
@@ -608,7 +611,11 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("未保存の変更があります。:q! で強制終了できます")));
+        let model = project(&ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            Some("未保存の変更があります。:q! で強制終了できます"),
+        ));
 
         assert_eq!(
             model.status_message,
@@ -627,7 +634,11 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("設定の読み込みに失敗しました")));
+        let model = project(&ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            Some("設定の読み込みに失敗しました"),
+        ));
 
         assert_eq!(
             model.status_message,
@@ -670,7 +681,11 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("保存しました")));
+        let model = project(&ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            Some("保存しました"),
+        ));
 
         assert_eq!(
             model.status_message,
@@ -710,9 +725,8 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None).with_viewport(1, 2),
-        );
+        let model =
+            project(&ProjectionInput::new(&snapshot, &session_state, None).with_viewport(1, 2));
 
         assert_eq!(model.lines, vec!["line2", "line3"]);
     }
@@ -809,7 +823,11 @@ mod tests {
 
         let session_state = EditorSessionState::new(Some(PathBuf::from("/tmp/test.txt")));
 
-        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("テストメッセージ")));
+        let model = project(&ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            Some("テストメッセージ"),
+        ));
 
         // 全フィールドがまとめて draw に必要なデータを持つこと
         assert!(!model.file_name.is_empty(), "ファイル名は空でないこと");

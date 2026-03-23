@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use deno_core::{op2, OpState, RuntimeOptions};
+use deno_core::{OpState, RuntimeOptions, op2};
 use deno_error::JsErrorBox;
 
 pub use crate::config_runtime::{
@@ -214,10 +214,7 @@ fn op_collect_startup_tab_size(
 }
 
 #[op2(fast)]
-fn op_collect_startup_line_numbers(
-    state: &mut OpState,
-    value: bool,
-) -> Result<(), JsErrorBox> {
+fn op_collect_startup_line_numbers(state: &mut OpState, value: bool) -> Result<(), JsErrorBox> {
     log::debug!(
         "[startup_runtime] collect startup lineNumbers option from runtime: value={}",
         value
@@ -481,7 +478,8 @@ fn transpile_typescript_module(module: &StartupModuleSource) -> Result<String, S
         module.path.display(),
         module.source_text.len()
     );
-    let executable_source_text = normalize_assignment_spacing(&strip_type_annotations(&module.source_text));
+    let executable_source_text =
+        normalize_assignment_spacing(&strip_type_annotations(&module.source_text));
     validate_executable_module(&module.path, &executable_source_text)?;
     Ok(executable_source_text)
 }
@@ -650,7 +648,8 @@ pub async fn collect_startup_registry(source_text: &str) -> Result<StartupRegist
     );
 
     let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
-    let specifier = resolve_init_module_specifier("init.ts", &current_dir).map_err(|error| error.to_string())?;
+    let specifier = resolve_init_module_specifier("init.ts", &current_dir)
+        .map_err(|error| error.to_string())?;
     let mut runtime = create_startup_runtime();
     let module_id = runtime
         .load_main_es_module_from_code(&specifier, source_text.to_string())

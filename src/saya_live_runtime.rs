@@ -470,8 +470,7 @@ deno_core::extension!(
 );
 
 fn runtime_command_error_to_js_error(error: RuntimeCommandError) -> JsErrorBox {
-    let encoded = serde_json::to_string(&error)
-        .expect("runtime command error should serialize");
+    let encoded = serde_json::to_string(&error).expect("runtime command error should serialize");
     JsErrorBox::generic(format!("{RUNTIME_COMMAND_ERROR_PREFIX}{encoded}"))
 }
 
@@ -528,8 +527,7 @@ fn build_seed_registration_script(
     let mut metadata = SeedRuntimeMetadata::default();
 
     for command in seed.commands() {
-        let name = serde_json::to_string(command.name())
-            .expect("command name should serialize");
+        let name = serde_json::to_string(command.name()).expect("command name should serialize");
         let callback = callback_expression(command.callback_source(), "");
         script.push_str(&format!(
             "globalThis.__sayaRuntime.registerCommand({name}, {callback});\n"
@@ -538,8 +536,7 @@ fn build_seed_registration_script(
 
     for event in seed.events() {
         let event_name = runtime_event_name_from_seed(event.name())?;
-        let name = serde_json::to_string(event.name())
-            .expect("event name should serialize");
+        let name = serde_json::to_string(event.name()).expect("event name should serialize");
         let callback = callback_expression(event.callback_source(), "payload");
         script.push_str(&format!(
             "globalThis.__sayaRuntime.registerEvent({name}, {callback});\n"
@@ -608,10 +605,7 @@ async fn dispatch_event_in_seed_runtime(
     Ok(())
 }
 
-fn parse_runtime_dispatch_error(
-    event: RuntimeEventName,
-    message: String,
-) -> RuntimeDispatchError {
+fn parse_runtime_dispatch_error(event: RuntimeEventName, message: String) -> RuntimeDispatchError {
     if let Some(payload) = extract_prefixed_json_payload(&message, RUNTIME_CALLBACK_ERROR_PREFIX) {
         if let Ok(encoded) = serde_json::from_str::<EncodedCallbackFailure>(payload) {
             return RuntimeDispatchError::CallbackFailed {
@@ -858,7 +852,10 @@ impl RuntimeCommandsApi {
             })
             .await
         } else {
-            log::debug!("[saya_live_runtime] execute host command fallback: {}", name);
+            log::debug!(
+                "[saya_live_runtime] execute host command fallback: {}",
+                name
+            );
             self.shared.bridge.execute_host_command(name).await
         };
 
@@ -1225,16 +1222,17 @@ mod tests {
         let runner = SayaStartupPhaseRunner::new(Arc::new(SleepingStartupEvaluator));
 
         let started_at = Instant::now();
-        let receipt = runner
-            .begin()
-            .expect("startup evaluation should be queued");
+        let receipt = runner.begin().expect("startup evaluation should be queued");
 
         assert!(
             started_at.elapsed() < Duration::from_millis(20),
             "begin should return quickly without waiting for startup evaluation"
         );
 
-        let result = receipt.await_result().await.expect("startup evaluation result");
+        let result = receipt
+            .await_result()
+            .await
+            .expect("startup evaluation result");
         assert_eq!(result, "startup-ready");
     }
 
@@ -1353,10 +1351,10 @@ mod tests {
                 Box::pin(async move {
                     let buffer = ctx.buffer().current().await;
                     let editor_mode = ctx.editor().mode().await;
-                    observed_in_command.lock().await.push(format!(
-                        "command:{:?}:{:?}",
-                        buffer.path, editor_mode
-                    ));
+                    observed_in_command
+                        .lock()
+                        .await
+                        .push(format!("command:{:?}:{:?}", buffer.path, editor_mode));
                     ctx.commands().execute("write").await
                 })
             })
@@ -1506,11 +1504,9 @@ mod tests {
             super::RuntimeDispatchError::CallbackFailed {
                 event: super::RuntimeEventName::BufferOpen,
                 handler_index: 0,
-                error: super::RuntimeCallbackError::Command(
-                    RuntimeCommandError::UnknownCommand {
-                        name: "missing".to_string(),
-                    },
-                ),
+                error: super::RuntimeCallbackError::Command(RuntimeCommandError::UnknownCommand {
+                    name: "missing".to_string(),
+                },),
             }
         );
     }

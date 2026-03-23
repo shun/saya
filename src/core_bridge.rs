@@ -688,9 +688,15 @@ mod tests {
 
         let mut bridge = CoreBridge::new("first\nsecond\n").expect("core bridge should initialize");
 
-        bridge.dispatch_key("y").expect("first y should enter operator pending");
-        bridge.dispatch_key("y").expect("second y should yank current line");
-        bridge.dispatch_key("p").expect("p should paste yanked line");
+        bridge
+            .dispatch_key("y")
+            .expect("first y should enter operator pending");
+        bridge
+            .dispatch_key("y")
+            .expect("second y should yank current line");
+        bridge
+            .dispatch_key("p")
+            .expect("p should paste yanked line");
 
         let snapshot = bridge.snapshot();
         assert_eq!(
@@ -708,7 +714,9 @@ mod tests {
         let mut bridge =
             CoreBridge::new("first\nsecond\nthird\n").expect("core bridge should initialize");
 
-        bridge.dispatch_key("d").expect("first d should enter operator pending");
+        bridge
+            .dispatch_key("d")
+            .expect("first d should enter operator pending");
         bridge
             .dispatch_key("d")
             .expect("second d should delete current line");

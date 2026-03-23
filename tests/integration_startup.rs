@@ -46,7 +46,11 @@ fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
 
     // 4. 起動直後の ScreenModel 生成
     let session_state = EditorSessionState::new(outcome.target_path.clone());
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
 
     assert_eq!(
         model.file_name,
@@ -85,7 +89,11 @@ fn new_buffer_startup_flow_without_target_path() {
 
     // 4. ScreenModel 生成
     let session_state = EditorSessionState::new(None);
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
 
     assert_eq!(
         model.file_name, "[新規]",

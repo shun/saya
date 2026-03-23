@@ -6,13 +6,15 @@ use crate::callback_registry_seed::CallbackRegistrySeed;
 use crate::cli::{ConfigSource, LaunchRequest};
 use crate::config_runtime::{
     AppliedKeyMapping, CapabilityLoadResult, ConfigApplyState, ConfigKeyMode, ConfigSourceResult,
-    SayaKeyMode, SayaKeymapAction, StartupRegistry, StartupRegistryEntry,
-    apply_config_commands, evaluate_capability_source,
+    SayaKeyMode, SayaKeymapAction, StartupRegistry, StartupRegistryEntry, apply_config_commands,
+    evaluate_capability_source,
 };
 use crate::core_bridge::CoreBridge;
 use crate::editor_session::EditorSessionState;
 use crate::session_guard::{SessionGuard, SessionGuardError};
-use crate::startup_runtime::{collect_startup_registry, prepare_init_module, StartupModulePrepareResult};
+use crate::startup_runtime::{
+    StartupModulePrepareResult, collect_startup_registry, prepare_init_module,
+};
 use vim_core_rs::CoreSnapshot;
 
 #[derive(Debug)]
@@ -334,9 +336,10 @@ fn evaluate_bootstrap_capability(loaded_config: &LoadedConfig) -> CapabilityLoad
 }
 
 fn evaluate_bootstrap_capability_from_path(path: &Path) -> Option<CapabilityLoadResult> {
-    let current_dir = path.parent().map(Path::to_path_buf).or_else(|| {
-        std::env::current_dir().ok()
-    })?;
+    let current_dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())?;
     log::debug!(
         "[bootstrap] evaluating formal startup runtime path: config_path={}, current_dir={}",
         path.display(),
@@ -399,23 +402,27 @@ fn evaluate_startup_registry_on_worker(source_text: String) -> Result<StartupReg
         })
 }
 
-fn config_commands_from_registry(registry: &StartupRegistry) -> Vec<crate::config_runtime::ConfigCommand> {
+fn config_commands_from_registry(
+    registry: &StartupRegistry,
+) -> Vec<crate::config_runtime::ConfigCommand> {
     registry
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            StartupRegistryEntry::Option { name, value } => Some(
-                crate::config_runtime::ConfigCommand::SetOption {
+            StartupRegistryEntry::Option { name, value } => {
+                Some(crate::config_runtime::ConfigCommand::SetOption {
                     name: (*name).into(),
                     value: value.clone().into(),
-                },
-            ),
+                })
+            }
             StartupRegistryEntry::Keymap { mode, lhs, action } => match action {
-                SayaKeymapAction::Literal(rhs) => Some(crate::config_runtime::ConfigCommand::MapKey {
-                    mode: (*mode).into(),
-                    lhs: lhs.clone(),
-                    rhs: rhs.clone(),
-                }),
+                SayaKeymapAction::Literal(rhs) => {
+                    Some(crate::config_runtime::ConfigCommand::MapKey {
+                        mode: (*mode).into(),
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                    })
+                }
                 SayaKeymapAction::RegisteredCommand(_) => None,
             },
             StartupRegistryEntry::Command { .. } | StartupRegistryEntry::Event { .. } => None,
@@ -431,9 +438,9 @@ fn startup_registry_from_registry(
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            StartupRegistryEntry::Keymap { mode, lhs, action } => {
-                Some(startup_keymap_from_registry_entry(*mode, lhs.clone(), action.clone()))
-            }
+            StartupRegistryEntry::Keymap { mode, lhs, action } => Some(
+                startup_keymap_from_registry_entry(*mode, lhs.clone(), action.clone()),
+            ),
             _ => None,
         })
         .collect();
@@ -513,6 +520,7 @@ mod tests {
 
     use vim_core_rs::CoreMode;
 
+    use super::startup_registry_from_registry;
     use crate::bootstrap::{
         BootstrapError, BootstrapWarning, LoadedConfig, StartupKeymapAction, StartupKeymapMode,
         StartupKeymapSnapshot, StartupRegistrySnapshot, prepare_launch,
@@ -523,7 +531,6 @@ mod tests {
         StartupRegistry, StartupRegistryEntry,
     };
     use crate::session_guard::SessionGuard;
-    use super::startup_registry_from_registry;
 
     fn session_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

@@ -53,7 +53,10 @@ async fn runtime_callback_consumes_typed_payload_for_buffer_write_post_headlessl
         .await
         .expect("dispatch result");
 
-    observed_in_event.lock().await.push(format!("{:?}", report.event));
+    observed_in_event
+        .lock()
+        .await
+        .push(format!("{:?}", report.event));
 
     assert_eq!(report.event, RuntimeEventName::BufferWritePost);
     assert_eq!(report.handler_count, 1);

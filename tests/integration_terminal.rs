@@ -90,7 +90,11 @@ fn display_model_reflects_editor_state_and_messages() {
     let mut session_state = EditorSessionState::new(outcome.target_path.clone());
 
     // 初期状態
-    let model = project(&ProjectionInput::new(&outcome.core_bridge.snapshot(), &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        None,
+    ));
 
     assert_eq!(model.file_name, target_path.display().to_string());
     assert_eq!(model.mode_label, "NORMAL");
@@ -105,7 +109,11 @@ fn display_model_reflects_editor_state_and_messages() {
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
     session_state.record_save_failure("Permission denied".to_string());
 
-    let model2 = project(&ProjectionInput::new(&outcome.core_bridge.snapshot(), &session_state, Some("Action failed")));
+    let model2 = project(&ProjectionInput::new(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        Some("Action failed"),
+    ));
 
     assert_eq!(model2.mode_label, "NORMAL");
     assert!(model2.dirty);
@@ -114,7 +122,11 @@ fn display_model_reflects_editor_state_and_messages() {
     assert_eq!(model2.status_message, Some("Action failed".to_string()));
 
     // transient なしなら save error が出るはず
-    let model3 = project(&ProjectionInput::new(&outcome.core_bridge.snapshot(), &session_state, None));
+    let model3 = project(&ProjectionInput::new(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        None,
+    ));
 
     assert_eq!(
         model3.status_message,

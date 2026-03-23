@@ -42,7 +42,11 @@ fn startup_tab_size_reflects_in_headless_boot_projection() {
     let session_state = outcome.editor_session_state();
     assert_eq!(session_state.tab_size(), 4);
 
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
 
     assert_eq!(model.file_name, target_path.display().to_string());
     assert_eq!(model.mode_label, "NORMAL");
@@ -77,7 +81,11 @@ fn startup_tab_size_falls_back_when_config_is_missing() {
     let session_state = outcome.editor_session_state();
     assert_eq!(session_state.tab_size(), 8);
 
-    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
 
     assert_eq!(model.file_name, target_path.display().to_string());
     assert_eq!(model.mode_label, "NORMAL");
