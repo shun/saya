@@ -137,6 +137,7 @@ Project memory keeps persistent guidance (steering, specs notes, component docs)
 - Human review required each phase; use `-y` only for intentional fast-track
 - Keep steering current and verify alignment with `/prompts:kiro-spec-status`
 - Follow the user's instructions precisely, and within that scope act autonomously: gather the necessary context and complete the requested work end-to-end in this run, asking questions only when essential information is missing or the instructions are critically ambiguous.
+- 不具合や挙動がおかしい調べごとは、まず該当する箇所にログを入れテストを実行して確認するようにしてください。
 - コマンドを実行する前に、必ずコマンドで何を実行しようとしているか出力してからコマンドは実行すること
 - いきなり実装に入らず、複数の案からpros/cons を検討し、あるべき設計を考慮して方針を立ててからテストコードを作成し、実装にはいること。
 - Kent Beck Style のTDDで、確実にREDにしてから実装を行い、GREEN、REFACTORで実装すること。

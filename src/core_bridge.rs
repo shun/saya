@@ -7,6 +7,7 @@ use vim_core_rs::{
 
 pub struct CoreBridge {
     session: VimCoreSession,
+    preferred_column: Option<usize>,
 }
 
 impl fmt::Debug for CoreBridge {
@@ -25,7 +26,10 @@ impl CoreBridge {
         );
         let session = VimCoreSession::new(initial_text)?;
         log::debug!("[core_bridge] vim-core-rs session initialized");
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            preferred_column: None,
+        })
     }
 
     pub fn new_with_target_path(
@@ -68,11 +72,21 @@ impl CoreBridge {
             key,
             key.len()
         );
-        let outcome = self
-            .session
-            .apply_normal_command(key)
-            .map_err(CoreSessionError::CommandFailed)?;
-        log::debug!("[core_bridge] dispatch result: {:?}", outcome);
+        let outcome = if self.should_preserve_preferred_column(key) {
+            self.dispatch_vertical_motion_with_preferred_column(key)?
+        } else {
+            let outcome = self
+                .session
+                .apply_normal_command(key)
+                .map_err(CoreSessionError::CommandFailed)?;
+            self.update_preferred_column_from_snapshot(key);
+            outcome
+        };
+        log::debug!(
+            "[core_bridge] dispatch result: {:?}, preferred_column={:?}",
+            outcome,
+            self.preferred_column
+        );
         Ok(outcome)
     }
 
@@ -111,6 +125,66 @@ impl CoreBridge {
             .apply_ex_command(&format!(":file {}", escaped_path))
             .map_err(CoreSessionError::CommandFailed)?;
         Ok(())
+    }
+}
+
+impl CoreBridge {
+    fn should_preserve_preferred_column(&self, key: &str) -> bool {
+        matches!(key, "j" | "k") && self.session.snapshot().mode == vim_core_rs::CoreMode::Normal
+    }
+
+    fn dispatch_vertical_motion_with_preferred_column(
+        &mut self,
+        key: &str,
+    ) -> Result<CoreCommandOutcome, CoreSessionError> {
+        let before = self.session.snapshot();
+        let desired_col = self.preferred_column.unwrap_or(before.cursor_col);
+        log::debug!(
+            "[core_bridge] vertical motion with preferred column: key={:?}, row={}, col={}, desired_col={}",
+            key,
+            before.cursor_row,
+            before.cursor_col,
+            desired_col
+        );
+
+        self.session
+            .apply_normal_command(key)
+            .map_err(CoreSessionError::CommandFailed)?;
+        let moved = self.session.snapshot();
+
+        if moved.cursor_col != desired_col {
+            let restore_command = format!("{}|", desired_col.saturating_add(1));
+            log::debug!(
+                "[core_bridge] restoring preferred column after vertical motion: command={:?}, current_col={}, desired_col={}",
+                restore_command,
+                moved.cursor_col,
+                desired_col
+            );
+            self.session
+                .apply_normal_command(&restore_command)
+                .map_err(CoreSessionError::CommandFailed)?;
+        }
+
+        self.preferred_column = Some(desired_col);
+        let snapshot = self.session.snapshot();
+        Ok(CoreCommandOutcome::CursorChanged {
+            row: snapshot.cursor_row,
+            col: snapshot.cursor_col,
+        })
+    }
+
+    fn update_preferred_column_from_snapshot(&mut self, key: &str) {
+        if matches!(key, "j" | "k") {
+            return;
+        }
+
+        let snapshot = self.session.snapshot();
+        self.preferred_column = Some(snapshot.cursor_col);
+        log::debug!(
+            "[core_bridge] preferred column updated from snapshot: key={:?}, preferred_column={}",
+            key,
+            snapshot.cursor_col
+        );
     }
 }
 
@@ -378,10 +452,39 @@ mod tests {
 
         bridge.dispatch_key("jj").expect("j で 2 行下に移動");
         assert_eq!(bridge.snapshot().cursor_row, 2);
+        bridge.dispatch_key("ll").expect("l で 2 列右に移動");
+        assert_eq!(bridge.snapshot().cursor_col, 2);
 
         bridge.dispatch_key("k").expect("k キーで上移動");
         let snapshot = bridge.snapshot();
         assert_eq!(snapshot.cursor_row, 1, "k キーでカーソルが上に移動すること");
+        assert_eq!(snapshot.cursor_col, 2, "k キーで現在列を維持すること");
+    }
+
+    #[test]
+    fn vertical_motion_keeps_preferred_column_across_shorter_line() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new("abcdef\nx\nuvwxyz\n").expect("core bridge should initialize");
+
+        bridge.dispatch_key("llll").expect("l で 4 列右に移動");
+        assert_eq!(bridge.snapshot().cursor_col, 4);
+
+        bridge.dispatch_key("j").expect("短い行へ下移動");
+        let short_line = bridge.snapshot();
+        assert_eq!(short_line.cursor_row, 1);
+        assert_eq!(short_line.cursor_col, 0, "短い行では行末へ丸められること");
+
+        bridge.dispatch_key("j").expect("再び下移動");
+        let restored = bridge.snapshot();
+        assert_eq!(restored.cursor_row, 2);
+        assert_eq!(
+            restored.cursor_col, 4,
+            "短い行を経由しても次の長い行で目標列へ戻ること"
+        );
     }
 
     #[test]
