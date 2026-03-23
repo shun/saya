@@ -1,83 +1,125 @@
-# System Architecture
+# Architecture
 
-## 1. エグゼクティブ・サマリ：最強のハイブリッド・アーキテクチャ
-本プロジェクトは、Vimの歴史的かつ完璧な操作パラダイムを維持しつつ、拡張性および設定環境を現代の最高峰技術で再構築する。アーキテクチャの最適解として、**「TypeScript (V8) と WebAssembly のハイブリッド構成」**を絶対原則とする。
+`saya` uses a layered architecture that keeps editing semantics, application
+orchestration, rendering, and TypeScript execution separate. This page explains
+the current architecture as implemented in the repository, not an aspirational
+future workspace layout.
 
-1. **コントロールプレーン：`deno_core` (V8) による基本操作**
-ユーザーが記述する `init.ts` やキーバインド設定、npmライブラリの読み込み、エディタの各種API操作は、すべてエディタ本体のRustバイナリに組み込まれた `deno_core` で処理する。通信遅延をナノ秒単位に抑え、TypeScriptの強力なエコシステムをそのまま提供する。
-2. **データプレーン：Wasmへの高負荷処理オフロード**
-ファジー検索アルゴリズム、巨大なファイルの構文解析など、純粋な計算速度が求められる重負荷処理は、TypeScript単体（JSエンジン）で実行させない。Deno（V8）標準のWasm爆速実行能力を活用し、該当処理のみをRust/Zig等でWasm化し、TypeScript内から `WebAssembly.instantiate` で動的ロードして呼び出す。
+The most important design rule is simple: higher layers may depend on lower
+layers, but lower layers must not take on upper-layer responsibilities.
 
-## 2. システム・レイヤー構造 (System Architecture Layers)
-システムは厳格に分離された4つのレイヤーで構成される。上位レイヤーは下位レイヤーにのみ依存でき、逆は許されない。
+## Layer model
 
-```text
-[Layer 4] User / Plugin Ecosystem (TypeScript & Wasm Hybrid)
-    ├── init.ts / User Configurations
-    ├── npm packages (e.g., Prettier, ESLint)
-    └── High-Perf Wasm Modules (loaded via WebAssembly API)
-         │
-         ▼ (WebAssembly API / V8 Fast API)
-[Layer 3] Scripting Engine (Rust + deno_core)
-    ├── V8 Isolate (Worker Thread)
-    └── Zero-Copy API Bridge (deno_core::op2)
-         │
-         ▼ (tokio::sync::mpsc / Async Event Bus)
-[Layer 2] Orchestration & Presentation (Rust Main Thread)
-    ├── Main Event Loop & Thread Manager
-    ├── UI Renderer (TUI: Ratatui / GUI: WGPU)
-    └── Buffer State Sync (Rope)
-         │
-         ▼ (C-FFI / bindgen)
-[Layer 1] Original Vim Core (C Language: libvim)
-    ├── Vim State Machine (Normal/Insert/Visual etc.)
-    └── Text Objects & Ex Command Parser
-```
-
-## 3. スレッドモデルとレイテンシ保護 (Thread Isolation)
-エディタのフリーズ（マイクロスタッター）を完全に防ぐため、以下のスレッド分離を絶対ルールとする。
-
-1. **Main Thread (UI & Rust Core & C-Core)**:
-ユーザー入力の受付、画面描画（Ratatui）、および C言語Vimコア（スレッドセーフではない）の操作を専任する。このスレッドはいかなる理由があってもブロックしてはならない。
-2. **V8 Worker Thread (TypeScript Environment)**:
-`deno_core` のイベントループとV8のガベージコレクション（GC）は、完全に独立した非同期タスク上で稼働させる。さらに、コア機能とプラグイン機能でWorkerを分離する（PluginRuntimeSupervisorによる隔離）。
-3. **同期メカニズム**:
-TS側からエディタを操作する場合、Rustの `tokio::sync::mpsc` チャネルを用いた**非同期メッセージパッシング**によりMain Threadへ命令を送信する。これにより、TS内で無限ループ等の暴走が起きても、Vimのカーソル移動やテキスト入力は絶対にフリーズしない。
-
-## 4. プロジェクト・ディレクトリ構成 (Cargo Workspace)
+The current codebase is easiest to understand as four layers.
 
 ```text
-ts-vim-hybrid/
-├── Cargo.toml                  # ワークスペース定義
-├── vendor/
-│   └── vim_src/                # オリジナルVim C言語ソースツリー (Git Submodule)
-├── crates/
-│   ├── vim_ffi/                # [Layer 1] Cコードのコンパイル(build.rs)とbindgenによるFFI生成
-│   ├── editor_core/            # [Layer 2] Rust製テキスト管理(Rope)とメインイベントループ
-│   ├── scripting_deno/         # [Layer 3] deno_coreの組み込み, op2定義
-│   └── ui_renderer/            # [Layer 2] Ratatui描画フロントエンド
-└── runtime_ts/                 # エディタバイナリに内蔵されるTypeScriptコアAPI群
-    ├── std/
-    └── vim_api.d.ts            # ユーザー(プラグイン開発者)向けの型定義ファイル
+[Layer 4] User configuration and future extensions
+    ├── init.ts
+    └── callback code evaluated in the runtime layer
+         │
+         ▼
+[Layer 3] TypeScript execution layer
+    ├── startup_runtime.rs
+    └── saya_live_runtime.rs
+         │
+         ▼
+[Layer 2] Application orchestration and presentation
+    ├── bootstrap.rs
+    ├── event_loop.rs
+    ├── editor_session.rs
+    ├── screen_model.rs
+    ├── tui_renderer.rs
+    └── host_io.rs
+         │
+         ▼
+[Layer 1] Editing core
+    ├── vim-core-rs
+    └── core_bridge.rs as the repository-local adapter
 ```
 
-## 5. Technology Stack
+## Responsibilities by layer
 
-| Layer | Choice / Version | Role in Feature |
-|-------|------------------|-----------------|
-| Frontend / CLI | `ratatui` + `crossterm` | terminal 描画、入力イベント、画面再描画 |
-| Backend / Services | `Rust stable` + `tokio` | Main Thread orchestration、worker 管理、channel 通信 |
-| Core Engine | Vim C source + `cc` + `bindgen` | Vim互換編集意味の実行、FFI境界生成 |
-| Scripting Runtime | `deno_core` + `rusty_v8` | TypeScript実行と `op2` 契約提供 |
-| Compute Offload | WebAssembly API | 高負荷処理の実行領域 (TypeScript空間内) |
-| Observability | `tracing` + `opentelemetry` | 診断ログ、SLO計測、監査 |
+Each layer exists to own one type of problem and reject the rest.
 
-## 6. UI Rendering & Virtual Projection (CUI WYSIWYG)
-本エディタは、CUIでありながらMarkdownのダイアグラム（Mermaid等）をインラインで描画するWYSIWYG体験をサポートする。これを実現するため、Vimコアのバッファ管理とは独立した**「プロジェクション（投影）レイヤー」**をRust側に設ける。
+### Layer 1: Editing core
 
-1. **Virtual Lines (仮想行) と装飾**
-バッファの生データ（Rope）を汚染することなく、TypeScriptプラグインから「指定行の直後にN行の仮想的な空行（Padding）を挿入する」「特定の文字列を別の文字や画像に置き換える（Virtual Text）」といった装飾情報をRust側に送信できる。
-2. **Vim Foldとの連携**
-Vimコアの標準機能である「Fold（折りたたみ）」を利用して元のソースコードブロック（例: 20行のMermaidコード）を1行に圧縮し、その直後にRust側のプロジェクション層が「画像表示用の仮想行（例: 15行）」を動的に挿入する。これにより、カーソル移動の整合性を保ちつつ、画像表示用のスペースをシームレスに確保する。
-3. **ターミナル画像プロトコルのネイティブサポート**
-RustのUIレンダラー（Ratatui）は、SixelやKitty Graphics Protocolなどのモダンな端末画像描画プロトコルをネイティブにサポートし、Wasmで生成されたダイアグラム画像（PNG/SVG等）を確保した仮想行スペースへ正確にレンダリングする。
+The editing core is `vim-core-rs`. It owns modal editing behavior, command
+interpretation, buffer mutations, and host actions that describe operations
+such as save or quit.
+
+This repository must not duplicate editor semantics in the application layer
+unless the behavior is clearly presentation-only.
+
+### Layer 2: Application orchestration and presentation
+
+The Rust application layer owns session startup, terminal lifecycle, rendering,
+save and quit policy, and viewport projection. It turns core snapshots into a
+screen model and mediates between core host actions and repository-local host
+logic.
+
+This layer includes these key modules.
+
+- `bootstrap.rs`
+- `event_loop.rs`
+- `editor_session.rs`
+- `screen_model.rs`
+- `tui_renderer.rs`
+- `host_io.rs`
+
+### Layer 3: TypeScript execution
+
+The TypeScript layer exists in two phases.
+
+- `startup_runtime.rs` evaluates `init.ts` before session startup and collects a
+  normalized startup registry.
+- `saya_live_runtime.rs` hosts runtime callbacks, typed payload dispatch, and
+  command execution against a host capability bridge.
+
+This layer must stay isolated from the TUI main loop. The repository already
+tests worker-boundary execution and phase separation, even though full live
+integration is still incomplete.
+
+### Layer 4: User configuration and future extensions
+
+The top layer contains user-authored `init.ts` files and future extension code.
+This is the only layer that should define end-user customization behavior.
+
+The public contract for that layer is the `saya` namespace documented in the
+API pages under `docs/api/`.
+
+## Thread and lifecycle model
+
+The repository tries to keep the UI path responsive and deterministic.
+
+- The TUI loop reads terminal events and redraws based on a projected screen
+  model.
+- Startup TypeScript evaluation is isolated from the UI flow and normalized
+  before boot continues.
+- Runtime callback execution is designed around a separate worker boundary.
+- Save and quit behavior remain explicit host-side operations instead of hidden
+  side effects inside the configuration runtime.
+
+## Current implementation notes
+
+This page describes the current implementation rather than the larger
+architecture vision documented in older planning notes. In the present
+repository state:
+
+- The code is a single Rust crate, not a split Cargo workspace.
+- `vim-core-rs` is consumed through a sibling path dependency.
+- The TUI uses `ratatui` and `crossterm`.
+- The TypeScript runtime uses `deno_core`.
+- The main TUI loop does not yet host the full long-lived runtime callback
+  lifecycle.
+
+Use [Status](status.md) for the current implementation state, and use the
+design pages for flow-level details.
+
+## Next steps
+
+If you want flow-level detail after this architectural view, continue with
+these pages.
+
+1. Read [Boot flow design](design/boot-flow.md).
+2. Read [Editing flow design](design/editing-flow.md).
+3. Read [TypeScript runtime design](design/typescript-runtime.md).
