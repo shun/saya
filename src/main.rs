@@ -1,6 +1,6 @@
 use saya::bootstrap::{BootstrapError, prepare_launch};
 use saya::cli::{CliParseError, parse_launch_request};
-use saya::editor_session::{EditorSessionState, QuitDecision};
+use saya::editor_session::QuitDecision;
 use saya::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
 use saya::host_io::{SaveResult, write_to_path};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
@@ -40,10 +40,7 @@ async fn main() {
     };
 
     let mut renderer = TuiRenderer::new().expect("TUI Renderer init failed");
-    let mut session_state = EditorSessionState::new_with_tab_size(
-        outcome.target_path.clone(),
-        outcome.initial_tab_size,
-    );
+    let mut session_state = outcome.editor_session_state();
     let mut transient_msg: Option<String> = None;
 
     // イベントループ初期化

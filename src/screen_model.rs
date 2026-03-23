@@ -56,7 +56,10 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let file_name = resolve_file_name(input.snapshot, input.session_state);
     let mode_label = mode_to_label(input.snapshot.mode);
     let dirty = input.snapshot.dirty;
-    let lines = split_text_to_lines(&input.snapshot.text, input.session_state.tab_size());
+    let lines = apply_line_number_prefix(
+        split_text_to_lines(&input.snapshot.text, input.session_state.tab_size()),
+        input.session_state.line_numbers(),
+    );
     let cursor_row = input.snapshot.cursor_row as u16;
     let cursor_col = resolve_cursor_col(
         &input.snapshot.text,
@@ -134,6 +137,21 @@ fn split_text_to_lines(text: &str, tab_size: u16) -> Vec<String> {
         .collect();
     log::debug!("[screen_model] split text to {} lines", lines.len());
     lines
+}
+
+fn apply_line_number_prefix(lines: Vec<String>, enabled: bool) -> Vec<String> {
+    if !enabled {
+        return lines;
+    }
+
+    let width = lines.len().max(1).to_string().len();
+    let numbered_lines = lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| format!("{:>width$} {}", index + 1, line, width = width))
+        .collect();
+    log::debug!("[screen_model] applied line number prefix");
+    numbered_lines
 }
 
 /// vim-core-rs のバイト列ベースカーソル位置を terminal の表示セル列へ変換する。

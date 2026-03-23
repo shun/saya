@@ -1,12 +1,18 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
+use crate::callback_registry_seed::CallbackRegistrySeed;
 use crate::cli::{ConfigSource, LaunchRequest};
 use crate::config_runtime::{
-    ConfigApplyState, ConfigLoadResult, ConfigSourceResult, apply_config_commands, evaluate_config,
+    AppliedKeyMapping, CapabilityLoadResult, ConfigApplyState, ConfigKeyMode, ConfigSourceResult,
+    SayaKeyMode, SayaKeymapAction, StartupRegistry, StartupRegistryEntry,
+    apply_config_commands, evaluate_capability_source,
 };
 use crate::core_bridge::CoreBridge;
+use crate::editor_session::EditorSessionState;
 use crate::session_guard::{SessionGuard, SessionGuardError};
+use crate::startup_runtime::{collect_startup_registry, prepare_init_module, StartupModulePrepareResult};
 use vim_core_rs::CoreSnapshot;
 
 #[derive(Debug)]
@@ -14,6 +20,9 @@ pub struct BootstrapOutcome {
     pub target_path: Option<PathBuf>,
     pub loaded_config: LoadedConfig,
     pub initial_tab_size: u16,
+    pub initial_line_numbers: bool,
+    pub startup_registry: StartupRegistrySnapshot,
+    pub callback_registry: CallbackRegistrySeed,
     pub initial_snapshot: CoreSnapshot,
     pub core_bridge: CoreBridge,
     pub warnings: Vec<BootstrapWarning>,
@@ -35,6 +44,88 @@ pub enum BootstrapWarning {
 pub enum BootstrapError {
     SessionAlreadyInitialized,
     TargetReadFailed { path: PathBuf, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupRegistrySnapshot {
+    pub options: StartupOptionsSnapshot,
+    pub keymaps: Vec<StartupKeymapSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupOptionsSnapshot {
+    pub tab_size: u16,
+    pub line_numbers: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupKeymapSnapshot {
+    pub mode: StartupKeymapMode,
+    pub lhs: String,
+    pub action: StartupKeymapAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupKeymapMode {
+    Normal,
+    Insert,
+    Visual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupKeymapAction {
+    Literal(String),
+    RegisteredCommand(String),
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedStartupState {
+    apply_state: ConfigApplyState,
+    startup_registry: StartupRegistrySnapshot,
+    callback_registry: CallbackRegistrySeed,
+}
+
+impl StartupRegistrySnapshot {
+    pub fn from_apply_state(state: &ConfigApplyState) -> Self {
+        log::debug!(
+            "[bootstrap] building startup registry from apply state: tab_size={}, line_numbers={}, keymaps={}",
+            state.tab_size,
+            state.line_numbers,
+            state.key_mappings.len()
+        );
+        Self {
+            options: StartupOptionsSnapshot {
+                tab_size: normalize_tab_size(state.tab_size),
+                line_numbers: state.line_numbers,
+            },
+            keymaps: state
+                .key_mappings
+                .iter()
+                .cloned()
+                .map(startup_keymap_from_applied_mapping)
+                .collect(),
+        }
+    }
+}
+
+impl BootstrapOutcome {
+    pub fn editor_session_state(&self) -> EditorSessionState {
+        log::debug!(
+            "[bootstrap] materializing editor session state from startup options: tab_size={}, line_numbers={}",
+            self.initial_tab_size,
+            self.initial_line_numbers
+        );
+        EditorSessionState::new_with_tab_size_and_line_numbers(
+            self.target_path.clone(),
+            self.initial_tab_size,
+            self.initial_line_numbers,
+        )
+    }
+}
+
+pub fn launch_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub fn prepare_launch(request: LaunchRequest) -> Result<BootstrapOutcome, BootstrapError> {
@@ -85,7 +176,8 @@ fn prepare_launch_with_guard(
 
     let mut warnings = Vec::new();
     let loaded_config = load_config_with_fallback(request.config_source, &mut warnings);
-    let initial_tab_size = resolve_initial_tab_size(&loaded_config);
+    let bootstrap_state = resolve_bootstrap_state(&loaded_config);
+    let initial_tab_size = bootstrap_state.startup_registry.options.tab_size;
 
     log::debug!(
         "[bootstrap] startup preflight completed: warnings={}, target_present={}, mode={:?}, dirty={}, tab_size={}",
@@ -100,6 +192,9 @@ fn prepare_launch_with_guard(
         target_path: request.target_path,
         loaded_config,
         initial_tab_size,
+        initial_line_numbers: bootstrap_state.apply_state.line_numbers,
+        startup_registry: bootstrap_state.startup_registry,
+        callback_registry: bootstrap_state.callback_registry,
         initial_snapshot,
         core_bridge,
         warnings,
@@ -139,49 +234,269 @@ fn load_config_with_fallback(
     }
 }
 
-fn resolve_initial_tab_size(loaded_config: &LoadedConfig) -> u16 {
+fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState {
     let mut state = ConfigApplyState::default_state();
-    let source_result = match loaded_config {
-        LoadedConfig::Default => ConfigSourceResult::Default,
-        LoadedConfig::File { path, source } => ConfigSourceResult::Loaded {
-            path: path.clone(),
-            source: source.clone(),
-        },
-    };
-
-    match evaluate_config(&source_result) {
-        ConfigLoadResult::Success { commands } => {
+    match evaluate_bootstrap_capability(loaded_config) {
+        CapabilityLoadResult::Success {
+            registry, commands, ..
+        } => {
             let result = apply_config_commands(&commands, &mut state);
+            let startup_registry = startup_registry_from_registry(&state, &registry);
+            let callback_registry = callback_registry_from_registry(&registry);
             log::debug!(
-                "[bootstrap] resolved initial tab size from config: applied={}, errors={}, tab_size={}",
+                "[bootstrap] resolved startup state from config: applied={}, errors={}, tab_size={}, line_numbers={}, keymaps={}, commands={}, events={}",
                 result.applied_count,
                 result.errors.len(),
-                state.tab_size
+                state.tab_size,
+                state.line_numbers,
+                startup_registry.keymaps.len(),
+                callback_registry.commands().len(),
+                callback_registry.events().len()
             );
+            return ResolvedStartupState {
+                apply_state: state,
+                startup_registry,
+                callback_registry,
+            };
         }
-        ConfigLoadResult::DefaultUsed => {
+        CapabilityLoadResult::DefaultUsed => {
+            let startup_registry = StartupRegistrySnapshot::from_apply_state(&state);
+            let callback_registry = CallbackRegistrySeed::empty();
             log::debug!(
-                "[bootstrap] resolved initial tab size from default config: {}",
-                state.tab_size
+                "[bootstrap] resolved startup state from default config: tab_size={}, line_numbers={}, keymaps={}",
+                state.tab_size,
+                state.line_numbers,
+                startup_registry.keymaps.len()
             );
+            return ResolvedStartupState {
+                apply_state: state,
+                startup_registry,
+                callback_registry,
+            };
         }
-        ConfigLoadResult::ReadFailed { path, message } => {
+        CapabilityLoadResult::ReadFailed { path, message } => {
             log::debug!(
-                "[bootstrap] keeping default tab size because config read failed: path={}, message={}",
+                "[bootstrap] keeping default startup state because config read failed: path={}, message={}",
                 path.display(),
                 message
             );
         }
-        ConfigLoadResult::EvalFailed { path, message } => {
+        CapabilityLoadResult::EvalFailed { path, message } => {
             log::debug!(
-                "[bootstrap] keeping default tab size because config eval failed: path={}, message={}",
+                "[bootstrap] keeping default startup state because config eval failed: path={}, message={}",
                 path.display(),
+                message
+            );
+        }
+        CapabilityLoadResult::UnsupportedCapability {
+            path,
+            capability,
+            message,
+        } => {
+            log::debug!(
+                "[bootstrap] keeping default startup state because config uses unsupported capability: path={}, capability={}, message={}",
+                path.display(),
+                capability,
                 message
             );
         }
     }
 
-    u16::try_from(state.tab_size).unwrap_or(8).max(1)
+    let startup_registry = StartupRegistrySnapshot::from_apply_state(&state);
+    let callback_registry = CallbackRegistrySeed::empty();
+    log::debug!(
+        "[bootstrap] fallback startup state resolved: tab_size={}, line_numbers={}, keymaps={}, commands={}, events={}",
+        state.tab_size,
+        state.line_numbers,
+        startup_registry.keymaps.len(),
+        callback_registry.commands().len(),
+        callback_registry.events().len()
+    );
+    ResolvedStartupState {
+        apply_state: state,
+        startup_registry,
+        callback_registry,
+    }
+}
+
+fn evaluate_bootstrap_capability(loaded_config: &LoadedConfig) -> CapabilityLoadResult {
+    match loaded_config {
+        LoadedConfig::Default => CapabilityLoadResult::DefaultUsed,
+        LoadedConfig::File { path, source } => {
+            let source_result = ConfigSourceResult::Loaded {
+                path: path.clone(),
+                source: source.clone(),
+            };
+            evaluate_bootstrap_capability_from_path(path)
+                .unwrap_or_else(|| evaluate_capability_source(&source_result))
+        }
+    }
+}
+
+fn evaluate_bootstrap_capability_from_path(path: &Path) -> Option<CapabilityLoadResult> {
+    let current_dir = path.parent().map(Path::to_path_buf).or_else(|| {
+        std::env::current_dir().ok()
+    })?;
+    log::debug!(
+        "[bootstrap] evaluating formal startup runtime path: config_path={}, current_dir={}",
+        path.display(),
+        current_dir.display()
+    );
+
+    let prepared = match prepare_init_module(path, &current_dir) {
+        StartupModulePrepareResult::Success(module) => module,
+        StartupModulePrepareResult::ReadFailed { path, message } => {
+            return Some(CapabilityLoadResult::ReadFailed { path, message });
+        }
+        StartupModulePrepareResult::TranspileFailed { path, message } => {
+            return Some(CapabilityLoadResult::EvalFailed { path, message });
+        }
+    };
+
+    match evaluate_startup_registry_on_worker(prepared.executable_source_text.clone()) {
+        Ok(registry) => {
+            let commands = config_commands_from_registry(&registry);
+            log::debug!(
+                "[bootstrap] formal startup runtime evaluation succeeded: path={}, registry_entries={}, commands={}",
+                prepared.path.display(),
+                registry.entries().len(),
+                commands.len()
+            );
+            Some(CapabilityLoadResult::Success {
+                path: prepared.path,
+                registry,
+                commands,
+            })
+        }
+        Err(message) => {
+            log::debug!(
+                "[bootstrap] formal startup runtime evaluation failed: path={}, error={}",
+                prepared.path.display(),
+                message
+            );
+            Some(CapabilityLoadResult::EvalFailed {
+                path: prepared.path,
+                message,
+            })
+        }
+    }
+}
+
+fn evaluate_startup_registry_on_worker(source_text: String) -> Result<StartupRegistry, String> {
+    std::thread::Builder::new()
+        .name("saya-startup-bootstrap".to_string())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("bootstrap worker should create startup runtime evaluator");
+            runtime.block_on(collect_startup_registry(&source_text))
+        })
+        .expect("bootstrap should spawn startup runtime worker")
+        .join()
+        .unwrap_or_else(|panic| {
+            std::panic::resume_unwind(panic);
+        })
+}
+
+fn config_commands_from_registry(registry: &StartupRegistry) -> Vec<crate::config_runtime::ConfigCommand> {
+    registry
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            StartupRegistryEntry::Option { name, value } => Some(
+                crate::config_runtime::ConfigCommand::SetOption {
+                    name: (*name).into(),
+                    value: value.clone().into(),
+                },
+            ),
+            StartupRegistryEntry::Keymap { mode, lhs, action } => match action {
+                SayaKeymapAction::Literal(rhs) => Some(crate::config_runtime::ConfigCommand::MapKey {
+                    mode: (*mode).into(),
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                }),
+                SayaKeymapAction::RegisteredCommand(_) => None,
+            },
+            StartupRegistryEntry::Command { .. } | StartupRegistryEntry::Event { .. } => None,
+        })
+        .collect()
+}
+
+fn startup_registry_from_registry(
+    state: &ConfigApplyState,
+    registry: &StartupRegistry,
+) -> StartupRegistrySnapshot {
+    let keymaps = registry
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            StartupRegistryEntry::Keymap { mode, lhs, action } => {
+                Some(startup_keymap_from_registry_entry(*mode, lhs.clone(), action.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    StartupRegistrySnapshot {
+        options: StartupOptionsSnapshot {
+            tab_size: normalize_tab_size(state.tab_size),
+            line_numbers: state.line_numbers,
+        },
+        keymaps,
+    }
+}
+
+fn callback_registry_from_registry(registry: &StartupRegistry) -> CallbackRegistrySeed {
+    CallbackRegistrySeed::from_startup_registry(registry)
+}
+
+fn startup_keymap_from_applied_mapping(mapping: AppliedKeyMapping) -> StartupKeymapSnapshot {
+    StartupKeymapSnapshot {
+        mode: startup_keymap_mode_from_config(mapping.mode),
+        lhs: mapping.lhs,
+        action: StartupKeymapAction::Literal(mapping.rhs),
+    }
+}
+
+fn startup_keymap_from_registry_entry(
+    mode: SayaKeyMode,
+    lhs: String,
+    action: SayaKeymapAction,
+) -> StartupKeymapSnapshot {
+    StartupKeymapSnapshot {
+        mode: startup_keymap_mode_from_saya(mode),
+        lhs,
+        action: startup_keymap_action_from_saya(action),
+    }
+}
+
+fn startup_keymap_mode_from_saya(mode: SayaKeyMode) -> StartupKeymapMode {
+    match mode {
+        SayaKeyMode::Normal => StartupKeymapMode::Normal,
+        SayaKeyMode::Insert => StartupKeymapMode::Insert,
+        SayaKeyMode::Visual => StartupKeymapMode::Visual,
+    }
+}
+
+fn startup_keymap_mode_from_config(mode: ConfigKeyMode) -> StartupKeymapMode {
+    match mode {
+        ConfigKeyMode::Normal => StartupKeymapMode::Normal,
+        ConfigKeyMode::Insert => StartupKeymapMode::Insert,
+    }
+}
+
+fn startup_keymap_action_from_saya(action: SayaKeymapAction) -> StartupKeymapAction {
+    match action {
+        SayaKeymapAction::Literal(text) => StartupKeymapAction::Literal(text),
+        SayaKeymapAction::RegisteredCommand(command) => {
+            StartupKeymapAction::RegisteredCommand(command)
+        }
+    }
+}
+
+fn normalize_tab_size(tab_size: i64) -> u16 {
+    u16::try_from(tab_size).unwrap_or(8).max(1)
 }
 
 fn map_session_guard_error(error: SessionGuardError) -> BootstrapError {
@@ -198,9 +513,17 @@ mod tests {
 
     use vim_core_rs::CoreMode;
 
-    use crate::bootstrap::{BootstrapError, BootstrapWarning, LoadedConfig, prepare_launch};
+    use crate::bootstrap::{
+        BootstrapError, BootstrapWarning, LoadedConfig, StartupKeymapAction, StartupKeymapMode,
+        StartupKeymapSnapshot, StartupRegistrySnapshot, prepare_launch,
+    };
     use crate::cli::{ConfigSource, LaunchRequest};
+    use crate::config_runtime::{
+        AppliedKeyMapping, ConfigApplyState, ConfigKeyMode, SayaKeyMode, SayaKeymapAction,
+        StartupRegistry, StartupRegistryEntry,
+    };
     use crate::session_guard::SessionGuard;
+    use super::startup_registry_from_registry;
 
     fn session_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -433,6 +756,90 @@ mod tests {
         assert!(outcome.warnings.is_empty());
 
         std::fs::remove_file(config_path).expect("cleanup config file");
+    }
+
+    #[test]
+    fn startup_registry_from_apply_state_preserves_keymap_order_and_duplicates() {
+        let state = ConfigApplyState {
+            tab_size: 8,
+            line_numbers: false,
+            key_mappings: vec![
+                AppliedKeyMapping {
+                    mode: ConfigKeyMode::Normal,
+                    lhs: "x".to_string(),
+                    rhs: "dd".to_string(),
+                },
+                AppliedKeyMapping {
+                    mode: ConfigKeyMode::Normal,
+                    lhs: "x".to_string(),
+                    rhs: "yy".to_string(),
+                },
+            ],
+        };
+
+        let startup_registry = StartupRegistrySnapshot::from_apply_state(&state);
+
+        assert_eq!(
+            startup_registry.keymaps,
+            vec![
+                StartupKeymapSnapshot {
+                    mode: StartupKeymapMode::Normal,
+                    lhs: "x".to_string(),
+                    action: StartupKeymapAction::Literal("dd".to_string()),
+                },
+                StartupKeymapSnapshot {
+                    mode: StartupKeymapMode::Normal,
+                    lhs: "x".to_string(),
+                    action: StartupKeymapAction::Literal("yy".to_string()),
+                },
+            ],
+            "same lhs should remain duplicated in registration order"
+        );
+    }
+
+    #[test]
+    fn startup_registry_from_registry_preserves_keymap_order_and_registered_command_actions() {
+        let mut registry = StartupRegistry::default();
+        registry.push(StartupRegistryEntry::Keymap {
+            mode: SayaKeyMode::Normal,
+            lhs: "<leader>w".to_string(),
+            action: SayaKeymapAction::Literal("write".to_string()),
+        });
+        registry.push(StartupRegistryEntry::Keymap {
+            mode: SayaKeyMode::Insert,
+            lhs: "<C-s>".to_string(),
+            action: SayaKeymapAction::RegisteredCommand("saveBuffer".to_string()),
+        });
+        registry.push(StartupRegistryEntry::Keymap {
+            mode: SayaKeyMode::Normal,
+            lhs: "<leader>w".to_string(),
+            action: SayaKeymapAction::Literal("write!".to_string()),
+        });
+
+        let state = ConfigApplyState::default_state();
+        let startup_registry = startup_registry_from_registry(&state, &registry);
+
+        assert_eq!(
+            startup_registry.keymaps,
+            vec![
+                StartupKeymapSnapshot {
+                    mode: StartupKeymapMode::Normal,
+                    lhs: "<leader>w".to_string(),
+                    action: StartupKeymapAction::Literal("write".to_string()),
+                },
+                StartupKeymapSnapshot {
+                    mode: StartupKeymapMode::Insert,
+                    lhs: "<C-s>".to_string(),
+                    action: StartupKeymapAction::RegisteredCommand("saveBuffer".to_string()),
+                },
+                StartupKeymapSnapshot {
+                    mode: StartupKeymapMode::Normal,
+                    lhs: "<leader>w".to_string(),
+                    action: StartupKeymapAction::Literal("write!".to_string()),
+                },
+            ],
+            "startup registry must preserve registration order and duplicates"
+        );
     }
 
     #[test]

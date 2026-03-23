@@ -31,6 +31,8 @@ pub struct EditorSessionState {
     target_path: Option<PathBuf>,
     /// 描画時のタブ幅
     tab_size: u16,
+    /// 行番号表示の初期状態
+    line_numbers: bool,
     /// 現在 dirty 状態かどうか
     dirty: bool,
     /// 直近の保存失敗メッセージ
@@ -40,20 +42,31 @@ pub struct EditorSessionState {
 impl EditorSessionState {
     /// 新しいセッション状態を作成する。
     pub fn new(target_path: Option<PathBuf>) -> Self {
-        Self::new_with_tab_size(target_path, 8)
+        Self::new_with_tab_size_and_line_numbers(target_path, 8, false)
     }
 
     /// タブ幅を指定して新しいセッション状態を作成する。
     pub fn new_with_tab_size(target_path: Option<PathBuf>, tab_size: u16) -> Self {
+        Self::new_with_tab_size_and_line_numbers(target_path, tab_size, false)
+    }
+
+    /// タブ幅と行番号表示を指定して新しいセッション状態を作成する。
+    pub fn new_with_tab_size_and_line_numbers(
+        target_path: Option<PathBuf>,
+        tab_size: u16,
+        line_numbers: bool,
+    ) -> Self {
         let tab_size = tab_size.max(1);
         log::debug!(
-            "[editor_session] new session state: target_path={:?}, tab_size={}",
+            "[editor_session] new session state: target_path={:?}, tab_size={}, line_numbers={}",
             target_path,
-            tab_size
+            tab_size,
+            line_numbers
         );
         Self {
             target_path,
             tab_size,
+            line_numbers,
             dirty: false,
             last_save_error: None,
         }
@@ -153,6 +166,11 @@ impl EditorSessionState {
     /// 描画時のタブ幅を返す。
     pub fn tab_size(&self) -> u16 {
         self.tab_size
+    }
+
+    /// 行番号表示が有効かを返す。
+    pub fn line_numbers(&self) -> bool {
+        self.line_numbers
     }
 }
 
