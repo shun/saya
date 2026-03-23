@@ -8,6 +8,7 @@ use vim_core_rs::{
 pub struct CoreBridge {
     session: VimCoreSession,
     preferred_column: Option<usize>,
+    pending_normal_operator: Option<String>,
 }
 
 impl fmt::Debug for CoreBridge {
@@ -29,6 +30,7 @@ impl CoreBridge {
         Ok(Self {
             session,
             preferred_column: None,
+            pending_normal_operator: None,
         })
     }
 
@@ -72,20 +74,18 @@ impl CoreBridge {
             key,
             key.len()
         );
-        let outcome = if self.should_preserve_preferred_column(key) {
+        let outcome = if self.should_route_through_single_key_normal_path(key) {
+            self.dispatch_single_normal_key(key)?
+        } else if self.should_preserve_preferred_column(key) {
             self.dispatch_vertical_motion_with_preferred_column(key)?
         } else {
-            let outcome = self
-                .session
-                .apply_normal_command(key)
-                .map_err(CoreSessionError::CommandFailed)?;
-            self.update_preferred_column_from_snapshot(key);
-            outcome
+            self.execute_normal_command(key)?
         };
         log::debug!(
-            "[core_bridge] dispatch result: {:?}, preferred_column={:?}",
+            "[core_bridge] dispatch result: {:?}, preferred_column={:?}, pending_normal_operator={:?}",
             outcome,
-            self.preferred_column
+            self.preferred_column,
+            self.pending_normal_operator
         );
         Ok(outcome)
     }
@@ -129,8 +129,57 @@ impl CoreBridge {
 }
 
 impl CoreBridge {
+    fn should_route_through_single_key_normal_path(&self, key: &str) -> bool {
+        self.session.snapshot().mode == vim_core_rs::CoreMode::Normal
+            && key.chars().count() == 1
+            && !matches!(key, "\x1b")
+    }
+
     fn should_preserve_preferred_column(&self, key: &str) -> bool {
         matches!(key, "j" | "k") && self.session.snapshot().mode == vim_core_rs::CoreMode::Normal
+    }
+
+    fn dispatch_single_normal_key(
+        &mut self,
+        key: &str,
+    ) -> Result<CoreCommandOutcome, CoreSessionError> {
+        if let Some(prefix) = self.pending_normal_operator.take() {
+            let command = format!("{prefix}{key}");
+            log::debug!(
+                "[core_bridge] completing pending normal operator: prefix={:?}, key={:?}, command={:?}",
+                prefix,
+                key,
+                command
+            );
+            return self.execute_normal_command(&command);
+        }
+
+        if is_pending_normal_operator(key) {
+            log::debug!(
+                "[core_bridge] storing pending normal operator: key={:?}",
+                key
+            );
+            self.pending_normal_operator = Some(key.to_string());
+            return Ok(CoreCommandOutcome::NoChange);
+        }
+
+        if self.should_preserve_preferred_column(key) {
+            return self.dispatch_vertical_motion_with_preferred_column(key);
+        }
+
+        self.execute_normal_command(key)
+    }
+
+    fn execute_normal_command(
+        &mut self,
+        command: &str,
+    ) -> Result<CoreCommandOutcome, CoreSessionError> {
+        let outcome = self
+            .session
+            .apply_normal_command(command)
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.update_preferred_column_from_snapshot(command);
+        Ok(outcome)
     }
 
     fn dispatch_vertical_motion_with_preferred_column(
@@ -186,6 +235,10 @@ impl CoreBridge {
             snapshot.cursor_col
         );
     }
+}
+
+fn is_pending_normal_operator(key: &str) -> bool {
+    matches!(key, "d" | "y" | "c" | ">" | "<" | "=")
 }
 
 fn escape_path_for_file_command(target_path: &Path) -> String {
@@ -625,6 +678,46 @@ mod tests {
             "dd で最初の行が削除されること"
         );
         assert!(snapshot.dirty, "dd 後は dirty になること");
+    }
+
+    #[test]
+    fn sequential_yyp_duplicates_current_line() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("first\nsecond\n").expect("core bridge should initialize");
+
+        bridge.dispatch_key("y").expect("first y should enter operator pending");
+        bridge.dispatch_key("y").expect("second y should yank current line");
+        bridge.dispatch_key("p").expect("p should paste yanked line");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(
+            snapshot.text, "first\nfirst\nsecond\n",
+            "yyp で現在行が複製されること"
+        );
+    }
+
+    #[test]
+    fn sequential_dd_deletes_current_line() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new("first\nsecond\nthird\n").expect("core bridge should initialize");
+
+        bridge.dispatch_key("d").expect("first d should enter operator pending");
+        bridge
+            .dispatch_key("d")
+            .expect("second d should delete current line");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(
+            snapshot.text, "second\nthird\n",
+            "dd を逐次入力しても現在行が削除されること"
+        );
     }
 
     #[test]

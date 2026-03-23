@@ -58,11 +58,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
     assert_eq!(outcome.callback_registry.events().len(), 1);
 
     let session_state = outcome.editor_session_state();
-    let model = project(&ProjectionInput {
-        snapshot: &outcome.initial_snapshot,
-        session_state: &session_state,
-        transient_message: None,
-    });
+    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
 
     assert_eq!(model.lines[0], "1 alpha");
     assert_eq!(model.lines[1], "2 beta");
@@ -94,11 +90,7 @@ fn startup_config_failure_keeps_default_session_and_presentation_state() {
     )));
 
     let session_state = outcome.editor_session_state();
-    let model = project(&ProjectionInput {
-        snapshot: &outcome.initial_snapshot,
-        session_state: &session_state,
-        transient_message: None,
-    });
+    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
 
     assert_eq!(session_state.tab_size(), 8);
     assert!(!session_state.line_numbers());

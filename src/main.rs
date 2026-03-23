@@ -7,6 +7,7 @@ use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::screen_model::{ProjectionInput, project};
 use saya::terminal_lifecycle::TerminalLifecycle;
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
+use saya::viewport::ViewportState;
 use vim_core_rs::CoreMode;
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
@@ -42,6 +43,7 @@ async fn main() {
     let mut renderer = TuiRenderer::new().expect("TUI Renderer init failed");
     let mut session_state = outcome.editor_session_state();
     let mut transient_msg: Option<String> = None;
+    let mut viewport = ViewportState::new();
 
     // イベントループ初期化
     let (mut coordinator, sender) = EventLoopCoordinator::new();
@@ -100,11 +102,12 @@ async fn main() {
 
     // 初期描画
     let snapshot = outcome.core_bridge.snapshot();
-    let model = project(&ProjectionInput {
-        snapshot: &snapshot,
-        session_state: &session_state,
-        transient_message: transient_msg.as_deref(),
-    });
+    let body_height = current_body_height();
+    viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, buffer_line_count(&snapshot.text));
+    let model = project(
+        &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
+            .with_viewport(viewport.top_line(), body_height),
+    );
     let _ = renderer.draw(&model);
 
     // メインループ
@@ -312,17 +315,31 @@ async fn main() {
 
         if need_redraw {
             let snapshot = outcome.core_bridge.snapshot();
-            let model = project(&ProjectionInput {
-                snapshot: &snapshot,
-                session_state: &session_state,
-                transient_message: transient_msg.as_deref(),
-            });
+            let body_height = current_body_height();
+            viewport.ensure_cursor_visible(
+                snapshot.cursor_row,
+                body_height,
+                buffer_line_count(&snapshot.text),
+            );
+            let model = project(
+                &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
+                    .with_viewport(viewport.top_line(), body_height),
+            );
             let _ = renderer.draw(&model);
         }
     }
 
     drop(terminal_session);
     std::process::exit(0);
+}
+
+fn current_body_height() -> usize {
+    let rows = crossterm::terminal::size().map(|(_, rows)| rows).unwrap_or(2);
+    usize::from(rows.saturating_sub(1).max(1))
+}
+
+fn buffer_line_count(text: &str) -> usize {
+    text.lines().count().max(1)
 }
 
 fn format_cli_error(error: CliParseError) -> String {

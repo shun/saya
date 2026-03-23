@@ -13,6 +13,7 @@ pub mod saya_live_runtime;
 pub mod session_guard;
 pub mod terminal_lifecycle;
 pub mod tui_renderer;
+pub mod viewport;
 
 pub use saya_live_runtime::RUNTIME_SAYA_TYPE_DECLARATION;
 pub use startup_runtime::STARTUP_SAYA_TYPE_DECLARATION;

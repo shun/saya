@@ -38,6 +38,30 @@ pub struct ProjectionInput<'a> {
     pub snapshot: &'a CoreSnapshot,
     pub session_state: &'a EditorSessionState,
     pub transient_message: Option<&'a str>,
+    pub viewport_top: usize,
+    pub body_height: usize,
+}
+
+impl<'a> ProjectionInput<'a> {
+    pub fn new(
+        snapshot: &'a CoreSnapshot,
+        session_state: &'a EditorSessionState,
+        transient_message: Option<&'a str>,
+    ) -> Self {
+        Self {
+            snapshot,
+            session_state,
+            transient_message,
+            viewport_top: 0,
+            body_height: usize::MAX,
+        }
+    }
+
+    pub fn with_viewport(mut self, viewport_top: usize, body_height: usize) -> Self {
+        self.viewport_top = viewport_top;
+        self.body_height = body_height.max(1);
+        self
+    }
 }
 
 /// CoreSnapshot と EditorSessionState から ScreenModel を生成する。
@@ -56,11 +80,16 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let file_name = resolve_file_name(input.snapshot, input.session_state);
     let mode_label = mode_to_label(input.snapshot.mode);
     let dirty = input.snapshot.dirty;
-    let lines = apply_line_number_prefix(
+    let full_lines = apply_line_number_prefix(
         split_text_to_lines(&input.snapshot.text, input.session_state.tab_size()),
         input.session_state.line_numbers(),
     );
-    let cursor_row = input.snapshot.cursor_row as u16;
+    let lines = slice_visible_lines(&full_lines, input.viewport_top, input.body_height);
+    let cursor_row = resolve_cursor_row(
+        input.snapshot.cursor_row,
+        input.viewport_top,
+        input.body_height,
+    );
     let cursor_col = resolve_cursor_col(
         &input.snapshot.text,
         input.snapshot.cursor_row,
@@ -89,6 +118,23 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_col,
         status_message,
     }
+}
+
+fn slice_visible_lines(lines: &[String], viewport_top: usize, body_height: usize) -> Vec<String> {
+    let body_height = body_height.max(1);
+    let start = viewport_top.min(lines.len());
+    let end = start.saturating_add(body_height).min(lines.len());
+    let visible = lines[start..end].to_vec();
+
+    log::debug!(
+        "[screen_model] sliced visible lines: viewport_top={}, body_height={}, total_lines={}, visible_lines={}",
+        viewport_top,
+        body_height,
+        lines.len(),
+        visible.len()
+    );
+
+    visible
 }
 
 /// アクティブバッファのファイル名を解決する。
@@ -171,6 +217,22 @@ fn resolve_cursor_col(text: &str, cursor_row: usize, cursor_col: usize, tab_size
     );
 
     display_col
+}
+
+fn resolve_cursor_row(cursor_row: usize, viewport_top: usize, body_height: usize) -> u16 {
+    let body_height = body_height.max(1);
+    let relative_row = cursor_row.saturating_sub(viewport_top).min(body_height - 1);
+    let relative_row = u16::try_from(relative_row).unwrap_or(u16::MAX);
+
+    log::debug!(
+        "[screen_model] resolved cursor row: absolute_row={}, viewport_top={}, body_height={}, relative_row={}",
+        cursor_row,
+        viewport_top,
+        body_height,
+        relative_row
+    );
+
+    relative_row
 }
 
 fn clamp_to_char_boundary(text: &str, col: usize) -> usize {
@@ -272,11 +334,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(Some(PathBuf::from("/tmp/hello.txt")));
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
             model.file_name, "/tmp/hello.txt",
@@ -294,11 +352,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
             model.file_name, "[新規]",
@@ -317,11 +371,7 @@ mod tests {
         assert_eq!(snapshot.mode, CoreMode::Normal);
 
         let session_state = EditorSessionState::new(None);
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
             model.mode_label, "NORMAL",
@@ -341,11 +391,7 @@ mod tests {
         assert_eq!(snapshot.mode, CoreMode::Insert);
 
         let session_state = EditorSessionState::new(None);
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
             model.mode_label, "INSERT",
@@ -363,11 +409,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert!(
             !model.file_name.is_empty(),
@@ -391,11 +433,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert!(!model.dirty, "未編集バッファは dirty=false であること");
     }
@@ -414,11 +452,7 @@ mod tests {
         assert!(snapshot.dirty);
 
         let session_state = EditorSessionState::new(None);
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert!(model.dirty, "編集後のバッファは dirty=true であること");
     }
@@ -433,11 +467,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(model.cursor_row, 0, "初期カーソル行は 0");
         assert_eq!(model.cursor_col, 0, "初期カーソル列は 0");
@@ -454,14 +484,30 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(model.cursor_row, 1, "カーソル行が移動後に反映されること");
         assert_eq!(model.cursor_col, 2, "カーソル列が移動後に反映されること");
+    }
+
+    #[test]
+    fn projects_visible_slice_and_relative_cursor_row_when_viewport_applied() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new("line1\nline2\nline3\nline4\nline5\n").expect("core bridge");
+        bridge.dispatch_key("jjj").expect("move to fourth line");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None).with_viewport(2, 2),
+        );
+
+        assert_eq!(model.lines, vec!["line3", "line4"]);
+        assert_eq!(model.cursor_row, 1, "viewport 内の相対行へ変換されること");
     }
 
     #[test]
@@ -475,11 +521,7 @@ mod tests {
         // 初回投影
         let snapshot1 = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
-        let model1 = project(&ProjectionInput {
-            snapshot: &snapshot1,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model1 = project(&ProjectionInput::new(&snapshot1, &session_state, None));
         assert!(!model1.dirty);
         assert_eq!(model1.cursor_row, 0);
 
@@ -490,11 +532,7 @@ mod tests {
         bridge.dispatch_key("\x1b").expect("normal mode");
 
         let snapshot2 = bridge.snapshot();
-        let model2 = project(&ProjectionInput {
-            snapshot: &snapshot2,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model2 = project(&ProjectionInput::new(&snapshot2, &session_state, None));
 
         assert!(model2.dirty, "編集後の再描画では dirty=true");
         assert_eq!(model2.cursor_row, 1, "カーソル行が再描画で追随すること");
@@ -512,11 +550,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
             model.status_message, None,
@@ -535,11 +569,7 @@ mod tests {
         let mut session_state = EditorSessionState::new(None);
         session_state.record_save_failure("disk full".to_string());
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
             model.status_message,
@@ -559,11 +589,7 @@ mod tests {
         let mut session_state = EditorSessionState::new(None);
         session_state.record_save_failure("old error".to_string());
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: Some("未保存の変更があります"),
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("未保存の変更があります")));
 
         assert_eq!(
             model.status_message,
@@ -582,11 +608,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: Some("未保存の変更があります。:q! で強制終了できます"),
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("未保存の変更があります。:q! で強制終了できます")));
 
         assert_eq!(
             model.status_message,
@@ -605,11 +627,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: Some("設定の読み込みに失敗しました"),
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("設定の読み込みに失敗しました")));
 
         assert_eq!(
             model.status_message,
@@ -630,20 +648,12 @@ mod tests {
 
         // 保存失敗を記録
         session_state.record_save_failure("error".to_string());
-        let model1 = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model1 = project(&ProjectionInput::new(&snapshot, &session_state, None));
         assert!(model1.status_message.is_some());
 
         // 保存成功を記録
         session_state.record_save_success();
-        let model2 = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model2 = project(&ProjectionInput::new(&snapshot, &session_state, None));
         assert_eq!(
             model2.status_message, None,
             "保存成功後はステータスメッセージがクリアされること"
@@ -660,11 +670,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: Some("保存しました"),
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("保存しました")));
 
         assert_eq!(
             model.status_message,
@@ -685,17 +691,30 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
             model.lines,
             vec!["line1", "line2", "line3"],
             "行データが snapshot から正しく分割されること"
         );
+    }
+
+    #[test]
+    fn project_limits_visible_lines_to_body_height() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("line1\nline2\nline3\nline4\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None).with_viewport(1, 2),
+        );
+
+        assert_eq!(model.lines, vec!["line2", "line3"]);
     }
 
     #[test]
@@ -709,11 +728,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(model.cursor_row, 1, "カーソル行が u16 として正しく変換");
         assert_eq!(model.cursor_col, 3, "カーソル列が u16 として正しく変換");
@@ -737,11 +752,7 @@ mod tests {
             "vim-core-rs の cursor_col は UTF-8 バイト位置で進むこと"
         );
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(model.cursor_row, 0, "行位置はそのまま反映されること");
         assert_eq!(
@@ -761,11 +772,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(model.lines[0], "        a");
         assert_eq!(model.cursor_col, 8);
@@ -782,11 +789,7 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new_with_tab_size(None, 4);
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: None,
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(model.lines[0], "    a");
         assert_eq!(model.cursor_col, 4);
@@ -806,11 +809,7 @@ mod tests {
 
         let session_state = EditorSessionState::new(Some(PathBuf::from("/tmp/test.txt")));
 
-        let model = project(&ProjectionInput {
-            snapshot: &snapshot,
-            session_state: &session_state,
-            transient_message: Some("テストメッセージ"),
-        });
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, Some("テストメッセージ")));
 
         // 全フィールドがまとめて draw に必要なデータを持つこと
         assert!(!model.file_name.is_empty(), "ファイル名は空でないこと");

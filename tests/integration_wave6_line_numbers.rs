@@ -40,11 +40,7 @@ fn startup_line_numbers_reflect_in_headless_projection_without_conflicting_with_
     assert!(outcome.initial_line_numbers);
 
     let session_state = outcome.editor_session_state();
-    let model = project(&ProjectionInput {
-        snapshot: &outcome.initial_snapshot,
-        session_state: &session_state,
-        transient_message: None,
-    });
+    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
 
     assert_eq!(session_state.tab_size(), 4);
     assert!(session_state.line_numbers());
@@ -74,11 +70,7 @@ fn startup_line_numbers_falls_back_to_default_projection_when_config_is_missing(
     assert!(!outcome.initial_line_numbers);
 
     let session_state = outcome.editor_session_state();
-    let model = project(&ProjectionInput {
-        snapshot: &outcome.initial_snapshot,
-        session_state: &session_state,
-        transient_message: None,
-    });
+    let model = project(&ProjectionInput::new(&outcome.initial_snapshot, &session_state, None));
 
     assert_eq!(session_state.tab_size(), 8);
     assert!(!session_state.line_numbers());
