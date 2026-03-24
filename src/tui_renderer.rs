@@ -105,7 +105,8 @@ fn render_line(model: &ScreenModel, index: usize, line: &str) -> Line<'static> {
         display_width(line)
     };
 
-    let (prefix, selected, suffix) = split_line_by_display_columns(line, start_col, end_col_exclusive);
+    let (prefix, selected, suffix) =
+        split_line_by_display_columns(line, start_col, end_col_exclusive);
     Line::from(vec![
         Span::raw(prefix),
         Span::styled(selected, Style::default().add_modifier(Modifier::REVERSED)),

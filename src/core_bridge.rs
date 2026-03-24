@@ -152,10 +152,8 @@ impl CoreBridge {
             .apply_normal_command("o")
             .map_err(CoreSessionError::CommandFailed)
             .ok()?;
-        let ((start_row, start_col), (end_row, end_col)) = normalize_selection_bounds(
-            anchor,
-            current,
-        );
+        let ((start_row, start_col), (end_row, end_col)) =
+            normalize_selection_bounds(anchor, current);
         Some(VisualSelection {
             mode: snapshot.mode,
             start_row,
@@ -922,7 +920,9 @@ mod tests {
         bridge.dispatch_key("l").expect("move inside quote");
         bridge.dispatch_key("v").expect("enter visual");
         bridge.dispatch_key("i").expect("inner text object pending");
-        bridge.dispatch_key("\"").expect("complete inner quote object");
+        bridge
+            .dispatch_key("\"")
+            .expect("complete inner quote object");
 
         let snapshot = bridge.snapshot();
         assert_eq!(snapshot.mode, CoreMode::Visual);

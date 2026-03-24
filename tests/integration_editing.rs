@@ -235,10 +235,16 @@ fn change_inside_double_quotes_deletes_contents_and_clears_visual_selection() {
 
     outcome.core_bridge.dispatch_key("f").expect("f dispatch");
     outcome.core_bridge.dispatch_key("\"").expect("find quote");
-    outcome.core_bridge.dispatch_key("l").expect("move inside quote");
+    outcome
+        .core_bridge
+        .dispatch_key("l")
+        .expect("move inside quote");
     outcome.core_bridge.dispatch_key("c").expect("c dispatch");
     outcome.core_bridge.dispatch_key("i").expect("i dispatch");
-    outcome.core_bridge.dispatch_key("\"").expect("quote dispatch");
+    outcome
+        .core_bridge
+        .dispatch_key("\"")
+        .expect("quote dispatch");
 
     let snapshot = outcome.core_bridge.snapshot();
     let visual_selection = outcome.core_bridge.current_visual_selection();
