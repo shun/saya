@@ -34,6 +34,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
         r#"
             saya.options.tabSize = 4;
             saya.options.lineNumbers = true;
+            saya.options.numberWidth = 4;
             saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
             saya.commands.register("writeCurrent", () => {
                 saya.commands.execute("write");
@@ -53,6 +54,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
 
     assert_eq!(outcome.initial_tab_size, 4);
     assert!(outcome.initial_line_numbers);
+    assert_eq!(outcome.initial_number_width, 4);
     assert_eq!(outcome.startup_registry.keymaps.len(), 1);
     assert_eq!(outcome.callback_registry.commands().len(), 1);
     assert_eq!(outcome.callback_registry.events().len(), 1);
@@ -64,8 +66,9 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
         None,
     ));
 
-    assert_eq!(model.lines[0], "1 alpha");
-    assert_eq!(model.lines[1], "2 beta");
+    assert_eq!(session_state.number_width(), 4);
+    assert_eq!(model.lines[0], "   1 alpha");
+    assert_eq!(model.lines[1], "   2 beta");
 
     std::fs::remove_file(&target_path).expect("remove target");
     std::fs::remove_file(&config_path).expect("remove config");
@@ -88,6 +91,7 @@ fn startup_config_failure_keeps_default_session_and_presentation_state() {
 
     assert_eq!(outcome.initial_tab_size, 8);
     assert!(!outcome.initial_line_numbers);
+    assert_eq!(outcome.initial_number_width, 4);
     assert!(outcome.warnings.iter().any(|warning| matches!(
         warning,
         saya::bootstrap::BootstrapWarning::ConfigLoadFailed { path, .. } if path == &config_path
@@ -102,6 +106,7 @@ fn startup_config_failure_keeps_default_session_and_presentation_state() {
 
     assert_eq!(session_state.tab_size(), 8);
     assert!(!session_state.line_numbers());
+    assert_eq!(session_state.number_width(), 4);
     assert_eq!(model.lines[0], "alpha");
     assert_eq!(model.lines[1], "beta");
 

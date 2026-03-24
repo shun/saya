@@ -29,6 +29,7 @@ pub enum ConfigCommand {
 pub enum ConfigOptionName {
     TabSize,
     LineNumbers,
+    NumberWidth,
 }
 
 /// オプション値の型。
@@ -124,6 +125,7 @@ pub enum StartupRegistryEntry {
 pub enum SayaOptionName {
     TabSize,
     LineNumbers,
+    NumberWidth,
 }
 
 /// startup option の値。
@@ -153,6 +155,7 @@ impl From<SayaOptionName> for ConfigOptionName {
         match value {
             SayaOptionName::TabSize => Self::TabSize,
             SayaOptionName::LineNumbers => Self::LineNumbers,
+            SayaOptionName::NumberWidth => Self::NumberWidth,
         }
     }
 }
@@ -464,6 +467,15 @@ fn parse_config_json(source: &str) -> Result<Vec<ConfigCommand>, String> {
         });
     }
 
+    // "numberWidth": <number> を検出
+    if let Some(value) = extract_json_number(trimmed, "numberWidth") {
+        log::debug!("[config_runtime] found numberWidth option: {}", value);
+        commands.push(ConfigCommand::SetOption {
+            name: ConfigOptionName::NumberWidth,
+            value: ConfigOptionValue::Number(value),
+        });
+    }
+
     // "keyMappings" 配列は MVP では簡易的に扱う
     // 完全な JSON パースは deno_core 移行時に置き換え予定
 
@@ -562,6 +574,7 @@ fn registry_from_commands(commands: &[ConfigCommand]) -> StartupRegistry {
                 let option_name = match name {
                     ConfigOptionName::TabSize => SayaOptionName::TabSize,
                     ConfigOptionName::LineNumbers => SayaOptionName::LineNumbers,
+                    ConfigOptionName::NumberWidth => SayaOptionName::NumberWidth,
                 };
                 let option_value = match value {
                     ConfigOptionValue::Number(number) => SayaOptionValue::Number(*number),
@@ -812,6 +825,7 @@ fn normalize_option_name(value: &str) -> Option<SayaOptionName> {
     match value {
         "tabSize" | "tabstop" => Some(SayaOptionName::TabSize),
         "lineNumbers" | "number" => Some(SayaOptionName::LineNumbers),
+        "numberWidth" | "numberwidth" | "nuw" => Some(SayaOptionName::NumberWidth),
         _ => None,
     }
 }
@@ -1222,6 +1236,7 @@ pub fn apply_config_commands(
 pub struct ConfigApplyState {
     pub tab_size: i64,
     pub line_numbers: bool,
+    pub number_width: i64,
     pub key_mappings: Vec<AppliedKeyMapping>,
 }
 
@@ -1240,6 +1255,7 @@ impl ConfigApplyState {
         Self {
             tab_size: 8,
             line_numbers: false,
+            number_width: 4,
             key_mappings: Vec::new(),
         }
     }
@@ -1294,6 +1310,21 @@ fn apply_single_command(
                     b
                 );
                 state.line_numbers = *b;
+                Ok(())
+            }
+            (ConfigOptionName::NumberWidth, ConfigOptionValue::Number(n)) => {
+                if *n < 1 || *n > 32 {
+                    return Err(format!(
+                        "numberWidth の値は 1〜32 の範囲で指定してください: {}",
+                        n
+                    ));
+                }
+                log::debug!(
+                    "[config_runtime] setting numberWidth: {} -> {}",
+                    state.number_width,
+                    n
+                );
+                state.number_width = *n;
                 Ok(())
             }
             (name, value) => Err(format!(
@@ -1517,6 +1548,30 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_config_parses_number_width_option() {
+        let source = ConfigSourceResult::Loaded {
+            path: PathBuf::from("test.json"),
+            source: "{ \"numberWidth\": 6 }".to_string(),
+        };
+
+        let result = evaluate_config(&source);
+
+        match result {
+            ConfigLoadResult::Success { commands } => {
+                assert_eq!(commands.len(), 1);
+                assert_eq!(
+                    commands[0],
+                    ConfigCommand::SetOption {
+                        name: ConfigOptionName::NumberWidth,
+                        value: ConfigOptionValue::Number(6),
+                    }
+                );
+            }
+            other => panic!("Success を返すこと, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn evaluate_config_parses_multiple_options() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
@@ -1631,6 +1686,7 @@ mod tests {
             source: r#"
                 saya.options.tabSize = 4;
                 saya.options.lineNumbers = true;
+                saya.options.numberWidth = 6;
                 saya.keymap.set("normal", "x", "dd");
                 saya.commands.register("writeCurrent", () => {
                     saya.commands.execute("write");
@@ -1650,8 +1706,8 @@ mod tests {
             } => {
                 assert_eq!(
                     commands.len(),
-                    2,
-                    "startup option は 2 件の command に正規化されること"
+                    3,
+                    "startup option は 3 件の command に正規化されること"
                 );
                 assert_eq!(
                     registry.entries(),
@@ -1663,6 +1719,10 @@ mod tests {
                         StartupRegistryEntry::Option {
                             name: SayaOptionName::LineNumbers,
                             value: SayaOptionValue::Boolean(true),
+                        },
+                        StartupRegistryEntry::Option {
+                            name: SayaOptionName::NumberWidth,
+                            value: SayaOptionValue::Number(6),
                         },
                         StartupRegistryEntry::Keymap {
                             mode: SayaKeyMode::Normal,
@@ -1708,6 +1768,8 @@ mod tests {
             path: PathBuf::from("init.ts"),
             source: r#"
                 saya.options.tabstop = 2;
+                saya.options.number = true;
+                saya.options.nuw = 5;
             "#
             .to_string(),
         };
@@ -1720,15 +1782,25 @@ mod tests {
             } => {
                 assert_eq!(
                     commands.len(),
-                    1,
+                    3,
                     "alias option も既存 boot 経路向け command に正規化されること"
                 );
                 assert_eq!(
                     registry.entries(),
-                    &[StartupRegistryEntry::Option {
-                        name: SayaOptionName::TabSize,
-                        value: SayaOptionValue::Number(2),
-                    }]
+                    &[
+                        StartupRegistryEntry::Option {
+                            name: SayaOptionName::TabSize,
+                            value: SayaOptionValue::Number(2),
+                        },
+                        StartupRegistryEntry::Option {
+                            name: SayaOptionName::LineNumbers,
+                            value: SayaOptionValue::Boolean(true),
+                        },
+                        StartupRegistryEntry::Option {
+                            name: SayaOptionName::NumberWidth,
+                            value: SayaOptionValue::Number(5),
+                        },
+                    ]
                 );
             }
             other => panic!("Success を返すこと, got: {:?}", other),
@@ -1803,6 +1875,21 @@ mod tests {
         let result = apply_config_commands(&commands, &mut state);
 
         assert!(state.line_numbers, "lineNumbers が true に変更されること");
+        assert!(result.is_fully_applied());
+    }
+
+    #[test]
+    fn apply_number_width_command_updates_state() {
+        let commands = vec![ConfigCommand::SetOption {
+            name: ConfigOptionName::NumberWidth,
+            value: ConfigOptionValue::Number(6),
+        }];
+        let mut state = ConfigApplyState::default_state();
+        assert_eq!(state.number_width, 4, "既定値は 4 であること");
+
+        let result = apply_config_commands(&commands, &mut state);
+
+        assert_eq!(state.number_width, 6, "numberWidth が 6 に変更されること");
         assert!(result.is_fully_applied());
     }
 

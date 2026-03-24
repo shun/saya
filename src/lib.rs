@@ -5,6 +5,7 @@ pub mod config_runtime;
 pub mod core_bridge;
 pub mod editor_session;
 pub mod event_loop;
+pub mod ex_command;
 pub mod host_io;
 pub mod input_router;
 pub mod saya_live_runtime;

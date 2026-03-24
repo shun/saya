@@ -83,6 +83,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let full_lines = apply_line_number_prefix(
         split_text_to_lines(&input.snapshot.text, input.session_state.tab_size()),
         input.session_state.line_numbers(),
+        input.session_state.number_width(),
     );
     let lines = slice_visible_lines(&full_lines, input.viewport_top, input.body_height);
     let cursor_row = resolve_cursor_row(
@@ -95,6 +96,8 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.snapshot.cursor_row,
         input.snapshot.cursor_col,
         input.session_state.tab_size(),
+        input.session_state.line_numbers(),
+        input.session_state.number_width(),
     );
     let status_message = resolve_status_message(input.session_state, input.transient_message);
 
@@ -185,12 +188,16 @@ fn split_text_to_lines(text: &str, tab_size: u16) -> Vec<String> {
     lines
 }
 
-fn apply_line_number_prefix(lines: Vec<String>, enabled: bool) -> Vec<String> {
+fn apply_line_number_prefix(
+    lines: Vec<String>,
+    enabled: bool,
+    configured_width: u16,
+) -> Vec<String> {
     if !enabled {
         return lines;
     }
 
-    let width = lines.len().max(1).to_string().len();
+    let width = line_number_width(lines.len(), configured_width);
     let numbered_lines = lines
         .into_iter()
         .enumerate()
@@ -201,22 +208,45 @@ fn apply_line_number_prefix(lines: Vec<String>, enabled: bool) -> Vec<String> {
 }
 
 /// vim-core-rs のバイト列ベースカーソル位置を terminal の表示セル列へ変換する。
-fn resolve_cursor_col(text: &str, cursor_row: usize, cursor_col: usize, tab_size: u16) -> u16 {
+fn resolve_cursor_col(
+    text: &str,
+    cursor_row: usize,
+    cursor_col: usize,
+    tab_size: u16,
+    line_numbers: bool,
+    number_width: u16,
+) -> u16 {
     let line = text.split('\n').nth(cursor_row).unwrap_or("");
     let clamped_col = cursor_col.min(line.len());
     let boundary_col = clamp_to_char_boundary(line, clamped_col);
-    let display_col = display_width(&line[..boundary_col], usize::from(tab_size.max(1)));
+    let base_display_col = display_width(&line[..boundary_col], usize::from(tab_size.max(1)));
+    let line_number_offset = if line_numbers {
+        line_number_width(text.lines().count(), number_width) + 1
+    } else {
+        0
+    };
+    let display_col = base_display_col.saturating_add(line_number_offset);
     let display_col = u16::try_from(display_col).unwrap_or(u16::MAX);
 
     log::debug!(
-        "[screen_model] resolved cursor col: row={}, raw_col={}, boundary_col={}, display_col={}",
+        "[screen_model] resolved cursor col: row={}, raw_col={}, boundary_col={}, base_display_col={}, line_number_offset={}, display_col={}",
         cursor_row,
         cursor_col,
         boundary_col,
+        base_display_col,
+        line_number_offset,
         display_col
     );
 
     display_col
+}
+
+fn line_number_width(line_count: usize, configured_width: u16) -> usize {
+    line_count
+        .max(1)
+        .to_string()
+        .len()
+        .max(usize::from(configured_width.max(1)))
 }
 
 fn resolve_cursor_row(cursor_row: usize, viewport_top: usize, body_height: usize) -> u16 {
@@ -773,6 +803,71 @@ mod tests {
             model.cursor_col, 2,
             "全角 1 文字ぶんは terminal 上で 2 セルとして描画されること"
         );
+    }
+
+    #[test]
+    fn projects_cursor_col_with_line_number_prefix() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("alpha\nbeta\n").expect("core bridge");
+        bridge.dispatch_key("jll").expect("move to row=1, col=2");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+        assert_eq!(model.lines[1], "   2 beta");
+        assert_eq!(model.cursor_row, 1);
+        assert_eq!(
+            model.cursor_col, 7,
+            "行番号と区切り分だけ右へ補正されること"
+        );
+    }
+
+    #[test]
+    fn projects_cursor_col_with_line_numbers_and_multibyte_text() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("あa\n").expect("core bridge");
+        bridge
+            .dispatch_key("l")
+            .expect("move right over multibyte char");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+        assert_eq!(model.lines[0], "   1 あa");
+        assert_eq!(
+            model.cursor_col, 7,
+            "全角表示幅に行番号オフセットが加算されること"
+        );
+    }
+
+    #[test]
+    fn projects_line_numbers_using_configured_minimum_width() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("alpha\nbeta\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+        assert_eq!(model.lines[0], "   1 alpha");
+        assert_eq!(model.lines[1], "   2 beta");
     }
 
     #[test]

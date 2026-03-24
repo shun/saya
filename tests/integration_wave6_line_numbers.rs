@@ -26,6 +26,7 @@ fn startup_line_numbers_reflect_in_headless_projection_without_conflicting_with_
         r#"
             saya.options.tabSize = 4;
             saya.options.lineNumbers = true;
+            saya.options.numberWidth = 4;
         "#,
     )
     .expect("config file");
@@ -38,6 +39,7 @@ fn startup_line_numbers_reflect_in_headless_projection_without_conflicting_with_
 
     assert_eq!(outcome.initial_tab_size, 4);
     assert!(outcome.initial_line_numbers);
+    assert_eq!(outcome.initial_number_width, 4);
 
     let session_state = outcome.editor_session_state();
     let model = project(&ProjectionInput::new(
@@ -48,8 +50,9 @@ fn startup_line_numbers_reflect_in_headless_projection_without_conflicting_with_
 
     assert_eq!(session_state.tab_size(), 4);
     assert!(session_state.line_numbers());
-    assert_eq!(model.lines[0], "1 ab  cd");
-    assert_eq!(model.lines[1], "2 second line");
+    assert_eq!(session_state.number_width(), 4);
+    assert_eq!(model.lines[0], "   1 ab  cd");
+    assert_eq!(model.lines[1], "   2 second line");
 
     std::fs::remove_file(&target_path).expect("remove target");
     std::fs::remove_file(&config_path).expect("remove config");
@@ -72,6 +75,7 @@ fn startup_line_numbers_falls_back_to_default_projection_when_config_is_missing(
 
     assert_eq!(outcome.initial_tab_size, 8);
     assert!(!outcome.initial_line_numbers);
+    assert_eq!(outcome.initial_number_width, 4);
 
     let session_state = outcome.editor_session_state();
     let model = project(&ProjectionInput::new(
@@ -82,6 +86,7 @@ fn startup_line_numbers_falls_back_to_default_projection_when_config_is_missing(
 
     assert_eq!(session_state.tab_size(), 8);
     assert!(!session_state.line_numbers());
+    assert_eq!(session_state.number_width(), 4);
     assert_eq!(model.lines[0], "ab      cd");
 
     std::fs::remove_file(&target_path).expect("remove target");

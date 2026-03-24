@@ -33,6 +33,8 @@ pub struct EditorSessionState {
     tab_size: u16,
     /// 行番号表示の初期状態
     line_numbers: bool,
+    /// 行番号欄の最小幅
+    number_width: u16,
     /// 現在 dirty 状態かどうか
     dirty: bool,
     /// 直近の保存失敗メッセージ
@@ -42,12 +44,12 @@ pub struct EditorSessionState {
 impl EditorSessionState {
     /// 新しいセッション状態を作成する。
     pub fn new(target_path: Option<PathBuf>) -> Self {
-        Self::new_with_tab_size_and_line_numbers(target_path, 8, false)
+        Self::new_with_tab_size_and_line_numbers_and_number_width(target_path, 8, false, 4)
     }
 
     /// タブ幅を指定して新しいセッション状態を作成する。
     pub fn new_with_tab_size(target_path: Option<PathBuf>, tab_size: u16) -> Self {
-        Self::new_with_tab_size_and_line_numbers(target_path, tab_size, false)
+        Self::new_with_tab_size_and_line_numbers_and_number_width(target_path, tab_size, false, 4)
     }
 
     /// タブ幅と行番号表示を指定して新しいセッション状態を作成する。
@@ -56,17 +58,35 @@ impl EditorSessionState {
         tab_size: u16,
         line_numbers: bool,
     ) -> Self {
-        let tab_size = tab_size.max(1);
-        log::debug!(
-            "[editor_session] new session state: target_path={:?}, tab_size={}, line_numbers={}",
+        Self::new_with_tab_size_and_line_numbers_and_number_width(
             target_path,
             tab_size,
-            line_numbers
+            line_numbers,
+            4,
+        )
+    }
+
+    /// タブ幅、行番号表示、行番号欄幅を指定して新しいセッション状態を作成する。
+    pub fn new_with_tab_size_and_line_numbers_and_number_width(
+        target_path: Option<PathBuf>,
+        tab_size: u16,
+        line_numbers: bool,
+        number_width: u16,
+    ) -> Self {
+        let tab_size = tab_size.max(1);
+        let number_width = number_width.max(1);
+        log::debug!(
+            "[editor_session] new session state: target_path={:?}, tab_size={}, line_numbers={}, number_width={}",
+            target_path,
+            tab_size,
+            line_numbers,
+            number_width
         );
         Self {
             target_path,
             tab_size,
             line_numbers,
+            number_width,
             dirty: false,
             last_save_error: None,
         }
@@ -171,6 +191,32 @@ impl EditorSessionState {
     /// 行番号表示が有効かを返す。
     pub fn line_numbers(&self) -> bool {
         self.line_numbers
+    }
+
+    /// 行番号欄の最小幅を返す。
+    pub fn number_width(&self) -> u16 {
+        self.number_width
+    }
+
+    /// 行番号表示の有効/無効を更新する。
+    pub fn set_line_numbers(&mut self, enabled: bool) {
+        log::debug!(
+            "[editor_session] line number visibility updated: {} -> {}",
+            self.line_numbers,
+            enabled
+        );
+        self.line_numbers = enabled;
+    }
+
+    /// 行番号欄の最小幅を更新する。
+    pub fn set_number_width(&mut self, width: u16) {
+        let width = width.max(1);
+        log::debug!(
+            "[editor_session] number width updated: {} -> {}",
+            self.number_width,
+            width
+        );
+        self.number_width = width;
     }
 }
 
@@ -445,5 +491,50 @@ mod tests {
         let state = EditorSessionState::new_with_tab_size(None, 0);
 
         assert_eq!(state.tab_size(), 1);
+    }
+
+    #[test]
+    fn new_with_number_width_defaults_to_four() {
+        let state = EditorSessionState::new(None);
+
+        assert_eq!(state.number_width(), 4);
+    }
+
+    #[test]
+    fn set_line_numbers_enables_projection_flag() {
+        let mut state = EditorSessionState::new(None);
+        assert!(!state.line_numbers(), "既定値は false であること");
+
+        state.set_line_numbers(true);
+
+        assert!(state.line_numbers(), "行番号表示が有効になること");
+    }
+
+    #[test]
+    fn set_line_numbers_disables_projection_flag() {
+        let mut state = EditorSessionState::new_with_tab_size_and_line_numbers(None, 8, true);
+        assert!(state.line_numbers(), "初期状態は true であること");
+
+        state.set_line_numbers(false);
+
+        assert!(!state.line_numbers(), "行番号表示が無効になること");
+    }
+
+    #[test]
+    fn set_number_width_updates_projection_width() {
+        let mut state = EditorSessionState::new(None);
+
+        state.set_number_width(6);
+
+        assert_eq!(state.number_width(), 6);
+    }
+
+    #[test]
+    fn set_number_width_clamps_zero_to_one() {
+        let mut state = EditorSessionState::new(None);
+
+        state.set_number_width(0);
+
+        assert_eq!(state.number_width(), 1);
     }
 }

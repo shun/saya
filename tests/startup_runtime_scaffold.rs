@@ -237,11 +237,31 @@ async fn startup_line_numbers_is_collected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_number_width_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.numberWidth = 6;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Option {
+            name: StartupOptionName::NumberWidth,
+            value: StartupOptionValue::Number(6),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_option_aliases_are_normalized_to_formal_names() {
     let registry = collect_startup_registry(
         r#"
             saya.options.tabstop = 2;
             saya.options.number = true;
+            saya.options.nuw = 5;
         "#,
     )
     .await
@@ -257,6 +277,10 @@ async fn startup_option_aliases_are_normalized_to_formal_names() {
             StartupRegistryEntry::Option {
                 name: StartupOptionName::LineNumbers,
                 value: StartupOptionValue::Boolean(true),
+            },
+            StartupRegistryEntry::Option {
+                name: StartupOptionName::NumberWidth,
+                value: StartupOptionValue::Number(5),
             },
         ]
     );

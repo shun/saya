@@ -15,6 +15,7 @@ pub use crate::config_runtime::{
 const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.tabSize",
     "saya.options.lineNumbers",
+    "saya.options.numberWidth",
     "saya.keymap.set",
     "saya.commands.register",
     "saya.commands.execute",
@@ -32,6 +33,7 @@ const STARTUP_SAYA_BOOTSTRAP: &str = r#"
 const {
     op_collect_startup_tab_size,
     op_collect_startup_line_numbers,
+    op_collect_startup_number_width,
     op_collect_startup_keymap,
     op_collect_startup_command,
     op_collect_startup_event,
@@ -41,6 +43,7 @@ globalThis.saya = {
     options: {
         tabSize: 8,
         lineNumbers: false,
+        numberWidth: 4,
     },
     keymap: {
         set(mode, lhs, action) {
@@ -127,6 +130,39 @@ Object.defineProperty(globalThis.saya.options, "number", {
     },
 });
 
+Object.defineProperty(globalThis.saya.options, "numberWidth", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return 4;
+    },
+    set(value) {
+        op_collect_startup_number_width(value);
+    },
+});
+
+Object.defineProperty(globalThis.saya.options, "numberwidth", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return 4;
+    },
+    set(value) {
+        op_collect_startup_number_width(value);
+    },
+});
+
+Object.defineProperty(globalThis.saya.options, "nuw", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return 4;
+    },
+    set(value) {
+        op_collect_startup_number_width(value);
+    },
+});
+
 Object.freeze(globalThis.saya.options);
 Object.freeze(globalThis.saya.keymap);
 Object.freeze(globalThis.saya.commands);
@@ -154,6 +190,7 @@ declare global {
     interface SayaStartupOptionsSurface {
         tabSize: number;
         lineNumbers: boolean;
+        numberWidth: number;
     }
 
     interface SayaStartupKeymapSurface {
@@ -225,6 +262,26 @@ fn op_collect_startup_line_numbers(state: &mut OpState, value: bool) -> Result<(
         .push(StartupRegistryEntry::Option {
             name: SayaOptionName::LineNumbers,
             value: SayaOptionValue::Boolean(value),
+        });
+
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_number_width(
+    state: &mut OpState,
+    #[number] value: i64,
+) -> Result<(), JsErrorBox> {
+    log::debug!(
+        "[startup_runtime] collect startup numberWidth option from runtime: value={}",
+        value
+    );
+
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::Option {
+            name: SayaOptionName::NumberWidth,
+            value: SayaOptionValue::Number(value),
         });
 
     Ok(())
@@ -314,6 +371,7 @@ deno_core::extension!(
     ops = [
         op_collect_startup_tab_size,
         op_collect_startup_line_numbers,
+        op_collect_startup_number_width,
         op_collect_startup_keymap,
         op_collect_startup_command,
         op_collect_startup_event

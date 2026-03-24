@@ -2,6 +2,7 @@ use saya::bootstrap::{BootstrapError, prepare_launch};
 use saya::cli::{CliParseError, parse_launch_request};
 use saya::editor_session::QuitDecision;
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
+use saya::ex_command::apply_local_ex_command;
 use saya::host_io::{SaveResult, write_to_path};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::screen_model::{ProjectionInput, project};
@@ -147,7 +148,13 @@ async fn main() {
                                 command_line_mode = false;
                                 command_line_buffer.clear();
                                 transient_msg = None;
-                                let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                if let Some(message) =
+                                    apply_local_ex_command(&mut session_state, &cmd)
+                                {
+                                    transient_msg = Some(message);
+                                } else {
+                                    let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                }
                                 session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
                             }
                             KeyInput::Backspace => {

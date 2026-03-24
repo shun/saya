@@ -23,6 +23,7 @@ pub struct BootstrapOutcome {
     pub loaded_config: LoadedConfig,
     pub initial_tab_size: u16,
     pub initial_line_numbers: bool,
+    pub initial_number_width: u16,
     pub startup_registry: StartupRegistrySnapshot,
     pub callback_registry: CallbackRegistrySeed,
     pub initial_snapshot: CoreSnapshot,
@@ -58,6 +59,7 @@ pub struct StartupRegistrySnapshot {
 pub struct StartupOptionsSnapshot {
     pub tab_size: u16,
     pub line_numbers: bool,
+    pub number_width: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,15 +92,17 @@ struct ResolvedStartupState {
 impl StartupRegistrySnapshot {
     pub fn from_apply_state(state: &ConfigApplyState) -> Self {
         log::debug!(
-            "[bootstrap] building startup registry from apply state: tab_size={}, line_numbers={}, keymaps={}",
+            "[bootstrap] building startup registry from apply state: tab_size={}, line_numbers={}, number_width={}, keymaps={}",
             state.tab_size,
             state.line_numbers,
+            state.number_width,
             state.key_mappings.len()
         );
         Self {
             options: StartupOptionsSnapshot {
                 tab_size: normalize_tab_size(state.tab_size),
                 line_numbers: state.line_numbers,
+                number_width: normalize_number_width(state.number_width),
             },
             keymaps: state
                 .key_mappings
@@ -113,14 +117,16 @@ impl StartupRegistrySnapshot {
 impl BootstrapOutcome {
     pub fn editor_session_state(&self) -> EditorSessionState {
         log::debug!(
-            "[bootstrap] materializing editor session state from startup options: tab_size={}, line_numbers={}",
+            "[bootstrap] materializing editor session state from startup options: tab_size={}, line_numbers={}, number_width={}",
             self.initial_tab_size,
-            self.initial_line_numbers
+            self.initial_line_numbers,
+            self.initial_number_width
         );
-        EditorSessionState::new_with_tab_size_and_line_numbers(
+        EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
             self.target_path.clone(),
             self.initial_tab_size,
             self.initial_line_numbers,
+            self.initial_number_width,
         )
     }
 }
@@ -180,14 +186,16 @@ fn prepare_launch_with_guard(
     let loaded_config = load_config_with_fallback(request.config_source, &mut warnings);
     let bootstrap_state = resolve_bootstrap_state(&loaded_config);
     let initial_tab_size = bootstrap_state.startup_registry.options.tab_size;
+    let initial_number_width = bootstrap_state.startup_registry.options.number_width;
 
     log::debug!(
-        "[bootstrap] startup preflight completed: warnings={}, target_present={}, mode={:?}, dirty={}, tab_size={}",
+        "[bootstrap] startup preflight completed: warnings={}, target_present={}, mode={:?}, dirty={}, tab_size={}, number_width={}",
         warnings.len(),
         request.target_path.is_some(),
         initial_snapshot.mode,
         initial_snapshot.dirty,
-        initial_tab_size
+        initial_tab_size,
+        initial_number_width
     );
 
     Ok(BootstrapOutcome {
@@ -195,6 +203,7 @@ fn prepare_launch_with_guard(
         loaded_config,
         initial_tab_size,
         initial_line_numbers: bootstrap_state.apply_state.line_numbers,
+        initial_number_width,
         startup_registry: bootstrap_state.startup_registry,
         callback_registry: bootstrap_state.callback_registry,
         initial_snapshot,
@@ -449,6 +458,7 @@ fn startup_registry_from_registry(
         options: StartupOptionsSnapshot {
             tab_size: normalize_tab_size(state.tab_size),
             line_numbers: state.line_numbers,
+            number_width: normalize_number_width(state.number_width),
         },
         keymaps,
     }
@@ -504,6 +514,10 @@ fn startup_keymap_action_from_saya(action: SayaKeymapAction) -> StartupKeymapAct
 
 fn normalize_tab_size(tab_size: i64) -> u16 {
     u16::try_from(tab_size).unwrap_or(8).max(1)
+}
+
+fn normalize_number_width(number_width: i64) -> u16 {
+    u16::try_from(number_width).unwrap_or(4).max(1)
 }
 
 fn map_session_guard_error(error: SessionGuardError) -> BootstrapError {
@@ -770,6 +784,7 @@ mod tests {
         let state = ConfigApplyState {
             tab_size: 8,
             line_numbers: false,
+            number_width: 4,
             key_mappings: vec![
                 AppliedKeyMapping {
                     mode: ConfigKeyMode::Normal,
