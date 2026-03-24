@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::prepare_launch;
 use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::cli::{ConfigSource, LaunchRequest};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::saya_live_runtime::{
     BoxFuture, BufferEventPayload, CallbackRegistryBuilder, HostCapabilityBridge,
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
@@ -46,8 +46,9 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
     .expect("config file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
     })
     .expect("startup with typescript config");
 
@@ -81,8 +82,9 @@ fn startup_config_failure_keeps_default_session_and_presentation_state() {
     std::fs::write(&target_path, "alpha\nbeta\n").expect("target file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
     })
     .expect("startup should continue with default fallback");
 

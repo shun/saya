@@ -11,6 +11,8 @@ use crate::host_io::SaveRequest;
 pub enum SaveRequestError {
     /// 保存先パスが未設定
     NoTargetPath,
+    /// read-only 起動のため保存不可
+    ReadOnly,
 }
 
 /// 終了要求の判定結果。
@@ -33,6 +35,8 @@ pub struct EditorSessionState {
     tab_size: u16,
     /// 行番号表示の初期状態
     line_numbers: bool,
+    /// read-only 起動かどうか
+    read_only: bool,
     /// 現在 dirty 状態かどうか
     dirty: bool,
     /// 直近の保存失敗メッセージ
@@ -42,12 +46,12 @@ pub struct EditorSessionState {
 impl EditorSessionState {
     /// 新しいセッション状態を作成する。
     pub fn new(target_path: Option<PathBuf>) -> Self {
-        Self::new_with_tab_size_and_line_numbers(target_path, 8, false)
+        Self::new_with_tab_size_and_line_numbers(target_path, 8, false, false)
     }
 
     /// タブ幅を指定して新しいセッション状態を作成する。
     pub fn new_with_tab_size(target_path: Option<PathBuf>, tab_size: u16) -> Self {
-        Self::new_with_tab_size_and_line_numbers(target_path, tab_size, false)
+        Self::new_with_tab_size_and_line_numbers(target_path, tab_size, false, false)
     }
 
     /// タブ幅と行番号表示を指定して新しいセッション状態を作成する。
@@ -55,18 +59,21 @@ impl EditorSessionState {
         target_path: Option<PathBuf>,
         tab_size: u16,
         line_numbers: bool,
+        read_only: bool,
     ) -> Self {
         let tab_size = tab_size.max(1);
         log::debug!(
-            "[editor_session] new session state: target_path={:?}, tab_size={}, line_numbers={}",
+            "[editor_session] new session state: target_path={:?}, tab_size={}, line_numbers={}, read_only={}",
             target_path,
             tab_size,
-            line_numbers
+            line_numbers,
+            read_only
         );
         Self {
             target_path,
             tab_size,
             line_numbers,
+            read_only,
             dirty: false,
             last_save_error: None,
         }
@@ -79,10 +86,15 @@ impl EditorSessionState {
         buffer_contents: &str,
     ) -> Result<SaveRequest, SaveRequestError> {
         log::debug!(
-            "[editor_session] building save request: target_path={:?}, contents_len={}",
+            "[editor_session] building save request: target_path={:?}, contents_len={}, read_only={}",
             self.target_path,
-            buffer_contents.len()
+            buffer_contents.len(),
+            self.read_only
         );
+        if self.read_only {
+            log::debug!("[editor_session] save request failed: session is read-only");
+            return Err(SaveRequestError::ReadOnly);
+        }
         match &self.target_path {
             Some(path) => {
                 let request = SaveRequest {
@@ -171,6 +183,10 @@ impl EditorSessionState {
     /// 行番号表示が有効かを返す。
     pub fn line_numbers(&self) -> bool {
         self.line_numbers
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 }
 
@@ -445,5 +461,15 @@ mod tests {
         let state = EditorSessionState::new_with_tab_size(None, 0);
 
         assert_eq!(state.tab_size(), 1);
+    }
+
+    #[test]
+    fn build_save_request_fails_when_session_is_read_only() {
+        let state = EditorSessionState::new_with_tab_size_and_line_numbers(None, 8, false, true);
+
+        let result = state.build_save_request("content");
+
+        assert_eq!(result, Err(SaveRequestError::ReadOnly));
+        assert!(state.read_only());
     }
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::{launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, LaunchRequest};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::screen_model::{ProjectionInput, project};
 
 fn unique_path(name: &str) -> PathBuf {
@@ -31,8 +31,9 @@ fn startup_line_numbers_reflect_in_headless_projection_without_conflicting_with_
     .expect("config file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
     })
     .expect("startup with typescript config");
 
@@ -65,8 +66,9 @@ fn startup_line_numbers_falls_back_to_default_projection_when_config_is_missing(
     std::fs::write(&target_path, "ab\tcd\n").expect("target file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
     })
     .expect("startup should continue with default fallback");
 

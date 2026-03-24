@@ -3,8 +3,39 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRequest {
-    pub target_path: Option<PathBuf>,
+    pub input_source: InputSource,
     pub config_source: ConfigSource,
+    pub initial_cursor: InitialCursorPosition,
+    pub read_only: bool,
+    pub startup_action: StartupAction,
+}
+
+impl Default for LaunchRequest {
+    fn default() -> Self {
+        Self {
+            input_source: InputSource::Empty,
+            config_source: ConfigSource::Default,
+            initial_cursor: InitialCursorPosition::None,
+            read_only: false,
+            startup_action: StartupAction::Edit,
+        }
+    }
+}
+
+impl LaunchRequest {
+    pub fn target_path(&self) -> Option<&PathBuf> {
+        match &self.input_source {
+            InputSource::File(path) => Some(path),
+            InputSource::Empty | InputSource::Stdin => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputSource {
+    Empty,
+    File(PathBuf),
+    Stdin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,8 +45,24 @@ pub enum ConfigSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitialCursorPosition {
+    None,
+    End,
+    Line(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupAction {
+    Edit,
+    PrintHelp,
+    PrintVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliParseError {
     MissingConfigPath,
+    MissingLineNumber,
+    InvalidLineNumber(OsString),
     MultipleTargetPaths,
     UnknownFlag(OsString),
 }
@@ -25,18 +72,56 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut target_path: Option<PathBuf> = None;
-    let mut config_source = ConfigSource::Default;
+    let mut request = LaunchRequest::default();
     let mut args = args.into_iter();
+    let mut treat_all_as_files = false;
 
     while let Some(arg) = args.next() {
         let arg = arg.as_ref();
 
-        if arg == "--config" {
+        if treat_all_as_files {
+            set_input_source(
+                &mut request.input_source,
+                InputSource::File(PathBuf::from(arg)),
+            )?;
+            continue;
+        }
+
+        if arg == "--" {
+            treat_all_as_files = true;
+            continue;
+        }
+
+        if is_config_flag(arg) {
             let Some(config_path) = args.next() else {
                 return Err(CliParseError::MissingConfigPath);
             };
-            config_source = ConfigSource::File(PathBuf::from(config_path.as_ref()));
+            request.config_source = ConfigSource::File(PathBuf::from(config_path.as_ref()));
+            continue;
+        }
+
+        if arg == "-" {
+            set_input_source(&mut request.input_source, InputSource::Stdin)?;
+            continue;
+        }
+
+        if let Some(initial_cursor) = parse_initial_cursor(arg)? {
+            request.initial_cursor = initial_cursor;
+            continue;
+        }
+
+        if matches!(arg.to_str(), Some("-R")) {
+            request.read_only = true;
+            continue;
+        }
+
+        if matches!(arg.to_str(), Some("-h" | "--help")) {
+            request.startup_action = StartupAction::PrintHelp;
+            continue;
+        }
+
+        if matches!(arg.to_str(), Some("--version")) {
+            request.startup_action = StartupAction::PrintVersion;
             continue;
         }
 
@@ -44,22 +129,57 @@ where
             return Err(CliParseError::UnknownFlag(arg.to_os_string()));
         }
 
-        let path = PathBuf::from(arg);
-        if target_path.replace(path).is_some() {
-            return Err(CliParseError::MultipleTargetPaths);
-        }
+        set_input_source(
+            &mut request.input_source,
+            InputSource::File(PathBuf::from(arg)),
+        )?;
     }
 
-    Ok(LaunchRequest {
-        target_path,
-        config_source,
-    })
+    Ok(request)
+}
+
+fn set_input_source(current: &mut InputSource, next: InputSource) -> Result<(), CliParseError> {
+    if matches!(current, InputSource::Empty) {
+        *current = next;
+        return Ok(());
+    }
+
+    Err(CliParseError::MultipleTargetPaths)
+}
+
+fn parse_initial_cursor(arg: &OsStr) -> Result<Option<InitialCursorPosition>, CliParseError> {
+    let Some(value) = arg.to_str() else {
+        return Ok(None);
+    };
+
+    if value == "+" {
+        return Ok(Some(InitialCursorPosition::End));
+    }
+
+    let Some(line_number_text) = value.strip_prefix('+') else {
+        return Ok(None);
+    };
+
+    if line_number_text.is_empty() {
+        return Err(CliParseError::MissingLineNumber);
+    }
+
+    let line_number = line_number_text
+        .parse::<usize>()
+        .ok()
+        .filter(|line_number| *line_number > 0)
+        .ok_or_else(|| CliParseError::InvalidLineNumber(arg.to_os_string()))?;
+    Ok(Some(InitialCursorPosition::Line(line_number)))
 }
 
 fn is_flag(arg: &OsStr) -> bool {
     arg.to_str()
         .map(|value| value.starts_with('-') && value != "-")
         .unwrap_or(false)
+}
+
+fn is_config_flag(arg: &OsStr) -> bool {
+    matches!(arg.to_str(), Some("--config" | "-u"))
 }
 
 #[cfg(test)]
@@ -73,8 +193,36 @@ mod tests {
         assert_eq!(
             request,
             LaunchRequest {
-                target_path: Some(PathBuf::from("notes.txt")),
+                input_source: InputSource::File(PathBuf::from("notes.txt")),
                 config_source: ConfigSource::File(PathBuf::from("init.ts")),
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_vim_style_u_option_as_config_path() {
+        let request = parse_launch_request(["notes.txt", "-u", "init.ts"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                input_source: InputSource::File(PathBuf::from("notes.txt")),
+                config_source: ConfigSource::File(PathBuf::from("init.ts")),
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn allows_starting_without_target_path_with_vim_style_u_option() {
+        let request = parse_launch_request(["-u", "init.ts"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                config_source: ConfigSource::File(PathBuf::from("init.ts")),
+                ..LaunchRequest::default()
             }
         );
     }
@@ -86,8 +234,8 @@ mod tests {
         assert_eq!(
             request,
             LaunchRequest {
-                target_path: Some(PathBuf::from("notes.txt")),
-                config_source: ConfigSource::Default,
+                input_source: InputSource::File(PathBuf::from("notes.txt")),
+                ..LaunchRequest::default()
             }
         );
     }
@@ -99,8 +247,113 @@ mod tests {
         assert_eq!(
             request,
             LaunchRequest {
-                target_path: None,
                 config_source: ConfigSource::File(PathBuf::from("init.ts")),
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_dash_dash_then_treats_following_value_as_file_name() {
+        let request = parse_launch_request(["--", "-leading-name.txt"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                input_source: InputSource::File(PathBuf::from("-leading-name.txt")),
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_stdin_input_source() {
+        let request = parse_launch_request(["-"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                input_source: InputSource::Stdin,
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_plus_as_end_of_file_cursor() {
+        let request = parse_launch_request(["+"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                initial_cursor: InitialCursorPosition::End,
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_plus_line_number_as_initial_cursor() {
+        let request = parse_launch_request(["+42"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                initial_cursor: InitialCursorPosition::Line(42),
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_read_only_mode() {
+        let request = parse_launch_request(["-R", "notes.txt"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                input_source: InputSource::File(PathBuf::from("notes.txt")),
+                read_only: true,
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_help_startup_action() {
+        let request = parse_launch_request(["--help"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                startup_action: StartupAction::PrintHelp,
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_short_help_startup_action() {
+        let request = parse_launch_request(["-h"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                startup_action: StartupAction::PrintHelp,
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_version_startup_action() {
+        let request = parse_launch_request(["--version"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                startup_action: StartupAction::PrintVersion,
+                ..LaunchRequest::default()
             }
         );
     }
@@ -113,10 +366,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_multiple_targets_when_stdin_and_file_are_combined() {
+        let err = parse_launch_request(["-", "notes.txt"]).unwrap_err();
+
+        assert_eq!(err, CliParseError::MultipleTargetPaths);
+    }
+
+    #[test]
     fn rejects_config_flag_without_value() {
         let err = parse_launch_request(["--config"]).unwrap_err();
 
         assert_eq!(err, CliParseError::MissingConfigPath);
+    }
+
+    #[test]
+    fn rejects_vim_style_u_option_without_value() {
+        let err = parse_launch_request(["-u"]).unwrap_err();
+
+        assert_eq!(err, CliParseError::MissingConfigPath);
+    }
+
+    #[test]
+    fn rejects_invalid_initial_line_number_text() {
+        let err = parse_launch_request(["+abc"]).unwrap_err();
+
+        assert_eq!(
+            err,
+            CliParseError::InvalidLineNumber(OsString::from("+abc"))
+        );
+    }
+
+    #[test]
+    fn rejects_zero_as_initial_line_number() {
+        let err = parse_launch_request(["+0"]).unwrap_err();
+
+        assert_eq!(err, CliParseError::InvalidLineNumber(OsString::from("+0")));
     }
 
     #[test]

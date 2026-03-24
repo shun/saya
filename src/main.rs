@@ -1,6 +1,6 @@
 use saya::bootstrap::{BootstrapError, prepare_launch};
-use saya::cli::{CliParseError, parse_launch_request};
-use saya::editor_session::QuitDecision;
+use saya::cli::{CliParseError, StartupAction, parse_launch_request};
+use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::host_io::{SaveResult, write_to_path};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
@@ -22,6 +22,18 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    match &launch_request.startup_action {
+        StartupAction::Edit => {}
+        StartupAction::PrintHelp => {
+            println!("{}", render_help_text());
+            std::process::exit(0);
+        }
+        StartupAction::PrintVersion => {
+            println!("{}", render_version_text());
+            std::process::exit(0);
+        }
+    }
 
     let mut outcome = match prepare_launch(launch_request) {
         Ok(outcome) => outcome,
@@ -203,23 +215,7 @@ async fn main() {
                             }
                             EditorIntent::Save => {
                                 let snapshot = outcome.core_bridge.snapshot();
-                                if let Ok(req) = session_state.build_save_request(&snapshot.text) {
-                                    match write_to_path(&req) {
-                                        SaveResult::Saved => {
-                                            session_state.record_save_success();
-                                            transient_msg = Some("Saved successfully".to_string());
-                                        }
-                                        SaveResult::Failed { message } => {
-                                            session_state.record_save_failure(message);
-                                            transient_msg = Some(format!(
-                                                "Save failed: {}",
-                                                session_state.last_save_error().unwrap_or("")
-                                            ));
-                                        }
-                                    }
-                                } else {
-                                    transient_msg = Some("No file name to save".to_string());
-                                }
+                                transient_msg = save_snapshot(&snapshot.text, &mut session_state);
                                 need_redraw = true;
                             }
                             EditorIntent::Quit { force } => {
@@ -329,22 +325,35 @@ fn handle_write_host_action(
         session_state.target_path().is_some(),
         snapshot.text.len()
     );
-    if let Ok(req) = session_state.build_save_request(&snapshot.text) {
-        match write_to_path(&req) {
+    *transient_msg = save_snapshot(&snapshot.text, session_state);
+}
+
+fn save_snapshot(
+    buffer_contents: &str,
+    session_state: &mut saya::editor_session::EditorSessionState,
+) -> Option<String> {
+    match session_state.build_save_request(buffer_contents) {
+        Ok(req) => match write_to_path(&req) {
             SaveResult::Saved => {
                 session_state.record_save_success();
-                *transient_msg = Some("Saved successfully".to_string());
+                Some("Saved successfully".to_string())
             }
             SaveResult::Failed { message } => {
                 session_state.record_save_failure(message);
-                *transient_msg = Some(format!(
+                Some(format!(
                     "Save failed: {}",
                     session_state.last_save_error().unwrap_or("")
-                ));
+                ))
             }
-        }
-    } else {
-        *transient_msg = Some("No file name to save".to_string());
+        },
+        Err(error) => Some(save_error_message(&error)),
+    }
+}
+
+fn save_error_message(error: &SaveRequestError) -> String {
+    match error {
+        SaveRequestError::NoTargetPath => "No file name to save".to_string(),
+        SaveRequestError::ReadOnly => "Read-only option is set; add ! to override".to_string(),
     }
 }
 
@@ -386,6 +395,10 @@ fn buffer_line_count(text: &str) -> usize {
 fn format_cli_error(error: CliParseError) -> String {
     match error {
         CliParseError::MissingConfigPath => "設定ファイルのパスが指定されていません".to_string(),
+        CliParseError::MissingLineNumber => "開始行番号が指定されていません".to_string(),
+        CliParseError::InvalidLineNumber(value) => {
+            format!("開始行番号が不正です: {}", value.to_string_lossy())
+        }
         CliParseError::MultipleTargetPaths => "対象ファイルは 1 つだけ指定できます".to_string(),
         CliParseError::UnknownFlag(flag) => {
             format!("未対応のオプションです: {}", flag.to_string_lossy())
@@ -398,6 +411,9 @@ fn format_bootstrap_error(error: BootstrapError) -> String {
         BootstrapError::SessionAlreadyInitialized => {
             "エディタのセッションはすでに初期化されています".to_string()
         }
+        BootstrapError::StdinReadFailed { message } => {
+            format!("標準入力を読み込めませんでした: {}", message)
+        }
         BootstrapError::TargetReadFailed { path, message } => {
             format!(
                 "対象ファイルを読み込めませんでした ({}): {}",
@@ -406,6 +422,28 @@ fn format_bootstrap_error(error: BootstrapError) -> String {
             )
         }
     }
+}
+
+fn render_help_text() -> String {
+    [
+        "Usage: sy [arguments] [file]",
+        "",
+        "Arguments:",
+        "  --               Only file names after this",
+        "  -                Read text from stdin",
+        "  -u <init.ts>     Use <init.ts> as startup config",
+        "  --config <path>  Use <path> as startup config",
+        "  +                Start at end of file",
+        "  +<lnum>          Start at line <lnum>",
+        "  -R               Read-only mode",
+        "  -h, --help       Print help and exit",
+        "  --version        Print version information and exit",
+    ]
+    .join("\n")
+}
+
+fn render_version_text() -> String {
+    format!("sy {}", env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(test)]
@@ -449,5 +487,31 @@ mod tests {
             transient_msg,
             Some("No write since last change (add force to override)".to_string())
         );
+    }
+
+    #[test]
+    fn save_error_message_reports_read_only_mode() {
+        let message = save_error_message(&SaveRequestError::ReadOnly);
+
+        assert_eq!(message, "Read-only option is set; add ! to override");
+    }
+
+    #[test]
+    fn render_help_text_lists_vim_compatible_options() {
+        let help = render_help_text();
+
+        assert!(help.contains("Usage: sy [arguments] [file]"));
+        assert!(help.contains("  --               Only file names after this"));
+        assert!(help.contains("  -                Read text from stdin"));
+        assert!(help.contains("  +<lnum>          Start at line <lnum>"));
+        assert!(help.contains("  -R               Read-only mode"));
+        assert!(help.contains("  --version        Print version information and exit"));
+    }
+
+    #[test]
+    fn render_version_text_includes_package_version() {
+        let version = render_version_text();
+
+        assert_eq!(version, format!("sy {}", env!("CARGO_PKG_VERSION")));
     }
 }

@@ -1,14 +1,18 @@
+use std::io::Cursor;
 /// 統合テスト: 起動フローの検証
 ///
 /// 既存ファイル起動、新規バッファ起動、読込失敗を個別に確認する。
 /// 起動失敗時にセッションが中途半端に残らないことを確認する。
 /// Requirements: 1.1, 1.2, 1.3, 3.4
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{BootstrapError, BootstrapWarning, LoadedConfig, prepare_launch};
-use saya::cli::{ConfigSource, LaunchRequest, parse_launch_request};
-use saya::editor_session::EditorSessionState;
+use saya::bootstrap::{
+    BootstrapError, BootstrapWarning, LoadedConfig, prepare_launch, prepare_launch_with_reader,
+};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest, parse_launch_request};
+use saya::editor_session::{EditorSessionState, SaveRequestError};
 use saya::screen_model::{ProjectionInput, project};
 use vim_core_rs::CoreMode;
 
@@ -18,6 +22,15 @@ fn unique_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-integ-startup-{name}-{nanos}"))
+}
+
+fn default_request() -> LaunchRequest {
+    LaunchRequest::default()
+}
+
+fn cwd_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 // ---- 9.1.1: 既存ファイル起動の統合フロー ----
@@ -32,7 +45,7 @@ fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
     // 1. CLI 引数パース
     let request = parse_launch_request([target_path.to_str().unwrap()])
         .expect("CLI 引数のパースが成功すること");
-    assert_eq!(request.target_path, Some(target_path.clone()));
+    assert_eq!(request.target_path(), Some(&target_path));
 
     // 2. 起動準備
     let outcome = prepare_launch(request).expect("既存ファイルでの起動が成功すること");
@@ -75,7 +88,7 @@ fn new_buffer_startup_flow_without_target_path() {
     // 1. CLI 引数パース（対象パスなし）
     let request =
         parse_launch_request::<&[&str], &&str>(&[]).expect("空引数のパースが成功すること");
-    assert_eq!(request.target_path, None);
+    assert_eq!(request.target_path(), None);
 
     // 2. 起動準備
     let outcome = prepare_launch(request).expect("新規バッファでの起動が成功すること");
@@ -172,15 +185,17 @@ fn session_guard_released_after_startup_failure() {
 
     // 1. 最初の起動試行（失敗する）
     let result = prepare_launch(LaunchRequest {
-        target_path: Some(missing_path),
+        input_source: InputSource::File(missing_path),
         config_source: ConfigSource::Default,
+        ..default_request()
     });
     assert!(result.is_err(), "起動は失敗すること");
 
     // 2. セッションガードが解放されているので、再度起動可能
     let outcome = prepare_launch(LaunchRequest {
-        target_path: None,
+        input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
+        ..default_request()
     });
     assert!(
         outcome.is_ok(),
@@ -194,8 +209,9 @@ fn session_guard_released_after_successful_startup_outcome_dropped() {
     // 1. 成功起動
     {
         let _outcome = prepare_launch(LaunchRequest {
-            target_path: None,
+            input_source: InputSource::Empty,
             config_source: ConfigSource::Default,
+            ..default_request()
         })
         .expect("起動成功");
         // outcome がスコープを抜けて drop される
@@ -203,8 +219,9 @@ fn session_guard_released_after_successful_startup_outcome_dropped() {
 
     // 2. 再度起動可能であること
     let outcome2 = prepare_launch(LaunchRequest {
-        target_path: None,
+        input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
+        ..default_request()
     });
     assert!(
         outcome2.is_ok(),
@@ -216,11 +233,11 @@ fn session_guard_released_after_successful_startup_outcome_dropped() {
 
 /// 設定ファイル付きの起動で config が warning なく読み込まれる。
 #[test]
-fn startup_with_config_file_loads_without_warning() {
+fn startup_with_vim_style_u_option_loads_config_without_warning() {
     let config_path = unique_path("config-ok.json");
     std::fs::write(&config_path, "{ \"tabSize\": 4 }").expect("設定ファイルの作成");
 
-    let request = parse_launch_request(["--config", config_path.to_str().unwrap()])
+    let request = parse_launch_request(["-u", config_path.to_str().unwrap()])
         .expect("CLI 引数のパースが成功すること");
 
     let outcome = prepare_launch(request).expect("設定付き起動が成功すること");
@@ -256,4 +273,119 @@ fn startup_with_missing_config_falls_back_with_warning() {
         &outcome.warnings[0],
         BootstrapWarning::ConfigLoadFailed { path, .. } if *path == missing_config
     ));
+}
+
+#[test]
+fn startup_from_stdin_populates_initial_snapshot() {
+    let request = parse_launch_request(["-"]).expect("CLI 引数のパースが成功すること");
+    let mut stdin = Cursor::new("stdin line 1\nstdin line 2\n");
+
+    let outcome =
+        prepare_launch_with_reader(request, &mut stdin).expect("stdin 起動が成功すること");
+
+    assert_eq!(outcome.target_path, None);
+    assert_eq!(
+        outcome.initial_snapshot.text,
+        "stdin line 1\nstdin line 2\n"
+    );
+    assert_eq!(outcome.initial_snapshot.mode, CoreMode::Normal);
+}
+
+#[test]
+fn startup_with_initial_line_number_moves_cursor_to_requested_line() {
+    let target_path = unique_path("cursor-line");
+    std::fs::write(&target_path, "line1\nline2\nline3\n").expect("テストファイルの作成");
+
+    let request = parse_launch_request(["+2", target_path.to_str().unwrap()])
+        .expect("CLI 引数のパースが成功すること");
+    let outcome = prepare_launch(request).expect("行指定付き起動が成功すること");
+
+    assert_eq!(outcome.initial_snapshot.cursor_row, 1);
+    assert_eq!(outcome.initial_snapshot.cursor_col, 0);
+
+    std::fs::remove_file(&target_path).expect("テストファイルの削除");
+}
+
+#[test]
+fn startup_with_end_of_file_moves_cursor_to_last_line() {
+    let target_path = unique_path("cursor-end");
+    std::fs::write(&target_path, "line1\nline2\nline3\n").expect("テストファイルの作成");
+
+    let request = parse_launch_request(["+", target_path.to_str().unwrap()])
+        .expect("CLI 引数のパースが成功すること");
+    let outcome = prepare_launch(request).expect("EOF 指定付き起動が成功すること");
+
+    assert_eq!(outcome.initial_snapshot.cursor_row, 2);
+    assert_eq!(outcome.initial_snapshot.cursor_col, 0);
+
+    std::fs::remove_file(&target_path).expect("テストファイルの削除");
+}
+
+#[test]
+fn startup_with_read_only_rejects_save_request() {
+    let target_path = unique_path("read-only");
+    std::fs::write(&target_path, "line1\n").expect("テストファイルの作成");
+
+    let request = parse_launch_request(["-R", target_path.to_str().unwrap()])
+        .expect("CLI 引数のパースが成功すること");
+    let outcome = prepare_launch(request).expect("read-only 起動が成功すること");
+    let session_state = outcome.editor_session_state();
+    let save_result = session_state.build_save_request(&outcome.initial_snapshot.text);
+
+    assert_eq!(save_result, Err(SaveRequestError::ReadOnly));
+
+    std::fs::remove_file(&target_path).expect("テストファイルの削除");
+}
+
+#[test]
+fn startup_with_dash_dash_accepts_leading_dash_file_name() {
+    let target_path = unique_path("-leading-name.txt");
+    std::fs::write(&target_path, "dash file\n").expect("テストファイルの作成");
+
+    let request = parse_launch_request(["--", target_path.to_str().unwrap()])
+        .expect("CLI 引数のパースが成功すること");
+    let outcome = prepare_launch(request).expect("ダッシュ始まりのファイル起動が成功すること");
+
+    assert_eq!(outcome.target_path, Some(target_path.clone()));
+    assert_eq!(outcome.initial_snapshot.text, "dash file\n");
+
+    std::fs::remove_file(&target_path).expect("テストファイルの削除");
+}
+
+#[test]
+fn startup_with_relative_config_path_resolves_line_numbers_from_current_directory() {
+    let _cwd_lock = cwd_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let base_dir = unique_path("relative-config-base");
+    let work_dir = base_dir.join("worktree").join("nested");
+    let config_path = base_dir.join("init.ts");
+    let target_path = base_dir.join("target.txt");
+
+    std::fs::create_dir_all(&work_dir).expect("作業ディレクトリの作成");
+    std::fs::write(&config_path, "saya.options.lineNumbers = true;\n").expect("設定ファイルの作成");
+    std::fs::write(&target_path, "alpha\nbeta\n").expect("対象ファイルの作成");
+
+    let previous_dir = std::env::current_dir().expect("現在ディレクトリの取得");
+    std::env::set_current_dir(&work_dir).expect("作業ディレクトリへの移動");
+
+    let request = parse_launch_request(["-u", "../../init.ts", "../../target.txt"])
+        .expect("CLI 引数のパースが成功すること");
+    let outcome = prepare_launch(request).expect("相対設定パスでの起動が成功すること");
+
+    std::env::set_current_dir(previous_dir).expect("カレントディレクトリの復元");
+
+    assert!(outcome.initial_line_numbers);
+    let session_state = outcome.editor_session_state();
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        None,
+    ));
+    assert_eq!(model.lines[0], "1 alpha");
+    assert_eq!(model.lines[1], "2 beta");
+
+    std::fs::remove_file(&config_path).expect("設定ファイルの削除");
+    std::fs::remove_file(&target_path).expect("対象ファイルの削除");
+    std::fs::remove_dir_all(&base_dir).expect("テストディレクトリの削除");
 }

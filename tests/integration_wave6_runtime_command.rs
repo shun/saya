@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::prepare_launch;
-use saya::cli::{ConfigSource, LaunchRequest};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::saya_live_runtime::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
     ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
@@ -97,8 +97,9 @@ async fn startup_registered_command_executes_from_runtime_event_headlessly() {
     .expect("config file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: None,
+        input_source: InputSource::Empty,
         config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
     })
     .expect("startup config should prepare callback seed");
 
