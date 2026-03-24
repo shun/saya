@@ -83,7 +83,31 @@ cargo run --bin sy --
 TypeScript 設定ファイルを渡すには、次を実行します。
 
 ```bash
-cargo run --bin sy -- path/to/file.txt --config ./init.ts
+cargo run --bin sy -- path/to/file.txt -u ./init.ts
+```
+
+標準入力から読み込むには、次を実行します。
+
+```bash
+printf 'hello\nworld\n' | cargo run --bin sy -- -
+```
+
+指定行から開くには、次を実行します。
+
+```bash
+cargo run --bin sy -- +42 path/to/file.txt
+```
+
+read-only で開くには、次を実行します。
+
+```bash
+cargo run --bin sy -- -R path/to/file.txt
+```
+
+ヘルプを表示するには、次を実行します。
+
+```bash
+cargo run --bin sy -- --help
 ```
 
 ## 最小の `init.ts`

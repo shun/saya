@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::prepare_launch;
-use saya::cli::{ConfigSource, LaunchRequest};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::editor_session::EditorSessionState;
 use saya::screen_model::{ProjectionInput, project};
 use saya::terminal_lifecycle::{TerminalBackend, TerminalLifecycle};
@@ -82,8 +82,9 @@ fn display_model_reflects_editor_state_and_messages() {
     std::fs::write(&target_path, "Hello\nWorld\n").unwrap();
 
     let mut outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::Default,
+        ..LaunchRequest::default()
     })
     .unwrap();
 

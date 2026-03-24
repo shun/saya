@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::{BootstrapOutcome, prepare_launch};
-use saya::cli::{ConfigSource, LaunchRequest};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::editor_session::EditorSessionState;
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::screen_model::{ProjectionInput, project};
@@ -28,8 +28,9 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
     std::fs::write(&target_path, content).expect("テストファイルの作成");
 
     prepare_launch(LaunchRequest {
-        target_path: Some(target_path),
+        input_source: InputSource::File(target_path),
         config_source: ConfigSource::Default,
+        ..LaunchRequest::default()
     })
     .expect("テスト用の起動が成功すること")
 }
@@ -37,8 +38,9 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
 /// テスト用に新規バッファで起動するヘルパー。
 fn launch_empty() -> BootstrapOutcome {
     prepare_launch(LaunchRequest {
-        target_path: None,
+        input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
+        ..LaunchRequest::default()
     })
     .expect("テスト用の新規バッファ起動が成功すること")
 }

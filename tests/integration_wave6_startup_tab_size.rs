@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::{BootstrapWarning, launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, LaunchRequest};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::screen_model::{ProjectionInput, project};
 use vim_core_rs::CoreMode;
 
@@ -30,8 +30,9 @@ fn startup_tab_size_reflects_in_headless_boot_projection() {
     std::fs::write(&config_path, "saya.options.tabSize = 4;").expect("config file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
     })
     .expect("startup with tabSize config");
 
@@ -67,8 +68,9 @@ fn startup_tab_size_falls_back_when_config_is_missing() {
     std::fs::write(&target_path, "a\tb\n").expect("target file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(missing_config.clone()),
+        ..LaunchRequest::default()
     })
     .expect("startup should continue with default fallback");
 

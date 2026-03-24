@@ -1,9 +1,10 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::callback_registry_seed::CallbackRegistrySeed;
-use crate::cli::{ConfigSource, LaunchRequest};
+use crate::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
 use crate::config_runtime::{
     AppliedKeyMapping, CapabilityLoadResult, ConfigApplyState, ConfigKeyMode, ConfigSourceResult,
     SayaKeyMode, SayaKeymapAction, StartupRegistry, StartupRegistryEntry, apply_config_commands,
@@ -24,6 +25,7 @@ pub struct BootstrapOutcome {
     pub initial_tab_size: u16,
     pub initial_line_numbers: bool,
     pub initial_number_width: u16,
+    pub read_only: bool,
     pub startup_registry: StartupRegistrySnapshot,
     pub callback_registry: CallbackRegistrySeed,
     pub initial_snapshot: CoreSnapshot,
@@ -46,6 +48,7 @@ pub enum BootstrapWarning {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapError {
     SessionAlreadyInitialized,
+    StdinReadFailed { message: String },
     TargetReadFailed { path: PathBuf, message: String },
 }
 
@@ -122,11 +125,12 @@ impl BootstrapOutcome {
             self.initial_line_numbers,
             self.initial_number_width
         );
-        EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+        EditorSessionState::new_with_options(
             self.target_path.clone(),
             self.initial_tab_size,
             self.initial_line_numbers,
             self.initial_number_width,
+            self.read_only,
         )
     }
 }
@@ -137,11 +141,19 @@ pub fn launch_test_lock() -> &'static Mutex<()> {
 }
 
 pub fn prepare_launch(request: LaunchRequest) -> Result<BootstrapOutcome, BootstrapError> {
+    let mut stdin = std::io::stdin().lock();
+    prepare_launch_with_reader(request, &mut stdin)
+}
+
+pub fn prepare_launch_with_reader<R: Read>(
+    request: LaunchRequest,
+    reader: &mut R,
+) -> Result<BootstrapOutcome, BootstrapError> {
     log::debug!("[bootstrap] startup preflight requested");
     let session_guard = SessionGuard::acquire().map_err(map_session_guard_error)?;
     log::debug!("[bootstrap] session guard acquired");
 
-    let result = prepare_launch_with_guard(request, session_guard);
+    let result = prepare_launch_with_guard(request, session_guard, reader);
     if let Err(error) = &result {
         log::debug!("[bootstrap] startup preflight failed: {error:?}");
     }
@@ -149,33 +161,50 @@ pub fn prepare_launch(request: LaunchRequest) -> Result<BootstrapOutcome, Bootst
     result
 }
 
-fn prepare_launch_with_guard(
+fn prepare_launch_with_guard<R: Read>(
     request: LaunchRequest,
     session_guard: SessionGuard,
+    reader: &mut R,
 ) -> Result<BootstrapOutcome, BootstrapError> {
-    let initial_text = if let Some(target_path) = request.target_path.as_ref() {
-        log::debug!(
-            "[bootstrap] loading target contents before terminal enter: {}",
-            target_path.display()
-        );
-        fs::read_to_string(target_path).map_err(|error| BootstrapError::TargetReadFailed {
-            path: target_path.clone(),
-            message: error.to_string(),
-        })?
-    } else {
-        log::debug!("[bootstrap] starting with an empty buffer");
-        String::new()
+    let target_path = target_path_from_input_source(&request.input_source);
+    let initial_text = match &request.input_source {
+        InputSource::File(target_path) => {
+            log::debug!(
+                "[bootstrap] loading target contents before terminal enter: {}",
+                target_path.display()
+            );
+            fs::read_to_string(target_path).map_err(|error| BootstrapError::TargetReadFailed {
+                path: target_path.clone(),
+                message: error.to_string(),
+            })?
+        }
+        InputSource::Stdin => {
+            log::debug!("[bootstrap] reading startup buffer contents from stdin");
+            let mut initial_text = String::new();
+            reader.read_to_string(&mut initial_text).map_err(|error| {
+                BootstrapError::StdinReadFailed {
+                    message: error.to_string(),
+                }
+            })?;
+            initial_text
+        }
+        InputSource::Empty => {
+            log::debug!("[bootstrap] starting with an empty buffer");
+            String::new()
+        }
     };
 
-    let core_bridge = if let Some(target_path) = request.target_path.as_ref() {
+    let mut core_bridge = if let Some(target_path) = target_path.as_ref() {
         CoreBridge::new_with_target_path(target_path, &initial_text)
     } else {
         CoreBridge::new(&initial_text)
     }
     .expect("vim-core-rs session should initialize after preflight session guard acquisition");
+
+    apply_initial_cursor(&mut core_bridge, &request.initial_cursor);
     let initial_snapshot = core_bridge.snapshot();
 
-    if let Some(target_path) = request.target_path.as_ref() {
+    if let Some(target_path) = target_path.as_ref() {
         log::debug!(
             "[bootstrap] validated target path before terminal enter: {}",
             target_path.display()
@@ -191,7 +220,7 @@ fn prepare_launch_with_guard(
     log::debug!(
         "[bootstrap] startup preflight completed: warnings={}, target_present={}, mode={:?}, dirty={}, tab_size={}, number_width={}",
         warnings.len(),
-        request.target_path.is_some(),
+        target_path.is_some(),
         initial_snapshot.mode,
         initial_snapshot.dirty,
         initial_tab_size,
@@ -199,11 +228,12 @@ fn prepare_launch_with_guard(
     );
 
     Ok(BootstrapOutcome {
-        target_path: request.target_path,
+        target_path,
         loaded_config,
         initial_tab_size,
         initial_line_numbers: bootstrap_state.apply_state.line_numbers,
         initial_number_width,
+        read_only: request.read_only,
         startup_registry: bootstrap_state.startup_registry,
         callback_registry: bootstrap_state.callback_registry,
         initial_snapshot,
@@ -211,6 +241,27 @@ fn prepare_launch_with_guard(
         warnings,
         session_guard,
     })
+}
+
+fn target_path_from_input_source(input_source: &InputSource) -> Option<PathBuf> {
+    match input_source {
+        InputSource::File(path) => Some(path.clone()),
+        InputSource::Empty | InputSource::Stdin => None,
+    }
+}
+
+fn apply_initial_cursor(core_bridge: &mut CoreBridge, initial_cursor: &InitialCursorPosition) {
+    let command = match initial_cursor {
+        InitialCursorPosition::None => return,
+        InitialCursorPosition::End => "G".to_string(),
+        InitialCursorPosition::Line(line_number) => format!("{line_number}G"),
+    };
+    log::debug!(
+        "[bootstrap] applying initial cursor position: {:?} via command={}",
+        initial_cursor,
+        command
+    );
+    let _ = core_bridge.dispatch_key(&command);
 }
 
 fn load_config_with_fallback(
@@ -345,17 +396,14 @@ fn evaluate_bootstrap_capability(loaded_config: &LoadedConfig) -> CapabilityLoad
 }
 
 fn evaluate_bootstrap_capability_from_path(path: &Path) -> Option<CapabilityLoadResult> {
-    let current_dir = path
-        .parent()
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())?;
+    let (resolved_path, current_dir) = resolve_formal_startup_runtime_path(path)?;
     log::debug!(
         "[bootstrap] evaluating formal startup runtime path: config_path={}, current_dir={}",
-        path.display(),
+        resolved_path.display(),
         current_dir.display()
     );
 
-    let prepared = match prepare_init_module(path, &current_dir) {
+    let prepared = match prepare_init_module(&resolved_path, &current_dir) {
         StartupModulePrepareResult::Success(module) => module,
         StartupModulePrepareResult::ReadFailed { path, message } => {
             return Some(CapabilityLoadResult::ReadFailed { path, message });
@@ -392,6 +440,19 @@ fn evaluate_bootstrap_capability_from_path(path: &Path) -> Option<CapabilityLoad
             })
         }
     }
+}
+
+fn resolve_formal_startup_runtime_path(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let current_dir = absolute_path
+        .parent()
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())?;
+    Some((absolute_path, current_dir))
 }
 
 fn evaluate_startup_registry_on_worker(source_text: String) -> Result<StartupRegistry, String> {
@@ -539,7 +600,7 @@ mod tests {
         BootstrapError, BootstrapWarning, LoadedConfig, StartupKeymapAction, StartupKeymapMode,
         StartupKeymapSnapshot, StartupRegistrySnapshot, prepare_launch,
     };
-    use crate::cli::{ConfigSource, LaunchRequest};
+    use crate::cli::{ConfigSource, InputSource, LaunchRequest};
     use crate::config_runtime::{
         AppliedKeyMapping, ConfigApplyState, ConfigKeyMode, SayaKeyMode, SayaKeymapAction,
         StartupRegistry, StartupRegistryEntry,
@@ -559,6 +620,10 @@ mod tests {
         std::env::temp_dir().join(format!("saya-bootstrap-{name}-{nanos}"))
     }
 
+    fn default_request() -> LaunchRequest {
+        LaunchRequest::default()
+    }
+
     #[test]
     fn returns_fatal_error_for_unreadable_target_path() {
         let _lock = session_test_lock()
@@ -567,8 +632,9 @@ mod tests {
         let missing_path = unique_path("missing-target");
 
         let result = prepare_launch(LaunchRequest {
-            target_path: Some(missing_path.clone()),
+            input_source: InputSource::File(missing_path.clone()),
             config_source: ConfigSource::Default,
+            ..default_request()
         });
 
         assert!(matches!(
@@ -585,8 +651,9 @@ mod tests {
         let missing_path = unique_path("nonexistent-readable-msg");
 
         let result = prepare_launch(LaunchRequest {
-            target_path: Some(missing_path.clone()),
+            input_source: InputSource::File(missing_path.clone()),
             config_source: ConfigSource::Default,
+            ..default_request()
         });
 
         match result {
@@ -622,8 +689,9 @@ mod tests {
         }
 
         let result = prepare_launch(LaunchRequest {
-            target_path: Some(restricted_path.clone()),
+            input_source: InputSource::File(restricted_path.clone()),
             config_source: ConfigSource::Default,
+            ..default_request()
         });
 
         // Unix環境では権限不足のエラーになるはず
@@ -667,8 +735,9 @@ mod tests {
         std::fs::create_dir_all(&dir_path).expect("create directory");
 
         let result = prepare_launch(LaunchRequest {
-            target_path: Some(dir_path.clone()),
+            input_source: InputSource::File(dir_path.clone()),
             config_source: ConfigSource::Default,
+            ..default_request()
         });
 
         match result {
@@ -717,8 +786,9 @@ mod tests {
         let missing_config = unique_path("missing-config");
 
         let outcome = prepare_launch(LaunchRequest {
-            target_path: None,
+            input_source: InputSource::Empty,
             config_source: ConfigSource::File(missing_config.clone()),
+            ..default_request()
         })
         .expect("config failures should not abort startup");
 
@@ -740,8 +810,9 @@ mod tests {
         let missing_path = unique_path("missing-target");
 
         let result = prepare_launch(LaunchRequest {
-            target_path: Some(missing_path),
+            input_source: InputSource::File(missing_path),
             config_source: ConfigSource::Default,
+            ..default_request()
         });
         assert!(result.is_err());
 
@@ -761,8 +832,9 @@ mod tests {
         std::fs::write(&config_path, "export default {};\n").expect("config file");
 
         let outcome = prepare_launch(LaunchRequest {
-            target_path: None,
+            input_source: InputSource::Empty,
             config_source: ConfigSource::File(config_path.clone()),
+            ..default_request()
         })
         .expect("existing config should load");
 
@@ -873,8 +945,9 @@ mod tests {
         std::fs::write(&config_path, "{ \"tabSize\": 4 }\n").expect("config file");
 
         let outcome = prepare_launch(LaunchRequest {
-            target_path: None,
+            input_source: InputSource::Empty,
             config_source: ConfigSource::File(config_path.clone()),
+            ..default_request()
         })
         .expect("existing config should load");
 
@@ -891,8 +964,9 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let outcome = prepare_launch(LaunchRequest {
-            target_path: None,
+            input_source: InputSource::Empty,
             config_source: ConfigSource::Default,
+            ..default_request()
         })
         .expect("launching without target path should succeed");
 
@@ -910,8 +984,9 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let mut outcome = prepare_launch(LaunchRequest {
-            target_path: None,
+            input_source: InputSource::Empty,
             config_source: ConfigSource::Default,
+            ..default_request()
         })
         .expect("launching without target path should succeed");
 
@@ -941,8 +1016,9 @@ mod tests {
         std::fs::write(&target_path, target_text).expect("target file");
 
         let outcome = prepare_launch(LaunchRequest {
-            target_path: Some(target_path.clone()),
+            input_source: InputSource::File(target_path.clone()),
             config_source: ConfigSource::Default,
+            ..default_request()
         })
         .expect("existing target should load");
 

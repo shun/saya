@@ -11,6 +11,8 @@ use crate::host_io::SaveRequest;
 pub enum SaveRequestError {
     /// 保存先パスが未設定
     NoTargetPath,
+    /// read-only 起動のため保存不可
+    ReadOnly,
 }
 
 /// 終了要求の判定結果。
@@ -35,6 +37,8 @@ pub struct EditorSessionState {
     line_numbers: bool,
     /// 行番号欄の最小幅
     number_width: u16,
+    /// read-only 起動かどうか
+    read_only: bool,
     /// 現在 dirty 状態かどうか
     dirty: bool,
     /// 直近の保存失敗メッセージ
@@ -73,20 +77,33 @@ impl EditorSessionState {
         line_numbers: bool,
         number_width: u16,
     ) -> Self {
+        Self::new_with_options(target_path, tab_size, line_numbers, number_width, false)
+    }
+
+    /// タブ幅、行番号表示、行番号欄幅、read-only を指定して新しいセッション状態を作成する。
+    pub fn new_with_options(
+        target_path: Option<PathBuf>,
+        tab_size: u16,
+        line_numbers: bool,
+        number_width: u16,
+        read_only: bool,
+    ) -> Self {
         let tab_size = tab_size.max(1);
         let number_width = number_width.max(1);
         log::debug!(
-            "[editor_session] new session state: target_path={:?}, tab_size={}, line_numbers={}, number_width={}",
+            "[editor_session] new session state: target_path={:?}, tab_size={}, line_numbers={}, number_width={}, read_only={}",
             target_path,
             tab_size,
             line_numbers,
-            number_width
+            number_width,
+            read_only
         );
         Self {
             target_path,
             tab_size,
             line_numbers,
             number_width,
+            read_only,
             dirty: false,
             last_save_error: None,
         }
@@ -99,10 +116,15 @@ impl EditorSessionState {
         buffer_contents: &str,
     ) -> Result<SaveRequest, SaveRequestError> {
         log::debug!(
-            "[editor_session] building save request: target_path={:?}, contents_len={}",
+            "[editor_session] building save request: target_path={:?}, contents_len={}, read_only={}",
             self.target_path,
-            buffer_contents.len()
+            buffer_contents.len(),
+            self.read_only
         );
+        if self.read_only {
+            log::debug!("[editor_session] save request failed: session is read-only");
+            return Err(SaveRequestError::ReadOnly);
+        }
         match &self.target_path {
             Some(path) => {
                 let request = SaveRequest {
@@ -217,6 +239,10 @@ impl EditorSessionState {
             width
         );
         self.number_width = width;
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 }
 
@@ -536,5 +562,15 @@ mod tests {
         state.set_number_width(0);
 
         assert_eq!(state.number_width(), 1);
+    }
+
+    #[test]
+    fn build_save_request_fails_when_session_is_read_only() {
+        let state = EditorSessionState::new_with_options(None, 8, false, 4, true);
+
+        let result = state.build_save_request("content");
+
+        assert_eq!(result, Err(SaveRequestError::ReadOnly));
+        assert!(state.read_only());
     }
 }

@@ -82,7 +82,31 @@ cargo run --bin sy --
 Load a TypeScript configuration file with this command.
 
 ```bash
-cargo run --bin sy -- path/to/file.txt --config ./init.ts
+cargo run --bin sy -- path/to/file.txt -u ./init.ts
+```
+
+Read from stdin with this command.
+
+```bash
+printf 'hello\nworld\n' | cargo run --bin sy -- -
+```
+
+Start at a specific line with this command.
+
+```bash
+cargo run --bin sy -- +42 path/to/file.txt
+```
+
+Open in read-only mode with this command.
+
+```bash
+cargo run --bin sy -- -R path/to/file.txt
+```
+
+Print help with this command.
+
+```bash
+cargo run --bin sy -- --help
 ```
 
 ## Minimal `init.ts`

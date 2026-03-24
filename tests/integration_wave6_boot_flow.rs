@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::{StartupKeymapAction, launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, LaunchRequest};
+use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -43,8 +43,9 @@ fn formal_boot_flow_uses_deno_core_runtime_for_expression_based_startup_config()
     .expect("config file");
 
     let outcome = prepare_launch(LaunchRequest {
-        target_path: Some(target_path.clone()),
+        input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
     })
     .expect("expression-based startup config should boot");
 
