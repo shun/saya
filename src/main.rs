@@ -4,6 +4,7 @@ use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::apply_local_ex_command;
 use saya::host_io::{SaveResult, write_to_path};
+use saya::input_loop::{CrosstermEventSource, run_terminal_input_loop};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::screen_model::{ProjectionInput, project};
 use saya::terminal_lifecycle::TerminalLifecycle;
@@ -11,7 +12,8 @@ use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::ViewportState;
 use vim_core_rs::CoreMode;
 
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use vim_core_rs::CoreHostAction;
 
 #[tokio::main]
@@ -64,51 +66,11 @@ async fn main() {
 
     // 入力監視タスク
     let input_sender = sender.clone();
-    tokio::task::spawn_blocking(move || {
-        log::debug!("[main] input thread started");
-        loop {
-            log::debug!("[main] waiting for event");
-            if let Ok(event) = crossterm::event::read() {
-                log::debug!("[main] raw event: {:?}", event);
-                match event {
-                    Event::Key(ke) => {
-                        let ki = match ke.code {
-                            KeyCode::Char(c) => {
-                                if ke.modifiers.contains(KeyModifiers::CONTROL) {
-                                    Some(KeyInput::Ctrl(c))
-                                } else {
-                                    Some(KeyInput::Char(c))
-                                }
-                            }
-                            KeyCode::Esc => Some(KeyInput::Escape),
-                            KeyCode::Enter => Some(KeyInput::Enter),
-                            KeyCode::Backspace => Some(KeyInput::Backspace),
-                            _ => None,
-                        };
-                        if let Some(key) = ki {
-                            log::debug!("[main] got key: {:?}", key);
-                            if input_sender.blocking_send(UiEvent::Input(key)).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Event::Resize(cols, rows) => {
-                        if input_sender
-                            .blocking_send(UiEvent::Resize {
-                                columns: cols,
-                                rows,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            } else {
-                break;
-            }
-        }
+    let input_stop_requested = Arc::new(AtomicBool::new(false));
+    let input_stop_for_task = input_stop_requested.clone();
+    let input_task = tokio::task::spawn_blocking(move || {
+        let mut source = CrosstermEventSource;
+        run_terminal_input_loop(&mut source, input_sender, input_stop_for_task);
     });
 
     let mut command_line_mode = false;
@@ -279,6 +241,13 @@ async fn main() {
     );
     let mut shutdown_sequence = coordinator.begin_shutdown(shutdown_reason);
     shutdown_sequence.record_loop_stopped();
+
+    log::debug!("[main] requesting input loop shutdown");
+    input_stop_requested.store(true, Ordering::Relaxed);
+    drop(sender);
+    if let Err(error) = input_task.await {
+        log::debug!("[main] input task join failed: {}", error);
+    }
 
     drop(renderer);
     log::debug!("[main] dropping editor outcome for session cleanup");
