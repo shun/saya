@@ -5,10 +5,19 @@ use vim_core_rs::{
     CoreCommandOutcome, CoreHostAction, CoreSessionError, CoreSnapshot, VimCoreSession,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualSelection {
+    pub mode: vim_core_rs::CoreMode,
+    pub start_row: usize,
+    pub start_col: usize,
+    pub end_row: usize,
+    pub end_col: usize,
+}
+
 pub struct CoreBridge {
     session: VimCoreSession,
     preferred_column: Option<usize>,
-    pending_normal_operator: Option<String>,
+    pending_normal_command_prefix: Option<String>,
 }
 
 impl fmt::Debug for CoreBridge {
@@ -30,7 +39,7 @@ impl CoreBridge {
         Ok(Self {
             session,
             preferred_column: None,
-            pending_normal_operator: None,
+            pending_normal_command_prefix: None,
         })
     }
 
@@ -74,8 +83,8 @@ impl CoreBridge {
             key,
             key.len()
         );
-        let outcome = if self.should_route_through_single_key_normal_path(key) {
-            self.dispatch_single_normal_key(key)?
+        let outcome = if self.should_route_through_pending_aware_key_path(key) {
+            self.dispatch_pending_aware_key(key)?
         } else if self.should_preserve_preferred_column(key) {
             self.dispatch_vertical_motion_with_preferred_column(key)?
         } else {
@@ -85,7 +94,7 @@ impl CoreBridge {
             "[core_bridge] dispatch result: {:?}, preferred_column={:?}, pending_normal_operator={:?}",
             outcome,
             self.preferred_column,
-            self.pending_normal_operator
+            self.pending_normal_command_prefix
         );
         Ok(outcome)
     }
@@ -126,27 +135,74 @@ impl CoreBridge {
             .map_err(CoreSessionError::CommandFailed)?;
         Ok(())
     }
+
+    pub fn current_visual_selection(&mut self) -> Option<VisualSelection> {
+        let snapshot = self.session.snapshot();
+        if !is_visual_mode(snapshot.mode) {
+            return None;
+        }
+        let current = (snapshot.cursor_row, snapshot.cursor_col);
+        self.session
+            .apply_normal_command("o")
+            .map_err(CoreSessionError::CommandFailed)
+            .ok()?;
+        let swapped = self.session.snapshot();
+        let anchor = (swapped.cursor_row, swapped.cursor_col);
+        self.session
+            .apply_normal_command("o")
+            .map_err(CoreSessionError::CommandFailed)
+            .ok()?;
+        let ((start_row, start_col), (end_row, end_col)) = normalize_selection_bounds(
+            anchor,
+            current,
+        );
+        Some(VisualSelection {
+            mode: snapshot.mode,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        })
+    }
 }
 
 impl CoreBridge {
-    fn should_route_through_single_key_normal_path(&self, key: &str) -> bool {
-        self.session.snapshot().mode == vim_core_rs::CoreMode::Normal
-            && key.chars().count() == 1
+    fn should_route_through_pending_aware_key_path(&self, key: &str) -> bool {
+        key.chars().count() == 1
             && !matches!(key, "\x1b")
+            && matches!(
+                self.session.snapshot().mode,
+                vim_core_rs::CoreMode::Normal
+                    | vim_core_rs::CoreMode::Visual
+                    | vim_core_rs::CoreMode::VisualLine
+                    | vim_core_rs::CoreMode::VisualBlock
+            )
     }
 
     fn should_preserve_preferred_column(&self, key: &str) -> bool {
         matches!(key, "j" | "k") && self.session.snapshot().mode == vim_core_rs::CoreMode::Normal
     }
 
-    fn dispatch_single_normal_key(
+    fn dispatch_pending_aware_key(
         &mut self,
         key: &str,
     ) -> Result<CoreCommandOutcome, CoreSessionError> {
-        if let Some(prefix) = self.pending_normal_operator.take() {
+        let mode = self.session.snapshot().mode;
+
+        if let Some(prefix) = self.pending_normal_command_prefix.take() {
             let command = format!("{prefix}{key}");
+            if is_pending_normal_command_prefix(mode, &command) {
+                log::debug!(
+                    "[core_bridge] extending pending normal command prefix: prefix={:?}, key={:?}, command={:?}",
+                    prefix,
+                    key,
+                    command
+                );
+                self.pending_normal_command_prefix = Some(command);
+                return Ok(CoreCommandOutcome::NoChange);
+            }
             log::debug!(
-                "[core_bridge] completing pending normal operator: prefix={:?}, key={:?}, command={:?}",
+                "[core_bridge] completing pending normal command: prefix={:?}, key={:?}, command={:?}",
                 prefix,
                 key,
                 command
@@ -154,12 +210,13 @@ impl CoreBridge {
             return self.execute_normal_command(&command);
         }
 
-        if is_pending_normal_operator(key) {
+        if is_pending_normal_command_prefix(mode, key) {
             log::debug!(
-                "[core_bridge] storing pending normal operator: key={:?}",
+                "[core_bridge] storing pending normal command prefix: mode={:?}, key={:?}",
+                mode,
                 key
             );
-            self.pending_normal_operator = Some(key.to_string());
+            self.pending_normal_command_prefix = Some(key.to_string());
             return Ok(CoreCommandOutcome::NoChange);
         }
 
@@ -237,8 +294,53 @@ impl CoreBridge {
     }
 }
 
-fn is_pending_normal_operator(key: &str) -> bool {
-    matches!(key, "d" | "y" | "c" | ">" | "<" | "=")
+fn is_pending_normal_command_prefix(mode: vim_core_rs::CoreMode, key: &str) -> bool {
+    match mode {
+        vim_core_rs::CoreMode::Normal => matches!(
+            key,
+            "d" | "y"
+                | "c"
+                | ">"
+                | "<"
+                | "="
+                | "di"
+                | "da"
+                | "yi"
+                | "ya"
+                | "ci"
+                | "ca"
+                | ">i"
+                | ">a"
+                | "<i"
+                | "<a"
+                | "=i"
+                | "=a"
+        ),
+        vim_core_rs::CoreMode::Visual
+        | vim_core_rs::CoreMode::VisualLine
+        | vim_core_rs::CoreMode::VisualBlock => matches!(key, "i" | "a"),
+        _ => false,
+    }
+}
+
+fn is_visual_mode(mode: vim_core_rs::CoreMode) -> bool {
+    matches!(
+        mode,
+        vim_core_rs::CoreMode::Visual
+            | vim_core_rs::CoreMode::VisualLine
+            | vim_core_rs::CoreMode::VisualBlock
+    )
+}
+
+fn normalize_selection_bounds(
+    anchor: (usize, usize),
+    cursor: (usize, usize),
+) -> ((usize, usize), (usize, usize)) {
+    if anchor <= cursor {
+        (anchor, cursor)
+    } else {
+        (cursor, anchor)
+    }
 }
 
 fn escape_path_for_file_command(target_path: &Path) -> String {
@@ -726,6 +828,132 @@ mod tests {
             snapshot.text, "second\nthird\n",
             "dd を逐次入力しても現在行が削除されること"
         );
+    }
+
+    #[test]
+    fn sequential_ciw_changes_inner_word() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("alpha beta\n").expect("core bridge should initialize");
+
+        bridge.dispatch_key("w").expect("w で次単語へ移動");
+        bridge.dispatch_key("c").expect("c で operator pending");
+        bridge
+            .dispatch_key("i")
+            .expect("i で text object pending を継続");
+        bridge
+            .dispatch_key("w")
+            .expect("w で inner word を変更対象に確定");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(
+            snapshot.mode,
+            CoreMode::Insert,
+            "ciw 完了後は insert mode に遷移すること"
+        );
+        assert_eq!(
+            snapshot.text, "alpha \n",
+            "ciw でカーソル下の単語だけが削除されること"
+        );
+    }
+
+    #[test]
+    fn sequential_viw_enters_visual_mode_and_selects_inner_word() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new("alpha beta gamma\n").expect("core bridge should initialize");
+
+        bridge.dispatch_key("w").expect("w で次単語へ移動");
+        bridge.dispatch_key("v").expect("v で visual mode へ遷移");
+        bridge
+            .dispatch_key("i")
+            .expect("i で text object pending を継続");
+        bridge
+            .dispatch_key("w")
+            .expect("w で inner word selection を確定");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(
+            snapshot.mode,
+            CoreMode::Visual,
+            "viw 完了後は visual mode を維持すること"
+        );
+        assert_eq!(
+            (snapshot.cursor_row, snapshot.cursor_col),
+            (0, 9),
+            "cursor が単語末尾まで到達すること"
+        );
+        assert_eq!(
+            snapshot.pending_input,
+            vim_core_rs::CorePendingInput::None,
+            "viw 完了後に未解決の pending input を残さないこと"
+        );
+        let visual = bridge
+            .current_visual_selection()
+            .expect("visual selection should be tracked");
+        assert_eq!(
+            (visual.start_row, visual.start_col),
+            (0, 6),
+            "visual selection start が単語先頭を指すこと"
+        );
+        assert_eq!(
+            (visual.end_row, visual.end_col),
+            (0, 9),
+            "visual selection end が単語末尾を指すこと"
+        );
+    }
+
+    #[test]
+    fn sequential_vi_quote_selects_inside_double_quotes() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new(r#"fasdfadfs"fasdfasdfasdfa""#).expect("core bridge should initialize");
+
+        bridge.dispatch_key("f").expect("f dispatch");
+        bridge.dispatch_key("\"").expect("find quote");
+        bridge.dispatch_key("l").expect("move inside quote");
+        bridge.dispatch_key("v").expect("enter visual");
+        bridge.dispatch_key("i").expect("inner text object pending");
+        bridge.dispatch_key("\"").expect("complete inner quote object");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(snapshot.mode, CoreMode::Visual);
+        let visual = bridge
+            .current_visual_selection()
+            .expect("visual selection should be tracked");
+        assert_eq!((visual.start_row, visual.start_col), (0, 10));
+        assert_eq!((visual.end_row, visual.end_col), (0, 23));
+    }
+
+    #[test]
+    fn sequential_ci_quote_deletes_inside_double_quotes_and_enters_insert() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new(r#"fasdfadfs"fasdfasdfasdfa""#).expect("core bridge should initialize");
+
+        bridge.dispatch_key("f").expect("f dispatch");
+        bridge.dispatch_key("\"").expect("find quote");
+        bridge.dispatch_key("l").expect("move inside quote");
+        bridge.dispatch_key("c").expect("change operator pending");
+        bridge.dispatch_key("i").expect("inner text object pending");
+        bridge
+            .dispatch_key("\"")
+            .expect("complete inner quote change object");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(snapshot.mode, CoreMode::Insert);
+        assert_eq!(snapshot.text, "fasdfadfs\"\"\n");
     }
 
     #[test]

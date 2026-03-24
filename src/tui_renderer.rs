@@ -2,8 +2,10 @@ use crate::screen_model::ScreenModel;
 use crate::terminal_lifecycle::TerminalBackend;
 use crossterm::{execute, terminal};
 use ratatui::prelude::*;
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use std::io::{self, Stdout};
+use unicode_width::UnicodeWidthChar;
 
 pub struct CrosstermBackendImpl;
 
@@ -45,8 +47,7 @@ impl TuiRenderer {
                 .constraints([Constraint::Min(1), Constraint::Length(1)].as_ref())
                 .split(size);
 
-            let text: String = model.lines.join("\n");
-            let buffer_content = Paragraph::new(text);
+            let buffer_content = Paragraph::new(render_buffer_text(model));
             f.render_widget(buffer_content, layout[0]);
 
             let status_msg = if let Some(msg) = &model.status_message {
@@ -71,4 +72,73 @@ impl TuiRenderer {
         })?;
         Ok(())
     }
+}
+
+fn render_buffer_text(model: &ScreenModel) -> Text<'static> {
+    let lines = model
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| render_line(model, index, line))
+        .collect::<Vec<_>>();
+    Text::from(lines)
+}
+
+fn render_line(model: &ScreenModel, index: usize, line: &str) -> Line<'static> {
+    let Some(selection) = model.visual_selection else {
+        return Line::from(line.to_string());
+    };
+
+    let row = u16::try_from(index).unwrap_or(u16::MAX);
+    if row < selection.start_row || row > selection.end_row {
+        return Line::from(line.to_string());
+    }
+
+    let start_col = if row == selection.start_row {
+        usize::from(selection.start_col)
+    } else {
+        0
+    };
+    let end_col_exclusive = if row == selection.end_row {
+        usize::from(selection.end_col_exclusive)
+    } else {
+        display_width(line)
+    };
+
+    let (prefix, selected, suffix) = split_line_by_display_columns(line, start_col, end_col_exclusive);
+    Line::from(vec![
+        Span::raw(prefix),
+        Span::styled(selected, Style::default().add_modifier(Modifier::REVERSED)),
+        Span::raw(suffix),
+    ])
+}
+
+fn split_line_by_display_columns(
+    line: &str,
+    start_col: usize,
+    end_col_exclusive: usize,
+) -> (String, String, String) {
+    let mut prefix = String::new();
+    let mut selected = String::new();
+    let mut suffix = String::new();
+    let mut display_col = 0usize;
+
+    for ch in line.chars() {
+        let width = ch.width().unwrap_or(0);
+        let target = if display_col < start_col {
+            &mut prefix
+        } else if display_col < end_col_exclusive {
+            &mut selected
+        } else {
+            &mut suffix
+        };
+        target.push(ch);
+        display_col = display_col.saturating_add(width);
+    }
+
+    (prefix, selected, suffix)
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars().map(|ch| ch.width().unwrap_or(0)).sum()
 }

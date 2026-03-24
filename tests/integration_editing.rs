@@ -201,6 +201,57 @@ fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
     assert_eq!(model.cursor_row, 2, "カーソルが本文領域内へ保たれること");
 }
 
+#[test]
+fn visual_inner_word_selection_is_projected_for_rendering() {
+    let mut outcome = launch_with_content("alpha beta gamma\n");
+    let session_state = EditorSessionState::new(outcome.target_path.clone());
+
+    outcome.core_bridge.dispatch_key("w").expect("w dispatch");
+    outcome.core_bridge.dispatch_key("v").expect("v dispatch");
+    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
+    outcome.core_bridge.dispatch_key("w").expect("w dispatch");
+
+    let snapshot = outcome.core_bridge.snapshot();
+    let visual_selection = outcome.core_bridge.current_visual_selection();
+    let model = project(
+        &ProjectionInput::new(&snapshot, &session_state, None)
+            .with_visual_selection(visual_selection.as_ref()),
+    );
+
+    assert_eq!(model.mode_label, "VISUAL");
+    let selection = model
+        .visual_selection
+        .expect("visual selection should be projected");
+    assert_eq!((selection.start_row, selection.start_col), (0, 6));
+    assert_eq!((selection.end_row, selection.end_col_exclusive), (0, 10));
+}
+
+#[test]
+fn change_inside_double_quotes_deletes_contents_and_clears_visual_selection() {
+    let mut outcome = launch_with_content("fasdfadfs\"fasdfasdfasdfa\"\n");
+    let session_state = EditorSessionState::new(outcome.target_path.clone());
+
+    outcome.core_bridge.dispatch_key("f").expect("f dispatch");
+    outcome.core_bridge.dispatch_key("\"").expect("find quote");
+    outcome.core_bridge.dispatch_key("l").expect("move inside quote");
+    outcome.core_bridge.dispatch_key("c").expect("c dispatch");
+    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
+    outcome.core_bridge.dispatch_key("\"").expect("quote dispatch");
+
+    let snapshot = outcome.core_bridge.snapshot();
+    let visual_selection = outcome.core_bridge.current_visual_selection();
+    let model = project(
+        &ProjectionInput::new(&snapshot, &session_state, None)
+            .with_visual_selection(visual_selection.as_ref()),
+    );
+
+    assert_eq!(snapshot.mode, CoreMode::Insert);
+    assert_eq!(snapshot.text, "fasdfadfs\"\"\n");
+    assert_eq!(model.mode_label, "INSERT");
+    assert!(model.visual_selection.is_none());
+    assert_eq!(model.lines[0], "fasdfadfs\"\"");
+}
+
 // ---- 9.2.3: テキスト入力が ScreenModel の行データに反映される ----
 
 /// インサートモードで入力した文字が ScreenModel の lines に反映される。

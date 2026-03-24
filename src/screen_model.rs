@@ -7,6 +7,7 @@
 use unicode_width::UnicodeWidthChar;
 use vim_core_rs::{CoreMode, CoreSnapshot};
 
+use crate::core_bridge::VisualSelection;
 use crate::editor_session::EditorSessionState;
 
 /// 描画専用 view model。
@@ -27,8 +28,18 @@ pub struct ScreenModel {
     pub cursor_row: u16,
     /// カーソル列（0-indexed）
     pub cursor_col: u16,
+    /// Visual mode の選択範囲（表示セル座標）
+    pub visual_selection: Option<ScreenSelection>,
     /// ステータスメッセージ（エラーや通知）
     pub status_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenSelection {
+    pub start_row: u16,
+    pub start_col: u16,
+    pub end_row: u16,
+    pub end_col_exclusive: u16,
 }
 
 /// 投影の入力をまとめた構造体。
@@ -37,6 +48,7 @@ pub struct ScreenModel {
 pub struct ProjectionInput<'a> {
     pub snapshot: &'a CoreSnapshot,
     pub session_state: &'a EditorSessionState,
+    pub visual_selection: Option<&'a VisualSelection>,
     pub transient_message: Option<&'a str>,
     pub viewport_top: usize,
     pub body_height: usize,
@@ -51,6 +63,7 @@ impl<'a> ProjectionInput<'a> {
         Self {
             snapshot,
             session_state,
+            visual_selection: None,
             transient_message,
             viewport_top: 0,
             body_height: usize::MAX,
@@ -60,6 +73,11 @@ impl<'a> ProjectionInput<'a> {
     pub fn with_viewport(mut self, viewport_top: usize, body_height: usize) -> Self {
         self.viewport_top = viewport_top;
         self.body_height = body_height.max(1);
+        self
+    }
+
+    pub fn with_visual_selection(mut self, visual_selection: Option<&'a VisualSelection>) -> Self {
+        self.visual_selection = visual_selection;
         self
     }
 }
@@ -99,6 +117,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.session_state.line_numbers(),
         input.session_state.number_width(),
     );
+    let visual_selection = resolve_visual_selection(input);
     let status_message = resolve_status_message(input.session_state, input.transient_message);
 
     log::debug!(
@@ -119,8 +138,58 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         lines,
         cursor_row,
         cursor_col,
+        visual_selection,
         status_message,
     }
+}
+
+fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelection> {
+    let selection = input.visual_selection?;
+    let viewport_bottom = input
+        .viewport_top
+        .saturating_add(input.body_height.max(1))
+        .saturating_sub(1);
+    if selection.end_row < input.viewport_top || selection.start_row > viewport_bottom {
+        return None;
+    }
+
+    let start_row = selection.start_row.max(input.viewport_top);
+    let end_row = selection.end_row.min(viewport_bottom);
+    let start_col = if start_row == selection.start_row {
+        resolve_display_col_for_position(
+            &input.snapshot.text,
+            start_row,
+            selection.start_col,
+            input.session_state.tab_size(),
+            input.session_state.line_numbers(),
+            input.session_state.number_width(),
+        )
+    } else {
+        line_number_offset(
+            &input.snapshot.text,
+            input.session_state.line_numbers(),
+            input.session_state.number_width(),
+        )
+    };
+    let end_col_exclusive = if end_row == selection.end_row {
+        resolve_display_col_after_inclusive_position(
+            &input.snapshot.text,
+            end_row,
+            selection.end_col,
+            input.session_state.tab_size(),
+            input.session_state.line_numbers(),
+            input.session_state.number_width(),
+        )
+    } else {
+        u16::MAX
+    };
+
+    Some(ScreenSelection {
+        start_row: resolve_cursor_row(start_row, input.viewport_top, input.body_height),
+        start_col,
+        end_row: resolve_cursor_row(end_row, input.viewport_top, input.body_height),
+        end_col_exclusive,
+    })
 }
 
 fn slice_visible_lines(lines: &[String], viewport_top: usize, body_height: usize) -> Vec<String> {
@@ -220,11 +289,7 @@ fn resolve_cursor_col(
     let clamped_col = cursor_col.min(line.len());
     let boundary_col = clamp_to_char_boundary(line, clamped_col);
     let base_display_col = display_width(&line[..boundary_col], usize::from(tab_size.max(1)));
-    let line_number_offset = if line_numbers {
-        line_number_width(text.lines().count(), number_width) + 1
-    } else {
-        0
-    };
+    let line_number_offset = usize::from(line_number_offset(text, line_numbers, number_width));
     let display_col = base_display_col.saturating_add(line_number_offset);
     let display_col = u16::try_from(display_col).unwrap_or(u16::MAX);
 
@@ -239,6 +304,67 @@ fn resolve_cursor_col(
     );
 
     display_col
+}
+
+fn resolve_display_col_for_position(
+    text: &str,
+    cursor_row: usize,
+    cursor_col: usize,
+    tab_size: u16,
+    line_numbers: bool,
+    number_width: u16,
+) -> u16 {
+    resolve_cursor_col(
+        text,
+        cursor_row,
+        cursor_col,
+        tab_size,
+        line_numbers,
+        number_width,
+    )
+}
+
+fn resolve_display_col_after_inclusive_position(
+    text: &str,
+    cursor_row: usize,
+    cursor_col: usize,
+    tab_size: u16,
+    line_numbers: bool,
+    number_width: u16,
+) -> u16 {
+    let line = text.split('\n').nth(cursor_row).unwrap_or("");
+    if line.is_empty() {
+        return resolve_display_col_for_position(
+            text,
+            cursor_row,
+            cursor_col,
+            tab_size,
+            line_numbers,
+            number_width,
+        );
+    }
+    let clamped_col = clamp_to_char_boundary(line, cursor_col.min(line.len()));
+    let next_col = line[clamped_col..]
+        .chars()
+        .next()
+        .map(|ch| clamped_col + ch.len_utf8())
+        .unwrap_or(clamped_col);
+    resolve_display_col_for_position(
+        text,
+        cursor_row,
+        next_col,
+        tab_size,
+        line_numbers,
+        number_width,
+    )
+}
+
+fn line_number_offset(text: &str, line_numbers: bool, number_width: u16) -> u16 {
+    if line_numbers {
+        u16::try_from(line_number_width(text.lines().count(), number_width) + 1).unwrap_or(u16::MAX)
+    } else {
+        0
+    }
 }
 
 fn line_number_width(line_count: usize, configured_width: u16) -> usize {
@@ -945,6 +1071,7 @@ mod tests {
             lines: vec!["hello".to_string()],
             cursor_row: 0,
             cursor_col: 0,
+            visual_selection: None,
             status_message: None,
         };
 
@@ -955,6 +1082,7 @@ mod tests {
         let _ = &model.lines;
         let _ = model.cursor_row;
         let _ = model.cursor_col;
+        let _ = &model.visual_selection;
         let _ = &model.status_message;
 
         // CoreSnapshot への直接参照は不要（型の独立性）

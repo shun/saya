@@ -104,6 +104,7 @@ async fn main() {
 
     // 初期描画
     let snapshot = outcome.core_bridge.snapshot();
+    let visual_selection = outcome.core_bridge.current_visual_selection();
     let body_height = current_body_height();
     viewport.ensure_cursor_visible(
         snapshot.cursor_row,
@@ -112,6 +113,7 @@ async fn main() {
     );
     let model = project(
         &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
+            .with_visual_selection(visual_selection.as_ref())
             .with_viewport(viewport.top_line(), body_height),
     );
     let _ = renderer.draw(&model);
@@ -259,6 +261,7 @@ async fn main() {
 
         if need_redraw {
             let snapshot = outcome.core_bridge.snapshot();
+            let visual_selection = outcome.core_bridge.current_visual_selection();
             let body_height = current_body_height();
             viewport.ensure_cursor_visible(
                 snapshot.cursor_row,
@@ -267,6 +270,7 @@ async fn main() {
             );
             let model = project(
                 &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
+                    .with_visual_selection(visual_selection.as_ref())
                     .with_viewport(viewport.top_line(), body_height),
             );
             let _ = renderer.draw(&model);
