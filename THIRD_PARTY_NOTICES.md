@@ -8,8 +8,8 @@ its own license terms.
 
 ## `vim-core-rs`
 
-`saya` depends on a local sibling checkout of `vim-core-rs` through a path
-dependency declared in [Cargo.toml](Cargo.toml).
+`saya` depends on the published `vim-core-rs` crate from crates.io, declared in
+[Cargo.toml](Cargo.toml).
 
 At the time this notice was written, `vim-core-rs` states the following
 repository-level license split.
@@ -17,11 +17,10 @@ repository-level license split.
 - Original `vim-core-rs` code is licensed under Apache License 2.0.
 - Vendored and modified Vim sources remain subject to the Vim License.
 
-See these files in the sibling repository for the authoritative text.
+See the crate page and repository for the authoritative text.
 
-- [../vim-core-rs/LICENSE](../vim-core-rs/LICENSE)
-- [../vim-core-rs/LICENSE-vim](../vim-core-rs/LICENSE-vim)
-- [../vim-core-rs/README.md](../vim-core-rs/README.md)
+- [crates.io package page](https://crates.io/crates/vim-core-rs)
+- [vim-core-rs repository](https://github.com/shun/vim-core-rs)
 
 ## Upstream Vim code through `vim-core-rs`
 
@@ -30,8 +29,8 @@ to `vim-core-rs`, redistributions of `saya` binaries may also need to carry the
 relevant Vim notices and license text.
 
 When you redistribute `saya` binaries or source packages that include
-`vim-core-rs` outputs, include at least these files from the sibling
-`vim-core-rs` repository.
+`vim-core-rs` outputs, include the license materials that ship with the
+published crate.
 
 - `LICENSE`
 - `LICENSE-vim`

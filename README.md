@@ -39,21 +39,14 @@ If you want the Japanese entry page, see
 
 ## Build
 
-This repository depends on a sibling checkout of `vim-core-rs`, so you must
-place both repositories under the same parent directory.
-
-```text
-workspace/
-├── saya.main/
-└── vim-core-rs/
-```
+This repository depends on the published `vim-core-rs` crate from crates.io,
+so Cargo downloads it automatically during the build.
 
 Before you build, make sure you have these prerequisites.
 
 - Rust stable
 - `cargo`
 - A C or C++ build toolchain that can build `rusty_v8`
-- A local checkout of `../vim-core-rs`
 
 Run the build from the repository root.
 

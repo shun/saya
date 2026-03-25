@@ -40,21 +40,14 @@
 
 ## ビルド
 
-このリポジトリは sibling path 依存として `vim-core-rs` を参照します。両方の
-リポジトリを同じ親ディレクトリ配下に置いてください。
-
-```text
-workspace/
-├── saya.main/
-└── vim-core-rs/
-```
+このリポジトリは crates.io で公開された `vim-core-rs` crate を参照します。
+そのため、Cargo がビルド時に自動で取得します。
 
 ビルド前に、次の前提を満たしてください。
 
 - Rust stable
 - `cargo`
 - `rusty_v8` をビルドできる C または C++ toolchain
-- `../vim-core-rs` のローカル checkout
 
 リポジトリルートで次を実行します。
 

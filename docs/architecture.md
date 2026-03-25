@@ -106,7 +106,7 @@ architecture vision documented in older planning notes. In the present
 repository state:
 
 - The code is a single Rust crate, not a split Cargo workspace.
-- `vim-core-rs` is consumed through a sibling path dependency.
+- `vim-core-rs` is consumed as a published crates.io dependency.
 - The TUI uses `ratatui` and `crossterm`.
 - The TypeScript runtime uses `deno_core`.
 - The main TUI loop does not yet host the full long-lived runtime callback
