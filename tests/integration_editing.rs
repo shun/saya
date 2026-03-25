@@ -225,6 +225,7 @@ fn visual_inner_word_selection_is_projected_for_rendering() {
         .visual_selection
         .expect("visual selection should be projected");
     assert_eq!((selection.start_row, selection.start_col), (0, 6));
+    assert_eq!(selection.line_start_col, 0);
     assert_eq!((selection.end_row, selection.end_col_exclusive), (0, 10));
 }
 

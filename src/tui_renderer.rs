@@ -107,7 +107,7 @@ fn render_line(model: &ScreenModel, index: usize, line: &str) -> Line<'static> {
     let start_col = if row == selection.start_row {
         usize::from(selection.start_col)
     } else {
-        0
+        usize::from(selection.line_start_col)
     };
     let end_col_exclusive = if row == selection.end_row {
         usize::from(selection.end_col_exclusive)
@@ -170,6 +170,7 @@ mod tests {
             visual_selection: Some(ScreenSelection {
                 start_row: 0,
                 start_col: 0,
+                line_start_col: 0,
                 end_row: 0,
                 end_col_exclusive: 1,
             }),
@@ -196,5 +197,33 @@ mod tests {
         let model = screen_model_with_message(None);
 
         assert_eq!(render_message_line(&model), "");
+    }
+
+    #[test]
+    fn multiline_selection_does_not_highlight_line_number_gutter() {
+        let model = ScreenModel {
+            file_name: "test.txt".to_string(),
+            mode_label: "V-LINE".to_string(),
+            dirty: false,
+            lines: vec![" 1 alpha".to_string(), " 2 beta".to_string()],
+            cursor_row: 1,
+            cursor_col: 3,
+            visual_selection: Some(ScreenSelection {
+                start_row: 0,
+                start_col: 3,
+                line_start_col: 3,
+                end_row: 1,
+                end_col_exclusive: 7,
+            }),
+            message_line: None,
+        };
+
+        let text = render_buffer_text(&model);
+        let second_line = &text.lines[1];
+
+        assert_eq!(second_line.spans.len(), 3);
+        assert_eq!(second_line.spans[0].content.as_ref(), " 2 ");
+        assert_eq!(second_line.spans[1].content.as_ref(), "beta");
+        assert_eq!(second_line.spans[2].content.as_ref(), "");
     }
 }

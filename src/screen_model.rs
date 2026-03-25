@@ -38,6 +38,7 @@ pub struct ScreenModel {
 pub struct ScreenSelection {
     pub start_row: u16,
     pub start_col: u16,
+    pub line_start_col: u16,
     pub end_row: u16,
     pub end_col_exclusive: u16,
 }
@@ -155,7 +156,14 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
 
     let start_row = selection.start_row.max(input.viewport_top);
     let end_row = selection.end_row.min(viewport_bottom);
-    let start_col = if start_row == selection.start_row {
+    let line_start_col = line_number_offset(
+        &input.snapshot.text,
+        input.session_state.line_numbers(),
+        input.session_state.number_width(),
+    );
+    let start_col = if selection.mode == CoreMode::VisualLine {
+        line_start_col
+    } else if start_row == selection.start_row {
         resolve_display_col_for_position(
             &input.snapshot.text,
             start_row,
@@ -165,13 +173,17 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
             input.session_state.number_width(),
         )
     } else {
-        line_number_offset(
+        line_start_col
+    };
+    let end_col_exclusive = if selection.mode == CoreMode::VisualLine {
+        visible_line_end_col_exclusive(
             &input.snapshot.text,
+            end_row,
+            input.session_state.tab_size(),
             input.session_state.line_numbers(),
             input.session_state.number_width(),
         )
-    };
-    let end_col_exclusive = if end_row == selection.end_row {
+    } else if end_row == selection.end_row {
         resolve_display_col_after_inclusive_position(
             &input.snapshot.text,
             end_row,
@@ -187,6 +199,7 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
     Some(ScreenSelection {
         start_row: resolve_cursor_row(start_row, input.viewport_top, input.body_height),
         start_col,
+        line_start_col,
         end_row: resolve_cursor_row(end_row, input.viewport_top, input.body_height),
         end_col_exclusive,
     })
@@ -365,6 +378,17 @@ fn line_number_offset(text: &str, line_numbers: bool, number_width: u16) -> u16 
     } else {
         0
     }
+}
+
+fn visible_line_end_col_exclusive(
+    text: &str,
+    row: usize,
+    tab_size: u16,
+    line_numbers: bool,
+    number_width: u16,
+) -> u16 {
+    let line = text.split('\n').nth(row).unwrap_or("");
+    resolve_display_col_for_position(text, row, line.len(), tab_size, line_numbers, number_width)
 }
 
 fn line_number_width(line_count: usize, configured_width: u16) -> usize {
@@ -991,6 +1015,70 @@ mod tests {
 
         assert_eq!(model.lines[0], "   1 alpha");
         assert_eq!(model.lines[1], "   2 beta");
+    }
+
+    #[test]
+    fn projects_visual_selection_with_line_number_gutter_offset() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("alpha\nbeta\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+        let visual_selection = VisualSelection {
+            mode: CoreMode::VisualLine,
+            start_row: 0,
+            start_col: 0,
+            end_row: 1,
+            end_col: 3,
+        };
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_visual_selection(Some(&visual_selection)),
+        );
+        let selection = model
+            .visual_selection
+            .expect("visual selection should be projected");
+
+        assert_eq!(selection.start_col, 5);
+        assert_eq!(selection.line_start_col, 5);
+        assert_eq!(selection.end_col_exclusive, 9);
+    }
+
+    #[test]
+    fn projects_visual_line_selection_as_full_lines() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("aaa\nbbbb\ncc\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let visual_selection = VisualSelection {
+            mode: CoreMode::VisualLine,
+            start_row: 1,
+            start_col: 3,
+            end_row: 2,
+            end_col: 0,
+        };
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_visual_selection(Some(&visual_selection)),
+        );
+        let selection = model
+            .visual_selection
+            .expect("visual selection should be projected");
+
+        assert_eq!(selection.start_row, 1);
+        assert_eq!(selection.start_col, 0);
+        assert_eq!(selection.line_start_col, 0);
+        assert_eq!(selection.end_row, 2);
+        assert_eq!(selection.end_col_exclusive, 2);
     }
 
     #[test]
