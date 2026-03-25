@@ -52,6 +52,7 @@ impl CoreBridge {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push_back(event);
         }));
+        configure_message_suppression(&mut session).map_err(CoreSessionError::CommandFailed)?;
         log::debug!("[core_bridge] vim-core-rs session initialized");
         Ok(Self {
             session,
@@ -363,6 +364,14 @@ impl CoreBridge {
             snapshot.cursor_col
         );
     }
+}
+
+fn configure_message_suppression(
+    session: &mut VimCoreSession,
+) -> Result<(), vim_core_rs::CoreCommandError> {
+    log::debug!("[core_bridge] configuring Vim message suppression: report=999999, shortmess+=F");
+    session.apply_ex_command(":set report=999999 shortmess+=F")?;
+    Ok(())
 }
 
 fn is_pending_normal_command_prefix(mode: vim_core_rs::CoreMode, key: &str) -> bool {
@@ -934,6 +943,24 @@ mod tests {
         assert_eq!(
             snapshot.text, "first\nfirst\nsecond\n",
             "yyp で現在行が複製されること"
+        );
+    }
+
+    #[test]
+    fn new_configures_high_report_threshold_to_suppress_bulk_edit_messages() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new("first\nsecond\nthird\n").expect("core bridge should initialize");
+        assert!(
+            bridge
+                .session
+                .eval_string("&report")
+                .as_deref()
+                .is_some_and(|report| report.trim() == "999999"),
+            "複数行操作の報告メッセージ抑制のため report が引き上げられていること"
         );
     }
 
