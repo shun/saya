@@ -1,8 +1,11 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use vim_core_rs::{
-    CoreCommandOutcome, CoreHostAction, CoreSessionError, CoreSnapshot, VimCoreSession,
+    CoreCommandOutcome, CoreHostAction, CoreMessageEvent, CoreMessageKind, CoreSessionError,
+    CoreSnapshot, VimCoreSession,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +21,7 @@ pub struct CoreBridge {
     session: VimCoreSession,
     preferred_column: Option<usize>,
     pending_normal_command_prefix: Option<String>,
+    pending_messages: Arc<Mutex<VecDeque<CoreMessageEvent>>>,
 }
 
 impl fmt::Debug for CoreBridge {
@@ -34,12 +38,26 @@ impl CoreBridge {
             "[core_bridge] initializing vim-core-rs session: initial_text_len={}",
             initial_text.len()
         );
-        let session = VimCoreSession::new(initial_text)?;
+        let mut session = VimCoreSession::new(initial_text)?;
+        let pending_messages = Arc::new(Mutex::new(VecDeque::new()));
+        let handler_queue = pending_messages.clone();
+        session.set_message_handler(Box::new(move |event: CoreMessageEvent| {
+            log::debug!(
+                "[core_bridge] queued core message: kind={:?}, content={:?}",
+                event.kind,
+                event.content
+            );
+            handler_queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_back(event);
+        }));
         log::debug!("[core_bridge] vim-core-rs session initialized");
         Ok(Self {
             session,
             preferred_column: None,
             pending_normal_command_prefix: None,
+            pending_messages,
         })
     }
 
@@ -75,6 +93,19 @@ impl CoreBridge {
         actions
     }
 
+    pub fn take_pending_messages(&mut self) -> Vec<CoreMessageEvent> {
+        let mut queue = self
+            .pending_messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let messages = queue.drain(..).collect::<Vec<_>>();
+        log::debug!(
+            "[core_bridge] drained pending core messages: count={}",
+            messages.len()
+        );
+        messages
+    }
+
     /// キー入力を vim-core-rs セッションに適用する。
     /// ノーマルモードコマンドとして解釈し、結果を返す。
     pub fn dispatch_key(&mut self, key: &str) -> Result<CoreCommandOutcome, CoreSessionError> {
@@ -83,7 +114,9 @@ impl CoreBridge {
             key,
             key.len()
         );
-        let outcome = if self.should_route_through_pending_aware_key_path(key) {
+        let outcome = if self.should_handle_ctrl_c_interrupt(key) {
+            self.handle_ctrl_c_interrupt()?
+        } else if self.should_route_through_pending_aware_key_path(key) {
             self.dispatch_pending_aware_key(key)?
         } else if self.should_preserve_preferred_column(key) {
             self.dispatch_vertical_motion_with_preferred_column(key)?
@@ -165,6 +198,46 @@ impl CoreBridge {
 }
 
 impl CoreBridge {
+    fn should_handle_ctrl_c_interrupt(&self, key: &str) -> bool {
+        key == "\u{3}"
+            && matches!(
+                self.session.snapshot().mode,
+                vim_core_rs::CoreMode::Normal
+                    | vim_core_rs::CoreMode::Visual
+                    | vim_core_rs::CoreMode::VisualLine
+                    | vim_core_rs::CoreMode::VisualBlock
+            )
+    }
+
+    fn handle_ctrl_c_interrupt(&mut self) -> Result<CoreCommandOutcome, CoreSessionError> {
+        let snapshot = self.session.snapshot();
+        let no_reason = self.pending_normal_command_prefix.is_none();
+        self.pending_normal_command_prefix = None;
+        log::debug!(
+            "[core_bridge] handling ctrl-c interrupt: dirty={}, mode={:?}, no_reason={}",
+            snapshot.dirty,
+            snapshot.mode,
+            no_reason
+        );
+
+        if no_reason {
+            let content = if snapshot.dirty {
+                "Type  :qa!  and press <Enter> to abandon all changes and exit Vim"
+            } else {
+                "Type  :qa  and press <Enter> to exit Vim"
+            };
+            self.pending_messages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push_back(CoreMessageEvent {
+                    kind: CoreMessageKind::Normal,
+                    content: content.to_string(),
+                });
+        }
+
+        Ok(CoreCommandOutcome::NoChange)
+    }
+
     fn should_route_through_pending_aware_key_path(&self, key: &str) -> bool {
         key.chars().count() == 1
             && !matches!(key, "\x1b")
@@ -358,7 +431,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use vim_core_rs::CoreMode;
+    use vim_core_rs::{CoreMessageKind, CoreMode};
 
     use super::CoreBridge;
 
@@ -399,6 +472,17 @@ mod tests {
         let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
 
         assert!(bridge.take_pending_host_actions().is_empty());
+    }
+
+    #[test]
+    fn starts_with_no_pending_core_messages() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+
+        assert!(bridge.take_pending_messages().is_empty());
     }
 
     #[test]
@@ -459,6 +543,54 @@ mod tests {
         assert_eq!(snapshot.text, "buffer text\n");
         assert!(!snapshot.dirty);
         assert_eq!(snapshot.mode, CoreMode::Normal);
+    }
+
+    #[test]
+    fn message_handler_captures_echoerr_messages() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
+
+        bridge
+            .apply_ex_command("echoerr 'test error message'")
+            .expect("echoerr command should complete");
+        let messages = bridge.take_pending_messages();
+
+        assert!(
+            messages.iter().any(|message| {
+                message.kind == CoreMessageKind::Error
+                    && message.content.contains("test error message")
+            }),
+            "echoerr message should be queued: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn dirty_ctrl_c_queues_upstream_exit_guidance_message() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
+        bridge.dispatch_key("i").expect("insert mode");
+        bridge.dispatch_key("X").expect("typed input");
+        bridge.dispatch_key("\x1b").expect("normal mode");
+
+        bridge
+            .dispatch_key("\u{3}")
+            .expect("ctrl-c should dispatch");
+        let messages = bridge.take_pending_messages();
+
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content.contains(":qa!")),
+            "ctrl-c guidance should mention :qa!: {:?}",
+            messages
+        );
     }
 
     // ---- タスク 4.1: モード遷移テスト ----

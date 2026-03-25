@@ -10,7 +10,7 @@ use saya::screen_model::{ProjectionInput, project};
 use saya::terminal_lifecycle::TerminalLifecycle;
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::ViewportState;
-use vim_core_rs::CoreMode;
+use vim_core_rs::{CoreMessageEvent, CoreMode};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +60,8 @@ async fn main() {
     let mut session_state = outcome.editor_session_state();
     let mut transient_msg: Option<String> = None;
     let mut viewport = ViewportState::new();
+    let mut command_line_mode = false;
+    let mut command_line_buffer = String::new();
 
     // イベントループ初期化
     let (mut coordinator, sender) = EventLoopCoordinator::new();
@@ -73,9 +75,6 @@ async fn main() {
         run_terminal_input_loop(&mut source, input_sender, input_stop_for_task);
     });
 
-    let mut command_line_mode = false;
-    let mut command_line_buffer = String::new();
-
     // 初期描画
     let snapshot = outcome.core_bridge.snapshot();
     let visual_selection = outcome.core_bridge.current_visual_selection();
@@ -86,9 +85,18 @@ async fn main() {
         buffer_line_count(&snapshot.text),
     );
     let model = project(
-        &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
-            .with_visual_selection(visual_selection.as_ref())
-            .with_viewport(viewport.top_line(), body_height),
+        &ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            visible_message_line(
+                command_line_mode,
+                &command_line_buffer,
+                transient_msg.as_deref(),
+            )
+            .as_deref(),
+        )
+        .with_visual_selection(visual_selection.as_ref())
+        .with_viewport(viewport.top_line(), body_height),
     );
     let _ = renderer.draw(&model);
 
@@ -117,33 +125,31 @@ async fn main() {
                             KeyInput::Escape => {
                                 command_line_mode = false;
                                 command_line_buffer.clear();
-                                transient_msg = None;
                             }
                             KeyInput::Enter => {
                                 let cmd = format!(":{}", command_line_buffer);
                                 command_line_mode = false;
                                 command_line_buffer.clear();
-                                transient_msg = None;
                                 if let Some(message) =
                                     apply_local_ex_command(&mut session_state, &cmd)
                                 {
                                     transient_msg = Some(message);
                                 } else {
                                     let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                    update_transient_message_from_core(
+                                        &mut outcome.core_bridge,
+                                        &mut transient_msg,
+                                    );
                                 }
                                 session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
                             }
                             KeyInput::Backspace => {
                                 if command_line_buffer.pop().is_none() {
                                     command_line_mode = false;
-                                    transient_msg = None;
-                                } else {
-                                    transient_msg = Some(format!(":{}", command_line_buffer));
                                 }
                             }
                             KeyInput::Char(c) => {
                                 command_line_buffer.push(c);
-                                transient_msg = Some(format!(":{}", command_line_buffer));
                             }
                             _ => {}
                         }
@@ -162,7 +168,6 @@ async fn main() {
                     {
                         command_line_mode = true;
                         command_line_buffer.clear();
-                        transient_msg = Some(":".to_string());
                         handled = true;
                         need_redraw = true;
                     }
@@ -172,6 +177,10 @@ async fn main() {
                         match intent {
                             EditorIntent::EditKey(k) => {
                                 let _ = outcome.core_bridge.dispatch_key(&k);
+                                update_transient_message_from_core(
+                                    &mut outcome.core_bridge,
+                                    &mut transient_msg,
+                                );
 
                                 if let Some(reason) = process_pending_host_actions(
                                     &mut outcome,
@@ -227,9 +236,18 @@ async fn main() {
                 buffer_line_count(&snapshot.text),
             );
             let model = project(
-                &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
-                    .with_visual_selection(visual_selection.as_ref())
-                    .with_viewport(viewport.top_line(), body_height),
+                &ProjectionInput::new(
+                    &snapshot,
+                    &session_state,
+                    visible_message_line(
+                        command_line_mode,
+                        &command_line_buffer,
+                        transient_msg.as_deref(),
+                    )
+                    .as_deref(),
+                )
+                .with_visual_selection(visual_selection.as_ref())
+                .with_viewport(viewport.top_line(), body_height),
             );
             let _ = renderer.draw(&model);
         }
@@ -337,6 +355,44 @@ fn save_error_message(error: &SaveRequestError) -> String {
     }
 }
 
+fn update_transient_message_from_core(
+    core_bridge: &mut saya::core_bridge::CoreBridge,
+    transient_msg: &mut Option<String>,
+) {
+    if let Some(message) = latest_non_empty_message(core_bridge.take_pending_messages()) {
+        log::debug!(
+            "[main] replacing transient message from core: {:?}",
+            message
+        );
+        *transient_msg = Some(message);
+    }
+}
+
+fn latest_non_empty_message(messages: Vec<CoreMessageEvent>) -> Option<String> {
+    messages
+        .into_iter()
+        .filter_map(|event| {
+            let trimmed = event.content.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .last()
+}
+
+fn visible_message_line(
+    command_line_mode: bool,
+    command_line_buffer: &str,
+    transient_msg: Option<&str>,
+) -> Option<String> {
+    if command_line_mode {
+        return Some(format!(":{}", command_line_buffer));
+    }
+    transient_msg.map(ToString::to_string)
+}
+
 fn shutdown_reason_from_quit_decision(
     decision: QuitDecision,
     force: bool,
@@ -364,8 +420,9 @@ fn shutdown_reason_from_quit_decision(
 fn current_body_height() -> usize {
     let rows = crossterm::terminal::size()
         .map(|(_, rows)| rows)
-        .unwrap_or(2);
-    usize::from(rows.saturating_sub(1).max(1))
+        .unwrap_or(3);
+    // 本文 + status line + message line の 3 段構成を前提に本文高さを計算する。
+    usize::from(rows.saturating_sub(2).max(1))
 }
 
 fn buffer_line_count(text: &str) -> usize {
@@ -474,6 +531,39 @@ mod tests {
         let message = save_error_message(&SaveRequestError::ReadOnly);
 
         assert_eq!(message, "Read-only option is set; add ! to override");
+    }
+
+    #[test]
+    fn visible_message_line_prefers_command_line_preview() {
+        let visible = visible_message_line(true, "q!", Some("saved"));
+
+        assert_eq!(visible, Some(":q!".to_string()));
+    }
+
+    #[test]
+    fn visible_message_line_restores_transient_message_after_command_line() {
+        let visible = visible_message_line(false, "", Some("vim core message"));
+
+        assert_eq!(visible, Some("vim core message".to_string()));
+    }
+
+    #[test]
+    fn latest_non_empty_message_returns_last_core_message() {
+        let messages = vec![
+            CoreMessageEvent {
+                kind: vim_core_rs::CoreMessageKind::Normal,
+                content: "first".to_string(),
+            },
+            CoreMessageEvent {
+                kind: vim_core_rs::CoreMessageKind::Error,
+                content: "second".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            latest_non_empty_message(messages),
+            Some("second".to_string())
+        );
     }
 
     #[test]

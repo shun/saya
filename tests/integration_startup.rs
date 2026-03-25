@@ -73,7 +73,7 @@ fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
     assert_eq!(model.mode_label, "NORMAL");
     assert!(!model.dirty);
     assert!(!model.lines.is_empty(), "行データが存在すること");
-    assert_eq!(model.status_message, None);
+    assert_eq!(model.message_line, None);
 
     // クリーンアップ
     std::fs::remove_file(&target_path).expect("テストファイルの削除");

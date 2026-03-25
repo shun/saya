@@ -44,26 +44,23 @@ impl TuiRenderer {
 
             let layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)].as_ref())
+                .constraints(
+                    [
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ]
+                    .as_ref(),
+                )
                 .split(size);
 
             let buffer_content = Paragraph::new(render_buffer_text(model));
             f.render_widget(buffer_content, layout[0]);
 
-            let status_msg = if let Some(msg) = &model.status_message {
-                format!("{} | {} | {}", model.file_name, model.mode_label, msg)
-            } else {
-                format!("{} | {}", model.file_name, model.mode_label)
-            };
-            let status_msg = if model.dirty {
-                format!("{} [+]!", status_msg)
-            } else {
-                status_msg
-            };
-
-            let status_bar = Paragraph::new(status_msg)
+            let status_bar = Paragraph::new(render_status_line(model))
                 .style(Style::default().bg(Color::White).fg(Color::Black));
             f.render_widget(status_bar, layout[1]);
+            f.render_widget(Paragraph::new(render_message_line(model)), layout[2]);
 
             // Set cursor
             if model.cursor_row < layout[0].height {
@@ -72,6 +69,19 @@ impl TuiRenderer {
         })?;
         Ok(())
     }
+}
+
+fn render_status_line(model: &ScreenModel) -> String {
+    let status = format!("{} | {}", model.file_name, model.mode_label);
+    if model.dirty {
+        format!("{status} [+]!")
+    } else {
+        status
+    }
+}
+
+fn render_message_line(model: &ScreenModel) -> &str {
+    model.message_line.as_deref().unwrap_or("")
 }
 
 fn render_buffer_text(model: &ScreenModel) -> Text<'static> {
@@ -142,4 +152,49 @@ fn split_line_by_display_columns(
 
 fn display_width(text: &str) -> usize {
     text.chars().map(|ch| ch.width().unwrap_or(0)).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screen_model::ScreenSelection;
+
+    fn screen_model_with_message(message_line: Option<&str>) -> ScreenModel {
+        ScreenModel {
+            file_name: "test.txt".to_string(),
+            mode_label: "NORMAL".to_string(),
+            dirty: true,
+            lines: vec!["hello".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: Some(ScreenSelection {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col_exclusive: 1,
+            }),
+            message_line: message_line.map(ToString::to_string),
+        }
+    }
+
+    #[test]
+    fn status_line_does_not_embed_message_line() {
+        let model = screen_model_with_message(Some("保存しました"));
+
+        assert_eq!(render_status_line(&model), "test.txt | NORMAL [+]!");
+    }
+
+    #[test]
+    fn message_line_uses_transient_message_area() {
+        let model = screen_model_with_message(Some("保存しました"));
+
+        assert_eq!(render_message_line(&model), "保存しました");
+    }
+
+    #[test]
+    fn message_line_is_empty_when_no_message_exists() {
+        let model = screen_model_with_message(None);
+
+        assert_eq!(render_message_line(&model), "");
+    }
 }

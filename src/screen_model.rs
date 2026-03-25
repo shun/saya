@@ -30,8 +30,8 @@ pub struct ScreenModel {
     pub cursor_col: u16,
     /// Visual mode の選択範囲（表示セル座標）
     pub visual_selection: Option<ScreenSelection>,
-    /// ステータスメッセージ（エラーや通知）
-    pub status_message: Option<String>,
+    /// メッセージ欄に表示する通知（エラーやガイダンス）
+    pub message_line: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,17 +118,17 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.session_state.number_width(),
     );
     let visual_selection = resolve_visual_selection(input);
-    let status_message = resolve_status_message(input.session_state, input.transient_message);
+    let message_line = resolve_message_line(input.session_state, input.transient_message);
 
     log::debug!(
-        "[screen_model] projected: file_name={:?}, mode_label={:?}, dirty={}, lines_count={}, cursor=({},{}), status_message={:?}",
+        "[screen_model] projected: file_name={:?}, mode_label={:?}, dirty={}, lines_count={}, cursor=({},{}), message_line={:?}",
         file_name,
         mode_label,
         dirty,
         lines.len(),
         cursor_row,
         cursor_col,
-        status_message,
+        message_line,
     );
 
     ScreenModel {
@@ -139,7 +139,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_row,
         cursor_col,
         visual_selection,
-        status_message,
+        message_line,
     }
 }
 
@@ -441,25 +441,25 @@ fn char_display_width(ch: char) -> usize {
     UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
-/// ステータスメッセージを解決する。
+/// メッセージ欄の内容を解決する。
 ///
 /// transient_message が指定されていればそれを優先し、
 /// なければ session_state の last_save_error を表示する。
-fn resolve_status_message(
+fn resolve_message_line(
     session_state: &EditorSessionState,
     transient_message: Option<&str>,
 ) -> Option<String> {
     if let Some(msg) = transient_message {
-        log::debug!("[screen_model] status message from transient: {:?}", msg);
+        log::debug!("[screen_model] message line from transient: {:?}", msg);
         return Some(msg.to_string());
     }
 
     if let Some(error) = session_state.last_save_error() {
-        log::debug!("[screen_model] status message from save error: {:?}", error);
+        log::debug!("[screen_model] message line from save error: {:?}", error);
         return Some(format!("保存失敗: {}", error));
     }
 
-    log::debug!("[screen_model] no status message");
+    log::debug!("[screen_model] no message line");
     None
 }
 
@@ -693,10 +693,10 @@ mod tests {
         assert_eq!(model2.cursor_row, 1, "カーソル行が再描画で追随すること");
     }
 
-    // ---- タスク 6.3: status message を描画モデルへ取り込むテスト ----
+    // ---- タスク 6.3: message line を描画モデルへ取り込むテスト ----
 
     #[test]
-    fn projects_no_status_message_in_normal_state() {
+    fn projects_no_message_line_in_normal_state() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -707,14 +707,11 @@ mod tests {
 
         let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
-        assert_eq!(
-            model.status_message, None,
-            "通常状態ではステータスメッセージなし"
-        );
+        assert_eq!(model.message_line, None, "通常状態ではメッセージ欄は空");
     }
 
     #[test]
-    fn projects_save_failure_as_status_message() {
+    fn projects_save_failure_as_message_line() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -727,14 +724,14 @@ mod tests {
         let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
         assert_eq!(
-            model.status_message,
+            model.message_line,
             Some("保存失敗: disk full".to_string()),
-            "保存失敗メッセージが status_message に反映されること"
+            "保存失敗メッセージが message_line に反映されること"
         );
     }
 
     #[test]
-    fn projects_transient_message_over_save_error() {
+    fn projects_transient_message_over_save_error_in_message_line() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -751,7 +748,7 @@ mod tests {
         ));
 
         assert_eq!(
-            model.status_message,
+            model.message_line,
             Some("未保存の変更があります".to_string()),
             "transient_message が save error より優先されること"
         );
@@ -774,7 +771,7 @@ mod tests {
         ));
 
         assert_eq!(
-            model.status_message,
+            model.message_line,
             Some("未保存の変更があります。:q! で強制終了できます".to_string()),
             "未保存警告が transient_message として投影されること"
         );
@@ -797,14 +794,14 @@ mod tests {
         ));
 
         assert_eq!(
-            model.status_message,
+            model.message_line,
             Some("設定の読み込みに失敗しました".to_string()),
             "設定失敗メッセージが投影されること"
         );
     }
 
     #[test]
-    fn clears_status_message_after_save_success() {
+    fn clears_message_line_after_save_success() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -816,14 +813,14 @@ mod tests {
         // 保存失敗を記録
         session_state.record_save_failure("error".to_string());
         let model1 = project(&ProjectionInput::new(&snapshot, &session_state, None));
-        assert!(model1.status_message.is_some());
+        assert!(model1.message_line.is_some());
 
         // 保存成功を記録
         session_state.record_save_success();
         let model2 = project(&ProjectionInput::new(&snapshot, &session_state, None));
         assert_eq!(
-            model2.status_message, None,
-            "保存成功後はステータスメッセージがクリアされること"
+            model2.message_line, None,
+            "保存成功後はメッセージ欄がクリアされること"
         );
     }
 
@@ -844,7 +841,7 @@ mod tests {
         ));
 
         assert_eq!(
-            model.status_message,
+            model.message_line,
             Some("保存しました".to_string()),
             "成功メッセージが transient として投影されること"
         );
@@ -1055,10 +1052,7 @@ mod tests {
         assert!(!model.mode_label.is_empty(), "モードラベルは空でないこと");
         assert!(model.dirty, "編集後は dirty=true であること");
         assert!(!model.lines.is_empty(), "行データは空でないこと");
-        assert!(
-            model.status_message.is_some(),
-            "ステータスメッセージが存在すること"
-        );
+        assert!(model.message_line.is_some(), "メッセージ欄が存在すること");
     }
 
     #[test]
@@ -1072,7 +1066,7 @@ mod tests {
             cursor_row: 0,
             cursor_col: 0,
             visual_selection: None,
-            status_message: None,
+            message_line: None,
         };
 
         // ScreenModel の各フィールドにアクセスできること（コンパイル時検証）
@@ -1083,7 +1077,7 @@ mod tests {
         let _ = model.cursor_row;
         let _ = model.cursor_col;
         let _ = &model.visual_selection;
-        let _ = &model.status_message;
+        let _ = &model.message_line;
 
         // CoreSnapshot への直接参照は不要（型の独立性）
         assert_eq!(

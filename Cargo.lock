@@ -1950,9 +1950,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vim-core-rs"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b720010e7cbe67572c72246f0ecc8d300b6e37f197baccf8b2a3792d1c670ed0"
+checksum = "b8a47ba5a745c2a972bd31b9cf3c58ec9be5db906b8197eed8e698323c8c3cc0"
 dependencies = [
  "bindgen",
  "cc",

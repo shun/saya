@@ -1,7 +1,7 @@
 //! 統合テスト: terminal lifecycle と表示更新の検証
 //!
 //! terminal 切り替えと restore が起動終了で成立することを確認する。
-//! file name、mode、dirty、status message が表示へ反映されることを確認する。
+//! file name、mode、dirty、message line が表示へ反映されることを確認する。
 //! Requirements: 2.5, 3.1, 3.4
 
 use std::io;
@@ -74,7 +74,7 @@ fn terminal_lifecycle_start_and_restore() {
     );
 }
 
-// ---- 9.4.2: file name, mode, dirty, status message が表示へ反映されること ----
+// ---- 9.4.2: file name, mode, dirty, message line が表示へ反映されること ----
 
 #[test]
 fn display_model_reflects_editor_state_and_messages() {
@@ -100,7 +100,7 @@ fn display_model_reflects_editor_state_and_messages() {
     assert_eq!(model.file_name, target_path.display().to_string());
     assert_eq!(model.mode_label, "NORMAL");
     assert!(!model.dirty);
-    assert_eq!(model.status_message, None);
+    assert_eq!(model.message_line, None);
 
     // 編集とメッセージ設定
     outcome.core_bridge.dispatch_key("i").unwrap();
@@ -120,7 +120,7 @@ fn display_model_reflects_editor_state_and_messages() {
     assert!(model2.dirty);
 
     // transient_message が優先される想定
-    assert_eq!(model2.status_message, Some("Action failed".to_string()));
+    assert_eq!(model2.message_line, Some("Action failed".to_string()));
 
     // transient なしなら save error が出るはず
     let model3 = project(&ProjectionInput::new(
@@ -130,7 +130,48 @@ fn display_model_reflects_editor_state_and_messages() {
     ));
 
     assert_eq!(
-        model3.status_message,
+        model3.message_line,
         Some("保存失敗: Permission denied".to_string())
+    );
+}
+
+#[test]
+fn ctrl_c_guidance_projects_into_message_line() {
+    let mut outcome = prepare_launch(LaunchRequest::default()).unwrap();
+    let mut session_state = EditorSessionState::new(outcome.target_path.clone());
+
+    outcome.core_bridge.dispatch_key("i").unwrap();
+    outcome.core_bridge.dispatch_key("X").unwrap();
+    outcome.core_bridge.dispatch_key("\x1b").unwrap();
+    outcome.core_bridge.dispatch_key("\u{3}").unwrap();
+
+    let latest_message = outcome
+        .core_bridge
+        .take_pending_messages()
+        .into_iter()
+        .filter_map(|message| {
+            let trimmed = message.content.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .last();
+
+    session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+    let model = project(&ProjectionInput::new(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        latest_message.as_deref(),
+    ));
+
+    assert!(
+        model
+            .message_line
+            .as_deref()
+            .is_some_and(|message| message.contains(":qa!")),
+        "Ctrl+C guidance should surface in the message line: {:?}",
+        model.message_line
     );
 }
