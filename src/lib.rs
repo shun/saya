@@ -1,3 +1,4 @@
+pub mod app_paths;
 pub mod app_startup;
 pub mod bootstrap;
 pub mod callback_registry_seed;

@@ -903,6 +903,8 @@ fn render_help_text() -> String {
         "  -                Read text from stdin",
         "  -u <init.ts>     Use <init.ts> as startup config",
         "  --config <path>  Use <path> as startup config",
+        "                    Default: $XDG_CONFIG_HOME/saya/init.ts",
+        "                    Fallback: $HOME/.config/saya/init.ts",
         "  +                Start at end of file",
         "  +<lnum>          Start at line <lnum>",
         "  -R               Read-only mode",
@@ -1144,6 +1146,8 @@ mod tests {
         assert!(help.contains("Usage: sy [arguments] [file]"));
         assert!(help.contains("  --               Only file names after this"));
         assert!(help.contains("  -                Read text from stdin"));
+        assert!(help.contains("Default: $XDG_CONFIG_HOME/saya/init.ts"));
+        assert!(help.contains("Fallback: $HOME/.config/saya/init.ts"));
         assert!(help.contains("  +<lnum>          Start at line <lnum>"));
         assert!(help.contains("  -R               Read-only mode"));
         assert!(help.contains("  --version        Print version information and exit"));
