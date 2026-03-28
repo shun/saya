@@ -132,14 +132,13 @@ fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
 // host-integration: visual selection projection for rendering is host-side
 // coverage.
 #[test]
-fn visual_inner_word_selection_is_projected_for_rendering() {
+fn visual_selection_is_projected_for_rendering() {
     let mut outcome = launch_with_content("alpha beta gamma\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
-    outcome.core_bridge.dispatch_key("w").expect("w dispatch");
     outcome.core_bridge.dispatch_key("v").expect("v dispatch");
-    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
-    outcome.core_bridge.dispatch_key("w").expect("w dispatch");
+    outcome.core_bridge.dispatch_key("l").expect("l dispatch");
+    outcome.core_bridge.dispatch_key("l").expect("l dispatch");
 
     let snapshot = outcome.core_bridge.snapshot();
     let visual_selection = outcome.core_bridge.current_visual_selection();

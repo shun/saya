@@ -12,19 +12,24 @@ host application layer around `vim-core-rs`, while `vim-core-rs` remains the
 source of truth for detailed editing semantics and in-scope upstream Vim
 compatibility.
 
+ADR 0002 defines the test architecture inside that boundary. `saya` now
+organizes test work around three headless-friendly layers: local unit and
+narrow integration tests, functional harness tests, and PTY-backed end-to-end
+tests.
+
 ## Test categories
 
-The current test suite is organized around these groups.
+The current test suite is moving toward these groups.
 
-- Unit tests inside `src/*.rs`
-- Integration tests under `tests/`
-- API surface guard tests
-- Runtime callback dispatch tests
-- Projection and terminal lifecycle tests
+- Layer 1 unit and narrow integration tests inside `src/*.rs`
+- Layer 2 functional harness tests under `tests/`
+- Layer 2 API surface and runtime integration tests
+- Layer 3 PTY-backed end-to-end tests
 
-The integration tests are especially valuable because they verify startup,
-save or quit flows, projection, terminal behavior, and TypeScript capability
-surfaces without needing a live interactive session.
+Layer 2 tests are especially valuable because they verify startup, save or
+quit flows, projection, terminal behavior, and TypeScript capability surfaces
+without needing a live interactive session. Layer 3 then validates the real
+process and terminal boundary with a smaller representative suite.
 
 ## Testing boundary
 
@@ -37,6 +42,8 @@ core.
 - Test startup TypeScript evaluation and runtime callback integration here.
 - Prefer headless end-to-end coverage over duplicated core-detail checks.
 - Add saya tests only when they prove host-application value.
+- Default new host-behavior tests to Layer 2 unless the behavior is clearly
+  local logic or clearly requires the real terminal process boundary.
 - Keep detailed core compatibility work in `vim-core-rs`, including most
   fine-grained editing semantics and upstream Vim compatibility cases.
 - Do not add detailed editing-semantics validation here. Keep that validation
@@ -112,4 +119,8 @@ If you want to understand the repository through tests, start with these files.
 If you want to compare the test suite with the implementation state, read
 [Status](status.md). If you need the formal scope boundary behind this testing
 strategy, read
-[ADR 0001](adr/0001-define-saya-scope-against-vim-core-rs.md).
+[ADR 0001](adr/0001-define-saya-scope-against-vim-core-rs.md). If you need the
+test-layer decision, read
+[ADR 0002](adr/0002-adopt-three-layer-headless-test-architecture.md). If you
+need the target harness design, read
+[Test architecture design](design/test-architecture.md).

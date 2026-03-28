@@ -18,8 +18,6 @@ pub struct VisualSelection {
 
 pub struct CoreBridge {
     session: VimCoreSession,
-    preferred_column: Option<usize>,
-    pending_normal_command_prefix: Option<String>,
     pending_host_actions: VecDeque<CoreHostAction>,
     pending_messages: VecDeque<CoreMessageEvent>,
 }
@@ -43,8 +41,6 @@ impl CoreBridge {
         log::debug!("[core_bridge] vim-core-rs session initialized");
         Ok(Self {
             session,
-            preferred_column: None,
-            pending_normal_command_prefix: None,
             pending_host_actions: VecDeque::new(),
             pending_messages: VecDeque::new(),
         })
@@ -100,18 +96,13 @@ impl CoreBridge {
         );
         let outcome = if self.should_handle_ctrl_c_interrupt(key) {
             self.handle_ctrl_c_interrupt()?
-        } else if self.should_route_through_pending_aware_key_path(key) {
-            self.dispatch_pending_aware_key(key)?
-        } else if self.should_preserve_preferred_column(key) {
-            self.dispatch_vertical_motion_with_preferred_column(key)?
         } else {
-            self.execute_normal_command(key)?
+            self.dispatch_session_key(key)?
         };
         log::debug!(
-            "[core_bridge] dispatch result: {:?}, preferred_column={:?}, pending_normal_operator={:?}",
+            "[core_bridge] dispatch result: {:?}, pending_input={:?}",
             outcome,
-            self.preferred_column,
-            self.pending_normal_command_prefix
+            self.session.snapshot().pending_input
         );
         Ok(outcome)
     }
@@ -202,160 +193,39 @@ impl CoreBridge {
 
     fn handle_ctrl_c_interrupt(&mut self) -> Result<CoreCommandOutcome, CoreSessionError> {
         let snapshot = self.session.snapshot();
-        let no_reason = self.pending_normal_command_prefix.is_none();
-        self.pending_normal_command_prefix = None;
+        let has_pending_input = snapshot.pending_input.is_pending();
         log::debug!(
-            "[core_bridge] handling ctrl-c interrupt: dirty={}, mode={:?}, no_reason={}",
+            "[core_bridge] handling ctrl-c interrupt: dirty={}, mode={:?}, has_pending_input={}",
             snapshot.dirty,
             snapshot.mode,
-            no_reason
+            has_pending_input
         );
 
-        if no_reason {
-            let content = if snapshot.dirty {
-                "Type  :qa!  and press <Enter> to abandon all changes and exit Vim"
-            } else {
-                "Type  :qa  and press <Enter> to exit Vim"
-            };
-            self.pending_messages.push_back(CoreMessageEvent {
-                severity: CoreMessageSeverity::Info,
-                category: CoreMessageCategory::UserVisible,
-                content: content.to_string(),
-            });
+        if has_pending_input {
+            return self.dispatch_session_key("\x1b");
         }
+
+        let content = if snapshot.dirty {
+            "Type  :qa!  and press <Enter> to abandon all changes and exit Vim"
+        } else {
+            "Type  :qa  and press <Enter> to exit Vim"
+        };
+        self.pending_messages.push_back(CoreMessageEvent {
+            severity: CoreMessageSeverity::Info,
+            category: CoreMessageCategory::UserVisible,
+            content: content.to_string(),
+        });
 
         Ok(CoreCommandOutcome::NoChange)
     }
 
-    fn should_route_through_pending_aware_key_path(&self, key: &str) -> bool {
-        key.chars().count() == 1
-            && !matches!(key, "\x1b")
-            && matches!(
-                self.session.snapshot().mode,
-                vim_core_rs::CoreMode::Normal
-                    | vim_core_rs::CoreMode::Visual
-                    | vim_core_rs::CoreMode::VisualLine
-                    | vim_core_rs::CoreMode::VisualBlock
-            )
-    }
-
-    fn should_preserve_preferred_column(&self, key: &str) -> bool {
-        matches!(key, "j" | "k") && self.session.snapshot().mode == vim_core_rs::CoreMode::Normal
-    }
-
-    fn dispatch_pending_aware_key(
-        &mut self,
-        key: &str,
-    ) -> Result<CoreCommandOutcome, CoreSessionError> {
-        let mode = self.session.snapshot().mode;
-
-        if let Some(prefix) = self.pending_normal_command_prefix.take() {
-            let command = format!("{prefix}{key}");
-            if is_pending_normal_command_prefix(mode, &command) {
-                log::debug!(
-                    "[core_bridge] extending pending normal command prefix: prefix={:?}, key={:?}, command={:?}",
-                    prefix,
-                    key,
-                    command
-                );
-                self.pending_normal_command_prefix = Some(command);
-                return Ok(CoreCommandOutcome::NoChange);
-            }
-            log::debug!(
-                "[core_bridge] completing pending normal command: prefix={:?}, key={:?}, command={:?}",
-                prefix,
-                key,
-                command
-            );
-            return self.execute_normal_command(&command);
-        }
-
-        if is_pending_normal_command_prefix(mode, key) {
-            log::debug!(
-                "[core_bridge] storing pending normal command prefix: mode={:?}, key={:?}",
-                mode,
-                key
-            );
-            self.pending_normal_command_prefix = Some(key.to_string());
-            return Ok(CoreCommandOutcome::NoChange);
-        }
-
-        if self.should_preserve_preferred_column(key) {
-            return self.dispatch_vertical_motion_with_preferred_column(key);
-        }
-
-        self.execute_normal_command(key)
-    }
-
-    fn execute_normal_command(
-        &mut self,
-        command: &str,
-    ) -> Result<CoreCommandOutcome, CoreSessionError> {
+    fn dispatch_session_key(&mut self, key: &str) -> Result<CoreCommandOutcome, CoreSessionError> {
         let outcome = self
             .session
-            .execute_normal_command(command)
+            .dispatch_key(key)
             .map_err(CoreSessionError::CommandFailed)?;
         self.queue_transaction_artifacts(&outcome);
-        self.update_preferred_column_from_snapshot(command);
         Ok(outcome.outcome)
-    }
-
-    fn dispatch_vertical_motion_with_preferred_column(
-        &mut self,
-        key: &str,
-    ) -> Result<CoreCommandOutcome, CoreSessionError> {
-        let before = self.session.snapshot();
-        let desired_col = self.preferred_column.unwrap_or(before.cursor_col);
-        log::debug!(
-            "[core_bridge] vertical motion with preferred column: key={:?}, row={}, col={}, desired_col={}",
-            key,
-            before.cursor_row,
-            before.cursor_col,
-            desired_col
-        );
-
-        let move_tx = self
-            .session
-            .execute_normal_command(key)
-            .map_err(CoreSessionError::CommandFailed)?;
-        self.queue_transaction_artifacts(&move_tx);
-        let moved = self.session.snapshot();
-
-        if moved.cursor_col != desired_col {
-            let restore_command = format!("{}|", desired_col.saturating_add(1));
-            log::debug!(
-                "[core_bridge] restoring preferred column after vertical motion: command={:?}, current_col={}, desired_col={}",
-                restore_command,
-                moved.cursor_col,
-                desired_col
-            );
-            let restore_tx = self
-                .session
-                .execute_normal_command(&restore_command)
-                .map_err(CoreSessionError::CommandFailed)?;
-            self.queue_transaction_artifacts(&restore_tx);
-        }
-
-        self.preferred_column = Some(desired_col);
-        let snapshot = self.session.snapshot();
-        Ok(CoreCommandOutcome::CursorChanged {
-            row: snapshot.cursor_row,
-            col: snapshot.cursor_col,
-        })
-    }
-
-    fn update_preferred_column_from_snapshot(&mut self, key: &str) {
-        if matches!(key, "j" | "k") {
-            return;
-        }
-
-        let snapshot = self.session.snapshot();
-        self.preferred_column = Some(snapshot.cursor_col);
-        log::debug!(
-            "[core_bridge] preferred column updated from snapshot: key={:?}, preferred_column={}",
-            key,
-            snapshot.cursor_col
-        );
     }
 
     fn queue_transaction_artifacts(&mut self, tx: &vim_core_rs::CoreCommandTransaction) {
@@ -413,35 +283,6 @@ fn configure_message_suppression(
     Ok(())
 }
 
-fn is_pending_normal_command_prefix(mode: vim_core_rs::CoreMode, key: &str) -> bool {
-    match mode {
-        vim_core_rs::CoreMode::Normal => matches!(
-            key,
-            "d" | "y"
-                | "c"
-                | ">"
-                | "<"
-                | "="
-                | "di"
-                | "da"
-                | "yi"
-                | "ya"
-                | "ci"
-                | "ca"
-                | ">i"
-                | ">a"
-                | "<i"
-                | "<a"
-                | "=i"
-                | "=a"
-        ),
-        vim_core_rs::CoreMode::Visual
-        | vim_core_rs::CoreMode::VisualLine
-        | vim_core_rs::CoreMode::VisualBlock => matches!(key, "i" | "a"),
-        _ => false,
-    }
-}
-
 fn is_visual_mode(mode: vim_core_rs::CoreMode) -> bool {
     matches!(
         mode,
@@ -479,7 +320,9 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use vim_core_rs::{CoreMessageCategory, CoreMessageSeverity, CoreMode};
+    use vim_core_rs::{
+        CoreCommandOutcome, CoreMessageCategory, CoreMessageSeverity, CoreMode, CorePendingInput,
+    };
 
     use super::CoreBridge;
 
@@ -792,33 +635,6 @@ mod tests {
         bridge.dispatch_key("k").expect("k キーで上移動");
         let snapshot = bridge.snapshot();
         assert_eq!(snapshot.cursor_row, 1, "k キーでカーソルが上に移動すること");
-        assert_eq!(snapshot.cursor_col, 2, "k キーで現在列を維持すること");
-    }
-
-    #[test]
-    fn vertical_motion_keeps_preferred_column_across_shorter_line() {
-        let _lock = session_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let mut bridge =
-            CoreBridge::new("abcdef\nx\nuvwxyz\n").expect("core bridge should initialize");
-
-        bridge.dispatch_key("llll").expect("l で 4 列右に移動");
-        assert_eq!(bridge.snapshot().cursor_col, 4);
-
-        bridge.dispatch_key("j").expect("短い行へ下移動");
-        let short_line = bridge.snapshot();
-        assert_eq!(short_line.cursor_row, 1);
-        assert_eq!(short_line.cursor_col, 0, "短い行では行末へ丸められること");
-
-        bridge.dispatch_key("j").expect("再び下移動");
-        let restored = bridge.snapshot();
-        assert_eq!(restored.cursor_row, 2);
-        assert_eq!(
-            restored.cursor_col, 4,
-            "短い行を経由しても次の長い行で目標列へ戻ること"
-        );
     }
 
     #[test]
@@ -962,27 +778,66 @@ mod tests {
     }
 
     #[test]
-    fn sequential_yyp_duplicates_current_line() {
+    fn sequential_multi_key_pending_input_is_forwarded_through_core_dispatch() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new("first\nsecond\nthird\n").expect("core bridge should initialize");
+
+        let first = bridge
+            .dispatch_key("y")
+            .expect("first key should be forwarded to core");
+        assert_eq!(first, CoreCommandOutcome::NoChange);
+        assert_eq!(
+            bridge.snapshot().pending_input.pending_keys,
+            "y",
+            "pending input state should come from vim-core-rs"
+        );
+
+        bridge
+            .dispatch_key("y")
+            .expect("second key should complete the sequence");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(
+            snapshot.text, "first\nsecond\nthird\n",
+            "yy itself should not change the buffer"
+        );
+        assert_eq!(
+            snapshot.pending_input,
+            CorePendingInput::none(),
+            "completed sequence should leave no bridge-side pending parser state"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancels_core_owned_pending_input_without_showing_exit_guidance() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let mut bridge = CoreBridge::new("first\nsecond\n").expect("core bridge should initialize");
 
-        bridge
-            .dispatch_key("y")
-            .expect("first y should enter operator pending");
-        bridge
-            .dispatch_key("y")
-            .expect("second y should yank current line");
-        bridge
-            .dispatch_key("p")
-            .expect("p should paste yanked line");
+        bridge.dispatch_key("d").expect("enter operator pending");
+        assert!(
+            bridge.snapshot().pending_input.is_pending(),
+            "pending input should be reported by vim-core-rs before ctrl-c"
+        );
 
-        let snapshot = bridge.snapshot();
+        let outcome = bridge
+            .dispatch_key("\u{3}")
+            .expect("ctrl-c should cancel pending input");
+        assert_eq!(outcome, CoreCommandOutcome::NoChange);
         assert_eq!(
-            snapshot.text, "first\nfirst\nsecond\n",
-            "yyp で現在行が複製されること"
+            bridge.snapshot().pending_input,
+            CorePendingInput::none(),
+            "ctrl-c should clear core pending input via escape dispatch"
+        );
+        assert!(
+            bridge.take_pending_messages().is_empty(),
+            "canceling pending input should not enqueue exit guidance"
         );
     }
 
@@ -1005,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn sequential_dd_deletes_current_line() {
+    fn sequential_dd_deletes_current_line_via_core_owned_pending_input() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1028,131 +883,28 @@ mod tests {
     }
 
     #[test]
-    fn sequential_ciw_changes_inner_word() {
+    fn insert_mode_keeps_literal_text_literal_at_bridge_boundary() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut bridge = CoreBridge::new("alpha beta\n").expect("core bridge should initialize");
+        let mut bridge = CoreBridge::new("").expect("core bridge should initialize");
 
-        bridge.dispatch_key("w").expect("w で次単語へ移動");
-        bridge.dispatch_key("c").expect("c で operator pending");
+        bridge.dispatch_key("i").expect("enter insert mode");
         bridge
-            .dispatch_key("i")
-            .expect("i で text object pending を継続");
+            .dispatch_key("2")
+            .expect("insert literal count digit");
         bridge
-            .dispatch_key("w")
-            .expect("w で inner word を変更対象に確定");
+            .dispatch_key("d")
+            .expect("insert literal operator key");
+        bridge
+            .dispatch_key("g")
+            .expect("insert literal normal prefix key");
+        bridge.dispatch_key("\x1b").expect("leave insert mode");
 
         let snapshot = bridge.snapshot();
-        assert_eq!(
-            snapshot.mode,
-            CoreMode::Insert,
-            "ciw 完了後は insert mode に遷移すること"
-        );
-        assert_eq!(
-            snapshot.text, "alpha \n",
-            "ciw でカーソル下の単語だけが削除されること"
-        );
-    }
-
-    #[test]
-    fn sequential_viw_enters_visual_mode_and_selects_inner_word() {
-        let _lock = session_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let mut bridge =
-            CoreBridge::new("alpha beta gamma\n").expect("core bridge should initialize");
-
-        bridge.dispatch_key("w").expect("w で次単語へ移動");
-        bridge.dispatch_key("v").expect("v で visual mode へ遷移");
-        bridge
-            .dispatch_key("i")
-            .expect("i で text object pending を継続");
-        bridge
-            .dispatch_key("w")
-            .expect("w で inner word selection を確定");
-
-        let snapshot = bridge.snapshot();
-        assert_eq!(
-            snapshot.mode,
-            CoreMode::Visual,
-            "viw 完了後は visual mode を維持すること"
-        );
-        assert_eq!(
-            (snapshot.cursor_row, snapshot.cursor_col),
-            (0, 9),
-            "cursor が単語末尾まで到達すること"
-        );
-        assert_eq!(
-            snapshot.pending_input,
-            vim_core_rs::CorePendingInput::None,
-            "viw 完了後に未解決の pending input を残さないこと"
-        );
-        let visual = bridge
-            .current_visual_selection()
-            .expect("visual selection should be tracked");
-        assert_eq!(
-            (visual.start_row, visual.start_col),
-            (0, 6),
-            "visual selection start が単語先頭を指すこと"
-        );
-        assert_eq!(
-            (visual.end_row, visual.end_col),
-            (0, 9),
-            "visual selection end が単語末尾を指すこと"
-        );
-    }
-
-    #[test]
-    fn sequential_vi_quote_selects_inside_double_quotes() {
-        let _lock = session_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let mut bridge =
-            CoreBridge::new(r#"fasdfadfs"fasdfasdfasdfa""#).expect("core bridge should initialize");
-
-        bridge.dispatch_key("f").expect("f dispatch");
-        bridge.dispatch_key("\"").expect("find quote");
-        bridge.dispatch_key("l").expect("move inside quote");
-        bridge.dispatch_key("v").expect("enter visual");
-        bridge.dispatch_key("i").expect("inner text object pending");
-        bridge
-            .dispatch_key("\"")
-            .expect("complete inner quote object");
-
-        let snapshot = bridge.snapshot();
-        assert_eq!(snapshot.mode, CoreMode::Visual);
-        let visual = bridge
-            .current_visual_selection()
-            .expect("visual selection should be tracked");
-        assert_eq!((visual.start_row, visual.start_col), (0, 10));
-        assert_eq!((visual.end_row, visual.end_col), (0, 23));
-    }
-
-    #[test]
-    fn sequential_ci_quote_deletes_inside_double_quotes_and_enters_insert() {
-        let _lock = session_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let mut bridge =
-            CoreBridge::new(r#"fasdfadfs"fasdfasdfasdfa""#).expect("core bridge should initialize");
-
-        bridge.dispatch_key("f").expect("f dispatch");
-        bridge.dispatch_key("\"").expect("find quote");
-        bridge.dispatch_key("l").expect("move inside quote");
-        bridge.dispatch_key("c").expect("change operator pending");
-        bridge.dispatch_key("i").expect("inner text object pending");
-        bridge
-            .dispatch_key("\"")
-            .expect("complete inner quote change object");
-
-        let snapshot = bridge.snapshot();
-        assert_eq!(snapshot.mode, CoreMode::Insert);
-        assert_eq!(snapshot.text, "fasdfadfs\"\"\n");
+        assert_eq!(snapshot.mode, CoreMode::Normal);
+        assert_eq!(snapshot.text, "2dg\n");
     }
 
     #[test]

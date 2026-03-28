@@ -103,6 +103,20 @@ The repository tries to keep the UI path responsive and deterministic.
 - Save and quit behavior remain explicit host-side operations instead of hidden
   side effects inside the configuration runtime.
 
+## Test architecture
+
+The repository uses a three-layer test structure that matches the layered
+application design.
+
+- Layer 1 keeps unit and narrow integration checks close to individual modules.
+- Layer 2 uses a shared functional harness to exercise deterministic
+  host-application paths without a PTY.
+- Layer 3 launches the real executable under a PTY to validate the true
+  terminal and process boundary.
+
+This split keeps most application verification fast and deterministic while
+still preserving a real-terminal confidence layer.
+
 ## Current implementation notes
 
 This page describes the current implementation rather than the larger
@@ -117,7 +131,10 @@ repository state:
   lifecycle.
 
 Use [Status](status.md) for the current implementation state, and use the
-design pages for flow-level details.
+design pages for flow-level details. Use
+[ADR 0002](adr/0002-adopt-three-layer-headless-test-architecture.md) and
+[Test architecture design](design/test-architecture.md) for the testing
+structure that supports this architecture.
 
 ## Next steps
 
