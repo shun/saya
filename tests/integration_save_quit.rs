@@ -20,6 +20,7 @@ use saya::editor_session::{EditorSessionState, QuitDecision};
 use saya::ex_command::{LocalHostCommand, parse_local_host_command};
 use saya::host_io::{SaveResult, write_to_path};
 use saya::screen_model::{ProjectionInput, project};
+use saya::swapfile::swapfile_path_for_target;
 use vim_core_rs::CoreHostAction;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -282,6 +283,50 @@ fn quit_host_action_allows_dropping_outcome_for_session_cleanup() {
         relaunched.is_ok(),
         "quit 後に outcome を drop すると session cleanup されて再起動できること"
     );
+}
+
+#[test]
+fn force_quit_removes_swapfile_when_outcome_is_dropped() {
+    let _lock = test_lock();
+    let target_path = unique_path("force-quit-swap-cleanup.txt");
+    std::fs::write(&target_path, "initial\n").expect("テストファイルの作成");
+    let swap_path = swapfile_path_for_target(&target_path).expect("swap path");
+
+    let mut outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::Default,
+        ..LaunchRequest::default()
+    })
+    .expect("テスト用の起動が成功すること");
+
+    assert!(
+        swap_path.exists(),
+        "起動後に swapfile が作成されること: {}",
+        swap_path.display()
+    );
+
+    outcome
+        .core_bridge
+        .apply_ex_command(":q!")
+        .expect(":q! コマンドが成功すること");
+
+    let actions = outcome.core_bridge.take_pending_host_actions();
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            vim_core_rs::CoreHostAction::Quit { force: true, .. }
+        )),
+        ":q! 後に強制 quit host action が発行されること"
+    );
+
+    drop(outcome);
+
+    assert!(
+        !swap_path.exists(),
+        "outcome drop 後に swapfile が削除されること: {}",
+        swap_path.display()
+    );
+    std::fs::remove_file(&target_path).expect("テストファイルの削除");
 }
 
 #[test]

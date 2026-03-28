@@ -8,6 +8,19 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn swapfile_path_for_target(target_path: &std::path::Path) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .expect("target file name should exist")
+        .to_string_lossy();
+    let swap_name = if file_name.starts_with('.') {
+        format!("{file_name}.swp")
+    } else {
+        format!(".{file_name}.swp")
+    };
+    target_path.with_file_name(swap_name)
+}
+
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -68,6 +81,7 @@ fn run_sy_headless_smoke_with_stdin(args: &[&str], stdin_text: &[u8]) -> Output 
 fn opening_editing_once_and_quitting_cleanly_works_through_the_sy_binary() {
     let target_path = unique_path("open-edit-quit.txt");
     std::fs::write(&target_path, "alpha\n").expect("test file should be created");
+    let swap_path = swapfile_path_for_target(&target_path);
 
     let target_path_arg = target_path
         .to_str()
@@ -84,6 +98,11 @@ fn opening_editing_once_and_quitting_cleanly_works_through_the_sy_binary() {
 
     let contents = std::fs::read_to_string(&target_path).expect("file should still be readable");
     assert_eq!(contents, "Xalpha\n");
+    assert!(
+        !swap_path.exists(),
+        "normal quit should remove the swapfile: {:?}",
+        swap_path
+    );
 
     std::fs::remove_file(&target_path).expect("cleanup");
 }

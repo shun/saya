@@ -17,6 +17,7 @@ pub mod saya_live_runtime;
 pub mod screen_model;
 pub mod session_guard;
 pub mod startup_runtime;
+pub mod swapfile;
 pub mod terminal_lifecycle;
 pub mod tui_renderer;
 pub mod viewport;

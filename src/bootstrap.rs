@@ -16,6 +16,7 @@ use crate::session_guard::{SessionGuard, SessionGuardError};
 use crate::startup_runtime::{
     StartupModulePrepareResult, collect_startup_registry, prepare_init_module,
 };
+use crate::swapfile::SwapfileCleanupGuard;
 use vim_core_rs::CoreSnapshot;
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ pub struct BootstrapOutcome {
     pub core_bridge: CoreBridge,
     pub warnings: Vec<BootstrapWarning>,
     pub session_guard: SessionGuard,
+    _swapfile_cleanup_guard: SwapfileCleanupGuard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +241,7 @@ fn prepare_launch_with_guard<R: Read>(
         initial_tab_size,
         initial_number_width
     );
+    let swapfile_cleanup_guard = SwapfileCleanupGuard::new(target_path.clone());
 
     Ok(BootstrapOutcome {
         target_path,
@@ -253,6 +256,7 @@ fn prepare_launch_with_guard<R: Read>(
         core_bridge,
         warnings,
         session_guard,
+        _swapfile_cleanup_guard: swapfile_cleanup_guard,
     })
 }
 
