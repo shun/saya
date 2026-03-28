@@ -72,6 +72,10 @@ Start with a new buffer with this command.
 cargo run --bin sy --
 ```
 
+Without `-u`, `sy` looks for the default startup config at
+`$XDG_CONFIG_HOME/saya/init.ts`, then falls back to `$HOME/.config/saya/init.ts`
+when `XDG_CONFIG_HOME` is unset.
+
 Load a TypeScript configuration file with this command.
 
 ```bash

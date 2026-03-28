@@ -73,6 +73,10 @@ cargo run --bin sy -- path/to/file.txt
 cargo run --bin sy --
 ```
 
+`-u` を省略した場合、`sy` はデフォルト設定として
+`$XDG_CONFIG_HOME/saya/init.ts` を探し、`XDG_CONFIG_HOME` が未設定なら
+`$HOME/.config/saya/init.ts` にフォールバックします。
+
 TypeScript 設定ファイルを渡すには、次を実行します。
 
 ```bash

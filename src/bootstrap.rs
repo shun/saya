@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::app_paths::default_init_ts_path;
 use crate::callback_registry_seed::CallbackRegistrySeed;
 use crate::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
 use crate::config_runtime::{
@@ -287,8 +288,36 @@ fn load_config_with_fallback(
 ) -> LoadedConfig {
     match config_source {
         ConfigSource::Default => {
-            log::debug!("[bootstrap] using default config source");
-            LoadedConfig::Default
+            let Some(path) = default_init_ts_path() else {
+                log::debug!("[bootstrap] using default config source without resolved config path");
+                return LoadedConfig::Default;
+            };
+            log::debug!(
+                "[bootstrap] probing default config source before terminal enter: {}",
+                path.display()
+            );
+            match fs::read_to_string(&path) {
+                Ok(source) => LoadedConfig::File { path, source },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    log::debug!(
+                        "[bootstrap] no default config source present, continuing without config: {}",
+                        path.display()
+                    );
+                    LoadedConfig::Default
+                }
+                Err(error) => {
+                    log::debug!(
+                        "[bootstrap] default config load failed, falling back to built-in defaults: path={}, error={}",
+                        path.display(),
+                        error
+                    );
+                    warnings.push(BootstrapWarning::ConfigLoadFailed {
+                        path,
+                        message: error.to_string(),
+                    });
+                    LoadedConfig::Default
+                }
+            }
         }
         ConfigSource::File(path) => {
             log::debug!(
@@ -606,7 +635,7 @@ fn map_session_guard_error(error: SessionGuardError) -> BootstrapError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -635,6 +664,40 @@ mod tests {
             .expect("time went backwards")
             .as_nanos();
         std::env::temp_dir().join(format!("saya-bootstrap-{name}-{nanos}"))
+    }
+
+    fn with_env_var_removed<T>(key: &str, f: impl FnOnce() -> T) -> T {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
+        let result = f();
+        match original {
+            Some(value) => unsafe {
+                std::env::set_var(key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+        result
+    }
+
+    fn with_env_var_set<T>(key: &str, value: &Path, f: impl FnOnce() -> T) -> T {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        let result = f();
+        match original {
+            Some(value) => unsafe {
+                std::env::set_var(key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(key);
+            },
+        }
+        result
     }
 
     fn default_request() -> LaunchRequest {
@@ -866,6 +929,78 @@ mod tests {
         assert!(outcome.warnings.is_empty());
 
         std::fs::remove_file(config_path).expect("cleanup config file");
+    }
+
+    #[test]
+    fn default_config_source_prefers_xdg_config_home_init_ts() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let xdg_config_home = unique_path("xdg-config-home");
+        let config_dir = xdg_config_home.join("saya");
+        let config_path = config_dir.join("init.ts");
+        std::fs::create_dir_all(&config_dir).expect("xdg config directory");
+        std::fs::write(&config_path, "saya.options.tabSize = 4;\n").expect("config file");
+
+        let outcome = with_env_var_set("XDG_CONFIG_HOME", &xdg_config_home, || {
+            with_env_var_removed("HOME", || {
+                prepare_launch(LaunchRequest {
+                    input_source: InputSource::Empty,
+                    config_source: ConfigSource::Default,
+                    ..default_request()
+                })
+                .expect("default launch should load XDG config")
+            })
+        });
+
+        assert_eq!(
+            outcome.loaded_config,
+            LoadedConfig::File {
+                path: config_path.clone(),
+                source: "saya.options.tabSize = 4;\n".to_string(),
+            }
+        );
+        assert_eq!(outcome.initial_tab_size, 4);
+        assert!(outcome.warnings.is_empty());
+
+        std::fs::remove_file(&config_path).expect("cleanup config file");
+        std::fs::remove_dir_all(&xdg_config_home).expect("cleanup xdg config home");
+    }
+
+    #[test]
+    fn default_config_source_falls_back_to_home_dot_config_init_ts() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home_dir = unique_path("home-dir");
+        let config_dir = home_dir.join(".config").join("saya");
+        let config_path = config_dir.join("init.ts");
+        std::fs::create_dir_all(&config_dir).expect("home config directory");
+        std::fs::write(&config_path, "saya.options.lineNumbers = true;\n").expect("config file");
+
+        let outcome = with_env_var_removed("XDG_CONFIG_HOME", || {
+            with_env_var_set("HOME", &home_dir, || {
+                prepare_launch(LaunchRequest {
+                    input_source: InputSource::Empty,
+                    config_source: ConfigSource::Default,
+                    ..default_request()
+                })
+                .expect("default launch should load HOME fallback config")
+            })
+        });
+
+        assert_eq!(
+            outcome.loaded_config,
+            LoadedConfig::File {
+                path: config_path.clone(),
+                source: "saya.options.lineNumbers = true;\n".to_string(),
+            }
+        );
+        assert!(outcome.initial_line_numbers);
+        assert!(outcome.warnings.is_empty());
+
+        std::fs::remove_file(&config_path).expect("cleanup config file");
+        std::fs::remove_dir_all(&home_dir).expect("cleanup home dir");
     }
 
     #[test]
