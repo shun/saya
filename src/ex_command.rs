@@ -1,5 +1,11 @@
 use crate::editor_session::EditorSessionState;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalHostCommand {
+    Save,
+    SaveThenQuit,
+}
+
 pub fn apply_local_ex_command(
     session_state: &mut EditorSessionState,
     command: &str,
@@ -29,6 +35,27 @@ pub fn apply_local_ex_command(
     };
 
     Some(message.to_string())
+}
+
+pub fn parse_local_host_command(command: &str) -> Option<LocalHostCommand> {
+    let normalized = normalize_command(command)?;
+    match normalized.as_str() {
+        "w" | "write" => {
+            log::debug!(
+                "[ex_command] routing command to host save policy: {:?}",
+                command
+            );
+            Some(LocalHostCommand::Save)
+        }
+        "wq" | "x" => {
+            log::debug!(
+                "[ex_command] routing command to host save-then-quit policy: {:?}",
+                command
+            );
+            Some(LocalHostCommand::SaveThenQuit)
+        }
+        _ => None,
+    }
 }
 
 fn apply_number_width_command(
@@ -151,5 +178,22 @@ mod tests {
 
         assert_eq!(result, None);
         assert!(!session_state.line_numbers());
+    }
+
+    #[test]
+    fn parse_local_host_command_routes_write_variants_to_host_policy() {
+        assert_eq!(parse_local_host_command(":w"), Some(LocalHostCommand::Save));
+        assert_eq!(
+            parse_local_host_command("write"),
+            Some(LocalHostCommand::Save)
+        );
+        assert_eq!(
+            parse_local_host_command(":wq"),
+            Some(LocalHostCommand::SaveThenQuit)
+        );
+        assert_eq!(
+            parse_local_host_command("x"),
+            Some(LocalHostCommand::SaveThenQuit)
+        );
     }
 }

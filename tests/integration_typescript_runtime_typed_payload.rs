@@ -1,3 +1,8 @@
+//! TypeScript runtime typed payload integration.
+//!
+//! This file proves host/application runtime payload dispatch and typed payload
+//! projection for buffer events.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

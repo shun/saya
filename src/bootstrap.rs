@@ -45,6 +45,19 @@ pub enum BootstrapWarning {
     ConfigLoadFailed { path: PathBuf, message: String },
 }
 
+pub fn bootstrap_warning_message(warnings: &[BootstrapWarning]) -> Option<String> {
+    warnings.iter().find_map(|warning| match warning {
+        BootstrapWarning::ConfigLoadFailed { path, message } => {
+            let rendered = format!("設定読込に失敗しました ({}): {}", path.display(), message);
+            log::debug!(
+                "[bootstrap] projecting startup warning into host message line: {}",
+                rendered
+            );
+            Some(rendered)
+        }
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapError {
     SessionAlreadyInitialized,

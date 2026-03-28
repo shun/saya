@@ -203,8 +203,13 @@ fn display_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::prepare_launch;
+    use crate::cli::LaunchRequest;
+    use crate::editor_session::EditorSessionState;
     use crate::screen_model::ScreenSelection;
+    use crate::screen_model::{ProjectionInput, project};
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
 
     fn screen_model_with_message(message_line: Option<&str>) -> ScreenModel {
         ScreenModel {
@@ -305,5 +310,54 @@ mod tests {
             "短い行への再描画で古い suffix が残らないこと: {:?}",
             first_row
         );
+    }
+
+    #[test]
+    fn integrated_update_cycle_keeps_message_status_and_cursor_in_sync() {
+        let mut outcome = prepare_launch(LaunchRequest::default()).expect("launch should succeed");
+        let mut session_state = EditorSessionState::new(outcome.target_path.clone());
+
+        outcome.core_bridge.dispatch_key("i").expect("insert mode");
+        outcome.core_bridge.dispatch_key("H").expect("insert text");
+        outcome
+            .core_bridge
+            .dispatch_key("\x1b")
+            .expect("leave insert mode");
+        session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+
+        let snapshot = outcome.core_bridge.snapshot();
+        let model = project(&ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            Some("Action failed"),
+        ));
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 4)).expect("test terminal should initialize");
+        draw_editor_frame(&mut terminal, &model, true).expect("render should succeed");
+
+        let rendered = format!("{}", terminal.backend());
+        let rows: Vec<&str> = rendered.lines().collect();
+
+        assert!(
+            rows.get(2).is_some_and(|row| row.contains(&model.file_name)
+                && row.contains(&model.mode_label)
+                && row.contains("[+]!")),
+            "status line should reflect file name, mode, and dirty state: {:?}",
+            rows.get(2)
+        );
+        assert!(
+            rows.get(3).is_some_and(|row| row.contains("Action failed")),
+            "message line should render the projected transient message: {:?}",
+            rows.get(3)
+        );
+        assert!(
+            rows.get(0).is_some_and(|row| row.contains('H')),
+            "buffer area should include the edited content after the update cycle: {:?}",
+            rows.get(0)
+        );
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(model.cursor_col, model.cursor_row));
     }
 }

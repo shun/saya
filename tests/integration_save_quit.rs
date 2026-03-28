@@ -1,5 +1,11 @@
 //! 統合テスト: 保存と終了の安全性の検証
 //!
+//! このファイルは `saya` の main host save or quit policy suite です。
+//!
+//! 責務は host/application 層の保存結果、quit 判定、`:wq` の
+//! save-then-quit coordination に限定する。詳細な編集セマンティクスは
+//! ADR 0001 に従って `vim-core-rs` に委ねる。
+//!
 //! 保存成功、保存失敗、未保存終了警告、強制終了を個別に確認する。
 //! host action と終了判定の整合が崩れないことを確認する。
 //! Requirements: 1.4, 1.5, 3.2, 3.3
@@ -11,7 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use saya::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
 use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::editor_session::{EditorSessionState, QuitDecision};
+use saya::ex_command::{LocalHostCommand, parse_local_host_command};
 use saya::host_io::{SaveResult, write_to_path};
+use saya::screen_model::{ProjectionInput, project};
+use vim_core_rs::CoreHostAction;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -37,6 +46,36 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
         ..LaunchRequest::default()
     })
     .expect("テスト用の起動が成功すること")
+}
+
+fn save_quit_suite_scope_statement() -> &'static str {
+    "main host save or quit policy suite for host/application save results, quit decisions, and save-then-quit coordination"
+}
+
+#[test]
+fn save_quit_suite_scope_statement_stays_pinned_to_host_layer_policy() {
+    let statement = save_quit_suite_scope_statement();
+
+    assert!(
+        statement.contains("main host save or quit policy suite"),
+        "suite ownership statement should stay explicit"
+    );
+    assert!(
+        statement.contains("save results"),
+        "suite ownership statement should keep host-side save responsibility visible"
+    );
+    assert!(
+        statement.contains("quit decisions"),
+        "suite ownership statement should keep quit policy responsibility visible"
+    );
+    assert!(
+        statement.contains("save-then-quit"),
+        "suite ownership statement should mention save-then-quit coordination"
+    );
+    assert!(
+        !statement.contains("editing semantics"),
+        "suite ownership statement must not drift into core-editing ownership"
+    );
 }
 
 // ---- 9.3.1: 保存成功の確認 ----
@@ -68,6 +107,55 @@ fn save_success_clears_dirty_state_and_allows_quit() {
 
     // 通常終了が許可される
     assert_eq!(session_state.evaluate_quit(false), QuitDecision::Allow);
+}
+
+#[test]
+fn write_host_action_updates_transient_message_on_success() {
+    let _lock = test_lock();
+    let mut outcome = launch_with_content("initial\n");
+    let mut session_state = EditorSessionState::new(outcome.target_path.clone());
+
+    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
+    outcome.core_bridge.dispatch_key("X").expect("X input");
+    outcome
+        .core_bridge
+        .dispatch_key("\x1b")
+        .expect("Esc dispatch");
+    session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+
+    outcome
+        .core_bridge
+        .apply_ex_command(":w")
+        .expect(":w コマンドが成功すること");
+
+    let actions = outcome.core_bridge.take_pending_host_actions();
+    assert!(
+        matches!(actions.as_slice(), [CoreHostAction::Write { .. }]),
+        ":w 後に write host action が 1 件発行されること: {:?}",
+        actions
+    );
+
+    let snapshot = outcome.core_bridge.snapshot();
+    let request = session_state
+        .build_save_request(&snapshot.text)
+        .expect("host 側が保存要求を組み立てられること");
+    let result = write_to_path(&request);
+    assert_eq!(result, SaveResult::Saved);
+
+    session_state.record_save_success();
+    let model = project(&ProjectionInput::new(
+        &snapshot,
+        &session_state,
+        Some("Saved successfully"),
+    ));
+
+    assert_eq!(
+        model.message_line,
+        Some("Saved successfully".to_string()),
+        "write 成功時の transient message が画面へ反映されること"
+    );
+    assert!(!session_state.is_dirty());
+    assert_eq!(session_state.last_save_error(), None);
 }
 
 // ---- 9.3.2: 保存失敗の確認 ----
@@ -193,5 +281,60 @@ fn quit_host_action_allows_dropping_outcome_for_session_cleanup() {
     assert!(
         relaunched.is_ok(),
         "quit 後に outcome を drop すると session cleanup されて再起動できること"
+    );
+}
+
+#[test]
+fn wq_host_coordination_saves_before_allowing_quit() {
+    let _lock = test_lock();
+    let mut outcome = launch_with_content("initial\n");
+    let mut session_state = EditorSessionState::new(outcome.target_path.clone());
+
+    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
+    outcome.core_bridge.dispatch_key("X").expect("X input");
+    outcome
+        .core_bridge
+        .dispatch_key("\x1b")
+        .expect("Esc dispatch");
+    session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+    assert_eq!(
+        session_state.evaluate_quit(false),
+        QuitDecision::WarnUnsaved,
+        "save 前の dirty 状態では quit を即時許可しないこと"
+    );
+
+    assert_eq!(
+        parse_local_host_command(":wq"),
+        Some(LocalHostCommand::SaveThenQuit),
+        ":wq は saya 側の host save-then-quit policy にルーティングされること"
+    );
+
+    outcome
+        .core_bridge
+        .apply_ex_command(":wq")
+        .expect(":wq コマンドが成功すること");
+
+    let actions = outcome.core_bridge.take_pending_host_actions();
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [CoreHostAction::Quit { force: false, .. }]
+        ),
+        "core 側の :wq は save 完了を保証しないので saya 側で補う必要があること: {:?}",
+        actions
+    );
+
+    let snapshot = outcome.core_bridge.snapshot();
+    let request = session_state
+        .build_save_request(&snapshot.text)
+        .expect("host 側が保存要求を組み立てられること");
+    let result = write_to_path(&request);
+    assert_eq!(result, SaveResult::Saved, ":wq の保存が成功すること");
+
+    session_state.record_save_success();
+    assert_eq!(
+        session_state.evaluate_quit(false),
+        QuitDecision::Allow,
+        "host 側で保存成功を記録した後に quit を許可すること"
     );
 }

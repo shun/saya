@@ -8,6 +8,10 @@ future workspace layout.
 The most important design rule is simple: higher layers may depend on lower
 layers, but lower layers must not take on upper-layer responsibilities.
 
+ADR 0001 records the repository-level boundary between `saya` and
+`vim-core-rs`. Use that decision when you need to decide whether a feature or
+test belongs in the application layer or in the embedded editing core.
+
 ## Layer model
 
 The current codebase is easiest to understand as four layers.

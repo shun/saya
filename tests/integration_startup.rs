@@ -1,19 +1,32 @@
-use std::io::Cursor;
 /// 統合テスト: 起動フローの検証
+///
+/// このファイルは `saya` の main startup and session orchestration suite
+/// です。
+///
+/// 責務は host/application 層の起動準備、セッションガード、bootstrap
+/// cleanup、初期 projection、startup warning routing に限定する。
+/// 詳細な編集セマンティクスは ADR 0001 に従って `vim-core-rs` に委ねる。
 ///
 /// 既存ファイル起動、新規バッファ起動、読込失敗を個別に確認する。
 /// 起動失敗時にセッションが中途半端に残らないことを確認する。
 /// Requirements: 1.1, 1.2, 1.3, 3.4
+use std::io;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use saya::app_startup::prepare_launch_and_start_terminal;
 use saya::bootstrap::{
-    BootstrapError, BootstrapWarning, LoadedConfig, prepare_launch, prepare_launch_with_reader,
+    BootstrapError, BootstrapWarning, LoadedConfig, bootstrap_warning_message, launch_test_lock,
+    prepare_launch, prepare_launch_with_reader,
 };
-use saya::cli::{ConfigSource, InputSource, LaunchRequest, parse_launch_request};
+use saya::cli::{
+    ConfigSource, InitialCursorPosition, InputSource, LaunchRequest, parse_launch_request,
+};
 use saya::editor_session::{EditorSessionState, SaveRequestError};
 use saya::screen_model::{ProjectionInput, project};
+use saya::terminal_lifecycle::TerminalBackend;
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -31,6 +44,123 @@ fn default_request() -> LaunchRequest {
 fn cwd_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn startup_suite_scope_statement() -> &'static str {
+    "main startup and session orchestration suite for host/application launch preparation, session guard cleanup, bootstrap cleanup, startup warning routing, and initial projection"
+}
+
+#[test]
+fn startup_suite_scope_statement_stays_pinned_to_host_layer_orchestration() {
+    let statement = startup_suite_scope_statement();
+
+    assert!(
+        statement.contains("main startup and session orchestration suite"),
+        "suite ownership statement should stay explicit"
+    );
+    assert!(
+        statement.contains("launch preparation"),
+        "suite ownership statement should stay host-layer focused"
+    );
+    assert!(
+        statement.contains("session guard cleanup"),
+        "suite ownership statement should keep lifecycle responsibility visible"
+    );
+    assert!(
+        statement.contains("startup warning routing"),
+        "suite ownership statement should mention projected startup warnings"
+    );
+    assert!(
+        !statement.contains("editing semantics"),
+        "suite ownership statement must not drift into core-editing ownership"
+    );
+}
+
+#[test]
+fn startup_related_test_files_use_startup_prefix_instead_of_wave6_prefix() {
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let file_names: Vec<String> = std::fs::read_dir(&tests_dir)
+        .expect("tests directory should be readable")
+        .map(|entry| {
+            entry
+                .expect("test directory entry should be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    assert!(
+        file_names.contains(&"integration_startup_boot_flow.rs".to_string()),
+        "startup boot flow suite should use the startup-oriented naming convention"
+    );
+    assert!(
+        file_names.contains(&"integration_startup_tab_size.rs".to_string()),
+        "startup tab size suite should use the startup-oriented naming convention"
+    );
+    assert!(
+        !file_names.contains(&"integration_wave6_boot_flow.rs".to_string()),
+        "wave6 boot flow naming should be retired from the startup suite"
+    );
+    assert!(
+        !file_names.contains(&"integration_wave6_startup_tab_size.rs".to_string()),
+        "wave6 tab size naming should be retired from the startup suite"
+    );
+}
+
+#[test]
+fn major_integration_files_keep_host_layer_file_comments() {
+    let major_files = [
+        "integration_startup.rs",
+        "integration_startup_boot_flow.rs",
+        "integration_startup_tab_size.rs",
+        "integration_presentation_line_numbers.rs",
+        "integration_save_quit.rs",
+        "integration_terminal.rs",
+        "integration_typescript_runtime_config_api.rs",
+        "integration_typescript_runtime_command.rs",
+        "integration_typescript_runtime_typed_payload.rs",
+    ];
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+
+    for file_name in major_files {
+        let path = tests_dir.join(file_name);
+        let header = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {file_name}: {error}"));
+        let header = header.lines().take(8).collect::<Vec<_>>().join("\n");
+
+        assert!(
+            header.contains("host/application") || header.contains("host layer"),
+            "major integration file should state its host-layer responsibility: {file_name}"
+        );
+    }
+}
+
+#[derive(Default)]
+struct RecordingTerminalBackend {
+    calls: Vec<&'static str>,
+}
+
+impl TerminalBackend for RecordingTerminalBackend {
+    fn enable_raw_mode(&mut self) -> io::Result<()> {
+        self.calls.push("enable_raw_mode");
+        Ok(())
+    }
+
+    fn enter_alternate_screen(&mut self) -> io::Result<()> {
+        self.calls.push("enter_alternate_screen");
+        Ok(())
+    }
+
+    fn leave_alternate_screen(&mut self) -> io::Result<()> {
+        self.calls.push("leave_alternate_screen");
+        Ok(())
+    }
+
+    fn disable_raw_mode(&mut self) -> io::Result<()> {
+        self.calls.push("disable_raw_mode");
+        Ok(())
+    }
 }
 
 // ---- 9.1.1: 既存ファイル起動の統合フロー ----
@@ -176,6 +306,29 @@ fn read_failure_startup_flow_for_permission_denied() {
     let _ = std::fs::remove_file(&restricted_path);
 }
 
+// ---- 9.1.4: 起動失敗時の terminal lifecycle 未初期化確認 ----
+
+/// 起動準備が失敗した場合、terminal lifecycle backend が一切触られない。
+#[test]
+fn startup_failure_leaves_terminal_lifecycle_uninitialized() {
+    let missing_path = unique_path("terminal-uninitialized");
+    let request = LaunchRequest {
+        input_source: InputSource::File(missing_path),
+        config_source: ConfigSource::Default,
+        ..default_request()
+    };
+    let mut backend = RecordingTerminalBackend::default();
+
+    let result = prepare_launch_and_start_terminal(request, &mut backend);
+
+    assert!(result.is_err(), "起動失敗になること");
+    drop(result);
+    assert!(
+        backend.calls.is_empty(),
+        "bootstrap failure 時に terminal backend が一切呼ばれないこと"
+    );
+}
+
 // ---- 9.1.4: 起動失敗時のセッション残留なし ----
 
 /// 起動失敗後にセッションガードが解放され、再度起動可能であることを確認する。
@@ -229,6 +382,74 @@ fn session_guard_released_after_successful_startup_outcome_dropped() {
     );
 }
 
+#[test]
+fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let success_path = unique_path("repeat-success");
+    let failure_path = unique_path("repeat-failure");
+
+    std::fs::write(&success_path, "line1\nline2\n").expect("成功用のテストファイルの作成");
+
+    let success_request = parse_launch_request(["-R", "+2", success_path.to_str().unwrap()])
+        .expect("成功サイクル用 CLI 引数のパースが成功すること");
+    let failure_request = parse_launch_request(["-R", "+2", failure_path.to_str().unwrap()])
+        .expect("失敗サイクル用 CLI 引数のパースが成功すること");
+
+    assert!(success_request.read_only);
+    assert_eq!(
+        success_request.initial_cursor,
+        InitialCursorPosition::Line(2)
+    );
+    assert!(failure_request.read_only);
+    assert_eq!(
+        failure_request.initial_cursor,
+        InitialCursorPosition::Line(2)
+    );
+
+    log::debug!("[test] cycle 1: successful launch before failure");
+    let first_outcome =
+        prepare_launch(success_request.clone()).expect("最初の起動サイクルが成功すること");
+    assert_eq!(first_outcome.target_path, Some(success_path.clone()));
+    assert!(
+        first_outcome.read_only,
+        "CLI の read-only 状態が保持されること"
+    );
+    assert_eq!(
+        first_outcome.initial_snapshot.cursor_row, 1,
+        "CLI の行指定が初回起動に反映されること"
+    );
+    drop(first_outcome);
+
+    log::debug!("[test] cycle 2: expected bootstrap failure");
+    let failure = prepare_launch(failure_request.clone());
+    match failure {
+        Err(BootstrapError::TargetReadFailed { path, .. }) => {
+            assert_eq!(path, failure_path);
+        }
+        other => panic!(
+            "存在しないファイルは TargetReadFailed を返すこと, got: {:?}",
+            other
+        ),
+    }
+
+    log::debug!("[test] cycle 3: successful relaunch after failure");
+    let second_outcome =
+        prepare_launch(success_request).expect("失敗後に同じ launch state で再起動できること");
+    assert_eq!(second_outcome.target_path, Some(success_path.clone()));
+    assert!(
+        second_outcome.read_only,
+        "再起動後も read-only 状態が保持されること"
+    );
+    assert_eq!(
+        second_outcome.initial_snapshot.cursor_row, 1,
+        "再起動後も CLI の行指定が反映されること"
+    );
+
+    std::fs::remove_file(&success_path).expect("成功用のテストファイルの削除");
+}
+
 // ---- 9.1.5: 設定付き起動の統合フロー ----
 
 /// 設定ファイル付きの起動で config が warning なく読み込まれる。
@@ -273,6 +494,26 @@ fn startup_with_missing_config_falls_back_with_warning() {
         &outcome.warnings[0],
         BootstrapWarning::ConfigLoadFailed { path, .. } if *path == missing_config
     ));
+}
+
+#[test]
+fn startup_warning_projects_into_initial_message_line() {
+    let missing_config = unique_path("config-warning-projection.json");
+
+    let request = parse_launch_request(["--config", missing_config.to_str().unwrap()])
+        .expect("CLI 引数のパースが成功すること");
+    let outcome = prepare_launch(request).expect("warning 付き起動が成功すること");
+    let session_state = outcome.editor_session_state();
+    let warning_message = bootstrap_warning_message(&outcome.warnings)
+        .expect("起動 warning が host message として可視化されること");
+
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        Some(warning_message.as_str()),
+    ));
+
+    assert_eq!(model.message_line, Some(warning_message));
 }
 
 #[test]

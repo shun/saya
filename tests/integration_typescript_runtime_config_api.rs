@@ -1,3 +1,11 @@
+//! 統合テスト: TypeScript runtime integration の検証
+//!
+//! このファイルは `saya` の TypeScript runtime integration suite です。
+//!
+//! 責務は startup config の反映、runtime callback dispatch、
+//! host/application projection に限定する。詳細な editing semantics は
+//! ADR 0001 に従って `vim-core-rs` に委ねる。
+//!
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -5,6 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use saya::bootstrap::prepare_launch;
 use saya::callback_registry_seed::CallbackRegistrySeed;
 use saya::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::editor_session::EditorSessionState;
+use saya::host_io::{SaveResult, write_to_path};
+use saya::runtime_message::runtime_callback_failure_message;
+use saya::runtime_refresh::runtime_dispatch_requests_redraw;
 use saya::saya_live_runtime::{
     BoxFuture, BufferEventPayload, CallbackRegistryBuilder, HostCapabilityBridge,
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
@@ -19,6 +31,76 @@ fn unique_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-ts-config-{name}-{nanos}"))
+}
+
+fn typescript_runtime_suite_scope_statement() -> &'static str {
+    "TypeScript runtime integration suite for startup config, runtime callback dispatch, and host/application projection"
+}
+
+#[test]
+fn typescript_runtime_suite_scope_statement_stays_pinned_to_host_layer_integration() {
+    let statement = typescript_runtime_suite_scope_statement();
+
+    assert!(
+        statement.contains("TypeScript runtime integration suite"),
+        "suite ownership statement should stay explicit"
+    );
+    assert!(
+        statement.contains("startup config"),
+        "suite ownership statement should keep startup responsibility visible"
+    );
+    assert!(
+        statement.contains("runtime callback dispatch"),
+        "suite ownership statement should keep runtime integration visible"
+    );
+    assert!(
+        statement.contains("host/application"),
+        "suite ownership statement should stay anchored to the host layer"
+    );
+    assert!(
+        !statement.contains("editing semantics"),
+        "suite ownership statement must not drift into core-editing ownership"
+    );
+}
+
+#[test]
+fn runtime_related_test_files_use_typescript_runtime_prefix_instead_of_wave6_prefix() {
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let file_names: Vec<String> = std::fs::read_dir(&tests_dir)
+        .expect("tests directory should be readable")
+        .map(|entry| {
+            entry
+                .expect("test directory entry should be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    assert!(
+        file_names.contains(&"integration_typescript_runtime_config_api.rs".to_string()),
+        "runtime config API suite should use the runtime-oriented naming convention"
+    );
+    assert!(
+        file_names.contains(&"integration_typescript_runtime_command.rs".to_string()),
+        "runtime command suite should use the runtime-oriented naming convention"
+    );
+    assert!(
+        file_names.contains(&"integration_typescript_runtime_typed_payload.rs".to_string()),
+        "typed payload suite should use the runtime-oriented naming convention"
+    );
+    assert!(
+        !file_names.contains(&"integration_typescript_config_api.rs".to_string()),
+        "typescript config API naming should be retired from the runtime suite"
+    );
+    assert!(
+        !file_names.contains(&"integration_wave6_runtime_command.rs".to_string()),
+        "wave6 runtime command naming should be retired from the runtime suite"
+    );
+    assert!(
+        !file_names.contains(&"integration_wave6_typed_payload.rs".to_string()),
+        "wave6 typed payload naming should be retired from the runtime suite"
+    );
 }
 
 #[test]
@@ -278,4 +360,170 @@ async fn runtime_surface_is_frozen_and_does_not_expose_registration_apis() {
         .expect("dispatch result");
 
     assert_eq!(report.handler_count, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_callback_failure_projects_as_message_without_corrupting_session_state() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("runtime-failure.txt");
+    let config_path = unique_path("runtime-failure-init.ts");
+    std::fs::write(&target_path, "alpha\nbeta\n").expect("target file");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.events.on("bufferOpen", () => {
+                throw new Error("boom");
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup should register failing runtime callback");
+
+    assert_eq!(outcome.callback_registry.events().len(), 1);
+    let session_state = outcome.editor_session_state();
+    let before_dirty = session_state.is_dirty();
+    let before_save_error = session_state.last_save_error().map(ToString::to_string);
+
+    let host_bridge = Arc::new(RecordingHostBridge::new());
+    let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge, outcome.callback_registry)
+        .expect("seed runtime should initialize");
+
+    let error = runtime
+        .dispatch_event(RuntimeEventPayload::BufferOpen(BufferEventPayload {
+            buffer: ReadonlyBufferSnapshot {
+                id: 88,
+                path: Some(PathBuf::from("runtime-failure.md")),
+                line_count: 2,
+            },
+        }))
+        .expect("dispatch queued")
+        .await_result()
+        .await
+        .expect_err("callback failure should surface as a dispatch error");
+
+    let message = runtime_callback_failure_message(&error)
+        .expect("callback failure should translate to an application message");
+
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        Some(message.as_str()),
+    ));
+
+    assert!(
+        message.contains("boom"),
+        "application message should preserve the runtime failure text: {message}"
+    );
+    assert_eq!(model.message_line, Some(message));
+    assert_eq!(session_state.is_dirty(), before_dirty);
+    assert_eq!(
+        session_state.last_save_error().map(ToString::to_string),
+        before_save_error
+    );
+    assert_eq!(model.dirty, before_dirty);
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_callback_completion_requests_projection_refresh_after_host_save() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("runtime-refresh-target.txt");
+    let config_path = unique_path("runtime-refresh-init.ts");
+    std::fs::write(&target_path, "alpha\nbeta\n").expect("target file");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.commands.register("writeCurrent", () => {
+                saya.commands.execute("write");
+            });
+            saya.events.on("bufferOpen", () => {
+                return saya.commands.execute("writeCurrent");
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let mut outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup should register runtime callback");
+
+    assert_eq!(outcome.callback_registry.commands().len(), 1);
+    assert_eq!(outcome.callback_registry.events().len(), 1);
+
+    outcome.core_bridge.dispatch_key("i").unwrap();
+    outcome.core_bridge.dispatch_key("X").unwrap();
+    outcome.core_bridge.dispatch_key("\x1b").unwrap();
+
+    let mut session_state = EditorSessionState::new(outcome.target_path.clone());
+    session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+    let before_model = saya::screen_model::project(&saya::screen_model::ProjectionInput::new(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        None,
+    ));
+    assert!(before_model.dirty);
+
+    let host_bridge = Arc::new(RecordingHostBridge::new());
+    let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), outcome.callback_registry)
+        .expect("seed runtime should initialize");
+    let report = runtime
+        .dispatch_event(RuntimeEventPayload::BufferOpen(BufferEventPayload {
+            buffer: ReadonlyBufferSnapshot {
+                id: 77,
+                path: Some(target_path.clone()),
+                line_count: 2,
+            },
+        }))
+        .expect("dispatch queued")
+        .await_result()
+        .await
+        .expect("dispatch result");
+
+    assert_eq!(report.handler_count, 1);
+    assert!(
+        runtime_dispatch_requests_redraw(&report),
+        "runtime callback completion should request a host refresh"
+    );
+    assert_eq!(
+        host_bridge.executed_commands.lock().await.clone(),
+        vec!["write".to_string()]
+    );
+
+    let snapshot = outcome.core_bridge.snapshot();
+    let request = session_state
+        .build_save_request(&snapshot.text)
+        .expect("host should build save request after callback completion");
+    assert_eq!(write_to_path(&request), SaveResult::Saved);
+    session_state.record_save_success();
+
+    let transient_message = Some("Saved successfully");
+    let after_model = saya::screen_model::project(&saya::screen_model::ProjectionInput::new(
+        &snapshot,
+        &session_state,
+        transient_message,
+    ));
+    assert_eq!(
+        after_model.message_line,
+        Some("Saved successfully".to_string())
+    );
+    assert_ne!(before_model.message_line, after_model.message_line);
+    assert!(!session_state.is_dirty());
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
 }

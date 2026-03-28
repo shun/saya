@@ -7,6 +7,11 @@ suite is organized and what caveats you must know before you run it.
 The most important caveat is the single-session constraint inherited from the
 editing core integration.
 
+ADR 0001 defines the testing boundary that matters most here: `saya` tests the
+host application layer around `vim-core-rs`, while `vim-core-rs` remains the
+source of truth for detailed editing semantics and in-scope upstream Vim
+compatibility.
+
 ## Test categories
 
 The current test suite is organized around these groups.
@@ -18,8 +23,40 @@ The current test suite is organized around these groups.
 - Projection and terminal lifecycle tests
 
 The integration tests are especially valuable because they verify startup,
-editing, save or quit behavior, and the TypeScript capability surfaces without
-needing a live interactive session.
+save or quit flows, projection, terminal behavior, and TypeScript capability
+surfaces without needing a live interactive session.
+
+## Testing boundary
+
+Use this repository to prove application behavior that sits above the editing
+core.
+
+- Test CLI startup, launch preparation, and session lifecycle here.
+- Test save or quit policy, message projection, viewport behavior, terminal
+  lifecycle, input routing, and event-loop orchestration here.
+- Test startup TypeScript evaluation and runtime callback integration here.
+- Prefer headless end-to-end coverage over duplicated core-detail checks.
+- Add saya tests only when they prove host-application value.
+- Keep detailed core compatibility work in `vim-core-rs`, including most
+  fine-grained editing semantics and upstream Vim compatibility cases.
+- Do not add detailed editing-semantics validation here. Keep that validation
+  in `vim-core-rs`.
+
+`saya` may keep smoke tests for representative editing flows when they prove
+host integration, but it must not grow into a second exhaustive compatibility
+suite for core editor behavior.
+
+- Do not add exhaustive register-behavior coverage here. Keep detailed
+  register semantics in `vim-core-rs`.
+- Do not add exhaustive mark and jumplist coverage here. Keep detailed mark
+  and jumplist semantics in `vim-core-rs`.
+- Do not add exhaustive undo-tree coverage here. Keep detailed undo-tree
+  semantics in `vim-core-rs`.
+- Do not add exhaustive search, syntax, or pop-up menu extraction coverage
+  here. Keep detailed search, syntax, and pop-up menu extraction semantics in
+  `vim-core-rs`.
+- Do not add detailed VFS protocol or job protocol contract suites here when
+  `vim-core-rs` already owns them.
 
 ## Useful commands
 
@@ -62,13 +99,17 @@ failing bootstrap assertion suggests.
 If you want to understand the repository through tests, start with these files.
 
 - `tests/integration_startup.rs`
-- `tests/integration_editing.rs`
 - `tests/integration_save_quit.rs`
-- `tests/integration_typescript_config_api.rs`
+- `tests/integration_terminal.rs`
+- `tests/integration_typescript_runtime_config_api.rs`
+- `tests/integration_typescript_runtime_command.rs`
+- `tests/integration_typescript_runtime_typed_payload.rs`
 - `tests/saya_surface_guard.rs`
 - `tests/public_surface_guard.rs`
 
 ## Next steps
 
 If you want to compare the test suite with the implementation state, read
-[Status](status.md).
+[Status](status.md). If you need the formal scope boundary behind this testing
+strategy, read
+[ADR 0001](adr/0001-define-saya-scope-against-vim-core-rs.md).

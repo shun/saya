@@ -1,3 +1,8 @@
+//! 統合テスト: startup boot flow の検証。
+//!
+//! startup config の式評価と callback registry 生成が、host/application
+//! 層の boot flow で成立することを確認する。
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 

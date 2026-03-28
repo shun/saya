@@ -8,6 +8,11 @@ extensions.
 This page explains the product direction, the intended user experience, and the
 explicit non-goals that shape the rest of the documentation.
 
+ADR 0001 defines the repository-level boundary between `saya` and
+`vim-core-rs`. Read that decision when you need to decide whether a feature,
+test, or document belongs in the host application layer or in the embedded
+editing core.
+
 ## Product goals
 
 The project exists to give you a portable terminal editor with a small public
@@ -27,9 +32,13 @@ areas.
 
 - CLI startup and argument parsing
 - Session lifecycle and save or quit policies
-- Terminal rendering and viewport management
+- Terminal rendering, viewport management, and event-loop coordination
 - Startup TypeScript evaluation through `deno_core`
-- Runtime callback infrastructure for future editor events
+- Runtime callback infrastructure and host-side integration for editor events
+
+The repository does not treat itself as a second editing engine. Detailed Vim
+semantics remain in `vim-core-rs`, while `saya` turns that core into a usable
+CLI application.
 
 ## Non-goals
 
@@ -41,6 +50,8 @@ goals. These exclusions are part of the design, not temporary omissions.
 - String-first compatibility APIs such as `vim.cmd(...)`, `:set`, or `:map`
 - Broad filesystem or network capabilities in the public TypeScript API
 - Pulling application-level concerns down into `vim-core-rs`
+- Re-implementing detailed core editing semantics that already belong to
+  `vim-core-rs`
 
 ## Current state
 
@@ -50,11 +61,14 @@ layer is still partially isolated from the main TUI loop.
 
 You can think of the repository as having two stable centers today.
 
-- A headless-testable CLI editor flow
-- A TypeScript-first startup and runtime foundation
+- A headless-testable host application flow around `vim-core-rs`
+- A TypeScript-first startup and runtime foundation for configuration and
+  future extensions
 
 Use [Status](status.md) to see what is implemented today, and use
 [Architecture](architecture.md) to understand how the pieces fit together.
+Use [ADR 0001](adr/0001-define-saya-scope-against-vim-core-rs.md) when you
+need the formal scope boundary.
 
 ## Next steps
 
@@ -63,5 +77,6 @@ continue with these pages.
 
 1. Read [Requirements](requirements.md).
 2. Read [Architecture](architecture.md).
-3. Read the design pages under
+3. Read [ADR 0001](adr/0001-define-saya-scope-against-vim-core-rs.md).
+4. Read the design pages under
    [docs/design](design).

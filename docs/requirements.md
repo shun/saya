@@ -7,6 +7,11 @@ serves as the durable product-level contract for contributors.
 The requirements are grouped into the CLI editor MVP and the TypeScript-first
 configuration and runtime model.
 
+ADR 0001 defines the architecture boundary behind these requirements. The
+requirements on this page describe the host application layer that `saya`
+owns around `vim-core-rs`, not a second specification for the embedded editing
+core itself.
+
 ## CLI editor requirements
 
 These requirements define the minimum editor behavior that the CLI application
@@ -15,7 +20,8 @@ must keep stable.
 ### Startup and file I/O
 
 The editor must let you start with an existing file or a new empty buffer, and
-it must handle file persistence through explicit host-side save logic.
+it must handle file persistence through explicit host-side save logic around
+the core host-action boundary.
 
 - The CLI must open a provided file path and present the file contents for
   editing.
@@ -26,24 +32,40 @@ it must handle file persistence through explicit host-side save logic.
 
 ### Basic editing experience
 
-The editor must provide a narrow but real Vim-derived editing flow rather than
-an approximation built around generic text-area behavior.
+The application must present a narrow but real Vim-derived editing flow by
+embedding `vim-core-rs` rather than approximating editing through generic
+text-area behavior.
 
-- The editor must provide at least Normal mode and Insert mode.
-- The editor must update cursor position for normal-mode movement commands.
-- The editor must insert text at the current position in Insert mode.
-- The editor must support delete operations through the core editing model.
-- The editor must track and display dirty state after modifications.
+- The application must surface at least Normal mode and Insert mode through the
+  embedded core.
+- The application must reflect cursor movement from normal-mode commands in the
+  projected UI state.
+- The application must reflect text insertion at the current position in Insert
+  mode.
+- The application must reflect delete operations through the core editing
+  model.
+- The application must track and display dirty state after modifications.
 
 ### Session control
 
-The editor must remain safe to use from a terminal session and must make save
-or quit state visible.
+The application must remain safe to use from a terminal session and must make
+save or quit state visible.
 
 - The UI must display the current mode and file identity.
 - The UI must process save and quit requests without blocking the session loop.
 - The editor must warn about unsaved changes before a normal quit.
 - The editor must support force quit when the caller explicitly requests it.
+
+### Scope boundary
+
+These requirements intentionally stop at the host application boundary.
+
+- `saya` must not re-specify or re-implement detailed Vim editing semantics
+  that already belong to `vim-core-rs`.
+- `saya` must treat `vim-core-rs` as the source of truth for embedded editing
+  behavior and detailed compatibility coverage.
+- `saya` must focus its own requirements on startup, orchestration, rendering,
+  host I/O, and TypeScript-facing behavior.
 
 ## TypeScript configuration requirements
 
@@ -108,5 +130,6 @@ blur registration logic and live callback execution.
 Use the following pages to see how these requirements map to implementation.
 
 1. Read [Architecture](architecture.md).
-2. Read [Boot flow design](design/boot-flow.md).
-3. Read [TypeScript runtime design](design/typescript-runtime.md).
+2. Read [ADR 0001](adr/0001-define-saya-scope-against-vim-core-rs.md).
+3. Read [Boot flow design](design/boot-flow.md).
+4. Read [TypeScript runtime design](design/typescript-runtime.md).

@@ -1,3 +1,4 @@
+pub mod app_startup;
 pub mod bootstrap;
 pub mod callback_registry_seed;
 pub mod cli;
@@ -9,6 +10,9 @@ pub mod ex_command;
 pub mod host_io;
 pub mod input_loop;
 pub mod input_router;
+pub mod runtime_integration;
+pub mod runtime_message;
+pub mod runtime_refresh;
 pub mod saya_live_runtime;
 pub mod screen_model;
 pub mod session_guard;

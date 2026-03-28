@@ -1,3 +1,8 @@
+//! Public-surface boundary suite for `saya` startup and runtime guards.
+//!
+//! This file stays focused on host/application API exposure and capability
+//! boundaries. It must not drift into duplicated editing semantics.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,6 +19,266 @@ use saya::startup_runtime::StartupRegistryEntry;
 use saya::startup_runtime::{
     evaluate_startup_module, startup_forbidden_surface_names, startup_public_surface_names,
 };
+
+fn saya_surface_suite_scope_statement() -> &'static str {
+    "public-surface boundary suite for startup and runtime capability exposure in host/application API gating"
+}
+
+#[test]
+fn saya_surface_suite_scope_statement_stays_pinned_to_public_boundary_ownership() {
+    let statement = saya_surface_suite_scope_statement();
+
+    assert!(
+        statement.contains("public-surface boundary suite"),
+        "suite ownership statement should stay explicit"
+    );
+    assert!(
+        statement.contains("startup"),
+        "suite ownership statement should keep startup responsibility visible"
+    );
+    assert!(
+        statement.contains("runtime"),
+        "suite ownership statement should keep runtime responsibility visible"
+    );
+    assert!(
+        statement.contains("host/application"),
+        "suite ownership statement should stay anchored to the host layer"
+    );
+    assert!(
+        !statement.contains("editing semantics"),
+        "suite ownership statement must not drift into core-editing ownership"
+    );
+}
+
+#[test]
+fn detailed_editing_semantics_validation_remains_owned_by_vim_core_rs() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Do not add detailed editing-semantics validation here."),
+        "testing boundary should explicitly keep detailed editing-semantics validation out of saya"
+    );
+    assert!(
+        docs.contains("vim-core-rs"),
+        "testing boundary should keep detailed editing-semantics ownership with vim-core-rs"
+    );
+}
+
+#[test]
+fn saya_tests_are_added_only_for_host_application_value() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Add saya tests only when they prove host-application value."),
+        "testing boundary should require host-application value before adding more saya tests"
+    );
+    assert!(
+        docs.contains("host application layer around `vim-core-rs`"),
+        "testing boundary should keep the value check anchored to the host layer"
+    );
+}
+
+#[test]
+fn headless_end_to_end_coverage_is_preferred_over_core_detail_duplication() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Prefer headless end-to-end coverage over duplicated core-detail checks."),
+        "testing boundary should prefer headless end-to-end coverage over duplicated core-detail checks"
+    );
+    assert!(
+        docs.contains("headless verification"),
+        "testing boundary should keep the headless verification preference visible"
+    );
+}
+
+#[test]
+fn live_runtime_review_is_recorded_against_saya_live_runtime_in_next_review() {
+    let docs = std::fs::read_to_string("docs/testing-todo.md")
+        .expect("testing todo should be readable from the repository root");
+    let normalized = docs.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        normalized.contains(
+            "- [x] Revisit this list whenever the live runtime path gains new integration points."
+        ),
+        "live runtime review should be marked complete once the todo has been revisited"
+    );
+    assert!(
+        docs.contains("Review this list after the main TUI loop gains fuller"),
+        "next review guidance should stay tied to the main TUI loop integration point"
+    );
+    assert!(
+        docs.contains("SayaLiveRuntime"),
+        "next review guidance should keep SayaLiveRuntime visible as the runtime integration boundary"
+    );
+}
+
+#[test]
+fn large_test_migration_review_records_current_inventory_without_premature_completion() {
+    let docs = std::fs::read_to_string("docs/testing-todo.md")
+        .expect("testing todo should be readable from the repository root");
+    let normalized = docs.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        docs.contains("Review log: March 28, 2026"),
+        "testing todo should record the latest large-test-migration review with a concrete date"
+    );
+    assert!(
+        docs.contains("integration_editing.rs"),
+        "testing todo should record the saya-side review inventory"
+    );
+    assert!(
+        docs.contains("vim-core-rs/tests/mode_transition_contract.rs"),
+        "testing todo should identify the core-side destination for migration candidates"
+    );
+    assert!(
+        normalized.contains(
+            "- [x] Review this list after any large test migration between `saya` and `vim-core-rs`."
+        ),
+        "large test migration review should be marked complete after the migration is executed"
+    );
+    assert!(
+        docs.contains("visual_selection_contract.rs"),
+        "testing todo should record the vim-core-rs visual-selection destination after migration"
+    );
+    assert!(
+        docs.contains("The detailed editing-semantics assertions that used"),
+        "testing todo should explain that detailed semantics moved out of saya after migration"
+    );
+}
+
+#[test]
+fn integration_editing_stays_trimmed_to_host_smoke_after_core_migration() {
+    let source = std::fs::read_to_string("tests/integration_editing.rs")
+        .expect("integration_editing source should be readable from the repository root");
+
+    assert!(
+        !source.contains("assert_eq!((selection.start_row, selection.start_col), (0, 6));"),
+        "saya should not keep exact visual-selection coordinates once vim-core-rs owns them"
+    );
+    assert!(
+        !source.contains("assert_eq!((selection.end_row, selection.end_col_exclusive), (0, 10));"),
+        "saya should not keep exact visual-selection ranges once vim-core-rs owns them"
+    );
+    assert!(
+        !source.contains("assert_eq!(snapshot.cursor_row, 1);"),
+        "saya should not keep exact cursor-row editing semantics in the representative editing smoke"
+    );
+    assert!(
+        !source.contains("assert_eq!(outcome.core_bridge.snapshot().mode, CoreMode::Insert);"),
+        "saya should not keep exact insert-mode transition semantics once vim-core-rs owns them"
+    );
+}
+
+#[test]
+fn integration_editing_smoke_does_not_reintroduce_core_owned_selection_and_edit_details() {
+    let source = std::fs::read_to_string("tests/integration_editing.rs")
+        .expect("integration editing suite should be readable from the repository root");
+
+    assert!(
+        !source.contains("(selection.start_row, selection.start_col)"),
+        "saya smoke should not pin exact visual-selection coordinates after vim-core-rs owns that contract"
+    );
+    assert!(
+        !source.contains("line.contains(\"XY\")"),
+        "saya smoke should not pin exact inserted-text semantics once vim-core-rs owns that round trip"
+    );
+    assert!(
+        !source.contains("snapshot.cursor_row, 1"),
+        "saya smoke should not pin exact cursor-row edit semantics once vim-core-rs owns delete/motion contracts"
+    );
+    assert!(
+        !source.contains("snapshot.mode, CoreMode::Insert"),
+        "saya smoke should not pin exact intermediate mode semantics once vim-core-rs owns them"
+    );
+    assert!(
+        source.contains("visual_selection.is_some()"),
+        "saya should keep host-side projection smoke for visual-selection handoff"
+    );
+    assert!(
+        source.contains("model.lines != initial_model.lines"),
+        "saya should keep high-level projection-change smoke for integrated editing flows"
+    );
+}
+
+#[test]
+fn register_behavior_remains_out_of_scope_for_saya() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Do not add exhaustive register-behavior coverage here."),
+        "testing boundary should explicitly keep exhaustive register coverage out of saya"
+    );
+    assert!(
+        docs.contains("vim-core-rs"),
+        "testing boundary should keep register-detail ownership with vim-core-rs"
+    );
+}
+
+#[test]
+fn mark_and_jumplist_behavior_remains_out_of_scope_for_saya() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Do not add exhaustive mark and jumplist coverage here."),
+        "testing boundary should explicitly keep exhaustive mark and jumplist coverage out of saya"
+    );
+    assert!(
+        docs.contains("vim-core-rs"),
+        "testing boundary should keep mark and jumplist ownership with vim-core-rs"
+    );
+}
+
+#[test]
+fn undo_tree_behavior_remains_out_of_scope_for_saya() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Do not add exhaustive undo-tree coverage here."),
+        "testing boundary should explicitly keep exhaustive undo-tree coverage out of saya"
+    );
+    assert!(
+        docs.contains("vim-core-rs"),
+        "testing boundary should keep undo-tree detail ownership with vim-core-rs"
+    );
+}
+
+#[test]
+fn search_syntax_popup_behavior_remains_out_of_scope_for_saya() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Do not add exhaustive search, syntax, or pop-up menu extraction coverage"),
+        "testing boundary should explicitly keep exhaustive search, syntax, and pop-up menu extraction coverage out of saya"
+    );
+    assert!(
+        docs.contains("search, syntax, and pop-up menu extraction semantics in"),
+        "testing boundary should keep search, syntax, and pop-up menu extraction ownership with vim-core-rs"
+    );
+}
+
+#[test]
+fn vfs_and_job_protocol_behavior_remains_out_of_scope_for_saya() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains("Do not add detailed VFS protocol or job protocol contract suites here"),
+        "testing boundary should explicitly keep detailed VFS/job protocol coverage out of saya"
+    );
+    assert!(
+        docs.contains("vim-core-rs"),
+        "testing boundary should keep VFS/job protocol detail ownership with vim-core-rs"
+    );
+}
 
 #[test]
 fn startup_surface_excludes_filesystem_and_network_capabilities() {
