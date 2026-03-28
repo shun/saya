@@ -104,7 +104,9 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.session_state.line_numbers(),
         input.session_state.number_width(),
     );
+    trace_projection_lines("full", &full_lines, 0);
     let lines = slice_visible_lines(&full_lines, input.viewport_top, input.body_height);
+    trace_projection_lines("visible", &lines, input.viewport_top);
     let cursor_row = resolve_cursor_row(
         input.snapshot.cursor_row,
         input.viewport_top,
@@ -142,6 +144,23 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         visual_selection,
         message_line,
     }
+}
+
+fn trace_projection_lines(phase: &str, lines: &[String], viewport_top: usize) {
+    if std::env::var_os("SAYA_TRACE_RENDER").is_none() {
+        return;
+    }
+
+    let absolute_row = 6usize;
+    let line = absolute_row
+        .checked_sub(viewport_top)
+        .and_then(|row| lines.get(row))
+        .map(String::as_str)
+        .unwrap_or("");
+
+    eprintln!(
+        "[saya-trace][screen_model][{phase}] viewport_top={viewport_top} abs_row=7 line={line:?}"
+    );
 }
 
 fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelection> {

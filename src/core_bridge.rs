@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use vim_core_rs::{
-    CoreCommandOutcome, CoreHostAction, CoreMessageEvent, CoreMessageKind, CoreSessionError,
-    CoreSnapshot, VimCoreSession,
+    CoreCommandOutcome, CoreEvent, CoreHostAction, CoreMessageCategory, CoreMessageEvent,
+    CoreMessageSeverity, CoreSessionError, CoreSnapshot, VimCoreSession,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +20,8 @@ pub struct CoreBridge {
     session: VimCoreSession,
     preferred_column: Option<usize>,
     pending_normal_command_prefix: Option<String>,
-    pending_messages: Arc<Mutex<VecDeque<CoreMessageEvent>>>,
+    pending_host_actions: VecDeque<CoreHostAction>,
+    pending_messages: VecDeque<CoreMessageEvent>,
 }
 
 impl fmt::Debug for CoreBridge {
@@ -39,26 +39,14 @@ impl CoreBridge {
             initial_text.len()
         );
         let mut session = VimCoreSession::new(initial_text)?;
-        let pending_messages = Arc::new(Mutex::new(VecDeque::new()));
-        let handler_queue = pending_messages.clone();
-        session.set_message_handler(Box::new(move |event: CoreMessageEvent| {
-            log::debug!(
-                "[core_bridge] queued core message: kind={:?}, content={:?}",
-                event.kind,
-                event.content
-            );
-            handler_queue
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_back(event);
-        }));
         configure_message_suppression(&mut session).map_err(CoreSessionError::CommandFailed)?;
         log::debug!("[core_bridge] vim-core-rs session initialized");
         Ok(Self {
             session,
             preferred_column: None,
             pending_normal_command_prefix: None,
-            pending_messages,
+            pending_host_actions: VecDeque::new(),
+            pending_messages: VecDeque::new(),
         })
     }
 
@@ -83,10 +71,8 @@ impl CoreBridge {
     }
 
     pub fn take_pending_host_actions(&mut self) -> Vec<CoreHostAction> {
-        let mut actions = Vec::new();
-        while let Some(action) = self.session.take_pending_host_action() {
-            actions.push(action);
-        }
+        self.drain_pending_host_actions_from_session();
+        let actions = self.pending_host_actions.drain(..).collect::<Vec<_>>();
         log::debug!(
             "[core_bridge] drained pending host actions: count={}",
             actions.len()
@@ -95,11 +81,8 @@ impl CoreBridge {
     }
 
     pub fn take_pending_messages(&mut self) -> Vec<CoreMessageEvent> {
-        let mut queue = self
-            .pending_messages
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let messages = queue.drain(..).collect::<Vec<_>>();
+        self.drain_pending_messages_from_session();
+        let messages = self.pending_messages.drain(..).collect::<Vec<_>>();
         log::debug!(
             "[core_bridge] drained pending core messages: count={}",
             messages.len()
@@ -142,10 +125,11 @@ impl CoreBridge {
         log::debug!("[core_bridge] applying ex command: {:?}", command);
         let outcome = self
             .session
-            .apply_ex_command(command)
+            .execute_ex_command(command)
             .map_err(CoreSessionError::CommandFailed)?;
-        log::debug!("[core_bridge] ex command result: {:?}", outcome);
-        Ok(outcome)
+        self.queue_transaction_artifacts(&outcome);
+        log::debug!("[core_bridge] ex command result: {:?}", outcome.outcome);
+        Ok(outcome.outcome)
     }
 
     /// buffer のテキスト内容を返す。保存要求の生成に使用する。
@@ -164,9 +148,11 @@ impl CoreBridge {
             "[core_bridge] attaching target path to active buffer: {}",
             target_path.display()
         );
-        self.session
-            .apply_ex_command(&format!(":file {}", escaped_path))
+        let tx = self
+            .session
+            .execute_ex_command(&format!(":file {}", escaped_path))
             .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&tx);
         Ok(())
     }
 
@@ -176,16 +162,20 @@ impl CoreBridge {
             return None;
         }
         let current = (snapshot.cursor_row, snapshot.cursor_col);
-        self.session
-            .apply_normal_command("o")
+        let first_swap = self
+            .session
+            .execute_normal_command("o")
             .map_err(CoreSessionError::CommandFailed)
             .ok()?;
+        self.queue_transaction_artifacts(&first_swap);
         let swapped = self.session.snapshot();
         let anchor = (swapped.cursor_row, swapped.cursor_col);
-        self.session
-            .apply_normal_command("o")
+        let second_swap = self
+            .session
+            .execute_normal_command("o")
             .map_err(CoreSessionError::CommandFailed)
             .ok()?;
+        self.queue_transaction_artifacts(&second_swap);
         let ((start_row, start_col), (end_row, end_col)) =
             normalize_selection_bounds(anchor, current);
         Some(VisualSelection {
@@ -227,13 +217,11 @@ impl CoreBridge {
             } else {
                 "Type  :qa  and press <Enter> to exit Vim"
             };
-            self.pending_messages
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_back(CoreMessageEvent {
-                    kind: CoreMessageKind::Normal,
-                    content: content.to_string(),
-                });
+            self.pending_messages.push_back(CoreMessageEvent {
+                severity: CoreMessageSeverity::Info,
+                category: CoreMessageCategory::UserVisible,
+                content: content.to_string(),
+            });
         }
 
         Ok(CoreCommandOutcome::NoChange)
@@ -305,10 +293,11 @@ impl CoreBridge {
     ) -> Result<CoreCommandOutcome, CoreSessionError> {
         let outcome = self
             .session
-            .apply_normal_command(command)
+            .execute_normal_command(command)
             .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&outcome);
         self.update_preferred_column_from_snapshot(command);
-        Ok(outcome)
+        Ok(outcome.outcome)
     }
 
     fn dispatch_vertical_motion_with_preferred_column(
@@ -325,9 +314,11 @@ impl CoreBridge {
             desired_col
         );
 
-        self.session
-            .apply_normal_command(key)
+        let move_tx = self
+            .session
+            .execute_normal_command(key)
             .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&move_tx);
         let moved = self.session.snapshot();
 
         if moved.cursor_col != desired_col {
@@ -338,9 +329,11 @@ impl CoreBridge {
                 moved.cursor_col,
                 desired_col
             );
-            self.session
-                .apply_normal_command(&restore_command)
+            let restore_tx = self
+                .session
+                .execute_normal_command(&restore_command)
                 .map_err(CoreSessionError::CommandFailed)?;
+            self.queue_transaction_artifacts(&restore_tx);
         }
 
         self.preferred_column = Some(desired_col);
@@ -364,13 +357,59 @@ impl CoreBridge {
             snapshot.cursor_col
         );
     }
+
+    fn queue_transaction_artifacts(&mut self, tx: &vim_core_rs::CoreCommandTransaction) {
+        for action in &tx.host_actions {
+            log::debug!(
+                "[core_bridge] queued host action from transaction: {:?}",
+                action
+            );
+            self.pending_host_actions.push_back(action.clone());
+        }
+
+        for event in &tx.events {
+            if let CoreEvent::Message(message) = event {
+                log::debug!(
+                    "[core_bridge] queued core message from transaction: severity={:?}, category={:?}, content={:?}",
+                    message.severity,
+                    message.category,
+                    message.content
+                );
+                self.pending_messages.push_back(message.clone());
+            }
+        }
+    }
+
+    fn drain_pending_host_actions_from_session(&mut self) {
+        while let Some(action) = self.session.take_pending_host_action() {
+            log::debug!(
+                "[core_bridge] queued host action from pending session state: {:?}",
+                action
+            );
+            self.pending_host_actions.push_back(action);
+        }
+    }
+
+    fn drain_pending_messages_from_session(&mut self) {
+        while let Some(event) = self.session.take_pending_event() {
+            if let CoreEvent::Message(message) = event {
+                log::debug!(
+                    "[core_bridge] queued core message from pending session state: severity={:?}, category={:?}, content={:?}",
+                    message.severity,
+                    message.category,
+                    message.content
+                );
+                self.pending_messages.push_back(message);
+            }
+        }
+    }
 }
 
 fn configure_message_suppression(
     session: &mut VimCoreSession,
 ) -> Result<(), vim_core_rs::CoreCommandError> {
     log::debug!("[core_bridge] configuring Vim message suppression: report=999999, shortmess+=F");
-    session.apply_ex_command(":set report=999999 shortmess+=F")?;
+    session.execute_ex_command(":set report=999999 shortmess+=F")?;
     Ok(())
 }
 
@@ -440,7 +479,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use vim_core_rs::{CoreMessageKind, CoreMode};
+    use vim_core_rs::{CoreMessageCategory, CoreMessageSeverity, CoreMode};
 
     use super::CoreBridge;
 
@@ -569,7 +608,8 @@ mod tests {
 
         assert!(
             messages.iter().any(|message| {
-                message.kind == CoreMessageKind::Error
+                message.severity == CoreMessageSeverity::Error
+                    && message.category == CoreMessageCategory::UserVisible
                     && message.content.contains("test error message")
             }),
             "echoerr message should be queued: {:?}",

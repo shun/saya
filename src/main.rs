@@ -98,6 +98,7 @@ async fn main() {
         .with_visual_selection(visual_selection.as_ref())
         .with_viewport(viewport.top_line(), body_height),
     );
+    trace_render_pipeline("initial", &snapshot.text, &model.lines, viewport.top_line());
     let _ = renderer.draw(&model);
 
     // メインループ
@@ -249,6 +250,7 @@ async fn main() {
                 .with_visual_selection(visual_selection.as_ref())
                 .with_viewport(viewport.top_line(), body_height),
             );
+            trace_render_pipeline("redraw", &snapshot.text, &model.lines, viewport.top_line());
             let _ = renderer.draw(&model);
         }
     };
@@ -359,7 +361,7 @@ fn update_transient_message_from_core(
     core_bridge: &mut saya::core_bridge::CoreBridge,
     transient_msg: &mut Option<String>,
 ) {
-    if let Some(message) = latest_non_empty_message(core_bridge.take_pending_messages()) {
+    if let Some(message) = latest_user_visible_message(core_bridge.take_pending_messages()) {
         log::debug!(
             "[main] replacing transient message from core: {:?}",
             message
@@ -368,12 +370,12 @@ fn update_transient_message_from_core(
     }
 }
 
-fn latest_non_empty_message(messages: Vec<CoreMessageEvent>) -> Option<String> {
+fn latest_user_visible_message(messages: Vec<CoreMessageEvent>) -> Option<String> {
     messages
         .into_iter()
         .filter_map(|event| {
             let trimmed = event.content.trim();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || !event.category.is_user_visible() {
                 None
             } else {
                 Some(trimmed.to_string())
@@ -427,6 +429,29 @@ fn current_body_height() -> usize {
 
 fn buffer_line_count(text: &str) -> usize {
     text.lines().count().max(1)
+}
+
+fn trace_render_pipeline(
+    phase: &str,
+    snapshot_text: &str,
+    visible_lines: &[String],
+    viewport_top: usize,
+) {
+    if std::env::var_os("SAYA_TRACE_RENDER").is_none() {
+        return;
+    }
+
+    let absolute_row = 6usize;
+    let snapshot_line = snapshot_text.lines().nth(absolute_row).unwrap_or("");
+    let visible_row = absolute_row.checked_sub(viewport_top);
+    let projected_line = visible_row
+        .and_then(|row| visible_lines.get(row))
+        .map(String::as_str)
+        .unwrap_or("");
+
+    eprintln!(
+        "[saya-trace][main][{phase}] viewport_top={viewport_top} abs_row=7 snapshot={snapshot_line:?} projected={projected_line:?}"
+    );
 }
 
 fn format_cli_error(error: CliParseError) -> String {
@@ -548,21 +573,62 @@ mod tests {
     }
 
     #[test]
-    fn latest_non_empty_message_returns_last_core_message() {
+    fn latest_user_visible_message_returns_last_user_visible_message() {
         let messages = vec![
             CoreMessageEvent {
-                kind: vim_core_rs::CoreMessageKind::Normal,
+                severity: vim_core_rs::CoreMessageSeverity::Info,
+                category: vim_core_rs::CoreMessageCategory::UserVisible,
                 content: "first".to_string(),
             },
             CoreMessageEvent {
-                kind: vim_core_rs::CoreMessageKind::Error,
+                severity: vim_core_rs::CoreMessageSeverity::Error,
+                category: vim_core_rs::CoreMessageCategory::UserVisible,
                 content: "second".to_string(),
             },
         ];
 
         assert_eq!(
-            latest_non_empty_message(messages),
+            latest_user_visible_message(messages),
             Some("second".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_user_visible_message_ignores_undo_command_feedback() {
+        let messages = vec![
+            CoreMessageEvent {
+                severity: vim_core_rs::CoreMessageSeverity::Info,
+                category: vim_core_rs::CoreMessageCategory::CommandFeedback,
+                content: "2 fewer lines; before #2  4 seconds ago".to_string(),
+            },
+            CoreMessageEvent {
+                severity: vim_core_rs::CoreMessageSeverity::Info,
+                category: vim_core_rs::CoreMessageCategory::CommandFeedback,
+                content: "1 change; after #3  1 second ago".to_string(),
+            },
+        ];
+
+        assert_eq!(latest_user_visible_message(messages), None);
+    }
+
+    #[test]
+    fn latest_user_visible_message_skips_command_feedback_and_keeps_visible_notice() {
+        let messages = vec![
+            CoreMessageEvent {
+                severity: vim_core_rs::CoreMessageSeverity::Info,
+                category: vim_core_rs::CoreMessageCategory::CommandFeedback,
+                content: "2 fewer lines; before #2  4 seconds ago".to_string(),
+            },
+            CoreMessageEvent {
+                severity: vim_core_rs::CoreMessageSeverity::Warning,
+                category: vim_core_rs::CoreMessageCategory::UserVisible,
+                content: "visible warning".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            latest_user_visible_message(messages),
+            Some("visible warning".to_string())
         );
     }
 

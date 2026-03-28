@@ -10,7 +10,7 @@ name = "sy"
 path = "src/main.rs"
 
 [dependencies]
-vim-core-rs = "0.1.1"
+vim-core-rs = { path = "/Users/skudo/ghq/github.com/shun/saya_ws/vim-core-rs" }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "rt-multi-thread"] }
 ratatui = "0.29.0"
 crossterm = { version = "0.28.1", features = ["event-stream"] }

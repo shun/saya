@@ -1,9 +1,10 @@
 use crate::screen_model::ScreenModel;
 use crate::terminal_lifecycle::TerminalBackend;
 use crossterm::{execute, terminal};
+use ratatui::Terminal;
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use std::io::{self, Stdout};
 use unicode_width::UnicodeWidthChar;
 
@@ -29,45 +30,65 @@ impl TerminalBackend for CrosstermBackendImpl {
 
 pub struct TuiRenderer {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    needs_full_clear: bool,
 }
 
 impl TuiRenderer {
     pub fn new() -> io::Result<Self> {
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            needs_full_clear: true,
+        })
     }
 
     pub fn draw(&mut self, model: &ScreenModel) -> io::Result<()> {
-        self.terminal.draw(|f| {
-            let size = f.area();
-
-            let layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(
-                    [
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                    ]
-                    .as_ref(),
-                )
-                .split(size);
-
-            let buffer_content = Paragraph::new(render_buffer_text(model));
-            f.render_widget(buffer_content, layout[0]);
-
-            let status_bar = Paragraph::new(render_status_line(model))
-                .style(Style::default().bg(Color::White).fg(Color::Black));
-            f.render_widget(status_bar, layout[1]);
-            f.render_widget(Paragraph::new(render_message_line(model)), layout[2]);
-
-            // Set cursor
-            if model.cursor_row < layout[0].height {
-                f.set_cursor_position((model.cursor_col, model.cursor_row));
-            }
-        })?;
+        draw_editor_frame(&mut self.terminal, model, self.needs_full_clear)?;
+        self.needs_full_clear = false;
         Ok(())
+    }
+}
+
+fn draw_editor_frame<B: Backend>(
+    terminal: &mut Terminal<B>,
+    model: &ScreenModel,
+    force_full_clear: bool,
+) -> io::Result<()> {
+    if force_full_clear {
+        terminal.clear()?;
+    }
+    terminal.draw(|f| render_editor_frame(f, model))?;
+    Ok(())
+}
+
+fn render_editor_frame(f: &mut Frame<'_>, model: &ScreenModel) {
+    let size = f.area();
+    f.render_widget(Clear, size);
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ]
+            .as_ref(),
+        )
+        .split(size);
+
+    let buffer_content = Paragraph::new(render_buffer_text(model, layout[0].width));
+    trace_renderer_line(model, layout[0].width);
+    f.render_widget(buffer_content, layout[0]);
+
+    let status_bar = Paragraph::new(render_status_line(model))
+        .style(Style::default().bg(Color::White).fg(Color::Black));
+    f.render_widget(status_bar, layout[1]);
+    f.render_widget(Paragraph::new(render_message_line(model)), layout[2]);
+
+    if model.cursor_row < layout[0].height {
+        f.set_cursor_position((model.cursor_col, model.cursor_row));
     }
 }
 
@@ -84,24 +105,36 @@ fn render_message_line(model: &ScreenModel) -> &str {
     model.message_line.as_deref().unwrap_or("")
 }
 
-fn render_buffer_text(model: &ScreenModel) -> Text<'static> {
+fn render_buffer_text(model: &ScreenModel, width: u16) -> Text<'static> {
     let lines = model
         .lines
         .iter()
         .enumerate()
-        .map(|(index, line)| render_line(model, index, line))
+        .map(|(index, line)| render_line(model, index, line, width))
         .collect::<Vec<_>>();
     Text::from(lines)
 }
 
-fn render_line(model: &ScreenModel, index: usize, line: &str) -> Line<'static> {
+fn trace_renderer_line(model: &ScreenModel, width: u16) {
+    if std::env::var_os("SAYA_TRACE_RENDER").is_none() {
+        return;
+    }
+
+    let line = model.lines.get(6).map(String::as_str).unwrap_or("");
+    eprintln!(
+        "[saya-trace][renderer] body_width={} rel_row=7 line={line:?}",
+        width
+    );
+}
+
+fn render_line(model: &ScreenModel, index: usize, line: &str, width: u16) -> Line<'static> {
     let Some(selection) = model.visual_selection else {
-        return Line::from(line.to_string());
+        return pad_line_to_width(Line::from(line.to_string()), width);
     };
 
     let row = u16::try_from(index).unwrap_or(u16::MAX);
     if row < selection.start_row || row > selection.end_row {
-        return Line::from(line.to_string());
+        return pad_line_to_width(Line::from(line.to_string()), width);
     }
 
     let start_col = if row == selection.start_row {
@@ -117,11 +150,24 @@ fn render_line(model: &ScreenModel, index: usize, line: &str) -> Line<'static> {
 
     let (prefix, selected, suffix) =
         split_line_by_display_columns(line, start_col, end_col_exclusive);
-    Line::from(vec![
-        Span::raw(prefix),
-        Span::styled(selected, Style::default().add_modifier(Modifier::REVERSED)),
-        Span::raw(suffix),
-    ])
+    pad_line_to_width(
+        Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(selected, Style::default().add_modifier(Modifier::REVERSED)),
+            Span::raw(suffix),
+        ]),
+        width,
+    )
+}
+
+fn pad_line_to_width(mut line: Line<'static>, width: u16) -> Line<'static> {
+    let rendered_width = line.width();
+    let target_width = usize::from(width);
+    if rendered_width < target_width {
+        line.spans
+            .push(Span::raw(" ".repeat(target_width - rendered_width)));
+    }
+    line
 }
 
 fn split_line_by_display_columns(
@@ -158,6 +204,7 @@ fn display_width(text: &str) -> usize {
 mod tests {
     use super::*;
     use crate::screen_model::ScreenSelection;
+    use ratatui::backend::TestBackend;
 
     fn screen_model_with_message(message_line: Option<&str>) -> ScreenModel {
         ScreenModel {
@@ -218,12 +265,45 @@ mod tests {
             message_line: None,
         };
 
-        let text = render_buffer_text(&model);
+        let text = render_buffer_text(&model, 20);
         let second_line = &text.lines[1];
 
-        assert_eq!(second_line.spans.len(), 3);
+        assert_eq!(second_line.spans.len(), 4);
         assert_eq!(second_line.spans[0].content.as_ref(), " 2 ");
         assert_eq!(second_line.spans[1].content.as_ref(), "beta");
         assert_eq!(second_line.spans[2].content.as_ref(), "");
+        assert!(
+            second_line.spans[3]
+                .content
+                .as_ref()
+                .chars()
+                .all(|ch| ch == ' '),
+            "末尾はパディング空白で埋めること"
+        );
+    }
+
+    #[test]
+    fn redraw_clears_stale_tail_when_line_becomes_shorter() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 4)).expect("test terminal should initialize");
+        let mut long_model = screen_model_with_message(None);
+        long_model.lines = vec!["## プロジェクト概要    13 seconds ago".to_string()];
+        long_model.dirty = false;
+        let mut short_model = screen_model_with_message(None);
+        short_model.lines = vec!["## プロジェクト概要".to_string()];
+        short_model.dirty = false;
+
+        draw_editor_frame(&mut terminal, &long_model, true).expect("first draw should succeed");
+        draw_editor_frame(&mut terminal, &short_model, false)
+            .expect("short line redraw should succeed");
+
+        let rendered = terminal.backend().buffer().content();
+        let first_row: String = rendered.iter().take(40).map(|cell| cell.symbol()).collect();
+
+        assert!(
+            !first_row.contains("seconds ago"),
+            "短い行への再描画で古い suffix が残らないこと: {:?}",
+            first_row
+        );
     }
 }
