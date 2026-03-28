@@ -18,6 +18,34 @@ impl ViewportState {
         self.top_line
     }
 
+    /// core が返す window.topline (1-based) を viewport に同期する。
+    ///
+    /// vim 側のスクロール操作は cursor 位置だけでは表現しきれないため、
+    /// 画面の先頭行は cursor ではなく core の window state を優先する。
+    pub fn sync_from_core_topline(
+        &mut self,
+        topline: usize,
+        body_height: usize,
+        total_lines: usize,
+    ) {
+        let body_height = body_height.max(1);
+        let total_lines = total_lines.max(1);
+        let max_top_line = total_lines.saturating_sub(body_height);
+        let next_top_line = topline.saturating_sub(1).min(max_top_line);
+
+        log::debug!(
+            "[viewport] sync from core topline: topline={}, body_height={}, total_lines={}, top_line_before={}, top_line_after={}, max_top_line={}",
+            topline,
+            body_height,
+            total_lines,
+            self.top_line,
+            next_top_line,
+            max_top_line
+        );
+
+        self.top_line = next_top_line;
+    }
+
     pub fn ensure_cursor_visible(
         &mut self,
         cursor_row: usize,
@@ -83,5 +111,23 @@ mod tests {
         viewport.ensure_cursor_visible(8, 6, 10);
 
         assert_eq!(viewport.top_line(), 4);
+    }
+
+    #[test]
+    fn syncs_from_core_topline_using_one_based_coordinates() {
+        let mut viewport = ViewportState::new();
+
+        viewport.sync_from_core_topline(11, 4, 100);
+
+        assert_eq!(viewport.top_line(), 10);
+    }
+
+    #[test]
+    fn syncs_from_core_topline_clamping_to_buffer_end() {
+        let mut viewport = ViewportState::new();
+
+        viewport.sync_from_core_topline(99, 4, 100);
+
+        assert_eq!(viewport.top_line(), 96);
     }
 }

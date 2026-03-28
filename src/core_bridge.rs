@@ -66,6 +66,16 @@ impl CoreBridge {
         snapshot
     }
 
+    /// core がページスクロールの基準にする screen size を host 側で同期する。
+    pub fn set_screen_size(&mut self, rows: i32, cols: i32) {
+        log::debug!(
+            "[core_bridge] setting screen size: rows={}, cols={}",
+            rows,
+            cols
+        );
+        self.session.set_screen_size(rows, cols);
+    }
+
     pub fn take_pending_host_actions(&mut self) -> Vec<CoreHostAction> {
         self.drain_pending_host_actions_from_session();
         let actions = self.pending_host_actions.drain(..).collect::<Vec<_>>();

@@ -107,14 +107,20 @@ async fn main() {
     });
 
     // 初期描画
+    sync_core_screen_size(&mut outcome);
     let snapshot = outcome.core_bridge.snapshot();
     let visual_selection = outcome.core_bridge.current_visual_selection();
     let body_height = current_body_height();
-    viewport.ensure_cursor_visible(
-        snapshot.cursor_row,
-        body_height,
-        buffer_line_count(&snapshot.text),
-    );
+    let total_lines = buffer_line_count(&snapshot.text);
+    if let Some(window) = snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| snapshot.windows.first())
+    {
+        viewport.sync_from_core_topline(window.topline, body_height, total_lines);
+    }
+    viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, total_lines);
     let model = project(
         &ProjectionInput::new(
             &snapshot,
@@ -291,14 +297,20 @@ async fn main() {
         }
 
         if need_redraw {
+            sync_core_screen_size(&mut outcome);
             let snapshot = outcome.core_bridge.snapshot();
             let visual_selection = outcome.core_bridge.current_visual_selection();
             let body_height = current_body_height();
-            viewport.ensure_cursor_visible(
-                snapshot.cursor_row,
-                body_height,
-                buffer_line_count(&snapshot.text),
-            );
+            let total_lines = buffer_line_count(&snapshot.text);
+            if let Some(window) = snapshot
+                .windows
+                .iter()
+                .find(|window| window.is_active)
+                .or_else(|| snapshot.windows.first())
+            {
+                viewport.sync_from_core_topline(window.topline, body_height, total_lines);
+            }
+            viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, total_lines);
             let model = project(
                 &ProjectionInput::new(
                     &snapshot,
@@ -824,6 +836,14 @@ fn current_body_height() -> usize {
         .unwrap_or(3);
     // 本文 + status line + message line の 3 段構成を前提に本文高さを計算する。
     usize::from(rows.saturating_sub(2).max(1))
+}
+
+fn sync_core_screen_size(outcome: &mut saya::bootstrap::BootstrapOutcome) {
+    if let Ok((cols, rows)) = crossterm::terminal::size() {
+        outcome
+            .core_bridge
+            .set_screen_size(i32::from(rows), i32::from(cols));
+    }
 }
 
 fn buffer_line_count(text: &str) -> usize {

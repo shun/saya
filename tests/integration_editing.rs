@@ -125,8 +125,110 @@ fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
         2,
         "4 行目移動時に viewport が追従すること"
     );
-    assert_eq!(model.lines, vec!["line3", "line4", "line5"]);
-    assert_eq!(model.cursor_row, 2, "カーソルが本文領域内へ保たれること");
+assert_eq!(model.lines, vec!["line3", "line4", "line5"]);
+assert_eq!(model.cursor_row, 2, "カーソルが本文領域内へ保たれること");
+}
+
+/// page scroll は cursor 位置ではなく core window の topline を信頼して投影する。
+#[test]
+fn page_scroll_uses_core_window_topline_for_forward_and_backward_motion() {
+    let content = (1..=40)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut outcome = launch_with_content(&content);
+    let session_state = EditorSessionState::new(outcome.target_path.clone());
+    let mut viewport = ViewportState::new();
+    let body_height = 10usize;
+
+    outcome.core_bridge.set_screen_size(12, 80);
+
+    let initial_snapshot = outcome.core_bridge.snapshot();
+    let initial_window = initial_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| initial_snapshot.windows.first())
+        .expect("active window should exist");
+    viewport.sync_from_core_topline(
+        initial_window.topline,
+        body_height,
+        initial_snapshot.text.lines().count(),
+    );
+    let initial_top_line = viewport.top_line();
+
+    outcome
+        .core_bridge
+        .dispatch_key("\u{6}")
+        .expect("Ctrl+F dispatch");
+    let forward_snapshot = outcome.core_bridge.snapshot();
+    let forward_window = forward_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| forward_snapshot.windows.first())
+        .expect("active window should exist after Ctrl+F");
+    viewport.sync_from_core_topline(
+        forward_window.topline,
+        body_height,
+        forward_snapshot.text.lines().count(),
+    );
+    let forward_top_line = viewport.top_line();
+
+    assert!(
+        forward_top_line > initial_top_line,
+        "Ctrl+F should advance the viewport: initial={}, forward={}",
+        initial_top_line,
+        forward_top_line
+    );
+
+    outcome
+        .core_bridge
+        .dispatch_key("\u{2}")
+        .expect("Ctrl+B dispatch");
+    let backward_snapshot = outcome.core_bridge.snapshot();
+    let backward_window = backward_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| backward_snapshot.windows.first())
+        .expect("active window should exist after Ctrl+B");
+    assert_eq!(
+        backward_window.topline,
+        initial_window.topline,
+        "Ctrl+B should restore the core topline to the initial page: initial={}, forward={}, backward={}, initial_cursor=({},{}), forward_cursor=({},{}), backward_cursor=({}, {})",
+        initial_window.topline,
+        forward_window.topline,
+        backward_window.topline,
+        initial_snapshot.cursor_row,
+        initial_snapshot.cursor_col,
+        forward_snapshot.cursor_row,
+        forward_snapshot.cursor_col,
+        backward_snapshot.cursor_row,
+        backward_snapshot.cursor_col
+    );
+    viewport.sync_from_core_topline(
+        backward_window.topline,
+        body_height,
+        backward_snapshot.text.lines().count(),
+    );
+
+    assert_eq!(
+        viewport.top_line(),
+        initial_top_line,
+        "Ctrl+B should restore the viewport to the previous page"
+    );
+
+    let model = project(
+        &ProjectionInput::new(&backward_snapshot, &session_state, None)
+            .with_viewport(viewport.top_line(), body_height),
+    );
+    assert_eq!(
+        model.lines.first().map(String::as_str),
+        Some("line1"),
+        "Ctrl+B で元の先頭行が再び表示されること"
+    );
 }
 
 // host-integration: visual selection projection for rendering is host-side
