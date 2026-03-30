@@ -87,9 +87,7 @@ fn render_editor_frame(f: &mut Frame<'_>, model: &ScreenModel) {
     f.render_widget(status_bar, layout[1]);
     f.render_widget(Paragraph::new(render_message_line(model)), layout[2]);
 
-    if let Some(col) = model.command_cursor_col {
-        f.set_cursor_position((col, layout[2].y));
-    } else if model.cursor_row < layout[0].height {
+    if model.cursor_row < layout[0].height {
         f.set_cursor_position((model.cursor_col, model.cursor_row));
     }
 }
@@ -229,7 +227,6 @@ mod tests {
                 end_col_exclusive: 1,
             }),
             message_line: message_line.map(ToString::to_string),
-            command_cursor_col: None,
         }
     }
 
@@ -271,7 +268,6 @@ mod tests {
                 end_col_exclusive: 7,
             }),
             message_line: None,
-            command_cursor_col: None,
         };
 
         let text = render_buffer_text(&model, 20);

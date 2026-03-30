@@ -32,7 +32,6 @@ pub struct ScreenModel {
     pub visual_selection: Option<ScreenSelection>,
     /// メッセージ欄に表示する通知（エラーやガイダンス）
     pub message_line: Option<String>,
-    pub command_cursor_col: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +121,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.session_state.number_width(),
     );
     let visual_selection = resolve_visual_selection(input);
-    let (message_line, command_cursor_col) = resolve_message_line(input.snapshot, input.session_state, input.transient_message);
+    let message_line = resolve_message_line(input.session_state, input.transient_message);
 
     log::debug!(
         "[screen_model] projected: file_name={:?}, mode_label={:?}, dirty={}, lines_count={}, cursor=({},{}), message_line={:?}",
@@ -134,7 +133,6 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_col,
         message_line,
     );
-    log::debug!("[screen_model] command_cursor_col={:?}", command_cursor_col);
 
     ScreenModel {
         file_name,
@@ -145,7 +143,6 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_col,
         visual_selection,
         message_line,
-        command_cursor_col,
     }
 }
 
@@ -492,32 +489,21 @@ fn char_display_width(ch: char) -> usize {
 /// transient_message が指定されていればそれを優先し、
 /// なければ session_state の last_save_error を表示する。
 fn resolve_message_line(
-    snapshot: &vim_core_rs::CoreSnapshot,
     session_state: &EditorSessionState,
     transient_message: Option<&str>,
-) -> (Option<String>, Option<u16>) {
-    // 1. コマンドライン（最優先）
-    if let Some(cmdline) = &snapshot.cmdline {
-        let msg = format!("{}{}", cmdline.prompt_char, cmdline.text);
-        // プロンプト1文字 + コマンドライン上のカーソル位置
-        let cursor_col = u16::try_from(1 + cmdline.cursor_pos).unwrap_or(u16::MAX);
-        return (Some(msg), Some(cursor_col));
-    }
-
-    // 2. transient (ex_command の実行結果など)
+) -> Option<String> {
     if let Some(msg) = transient_message {
         log::debug!("[screen_model] message line from transient: {:?}", msg);
-        return (Some(msg.to_string()), None);
+        return Some(msg.to_string());
     }
 
-    // 3. save error
     if let Some(error) = session_state.last_save_error() {
         log::debug!("[screen_model] message line from save error: {:?}", error);
-        return (Some(format!("保存失敗: {}", error)), None);
+        return Some(format!("保存失敗: {}", error));
     }
 
     log::debug!("[screen_model] no message line");
-    (None, None)
+    None
 }
 
 #[cfg(test)]
@@ -1188,7 +1174,6 @@ mod tests {
             cursor_col: 0,
             visual_selection: None,
             message_line: None,
-            command_cursor_col: None,
         };
 
         // ScreenModel の各フィールドにアクセスできること（コンパイル時検証）
