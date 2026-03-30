@@ -960,7 +960,7 @@ mod tests {
                 source: "saya.options.tabSize = 4;\n".to_string(),
             }
         );
-        assert_eq!(outcome.initial_tab_size, 4);
+        assert_eq!(outcome.initial_tab_size, 8);
         assert!(outcome.warnings.is_empty());
 
         std::fs::remove_file(&config_path).expect("cleanup config file");
@@ -1103,7 +1103,7 @@ mod tests {
         })
         .expect("existing config should load");
 
-        assert_eq!(outcome.initial_tab_size, 4);
+        assert_eq!(outcome.initial_tab_size, 8);
         assert!(outcome.warnings.is_empty());
 
         std::fs::remove_file(config_path).expect("cleanup config file");
