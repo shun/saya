@@ -32,6 +32,7 @@ pub struct ScreenModel {
     pub visual_selection: Option<ScreenSelection>,
     /// メッセージ欄に表示する通知（エラーやガイダンス）
     pub message_line: Option<String>,
+    pub command_cursor_col: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +144,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_col,
         visual_selection,
         message_line,
+        command_cursor_col: None,
     }
 }
 
@@ -1174,6 +1176,7 @@ mod tests {
             cursor_col: 0,
             visual_selection: None,
             message_line: None,
+            command_cursor_col: None,
         };
 
         // ScreenModel の各フィールドにアクセスできること（コンパイル時検証）
