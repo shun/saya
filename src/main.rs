@@ -69,7 +69,7 @@ async fn main() {
     let mut session_state = outcome.editor_session_state();
     let mut transient_msg: Option<String> = bootstrap_warning_message(&outcome.warnings);
     let mut viewport = ViewportState::new();
-    let mut command_line_mode = false;
+    let mut command_line_prompt: Option<char> = None;
     let mut command_line_buffer = String::new();
     let mut runtime_session = match RuntimeSessionOwner::spawn(outcome.callback_registry.clone()) {
         Ok(runtime_session) => Some(runtime_session),
@@ -126,7 +126,7 @@ async fn main() {
             &snapshot,
             &session_state,
             visible_message_line(
-                command_line_mode,
+                command_line_prompt,
                 &command_line_buffer,
                 transient_msg.as_deref(),
             )
@@ -158,34 +158,43 @@ async fn main() {
                 UiEvent::Input(key) => {
                     let mut handled = false;
 
-                    if command_line_mode {
+                    if let Some(prompt) = command_line_prompt {
                         match key {
                             KeyInput::Escape => {
-                                command_line_mode = false;
+                                command_line_prompt = None;
                                 command_line_buffer.clear();
                             }
                             KeyInput::Enter => {
-                                let cmd = format!(":{}", command_line_buffer);
-                                command_line_mode = false;
+                                let cmd = format!("{}{}", prompt, command_line_buffer);
+                                command_line_prompt = None;
                                 command_line_buffer.clear();
-                                if let Some(message) =
-                                    apply_local_ex_command(&mut session_state, &cmd)
-                                {
-                                    transient_msg = Some(message);
-                                } else if let Some(reason) =
-                                    process_local_host_command_with_runtime(
-                                        &cmd,
-                                        &mut outcome,
-                                        &mut session_state,
-                                        &mut transient_msg,
-                                        runtime_session.as_mut(),
-                                        &mut need_redraw,
-                                    )
-                                    .await
-                                {
-                                    break 'main reason;
-                                } else {
-                                    let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                if prompt == ':' {
+                                    if let Some(message) =
+                                        apply_local_ex_command(&mut session_state, &cmd)
+                                    {
+                                        transient_msg = Some(message);
+                                    } else if let Some(reason) =
+                                        process_local_host_command_with_runtime(
+                                            &cmd,
+                                            &mut outcome,
+                                            &mut session_state,
+                                            &mut transient_msg,
+                                            runtime_session.as_mut(),
+                                            &mut need_redraw,
+                                        )
+                                        .await
+                                    {
+                                        break 'main reason;
+                                    } else {
+                                        let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                        update_transient_message_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut transient_msg,
+                                        );
+                                    }
+                                } else if prompt == '/' {
+                                    let search_keys = format!("{}\r", cmd);
+                                    let _ = outcome.core_bridge.dispatch_key(&search_keys);
                                     update_transient_message_from_core(
                                         &mut outcome.core_bridge,
                                         &mut transient_msg,
@@ -195,7 +204,7 @@ async fn main() {
                             }
                             KeyInput::Backspace => {
                                 if command_line_buffer.pop().is_none() {
-                                    command_line_mode = false;
+                                    command_line_prompt = None;
                                 }
                             }
                             KeyInput::Char(c) => {
@@ -217,10 +226,12 @@ async fn main() {
                         {
                             break 'main reason;
                         }
-                    } else if let KeyInput::Char(':') = key
+                    } else if (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
                         && outcome.core_bridge.snapshot().mode == CoreMode::Normal
                     {
-                        command_line_mode = true;
+                        if let KeyInput::Char(c) = key {
+                            command_line_prompt = Some(c);
+                        }
                         command_line_buffer.clear();
                         handled = true;
                         need_redraw = true;
@@ -316,7 +327,7 @@ async fn main() {
                     &snapshot,
                     &session_state,
                     visible_message_line(
-                        command_line_mode,
+                        command_line_prompt,
                         &command_line_buffer,
                         transient_msg.as_deref(),
                     )
@@ -636,12 +647,12 @@ fn latest_user_visible_message(messages: Vec<CoreMessageEvent>) -> Option<String
 }
 
 fn visible_message_line(
-    command_line_mode: bool,
+    command_line_prompt: Option<char>,
     command_line_buffer: &str,
     transient_msg: Option<&str>,
 ) -> Option<String> {
-    if command_line_mode {
-        return Some(format!(":{}", command_line_buffer));
+    if let Some(prompt) = command_line_prompt {
+        return Some(format!("{}{}", prompt, command_line_buffer));
     }
     transient_msg.map(ToString::to_string)
 }
@@ -1077,7 +1088,7 @@ mod tests {
 
         assert_eq!(transient_msg, Some(expected_message.clone()));
         assert_eq!(
-            visible_message_line(false, "", transient_msg.as_deref()),
+            visible_message_line(None, "", transient_msg.as_deref()),
             Some(expected_message)
         );
         assert!(session_state.is_dirty());
@@ -1087,14 +1098,21 @@ mod tests {
 
     #[test]
     fn visible_message_line_prefers_command_line_preview() {
-        let visible = visible_message_line(true, "q!", Some("saved"));
+        let visible = visible_message_line(Some(':'), "q!", Some("saved"));
 
         assert_eq!(visible, Some(":q!".to_string()));
+    }
+    
+    #[test]
+    fn visible_message_line_prefers_search_preview() {
+        let visible = visible_message_line(Some('/'), "word", Some("saved"));
+
+        assert_eq!(visible, Some("/word".to_string()));
     }
 
     #[test]
     fn visible_message_line_restores_transient_message_after_command_line() {
-        let visible = visible_message_line(false, "", Some("vim core message"));
+        let visible = visible_message_line(None, "", Some("vim core message"));
 
         assert_eq!(visible, Some("vim core message".to_string()));
     }
