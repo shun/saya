@@ -3,7 +3,10 @@ use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
 use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
-use saya::ex_command::{LocalHostCommand, apply_local_ex_command, parse_local_host_command};
+use saya::ex_command::{
+    ExCommandRoute, LocalHostCommand, apply_local_ex_command, parse_local_host_command,
+    route_ex_command,
+};
 use saya::host_io::{SaveResult, write_to_path};
 use saya::input_loop::{CrosstermEventSource, run_terminal_input_loop};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
@@ -16,10 +19,13 @@ use saya::saya_live_runtime::{
     RuntimeInitError, RuntimeMode,
 };
 use saya::screen_model::{ProjectionInput, project};
+use saya::search_refresh::{SearchModeHint, SearchRefreshCoordinator, SearchRefreshInput};
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::ViewportState;
 use vim_core_rs::{CoreMessageEvent, CoreMode};
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use vim_core_rs::CoreHostAction;
@@ -67,8 +73,11 @@ async fn main() {
 
     let mut renderer = TuiRenderer::new().expect("TUI Renderer init failed");
     let mut session_state = outcome.editor_session_state();
-    let mut transient_msg: Option<String> = bootstrap_warning_message(&outcome.warnings);
+    let mut core_message: Option<String> = None;
+    let mut system_warning: Option<String> = bootstrap_warning_message(&outcome.warnings);
+    let mut transient_msg: Option<String> = None;
     let mut viewport = ViewportState::new();
+    let mut search_refresh = SearchRefreshCoordinator::new();
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_buffer = String::new();
     let mut runtime_session = match RuntimeSessionOwner::spawn(outcome.callback_registry.clone()) {
@@ -121,19 +130,28 @@ async fn main() {
         viewport.sync_from_core_topline(window.topline, body_height, total_lines);
     }
     viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, total_lines);
+    let search_refresh_outcome = search_refresh.update(
+        &mut outcome.core_bridge,
+        SearchRefreshInput {
+            revision: snapshot.revision as u64,
+            viewport_top: viewport.top_line(),
+            viewport_height: body_height,
+            cursor_row: snapshot.cursor_row,
+            cursor_col: snapshot.cursor_col,
+            prompt_revision: resolve_prompt_revision(command_line_prompt, &command_line_buffer),
+            search_mode_hint: resolve_search_mode_hint(command_line_prompt, &command_line_buffer),
+        },
+    );
+    let command_preview =
+        command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
     let model = project(
-        &ProjectionInput::new(
-            &snapshot,
-            &session_state,
-            visible_message_line(
-                command_line_prompt,
-                &command_line_buffer,
-                transient_msg.as_deref(),
-            )
-            .as_deref(),
-        )
-        .with_visual_selection(visual_selection.as_ref())
-        .with_viewport(viewport.top_line(), body_height),
+        &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
+            .with_command_preview(command_preview.as_deref())
+            .with_core_message(core_message.as_deref())
+            .with_system_warning(system_warning.as_deref())
+            .with_visual_selection(visual_selection.as_ref())
+            .with_search_state(search_refresh_outcome.render_state.as_ref())
+            .with_viewport(viewport.top_line(), body_height),
     );
     trace_render_pipeline("initial", &snapshot.text, &model.lines, viewport.top_line());
     let _ = renderer.draw(&model);
@@ -161,54 +179,113 @@ async fn main() {
                     if let Some(prompt) = command_line_prompt {
                         match key {
                             KeyInput::Escape => {
+                                if prompt == '/' {
+                                    let _ = outcome.core_bridge.cancel_search_input();
+                                    update_core_message_from_core(
+                                        &mut outcome.core_bridge,
+                                        &mut core_message,
+                                    );
+                                }
                                 command_line_prompt = None;
                                 command_line_buffer.clear();
                             }
                             KeyInput::Enter => {
-                                let cmd = format!("{}{}", prompt, command_line_buffer);
-                                command_line_prompt = None;
-                                command_line_buffer.clear();
                                 if prompt == ':' {
-                                    if let Some(message) =
-                                        apply_local_ex_command(&mut session_state, &cmd)
-                                    {
-                                        transient_msg = Some(message);
-                                    } else if let Some(reason) =
-                                        process_local_host_command_with_runtime(
-                                            &cmd,
-                                            &mut outcome,
-                                            &mut session_state,
-                                            &mut transient_msg,
-                                            runtime_session.as_mut(),
-                                            &mut need_redraw,
-                                        )
-                                        .await
-                                    {
-                                        break 'main reason;
-                                    } else {
-                                        let _ = outcome.core_bridge.apply_ex_command(&cmd);
-                                        update_transient_message_from_core(
-                                            &mut outcome.core_bridge,
-                                            &mut transient_msg,
-                                        );
+                                    let cmd = format!("{}{}", prompt, command_line_buffer);
+                                    command_line_prompt = None;
+                                    command_line_buffer.clear();
+                                    match route_ex_command(&cmd) {
+                                        ExCommandRoute::LocalHost(_) => {
+                                            if let Some(reason) =
+                                                process_local_host_command_with_runtime(
+                                                    &cmd,
+                                                    &mut outcome,
+                                                    &mut session_state,
+                                                    &mut transient_msg,
+                                                    &mut system_warning,
+                                                    runtime_session.as_mut(),
+                                                    &mut need_redraw,
+                                                )
+                                                .await
+                                            {
+                                                break 'main reason;
+                                            }
+                                        }
+                                        ExCommandRoute::PresentationLocal => {
+                                            if let Some(message) =
+                                                apply_local_ex_command(&mut session_state, &cmd)
+                                            {
+                                                transient_msg = Some(message);
+                                            } else {
+                                                log::debug!(
+                                                    "[main] presentation-local route fell through to core-owned handler: command={:?}",
+                                                    cmd
+                                                );
+                                                let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                                update_core_message_from_core(
+                                                    &mut outcome.core_bridge,
+                                                    &mut core_message,
+                                                );
+                                            }
+                                        }
+                                        ExCommandRoute::SearchOption(search_option) => {
+                                            log::debug!(
+                                                "[main] routing search option command to core-owned option update: command={:?}, search_option={:?}",
+                                                cmd,
+                                                search_option
+                                            );
+                                            let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                            update_core_message_from_core(
+                                                &mut outcome.core_bridge,
+                                                &mut core_message,
+                                            );
+                                        }
+                                        ExCommandRoute::CoreOwned => {
+                                            let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                            update_core_message_from_core(
+                                                &mut outcome.core_bridge,
+                                                &mut core_message,
+                                            );
+                                        }
                                     }
                                 } else if prompt == '/' {
-                                    let search_keys = format!("{}\r", cmd);
-                                    let _ = outcome.core_bridge.dispatch_key(&search_keys);
-                                    update_transient_message_from_core(
+                                    let _ = outcome
+                                        .core_bridge
+                                        .commit_search_input(&command_line_buffer);
+                                    update_core_message_from_core(
                                         &mut outcome.core_bridge,
-                                        &mut transient_msg,
+                                        &mut core_message,
                                     );
+                                    command_line_prompt = None;
+                                    command_line_buffer.clear();
                                 }
                                 session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
                             }
                             KeyInput::Backspace => {
-                                if command_line_buffer.pop().is_none() {
+                                if prompt == '/' {
+                                    let _ = command_line_buffer.pop();
+                                    let _ = outcome
+                                        .core_bridge
+                                        .sync_search_input(&command_line_buffer);
+                                    update_core_message_from_core(
+                                        &mut outcome.core_bridge,
+                                        &mut core_message,
+                                    );
+                                } else if command_line_buffer.pop().is_none() {
                                     command_line_prompt = None;
                                 }
                             }
                             KeyInput::Char(c) => {
                                 command_line_buffer.push(c);
+                                if prompt == '/' {
+                                    let _ = outcome
+                                        .core_bridge
+                                        .sync_search_input(&command_line_buffer);
+                                    update_core_message_from_core(
+                                        &mut outcome.core_bridge,
+                                        &mut core_message,
+                                    );
+                                }
                             }
                             _ => {}
                         }
@@ -219,6 +296,7 @@ async fn main() {
                             &mut outcome,
                             &mut session_state,
                             &mut transient_msg,
+                            &mut system_warning,
                             runtime_session.as_mut(),
                             &mut need_redraw,
                         )
@@ -242,15 +320,16 @@ async fn main() {
                         match intent {
                             EditorIntent::EditKey(k) => {
                                 let _ = outcome.core_bridge.dispatch_key(&k);
-                                update_transient_message_from_core(
+                                update_core_message_from_core(
                                     &mut outcome.core_bridge,
-                                    &mut transient_msg,
+                                    &mut core_message,
                                 );
 
                                 if let Some(reason) = process_pending_host_actions_with_runtime(
                                     &mut outcome,
                                     &mut session_state,
                                     &mut transient_msg,
+                                    &mut system_warning,
                                     runtime_session.as_mut(),
                                     &mut need_redraw,
                                 )
@@ -284,7 +363,7 @@ async fn main() {
                                 if let Some(reason) = shutdown_reason_from_quit_decision(
                                     decision,
                                     force,
-                                    &mut transient_msg,
+                                    &mut system_warning,
                                 ) {
                                     break 'main reason;
                                 }
@@ -322,19 +401,41 @@ async fn main() {
                 viewport.sync_from_core_topline(window.topline, body_height, total_lines);
             }
             viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, total_lines);
-            let model = project(
-                &ProjectionInput::new(
-                    &snapshot,
-                    &session_state,
-                    visible_message_line(
+            let search_refresh_outcome = search_refresh.update(
+                &mut outcome.core_bridge,
+                SearchRefreshInput {
+                    revision: snapshot.revision as u64,
+                    viewport_top: viewport.top_line(),
+                    viewport_height: body_height,
+                    cursor_row: snapshot.cursor_row,
+                    cursor_col: snapshot.cursor_col,
+                    prompt_revision: resolve_prompt_revision(
                         command_line_prompt,
                         &command_line_buffer,
-                        transient_msg.as_deref(),
-                    )
-                    .as_deref(),
-                )
-                .with_visual_selection(visual_selection.as_ref())
-                .with_viewport(viewport.top_line(), body_height),
+                    ),
+                    search_mode_hint: resolve_search_mode_hint(
+                        command_line_prompt,
+                        &command_line_buffer,
+                    ),
+                },
+            );
+            log::debug!(
+                "[main] search refresh updated: key={:?}, query_executed={}, capability={:?}, render_state_present={}",
+                search_refresh_outcome.cache_key,
+                search_refresh_outcome.query_executed,
+                search_refresh_outcome.capability,
+                search_refresh_outcome.render_state.is_some()
+            );
+            let command_preview =
+                command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
+            let model = project(
+                &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
+                    .with_command_preview(command_preview.as_deref())
+                    .with_core_message(core_message.as_deref())
+                    .with_system_warning(system_warning.as_deref())
+                    .with_visual_selection(visual_selection.as_ref())
+                    .with_search_state(search_refresh_outcome.render_state.as_ref())
+                    .with_viewport(viewport.top_line(), body_height),
             );
             trace_render_pipeline("redraw", &snapshot.text, &model.lines, viewport.top_line());
             let _ = renderer.draw(&model);
@@ -386,6 +487,7 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
         None,
     ));
     let mut transient_msg: Option<String> = None;
+    let mut system_warning: Option<String> = None;
 
     eprintln!(
         "[main][smoke] projected startup ui: first_line={:?}, message_line={:?}, file_name={}, mode={}, dirty={}, line_numbers={}, number_width={}",
@@ -411,7 +513,7 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
         .core_bridge
         .dispatch_key("\x1b")
         .map_err(|error| format!("escape failed: {:?}", error))?;
-    update_transient_message_from_core(&mut outcome.core_bridge, &mut transient_msg);
+    update_core_message_from_core(&mut outcome.core_bridge, &mut transient_msg);
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
 
     if session_state.target_path().is_none() {
@@ -423,15 +525,20 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     }
 
     eprintln!("[main][smoke] saving and quitting through host command");
-    let reason =
-        process_local_host_command(":wq", &mut outcome, &mut session_state, &mut transient_msg)
-            .ok_or_else(|| {
-                format!(
-                    "smoke quit did not complete: dirty={}, last_save_error={:?}",
-                    session_state.is_dirty(),
-                    session_state.last_save_error()
-                )
-            })?;
+    let reason = process_local_host_command(
+        ":wq",
+        &mut outcome,
+        &mut session_state,
+        &mut transient_msg,
+        &mut system_warning,
+    )
+    .ok_or_else(|| {
+        format!(
+            "smoke quit did not complete: dirty={}, last_save_error={:?}",
+            session_state.is_dirty(),
+            session_state.last_save_error()
+        )
+    })?;
 
     if reason != ShutdownReason::UserQuit {
         return Err(format!(
@@ -448,6 +555,7 @@ async fn process_pending_host_actions_with_runtime(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
     mut runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
 ) -> Option<ShutdownReason> {
@@ -466,7 +574,7 @@ async fn process_pending_host_actions_with_runtime(
             CoreHostAction::Quit { force, .. } => {
                 let decision = session_state.evaluate_quit(force);
                 if let Some(reason) =
-                    shutdown_reason_from_quit_decision(decision, force, transient_msg)
+                    shutdown_reason_from_quit_decision(decision, force, system_warning)
                 {
                     return Some(reason);
                 }
@@ -554,6 +662,7 @@ fn process_local_host_command(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
 ) -> Option<ShutdownReason> {
     let host_command = parse_local_host_command(command)?;
     let snapshot = outcome.core_bridge.snapshot();
@@ -570,7 +679,11 @@ fn process_local_host_command(
         LocalHostCommand::Save => None,
         LocalHostCommand::SaveThenQuit => (!session_state.is_dirty()
             && session_state.last_save_error().is_none())
-        .then_some(ShutdownReason::UserQuit),
+        .then_some(ShutdownReason::UserQuit)
+        .or_else(|| {
+            *system_warning = Some(normal_quit_warning_message().to_string());
+            None
+        }),
     }
 }
 
@@ -579,6 +692,7 @@ async fn process_local_host_command_with_runtime(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
     runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
 ) -> Option<ShutdownReason> {
@@ -608,7 +722,11 @@ async fn process_local_host_command_with_runtime(
         LocalHostCommand::Save => None,
         LocalHostCommand::SaveThenQuit => (!session_state.is_dirty()
             && session_state.last_save_error().is_none())
-        .then_some(ShutdownReason::UserQuit),
+        .then_some(ShutdownReason::UserQuit)
+        .or_else(|| {
+            *system_warning = Some(normal_quit_warning_message().to_string());
+            None
+        }),
     }
 }
 
@@ -619,16 +737,16 @@ fn save_error_message(error: &SaveRequestError) -> String {
     }
 }
 
-fn update_transient_message_from_core(
+fn update_core_message_from_core(
     core_bridge: &mut saya::core_bridge::CoreBridge,
-    transient_msg: &mut Option<String>,
+    core_message: &mut Option<String>,
 ) {
     if let Some(message) = latest_user_visible_message(core_bridge.take_pending_messages()) {
         log::debug!(
-            "[main] replacing transient message from core: {:?}",
+            "[main] replacing core message from core bridge: {:?}",
             message
         );
-        *transient_msg = Some(message);
+        *core_message = Some(message);
     }
 }
 
@@ -644,17 +762,6 @@ fn latest_user_visible_message(messages: Vec<CoreMessageEvent>) -> Option<String
             }
         })
         .last()
-}
-
-fn visible_message_line(
-    command_line_prompt: Option<char>,
-    command_line_buffer: &str,
-    transient_msg: Option<&str>,
-) -> Option<String> {
-    if let Some(prompt) = command_line_prompt {
-        return Some(format!("{}{}", prompt, command_line_buffer));
-    }
-    transient_msg.map(ToString::to_string)
 }
 
 async fn dispatch_buffer_open_with_runtime(
@@ -820,7 +927,7 @@ fn format_runtime_init_error(error: &RuntimeInitError) -> String {
 fn shutdown_reason_from_quit_decision(
     decision: QuitDecision,
     force: bool,
-    transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
 ) -> Option<ShutdownReason> {
     log::debug!(
         "[main] evaluating quit decision for shutdown: force={}, decision={:?}",
@@ -831,7 +938,7 @@ fn shutdown_reason_from_quit_decision(
         QuitDecision::Allow => Some(ShutdownReason::UserQuit),
         QuitDecision::ForceQuit => Some(ShutdownReason::UserForceQuit),
         QuitDecision::WarnUnsaved => {
-            *transient_msg = Some(normal_quit_warning_message().to_string());
+            *system_warning = Some(normal_quit_warning_message().to_string());
             None
         }
     }
@@ -882,6 +989,28 @@ fn trace_render_pipeline(
     eprintln!(
         "[saya-trace][main][{phase}] viewport_top={viewport_top} abs_row=7 snapshot={snapshot_line:?} projected={projected_line:?}"
     );
+}
+
+fn resolve_search_mode_hint(
+    command_line_prompt: Option<char>,
+    command_line_buffer: &str,
+) -> SearchModeHint {
+    if command_line_prompt == Some('/') && !command_line_buffer.is_empty() {
+        SearchModeHint::Incsearch
+    } else {
+        SearchModeHint::Hlsearch
+    }
+}
+
+fn resolve_prompt_revision(
+    command_line_prompt: Option<char>,
+    command_line_buffer: &str,
+) -> Option<u64> {
+    let prompt = command_line_prompt?;
+    let mut hasher = DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    command_line_buffer.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 fn format_cli_error(error: CliParseError) -> String {
@@ -1087,34 +1216,31 @@ mod tests {
         let expected_message = format!("Save failed: {}", expected_error);
 
         assert_eq!(transient_msg, Some(expected_message.clone()));
-        assert_eq!(
-            visible_message_line(None, "", transient_msg.as_deref()),
-            Some(expected_message)
-        );
+        assert_eq!(transient_msg.as_deref(), Some(expected_message.as_str()));
         assert!(session_state.is_dirty());
 
         std::fs::remove_file(&target_path).expect("cleanup");
     }
 
     #[test]
-    fn visible_message_line_prefers_command_line_preview() {
-        let visible = visible_message_line(Some(':'), "q!", Some("saved"));
+    fn prompt_revision_changes_when_search_buffer_text_changes_with_same_length() {
+        let alpha = resolve_prompt_revision(Some('/'), "ab");
+        let omega = resolve_prompt_revision(Some('/'), "cd");
 
-        assert_eq!(visible, Some(":q!".to_string()));
-    }
-    
-    #[test]
-    fn visible_message_line_prefers_search_preview() {
-        let visible = visible_message_line(Some('/'), "word", Some("saved"));
-
-        assert_eq!(visible, Some("/word".to_string()));
+        assert_ne!(alpha, omega);
     }
 
     #[test]
-    fn visible_message_line_restores_transient_message_after_command_line() {
-        let visible = visible_message_line(None, "", Some("vim core message"));
+    fn prompt_revision_distinguishes_search_and_command_prompts() {
+        let search = resolve_prompt_revision(Some('/'), "word");
+        let command = resolve_prompt_revision(Some(':'), "word");
 
-        assert_eq!(visible, Some("vim core message".to_string()));
+        assert_ne!(search, command);
+    }
+
+    #[test]
+    fn prompt_revision_is_none_when_prompt_is_inactive() {
+        assert_eq!(resolve_prompt_revision(None, "word"), None);
     }
 
     #[test]

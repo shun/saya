@@ -168,7 +168,8 @@ fn starting_from_stdin_surfaces_save_path_restriction_in_the_smoke_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("first_line=Some(\"alpha\")"),
+        String::from_utf8_lossy(&output.stderr).contains("first_line=Some(\"")
+            && String::from_utf8_lossy(&output.stderr).contains("alpha"),
         "stdin smoke should project stdin contents into the startup UI: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );

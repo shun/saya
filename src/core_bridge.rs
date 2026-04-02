@@ -3,8 +3,15 @@ use std::fmt;
 use std::path::Path;
 
 use vim_core_rs::{
-    CoreCommandOutcome, CoreEvent, CoreHostAction, CoreMessageCategory, CoreMessageEvent,
-    CoreMessageSeverity, CoreSessionError, CoreSnapshot, VimCoreSession,
+    CoreCommandOutcome, CoreEvent, CoreHostAction, CoreMatchType, CoreMessageCategory,
+    CoreMessageEvent, CoreMessageSeverity, CoreSearchHighlightMode, CoreSearchQueryError,
+    CoreSessionError, CoreSnapshot, VimCoreSession,
+};
+
+use crate::search_capability::SearchCapabilityContract;
+use crate::search_query::{
+    SearchMatch, SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery,
+    SearchVisibleRows, SearchVisibleState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,9 +194,182 @@ impl CoreBridge {
             end_col,
         })
     }
+
+    pub fn sync_search_input(&mut self, pattern: &str) -> Result<CoreCommandOutcome, CoreSessionError> {
+        if self.search_prompt_is_active() {
+            let _ = self.dispatch_session_key("\x1b")?;
+        }
+
+        if pattern.is_empty() {
+            log::debug!("[core_bridge] search prompt synced with empty pattern");
+            return Ok(CoreCommandOutcome::NoChange);
+        }
+
+        log::debug!("[core_bridge] syncing search prompt through core-owned state: pattern={:?}", pattern);
+        let tx = self
+            .session
+            .execute_normal_command(&format!("/{}", pattern))
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&tx);
+        Ok(tx.outcome)
+    }
+
+    pub fn commit_search_input(
+        &mut self,
+        pattern: &str,
+    ) -> Result<CoreCommandOutcome, CoreSessionError> {
+        if self.search_prompt_is_active() {
+            let _ = self.dispatch_session_key("\x1b")?;
+        }
+
+        let tx = self
+            .session
+            .execute_normal_command(&format!("/{}\r", pattern))
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&tx);
+        Ok(tx.outcome)
+    }
+
+    pub fn cancel_search_input(&mut self) -> Result<CoreCommandOutcome, CoreSessionError> {
+        if !self.search_prompt_is_active() {
+            return Ok(CoreCommandOutcome::NoChange);
+        }
+        self.dispatch_session_key("\x1b")
+    }
+
+    pub fn search_capability_contract(&self) -> SearchCapabilityContract {
+        let contract = VimCoreSession::search_capability_contract();
+        let contract = SearchCapabilityContract {
+            live_state_query_available: contract.live_state_query_available,
+            visible_rows_only: contract.visible_rows_only,
+            start_col_inclusive: contract.start_col_inclusive,
+            end_col_exclusive: contract.end_col_exclusive,
+        };
+        log::debug!(
+            "[core_bridge] search capability contract resolved: live_state_query_available={}, visible_rows_only={}, start_col_inclusive={}, end_col_exclusive={}",
+            contract.live_state_query_available,
+            contract.visible_rows_only,
+            contract.start_col_inclusive,
+            contract.end_col_exclusive
+        );
+        contract
+    }
+
+    pub fn query_visible_search_state(
+        &mut self,
+        query: SearchVisibleQuery,
+    ) -> Result<SearchVisibleState, SearchStateError> {
+        if query.start_row == 0 || query.end_row < query.start_row {
+            log::debug!(
+                "[core_bridge] rejecting search query because viewport is invalid: query={:?}",
+                query
+            );
+            return Err(SearchStateError::InvalidViewport {
+                start_row: query.start_row,
+                end_row: query.end_row,
+            });
+        }
+
+        let capability = self.search_capability_contract();
+        let core_state = self
+            .session
+            .query_visible_search_state(query.start_row as i32, query.end_row as i32)
+            .map_err(map_search_query_error)?;
+        let matches = core_state
+            .ranges
+            .into_iter()
+            .map(|range| SearchMatch {
+                kind: map_match_kind(range.match_type),
+                start_row: range.start_row,
+                start_col: range.start_col,
+                end_row: range.end_row,
+                end_col: range.end_col,
+            })
+            .collect::<Vec<_>>();
+        let mut matches = matches;
+        matches.sort_by_key(|range| {
+            let kind_rank = match range.kind {
+                SearchMatchKind::Current => 0usize,
+                SearchMatchKind::Incremental => 1usize,
+                SearchMatchKind::Regular => 2usize,
+            };
+            (
+                kind_rank,
+                range.start_row,
+                range.start_col,
+                range.end_row,
+                range.end_col,
+            )
+        });
+        log::debug!(
+            "[core_bridge] resolved visible search state: query={:?}, window_id={}, mode={:?}, hlsearch_enabled={}, hlsearch_suspended={}, incsearch_active={}, pattern={:?}, input_pattern={:?}, matches={}",
+            query,
+            core_state.window_id,
+            core_state.mode,
+            core_state.hlsearch_enabled,
+            core_state.hlsearch_suspended,
+            core_state.incsearch_active,
+            core_state.pattern,
+            core_state.input_pattern,
+            matches.len(),
+        );
+
+        Ok(SearchVisibleState {
+            capability,
+            visible_rows: SearchVisibleRows {
+                start_row: core_state.start_row,
+                end_row: core_state.end_row,
+            },
+            window_id: core_state.window_id,
+            mode: map_search_mode(core_state.mode),
+            pattern: core_state.pattern,
+            input_pattern: core_state.input_pattern,
+            hlsearch_enabled: core_state.hlsearch_enabled,
+            hlsearch_suspended: core_state.hlsearch_suspended,
+            incsearch_active: core_state.incsearch_active,
+            matches,
+        })
+    }
+}
+
+fn map_match_kind(match_type: CoreMatchType) -> SearchMatchKind {
+    match match_type {
+        CoreMatchType::Regular => SearchMatchKind::Regular,
+        CoreMatchType::IncSearch => SearchMatchKind::Incremental,
+        CoreMatchType::CurSearch => SearchMatchKind::Current,
+    }
+}
+
+fn map_search_mode(mode: CoreSearchHighlightMode) -> SearchQueryMode {
+    match mode {
+        CoreSearchHighlightMode::Disabled => SearchQueryMode::Disabled,
+        CoreSearchHighlightMode::HlSearch => SearchQueryMode::Hlsearch,
+        CoreSearchHighlightMode::IncSearch => SearchQueryMode::IncsearchPreview,
+    }
+}
+
+fn map_search_query_error(error: CoreSearchQueryError) -> SearchStateError {
+    match error {
+        CoreSearchQueryError::NoActiveWindow => SearchStateError::ActiveWindowMissing,
+        CoreSearchQueryError::InvalidViewport { start_row, end_row } => {
+            SearchStateError::InvalidViewport {
+                start_row: start_row.max(0) as usize,
+                end_row: end_row.max(0) as usize,
+            }
+        }
+        CoreSearchQueryError::WindowNotFound { window_id } => {
+            SearchStateError::WindowNotFound { window_id }
+        }
+    }
 }
 
 impl CoreBridge {
+    fn search_prompt_is_active(&self) -> bool {
+        self.session.get_search_input_pattern().is_some()
+            || self.session.is_incsearch_active()
+            || matches!(self.session.snapshot().mode, vim_core_rs::CoreMode::CommandLine)
+    }
+
     fn should_handle_ctrl_c_interrupt(&self, key: &str) -> bool {
         key == "\u{3}"
             && matches!(
@@ -327,7 +507,6 @@ fn escape_path_for_file_command(target_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use vim_core_rs::{
@@ -336,10 +515,7 @@ mod tests {
 
     use super::CoreBridge;
 
-    fn session_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::session_guard::test_lock as session_test_lock;
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()

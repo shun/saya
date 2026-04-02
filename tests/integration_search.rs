@@ -29,17 +29,22 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
 
 #[test]
 fn search_starts_and_executes() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nsearch test\nworld\n");
     let _session_state = EditorSessionState::new(outcome.target_path.clone());
 
-    // / starts search. Since main loop handles / mapping to command_line_prompt, 
+    // / starts search. Since main loop handles / mapping to command_line_prompt,
     // the integration of core_bridge handling '/' search directly can also be tested.
     // However, our `main.rs` intercepts `/` and then dispatches `/{cmd}\r`.
-    
-    // We can at least test `vim-core-rs` behavior through `core_bridge` 
+
+    // We can at least test `vim-core-rs` behavior through `core_bridge`
     // to ensure dispatching `/{cmd}\r` moves the cursor.
-    outcome.core_bridge.dispatch_key("/search\r").expect("dispatch search");
+    outcome
+        .core_bridge
+        .dispatch_key("/search\r")
+        .expect("dispatch search");
     let snapshot = outcome.core_bridge.snapshot();
     assert_eq!(snapshot.mode, CoreMode::Normal);
     assert_eq!(snapshot.cursor_row, 1); // 0-indexed, "search test" is on line 2 (index 1)
@@ -47,10 +52,15 @@ fn search_starts_and_executes() {
 
 #[test]
 fn next_previous_search_results() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("word\ntext\nword\nhello\nword\n");
-    
-    outcome.core_bridge.dispatch_key("/word\r").expect("dispatch search");
+
+    outcome
+        .core_bridge
+        .dispatch_key("/word\r")
+        .expect("dispatch search");
     let snapshot = outcome.core_bridge.snapshot();
     assert_eq!(snapshot.cursor_row, 2); // skips the first one because we are at line 0, next is line 2
 
@@ -65,20 +75,27 @@ fn next_previous_search_results() {
 
 #[test]
 fn search_not_found_message() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nworld\n");
     let _session_state = EditorSessionState::new(outcome.target_path.clone());
-    
+
     // search for non-existent word
     outcome.core_bridge.dispatch_key("/missing\r").unwrap();
     let messages = outcome.core_bridge.take_pending_messages();
-    
-    let error_msg = messages.into_iter()
+
+    let error_msg = messages
+        .into_iter()
         .filter(|msg| msg.category.is_user_visible())
         .last()
         .expect("Should have a user visible message");
-    
-    assert!(error_msg.content.contains("E486: Pattern not found: missing"));
+
+    assert!(
+        error_msg
+            .content
+            .contains("E486: Pattern not found: missing")
+    );
 
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput::new(
@@ -87,38 +104,49 @@ fn search_not_found_message() {
         Some(error_msg.content.trim()),
     ));
 
-    assert_eq!(model.message_line, Some("E486: Pattern not found: missing".to_string()));
+    assert_eq!(
+        model.message_line,
+        Some("E486: Pattern not found: missing".to_string())
+    );
 }
 
 #[test]
 fn search_navigation_failure() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nworld\n");
     let _session_state = EditorSessionState::new(outcome.target_path.clone());
-    
+
     // search navigation 'n' without prior search
     outcome.core_bridge.dispatch_key("n").unwrap();
     let messages = outcome.core_bridge.take_pending_messages();
-    
-    let error_msg = messages.into_iter()
+
+    let error_msg = messages
+        .into_iter()
         .filter(|msg| msg.category.is_user_visible())
         .last()
         .expect("Should have a user visible message");
-    
+
     assert!(
-        error_msg.content.contains("E35: No previous regular expression") ||
-        error_msg.content.contains("E486: Pattern not found"),
-        "Unexpected error message: {}", error_msg.content
+        error_msg
+            .content
+            .contains("E35: No previous regular expression")
+            || error_msg.content.contains("E486: Pattern not found"),
+        "Unexpected error message: {}",
+        error_msg.content
     );
 }
 
 #[test]
 fn search_exact_word() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
     outcome.core_bridge.dispatch_key("/\\<first\\>\r").unwrap();
     let snapshot = outcome.core_bridge.snapshot();
-    assert_eq!(snapshot.cursor_col, 13); 
+    assert_eq!(snapshot.cursor_col, 13);
 
     // search for the next "first"
     outcome.core_bridge.dispatch_key("n").unwrap();
@@ -128,7 +156,9 @@ fn search_exact_word() {
 
 #[test]
 fn search_asterisk() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
     // move right a bit
     outcome.core_bridge.dispatch_key("l").unwrap();
@@ -141,7 +171,9 @@ fn search_asterisk() {
 
 #[test]
 fn search_hash() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
     // move right to the second "first" (index 13)
     for _ in 0..13 {
@@ -155,42 +187,47 @@ fn search_hash() {
 
 #[test]
 fn search_prompt_and_cancel_flow() {
-    let _lock = saya::bootstrap::launch_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nsearch test\nworld\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
     // 1. Initial state: Normal mode, no prompt
     let snapshot = outcome.core_bridge.snapshot();
     assert_eq!(snapshot.mode, CoreMode::Normal);
-    
+
     // Simulate pressing '/' to start search
     let mut command_line_prompt = Some('/');
     let mut command_line_buffer = String::new();
-    
+
     let model = project(&ProjectionInput::new(
         &snapshot,
         &session_state,
-        Some(&format!("{}{}", command_line_prompt.unwrap(), command_line_buffer)),
+        Some(&format!(
+            "{}{}",
+            command_line_prompt.unwrap(),
+            command_line_buffer
+        )),
     ));
     assert_eq!(model.message_line.as_deref(), Some("/"));
-    
+
     // Simulate typing "world"
     command_line_buffer.push_str("world");
     let model = project(&ProjectionInput::new(
         &snapshot,
         &session_state,
-        Some(&format!("{}{}", command_line_prompt.unwrap(), command_line_buffer)),
+        Some(&format!(
+            "{}{}",
+            command_line_prompt.unwrap(),
+            command_line_buffer
+        )),
     ));
     assert_eq!(model.message_line.as_deref(), Some("/world"));
 
     // Simulate pressing Esc (cancel search)
-    command_line_prompt = None;
     command_line_buffer.clear();
-    let model = project(&ProjectionInput::new(
-        &snapshot,
-        &session_state,
-        None,
-    ));
+    let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
     assert_eq!(model.message_line, None);
 
     // Assert cursor hasn't moved
@@ -214,11 +251,6 @@ fn search_prompt_and_cancel_flow() {
     assert_eq!(snapshot.mode, CoreMode::Normal);
     assert_eq!(snapshot.cursor_row, 1); // "search test" is on row 1
 
-    let model = project(&ProjectionInput::new(
-        &snapshot,
-        &session_state,
-        None,
-    ));
+    let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
     assert_eq!(model.message_line, None);
 }
-

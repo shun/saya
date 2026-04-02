@@ -636,7 +636,6 @@ fn map_session_guard_error(error: SessionGuardError) -> BootstrapError {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use vim_core_rs::CoreMode;
@@ -651,12 +650,7 @@ mod tests {
         AppliedKeyMapping, ConfigApplyState, ConfigKeyMode, SayaKeyMode, SayaKeymapAction,
         StartupRegistry, StartupRegistryEntry,
     };
-    use crate::session_guard::SessionGuard;
-
-    fn session_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::session_guard::{SessionGuard, test_lock as session_test_lock};
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -1094,7 +1088,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config_path = unique_path("config-tab-size");
-        std::fs::write(&config_path, "{ \"tabSize\": 4 }\n").expect("config file");
+        std::fs::write(&config_path, "saya.options.tabSize = 4;\n").expect("config file");
 
         let outcome = prepare_launch(LaunchRequest {
             input_source: InputSource::Empty,

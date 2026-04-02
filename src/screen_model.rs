@@ -9,6 +9,7 @@ use vim_core_rs::{CoreMode, CoreSnapshot};
 
 use crate::core_bridge::VisualSelection;
 use crate::editor_session::EditorSessionState;
+use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
 
 /// 描画専用 view model。
 ///
@@ -30,6 +31,8 @@ pub struct ScreenModel {
     pub cursor_col: u16,
     /// Visual mode の選択範囲（表示セル座標）
     pub visual_selection: Option<ScreenSelection>,
+    /// 検索ハイライトの表示用 overlay
+    pub search_overlays: Vec<ScreenSearchOverlay>,
     /// メッセージ欄に表示する通知（エラーやガイダンス）
     pub message_line: Option<String>,
     pub command_cursor_col: Option<u16>,
@@ -44,6 +47,37 @@ pub struct ScreenSelection {
     pub end_col_exclusive: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenSearchOverlay {
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col_exclusive: u16,
+    pub kind: SearchMatchKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenMessageKind {
+    CommandPreview,
+    CoreMessage,
+    SystemWarning,
+    TransientInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenMessageState {
+    pub kind: ScreenMessageKind,
+    pub text: String,
+}
+
+impl ScreenMessageState {
+    fn new(kind: ScreenMessageKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+        }
+    }
+}
+
 /// 投影の入力をまとめた構造体。
 ///
 /// CoreSnapshot と EditorSessionState から描画に必要な情報を選択して渡す。
@@ -51,7 +85,11 @@ pub struct ProjectionInput<'a> {
     pub snapshot: &'a CoreSnapshot,
     pub session_state: &'a EditorSessionState,
     pub visual_selection: Option<&'a VisualSelection>,
-    pub transient_message: Option<&'a str>,
+    pub search_state: Option<&'a SearchVisibleState>,
+    pub command_preview: Option<&'a str>,
+    pub core_message: Option<&'a str>,
+    pub system_warning: Option<&'a str>,
+    pub transient_info: Option<&'a str>,
     pub viewport_top: usize,
     pub body_height: usize,
 }
@@ -66,7 +104,11 @@ impl<'a> ProjectionInput<'a> {
             snapshot,
             session_state,
             visual_selection: None,
-            transient_message,
+            search_state: None,
+            command_preview: None,
+            core_message: None,
+            system_warning: None,
+            transient_info: transient_message,
             viewport_top: 0,
             body_height: usize::MAX,
         }
@@ -82,6 +124,31 @@ impl<'a> ProjectionInput<'a> {
         self.visual_selection = visual_selection;
         self
     }
+
+    pub fn with_search_state(mut self, search_state: Option<&'a SearchVisibleState>) -> Self {
+        self.search_state = search_state;
+        self
+    }
+
+    pub fn with_command_preview(mut self, command_preview: Option<&'a str>) -> Self {
+        self.command_preview = command_preview;
+        self
+    }
+
+    pub fn with_core_message(mut self, core_message: Option<&'a str>) -> Self {
+        self.core_message = core_message;
+        self
+    }
+
+    pub fn with_system_warning(mut self, system_warning: Option<&'a str>) -> Self {
+        self.system_warning = system_warning;
+        self
+    }
+
+    pub fn with_transient_info(mut self, transient_info: Option<&'a str>) -> Self {
+        self.transient_info = transient_info;
+        self
+    }
 }
 
 /// CoreSnapshot と EditorSessionState から ScreenModel を生成する。
@@ -89,12 +156,15 @@ impl<'a> ProjectionInput<'a> {
 /// 描画側はこの関数の戻り値だけを使い、CoreSnapshot に直接依存しない。
 pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     log::debug!(
-        "[screen_model] projecting: mode={:?}, dirty={}, cursor=({},{}), transient_message={:?}",
+        "[screen_model] projecting: mode={:?}, dirty={}, cursor=({},{}), command_preview={:?}, core_message={:?}, system_warning={:?}, transient_info={:?}",
         input.snapshot.mode,
         input.snapshot.dirty,
         input.snapshot.cursor_row,
         input.snapshot.cursor_col,
-        input.transient_message,
+        input.command_preview,
+        input.core_message,
+        input.system_warning,
+        input.transient_info,
     );
 
     let file_name = resolve_file_name(input.snapshot, input.session_state);
@@ -122,16 +192,20 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.session_state.number_width(),
     );
     let visual_selection = resolve_visual_selection(input);
-    let message_line = resolve_message_line(input.session_state, input.transient_message);
+    let search_overlays = project_search_overlays(input);
+    let message_state = resolve_message_state(input);
+    let message_line = message_state.as_ref().map(|state| state.text.clone());
 
     log::debug!(
-        "[screen_model] projected: file_name={:?}, mode_label={:?}, dirty={}, lines_count={}, cursor=({},{}), message_line={:?}",
+        "[screen_model] projected: file_name={:?}, mode_label={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, message_state_kind={:?}, message_line={:?}",
         file_name,
         mode_label,
         dirty,
         lines.len(),
         cursor_row,
         cursor_col,
+        search_overlays.len(),
+        message_state.as_ref().map(|state| state.kind),
         message_line,
     );
 
@@ -143,6 +217,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_row,
         cursor_col,
         visual_selection,
+        search_overlays,
         message_line,
         command_cursor_col: None,
     }
@@ -488,40 +563,217 @@ fn char_display_width(ch: char) -> usize {
 
 /// メッセージ欄の内容を解決する。
 ///
-/// transient_message が指定されていればそれを優先し、
-/// なければ session_state の last_save_error を表示する。
-fn resolve_message_line(
-    session_state: &EditorSessionState,
-    transient_message: Option<&str>,
-) -> Option<String> {
-    if let Some(msg) = transient_message {
-        log::debug!("[screen_model] message line from transient: {:?}", msg);
-        return Some(msg.to_string());
+/// command preview が最優先で、その次に core message、
+/// system warning、transient info を適用する。
+fn resolve_message_state(input: &ProjectionInput<'_>) -> Option<ScreenMessageState> {
+    if let Some(message) = resolve_message_text(input.command_preview) {
+        log::debug!(
+            "[screen_model] message line from command preview: {:?}",
+            message
+        );
+        return Some(ScreenMessageState::new(
+            ScreenMessageKind::CommandPreview,
+            message,
+        ));
     }
 
-    if let Some(error) = session_state.last_save_error() {
-        log::debug!("[screen_model] message line from save error: {:?}", error);
-        return Some(format!("保存失敗: {}", error));
+    if let Some(message) = resolve_message_text(input.core_message) {
+        log::debug!(
+            "[screen_model] message line from core message: {:?}",
+            message
+        );
+        return Some(ScreenMessageState::new(
+            ScreenMessageKind::CoreMessage,
+            message,
+        ));
+    }
+
+    if let Some(message) = resolve_message_text(input.system_warning) {
+        log::debug!(
+            "[screen_model] message line from system warning: {:?}",
+            message
+        );
+        return Some(ScreenMessageState::new(
+            ScreenMessageKind::SystemWarning,
+            message,
+        ));
+    }
+
+    if let Some(message) = resolve_message_text(input.transient_info) {
+        log::debug!(
+            "[screen_model] message line from transient info: {:?}",
+            message
+        );
+        return Some(ScreenMessageState::new(
+            ScreenMessageKind::TransientInfo,
+            message,
+        ));
+    }
+
+    if let Some(error) = input.session_state.last_save_error() {
+        log::debug!(
+            "[screen_model] message line from save error fallback: {:?}",
+            error
+        );
+        return Some(ScreenMessageState::new(
+            ScreenMessageKind::TransientInfo,
+            format!("保存失敗: {}", error),
+        ));
     }
 
     log::debug!("[screen_model] no message line");
     None
 }
 
+fn resolve_message_text(message: Option<&str>) -> Option<String> {
+    let message = message?.trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(message.to_string())
+    }
+}
+
+fn project_search_overlays(input: &ProjectionInput<'_>) -> Vec<ScreenSearchOverlay> {
+    let Some(search_state) = input.search_state else {
+        log::debug!("[screen_model] no search state provided");
+        return Vec::new();
+    };
+
+    if search_state.matches.is_empty() {
+        log::debug!("[screen_model] search state has no matches");
+        return Vec::new();
+    }
+
+    if matches!(search_state.mode, SearchQueryMode::Hlsearch)
+        && (!search_state.hlsearch_enabled || search_state.hlsearch_suspended)
+    {
+        log::debug!(
+            "[screen_model] hlsearch overlay suppressed: enabled={}, suspended={}",
+            search_state.hlsearch_enabled,
+            search_state.hlsearch_suspended
+        );
+        return Vec::new();
+    }
+
+    let viewport_bottom = input
+        .viewport_top
+        .saturating_add(input.body_height.max(1))
+        .saturating_sub(1);
+    let visible_start_row = input.viewport_top.saturating_add(1);
+    let visible_end_row = viewport_bottom.saturating_add(1);
+    let start_row = search_state.visible_rows.start_row.max(visible_start_row);
+    let end_row = search_state.visible_rows.end_row.min(visible_end_row);
+    if start_row > end_row {
+        log::debug!(
+            "[screen_model] search overlays outside visible rows: visible=({}, {}), state=({}, {})",
+            visible_start_row,
+            visible_end_row,
+            search_state.visible_rows.start_row,
+            search_state.visible_rows.end_row
+        );
+        return Vec::new();
+    }
+
+    let mut overlays = Vec::new();
+    for search_match in &search_state.matches {
+        let match_start_row = search_match.start_row.max(start_row);
+        let match_end_row = search_match.end_row.min(end_row);
+        if match_start_row > match_end_row {
+            continue;
+        }
+
+        for row in match_start_row..=match_end_row {
+            let absolute_row = row - 1;
+            let relative_row = absolute_row.saturating_sub(input.viewport_top);
+            let start_col = if row == search_match.start_row {
+                resolve_display_col_for_position(
+                    &input.snapshot.text,
+                    search_match.start_row - 1,
+                    search_match.start_col,
+                    input.session_state.tab_size(),
+                    input.session_state.line_numbers(),
+                    input.session_state.number_width(),
+                )
+            } else {
+                line_number_offset(
+                    &input.snapshot.text,
+                    input.session_state.line_numbers(),
+                    input.session_state.number_width(),
+                )
+            };
+            let end_col_exclusive = if row == search_match.end_row {
+                resolve_display_col_for_position(
+                    &input.snapshot.text,
+                    search_match.end_row - 1,
+                    search_match.end_col,
+                    input.session_state.tab_size(),
+                    input.session_state.line_numbers(),
+                    input.session_state.number_width(),
+                )
+            } else {
+                visible_line_end_col_exclusive(
+                    &input.snapshot.text,
+                    absolute_row,
+                    input.session_state.tab_size(),
+                    input.session_state.line_numbers(),
+                    input.session_state.number_width(),
+                )
+            };
+
+            if end_col_exclusive <= start_col {
+                continue;
+            }
+
+            overlays.push(ScreenSearchOverlay {
+                row: u16::try_from(relative_row).unwrap_or(u16::MAX),
+                start_col,
+                end_col_exclusive,
+                kind: search_match.kind,
+            });
+        }
+    }
+
+    overlays.sort_by_key(|overlay| {
+        let kind_rank = match overlay.kind {
+            SearchMatchKind::Current => 0usize,
+            SearchMatchKind::Incremental => 1usize,
+            SearchMatchKind::Regular => 2usize,
+        };
+        (
+            overlay.row,
+            overlay.start_col,
+            kind_rank,
+            overlay.end_col_exclusive,
+        )
+    });
+
+    log::debug!(
+        "[screen_model] projected search overlays: count={}, rows={:?}",
+        overlays.len(),
+        overlays
+            .iter()
+            .map(|overlay| overlay.row)
+            .collect::<Vec<_>>()
+    );
+
+    overlays
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
 
     use vim_core_rs::CoreMode;
 
     use super::*;
     use crate::core_bridge::CoreBridge;
+    use crate::search_capability::SearchCapabilityContract;
+    use crate::search_query::{
+        SearchMatch, SearchMatchKind, SearchQueryMode, SearchVisibleRows, SearchVisibleState,
+    };
 
-    fn session_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::session_guard::test_lock as session_test_lock;
 
     // ---- タスク 6.1: file name と mode を描画モデルへ投影するテスト ----
 
@@ -843,6 +1095,47 @@ mod tests {
             Some("設定の読み込みに失敗しました".to_string()),
             "設定失敗メッセージが投影されること"
         );
+    }
+
+    #[test]
+    fn resolves_message_state_by_fixed_priority_order() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("text\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+
+        let priority_input = ProjectionInput::new(&snapshot, &session_state, Some("transient"))
+            .with_command_preview(Some("/pattern"))
+            .with_core_message(Some("core warning"))
+            .with_system_warning(Some("system warning"));
+        let resolved = resolve_message_state(&priority_input)
+            .expect("command preview should win over all other messages");
+        assert_eq!(resolved.kind, ScreenMessageKind::CommandPreview);
+        assert_eq!(resolved.text, "/pattern");
+
+        let core_first = ProjectionInput::new(&snapshot, &session_state, Some("transient"))
+            .with_core_message(Some("core warning"))
+            .with_system_warning(Some("system warning"));
+        let resolved = resolve_message_state(&core_first)
+            .expect("core message should win when no command preview exists");
+        assert_eq!(resolved.kind, ScreenMessageKind::CoreMessage);
+        assert_eq!(resolved.text, "core warning");
+
+        let system_first = ProjectionInput::new(&snapshot, &session_state, Some("transient"))
+            .with_system_warning(Some("system warning"));
+        let resolved = resolve_message_state(&system_first)
+            .expect("system warning should win when no higher-priority message exists");
+        assert_eq!(resolved.kind, ScreenMessageKind::SystemWarning);
+        assert_eq!(resolved.text, "system warning");
+
+        let transient_only = ProjectionInput::new(&snapshot, &session_state, Some("transient"));
+        let resolved = resolve_message_state(&transient_only)
+            .expect("transient info should be used as the fallback");
+        assert_eq!(resolved.kind, ScreenMessageKind::TransientInfo);
+        assert_eq!(resolved.text, "transient");
     }
 
     #[test]
@@ -1175,6 +1468,7 @@ mod tests {
             cursor_row: 0,
             cursor_col: 0,
             visual_selection: None,
+            search_overlays: vec![],
             message_line: None,
             command_cursor_col: None,
         };
@@ -1193,6 +1487,129 @@ mod tests {
         assert_eq!(
             model.mode_label, "NORMAL",
             "ScreenModel だけで描画に必要な全情報が揃うこと"
+        );
+    }
+
+    #[test]
+    fn projects_search_overlay_with_tabs_wide_glyphs_and_gutter_offset() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("\tあx\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 4, true, 4,
+        );
+        let search_state = SearchVisibleState {
+            capability: SearchCapabilityContract::baseline_ready_contract(),
+            window_id: 1,
+            visible_rows: SearchVisibleRows {
+                start_row: 1,
+                end_row: 1,
+            },
+            mode: SearchQueryMode::Hlsearch,
+            pattern: Some("あ".to_string()),
+            input_pattern: None,
+            hlsearch_enabled: true,
+            hlsearch_suspended: false,
+            incsearch_active: false,
+            matches: vec![SearchMatch {
+                kind: SearchMatchKind::Current,
+                start_row: 1,
+                start_col: 1,
+                end_row: 1,
+                end_col: 4,
+            }],
+        };
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_search_state(Some(&search_state)),
+        );
+
+        assert_eq!(
+            model.search_overlays,
+            vec![ScreenSearchOverlay {
+                row: 0,
+                start_col: 9,
+                end_col_exclusive: 11,
+                kind: SearchMatchKind::Current,
+            }],
+            "tab と全角文字と行番号オフセットを display-space に正しく投影すること"
+        );
+    }
+
+    #[test]
+    fn projects_search_overlay_clips_to_visible_rows_and_keeps_match_kinds() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("zero\nalpha\nbeta\nomega\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let search_state = SearchVisibleState {
+            capability: SearchCapabilityContract::baseline_ready_contract(),
+            window_id: 1,
+            visible_rows: SearchVisibleRows {
+                start_row: 2,
+                end_row: 3,
+            },
+            hlsearch_enabled: true,
+            hlsearch_suspended: false,
+            incsearch_active: false,
+            mode: SearchQueryMode::Hlsearch,
+            pattern: Some("a".to_string()),
+            input_pattern: None,
+            matches: vec![
+                SearchMatch {
+                    kind: SearchMatchKind::Regular,
+                    start_row: 2,
+                    start_col: 0,
+                    end_row: 2,
+                    end_col: 5,
+                },
+                SearchMatch {
+                    kind: SearchMatchKind::Current,
+                    start_row: 3,
+                    start_col: 1,
+                    end_row: 3,
+                    end_col: 4,
+                },
+                SearchMatch {
+                    kind: SearchMatchKind::Regular,
+                    start_row: 4,
+                    start_col: 0,
+                    end_row: 4,
+                    end_col: 5,
+                },
+            ],
+        };
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_search_state(Some(&search_state))
+                .with_viewport(1, 2),
+        );
+
+        assert_eq!(
+            model.search_overlays,
+            vec![
+                ScreenSearchOverlay {
+                    row: 0,
+                    start_col: 0,
+                    end_col_exclusive: 5,
+                    kind: SearchMatchKind::Regular,
+                },
+                ScreenSearchOverlay {
+                    row: 1,
+                    start_col: 1,
+                    end_col_exclusive: 4,
+                    kind: SearchMatchKind::Current,
+                }
+            ],
+            "visible rows のみが投影され、current match が区別されること"
         );
     }
 }

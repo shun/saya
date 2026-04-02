@@ -1,6 +1,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 static SESSION_OWNED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionGuardError {
@@ -48,16 +56,10 @@ impl Drop for SessionGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn session_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn rejects_second_live_session_guard() {
-        let _lock = session_test_lock()
+        let _lock = test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         SESSION_OWNED.store(false, Ordering::SeqCst);
@@ -73,7 +75,7 @@ mod tests {
 
     #[test]
     fn allows_reacquiring_after_guard_is_released() {
-        let _lock = session_test_lock()
+        let _lock = test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         SESSION_OWNED.store(false, Ordering::SeqCst);

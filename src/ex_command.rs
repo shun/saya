@@ -1,9 +1,28 @@
 use crate::editor_session::EditorSessionState;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalHostCommand {
     Save,
     SaveThenQuit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOptionCommand {
+    EnableHlSearch,
+    DisableHlSearch,
+    ToggleHlSearch,
+    EnableIncSearch,
+    DisableIncSearch,
+    ToggleIncSearch,
+    ClearHlSearch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExCommandRoute {
+    LocalHost(LocalHostCommand),
+    SearchOption(SearchOptionCommand),
+    PresentationLocal,
+    CoreOwned,
 }
 
 pub fn apply_local_ex_command(
@@ -11,6 +30,15 @@ pub fn apply_local_ex_command(
     command: &str,
 ) -> Option<String> {
     let normalized = normalize_command(command)?;
+    if let Some(search_option) = parse_search_option_command_normalized(&normalized) {
+        log::debug!(
+            "[ex_command] skipping search option command in host-local handler: command={:?}, search_option={:?}",
+            command,
+            search_option
+        );
+        return None;
+    }
+
     if let Some(message) = apply_number_width_command(session_state, &normalized, command) {
         return Some(message);
     }
@@ -39,23 +67,80 @@ pub fn apply_local_ex_command(
 
 pub fn parse_local_host_command(command: &str) -> Option<LocalHostCommand> {
     let normalized = normalize_command(command)?;
-    match normalized.as_str() {
-        "w" | "write" => {
-            log::debug!(
-                "[ex_command] routing command to host save policy: {:?}",
-                command
-            );
-            Some(LocalHostCommand::Save)
-        }
-        "wq" | "x" => {
-            log::debug!(
-                "[ex_command] routing command to host save-then-quit policy: {:?}",
-                command
-            );
-            Some(LocalHostCommand::SaveThenQuit)
-        }
+    parse_local_host_command_normalized(&normalized)
+}
+
+pub fn parse_search_option_command(command: &str) -> Option<SearchOptionCommand> {
+    let normalized = normalize_command(command)?;
+    parse_search_option_command_normalized(&normalized)
+}
+
+pub fn route_ex_command(command: &str) -> ExCommandRoute {
+    let Some(normalized) = normalize_command(command) else {
+        log::debug!("[ex_command] routing empty ex command as core-owned no-op");
+        return ExCommandRoute::CoreOwned;
+    };
+
+    if let Some(host_command) = parse_local_host_command_normalized(&normalized) {
+        log::debug!(
+            "[ex_command] routing command to host save policy: command={:?}, host_command={:?}",
+            command,
+            host_command
+        );
+        return ExCommandRoute::LocalHost(host_command);
+    }
+
+    if let Some(search_option) = parse_search_option_command_normalized(&normalized) {
+        log::debug!(
+            "[ex_command] routing search command to core-owned option update: command={:?}, search_option={:?}",
+            command,
+            search_option
+        );
+        return ExCommandRoute::SearchOption(search_option);
+    }
+
+    if is_presentation_local_command_normalized(&normalized) {
+        log::debug!(
+            "[ex_command] routing command to host presentation state: command={:?}",
+            command
+        );
+        return ExCommandRoute::PresentationLocal;
+    }
+
+    log::debug!(
+        "[ex_command] routing command to core-owned ex handler: command={:?}",
+        command
+    );
+    ExCommandRoute::CoreOwned
+}
+
+fn parse_local_host_command_normalized(normalized: &str) -> Option<LocalHostCommand> {
+    match normalized {
+        "w" | "write" => Some(LocalHostCommand::Save),
+        "wq" | "x" => Some(LocalHostCommand::SaveThenQuit),
         _ => None,
     }
+}
+
+fn parse_search_option_command_normalized(normalized: &str) -> Option<SearchOptionCommand> {
+    match normalized {
+        "nohlsearch" => Some(SearchOptionCommand::ClearHlSearch),
+        "set hlsearch" | "set hls" => Some(SearchOptionCommand::EnableHlSearch),
+        "set nohlsearch" | "set nohls" => Some(SearchOptionCommand::DisableHlSearch),
+        "set hls!" | "set invhlsearch" => Some(SearchOptionCommand::ToggleHlSearch),
+        "set incsearch" => Some(SearchOptionCommand::EnableIncSearch),
+        "set noincsearch" => Some(SearchOptionCommand::DisableIncSearch),
+        "set incsearch!" | "set invincsearch" => Some(SearchOptionCommand::ToggleIncSearch),
+        _ => None,
+    }
+}
+
+fn is_presentation_local_command_normalized(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "set number" | "set nu" | "set nonumber" | "set nonu"
+    ) || normalized.starts_with("set numberwidth=")
+        || normalized.starts_with("set nuw=")
 }
 
 fn apply_number_width_command(
@@ -195,5 +280,85 @@ mod tests {
             parse_local_host_command("x"),
             Some(LocalHostCommand::SaveThenQuit)
         );
+    }
+
+    #[test]
+    fn parse_search_option_command_routes_search_option_commands_to_core_owned_updates() {
+        assert_eq!(
+            parse_search_option_command(":set hlsearch"),
+            Some(SearchOptionCommand::EnableHlSearch)
+        );
+        assert_eq!(
+            parse_search_option_command("set nohls"),
+            Some(SearchOptionCommand::DisableHlSearch)
+        );
+        assert_eq!(
+            parse_search_option_command(":set hls!"),
+            Some(SearchOptionCommand::ToggleHlSearch)
+        );
+        assert_eq!(
+            parse_search_option_command("set incsearch"),
+            Some(SearchOptionCommand::EnableIncSearch)
+        );
+        assert_eq!(
+            parse_search_option_command(":nohlsearch"),
+            Some(SearchOptionCommand::ClearHlSearch)
+        );
+    }
+
+    #[test]
+    fn route_ex_command_routes_search_option_commands_to_core_owned_updates() {
+        assert_eq!(
+            route_ex_command(":set hlsearch"),
+            ExCommandRoute::SearchOption(SearchOptionCommand::EnableHlSearch)
+        );
+        assert_eq!(
+            route_ex_command("set nohls"),
+            ExCommandRoute::SearchOption(SearchOptionCommand::DisableHlSearch)
+        );
+        assert_eq!(
+            route_ex_command(":set hls!"),
+            ExCommandRoute::SearchOption(SearchOptionCommand::ToggleHlSearch)
+        );
+        assert_eq!(
+            route_ex_command("set incsearch"),
+            ExCommandRoute::SearchOption(SearchOptionCommand::EnableIncSearch)
+        );
+        assert_eq!(
+            route_ex_command(":nohlsearch"),
+            ExCommandRoute::SearchOption(SearchOptionCommand::ClearHlSearch)
+        );
+    }
+
+    #[test]
+    fn route_ex_command_keeps_host_commands_separate_from_search_options() {
+        assert_eq!(
+            route_ex_command(":w"),
+            ExCommandRoute::LocalHost(LocalHostCommand::Save)
+        );
+        assert_eq!(
+            route_ex_command(":wq"),
+            ExCommandRoute::LocalHost(LocalHostCommand::SaveThenQuit)
+        );
+        assert_eq!(
+            parse_local_host_command(":set hlsearch"),
+            None,
+            "search option commands must not be parsed as host-local commands"
+        );
+    }
+
+    #[test]
+    fn apply_local_ex_command_ignores_search_option_commands() {
+        let mut session_state = EditorSessionState::new(None);
+
+        assert_eq!(
+            apply_local_ex_command(&mut session_state, ":set hlsearch"),
+            None
+        );
+        assert_eq!(
+            apply_local_ex_command(&mut session_state, ":nohlsearch"),
+            None
+        );
+        assert!(!session_state.line_numbers());
     }
 }

@@ -125,8 +125,8 @@ fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
         2,
         "4 行目移動時に viewport が追従すること"
     );
-assert_eq!(model.lines, vec!["line3", "line4", "line5"]);
-assert_eq!(model.cursor_row, 2, "カーソルが本文領域内へ保たれること");
+    assert_eq!(model.lines, vec!["line3", "line4", "line5"]);
+    assert_eq!(model.cursor_row, 2, "カーソルが本文領域内へ保たれること");
 }
 
 /// page scroll は cursor 位置ではなく core window の topline を信頼して投影する。

@@ -130,36 +130,160 @@ fn trace_renderer_line(model: &ScreenModel, width: u16) {
 }
 
 fn render_line(model: &ScreenModel, index: usize, line: &str, width: u16) -> Line<'static> {
-    let Some(selection) = model.visual_selection else {
-        return pad_line_to_width(Line::from(line.to_string()), width);
-    };
-
     let row = u16::try_from(index).unwrap_or(u16::MAX);
-    if row < selection.start_row || row > selection.end_row {
+    let overlays = collect_render_overlays(model, row, line);
+    if overlays.is_empty() {
         return pad_line_to_width(Line::from(line.to_string()), width);
     }
 
-    let start_col = if row == selection.start_row {
-        usize::from(selection.start_col)
-    } else {
-        usize::from(selection.line_start_col)
-    };
-    let end_col_exclusive = if row == selection.end_row {
-        usize::from(selection.end_col_exclusive)
-    } else {
-        display_width(line)
-    };
+    render_layered_line(line, &overlays, width)
+}
 
-    let (prefix, selected, suffix) =
-        split_line_by_display_columns(line, start_col, end_col_exclusive);
-    pad_line_to_width(
-        Line::from(vec![
-            Span::raw(prefix),
-            Span::styled(selected, Style::default().add_modifier(Modifier::REVERSED)),
-            Span::raw(suffix),
-        ]),
-        width,
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderOverlayKind {
+    VisualSelection,
+    Search(crate::search_query::SearchMatchKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderOverlayRange {
+    start_col: usize,
+    end_col_exclusive: usize,
+    kind: RenderOverlayKind,
+}
+
+fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<RenderOverlayRange> {
+    let mut overlays = Vec::new();
+
+    if let Some(selection) = model.visual_selection {
+        if row >= selection.start_row && row <= selection.end_row {
+            let start_col = if row == selection.start_row {
+                usize::from(selection.start_col)
+            } else {
+                usize::from(selection.line_start_col)
+            };
+            let end_col_exclusive = if row == selection.end_row {
+                usize::from(selection.end_col_exclusive)
+            } else {
+                display_width(line)
+            };
+            if end_col_exclusive > start_col {
+                overlays.push(RenderOverlayRange {
+                    start_col,
+                    end_col_exclusive,
+                    kind: RenderOverlayKind::VisualSelection,
+                });
+            }
+        }
+    }
+
+    overlays.extend(
+        model
+            .search_overlays
+            .iter()
+            .filter(|overlay| overlay.row == row)
+            .filter(|overlay| overlay.end_col_exclusive > overlay.start_col)
+            .map(|overlay| RenderOverlayRange {
+                start_col: usize::from(overlay.start_col),
+                end_col_exclusive: usize::from(overlay.end_col_exclusive),
+                kind: RenderOverlayKind::Search(overlay.kind),
+            }),
+    );
+
+    overlays.sort_by_key(|overlay| {
+        (
+            overlay.start_col,
+            overlay.end_col_exclusive,
+            overlay_kind_rank(overlay.kind),
+        )
+    });
+    overlays
+}
+
+fn render_layered_line(line: &str, overlays: &[RenderOverlayRange], width: u16) -> Line<'static> {
+    let line_width = display_width(line);
+    let mut boundaries = vec![0usize, line_width];
+    for overlay in overlays {
+        boundaries.push(overlay.start_col.min(line_width));
+        boundaries.push(overlay.end_col_exclusive.min(line_width));
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut spans = Vec::new();
+    for window in boundaries.windows(2) {
+        let start_col = window[0];
+        let end_col_exclusive = window[1];
+        if end_col_exclusive <= start_col {
+            continue;
+        }
+        let text = slice_line_by_display_columns(line, start_col, end_col_exclusive);
+        let style = overlays
+            .iter()
+            .filter(|overlay| {
+                overlay.start_col < end_col_exclusive && overlay.end_col_exclusive > start_col
+            })
+            .max_by_key(|overlay| overlay_kind_rank(overlay.kind))
+            .map(|overlay| style_for_overlay_kind(overlay.kind))
+            .unwrap_or_default();
+        if style == Style::default() {
+            spans.push(Span::raw(text));
+        } else {
+            spans.push(Span::styled(text, style));
+        }
+    }
+
+    pad_line_to_width(Line::from(spans), width)
+}
+
+fn overlay_kind_rank(kind: RenderOverlayKind) -> usize {
+    match kind {
+        RenderOverlayKind::VisualSelection => 3,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => 2,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => 1,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => 0,
+    }
+}
+
+fn style_for_overlay_kind(kind: RenderOverlayKind) -> Style {
+    match kind {
+        RenderOverlayKind::VisualSelection => Style::default().add_modifier(Modifier::REVERSED),
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        }
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => {
+            Style::default().fg(Color::White).bg(Color::Blue)
+        }
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+        }
+    }
+}
+
+fn slice_line_by_display_columns(line: &str, start_col: usize, end_col_exclusive: usize) -> String {
+    let mut result = String::new();
+    let mut display_col = 0usize;
+
+    for ch in line.chars() {
+        let width = ch.width().unwrap_or(0);
+        let next_col = display_col.saturating_add(width);
+        if next_col <= start_col {
+            display_col = next_col;
+            continue;
+        }
+        if display_col >= end_col_exclusive {
+            break;
+        }
+        result.push(ch);
+        display_col = next_col;
+    }
+
+    result
 }
 
 fn pad_line_to_width(mut line: Line<'static>, width: u16) -> Line<'static> {
@@ -170,32 +294,6 @@ fn pad_line_to_width(mut line: Line<'static>, width: u16) -> Line<'static> {
             .push(Span::raw(" ".repeat(target_width - rendered_width)));
     }
     line
-}
-
-fn split_line_by_display_columns(
-    line: &str,
-    start_col: usize,
-    end_col_exclusive: usize,
-) -> (String, String, String) {
-    let mut prefix = String::new();
-    let mut selected = String::new();
-    let mut suffix = String::new();
-    let mut display_col = 0usize;
-
-    for ch in line.chars() {
-        let width = ch.width().unwrap_or(0);
-        let target = if display_col < start_col {
-            &mut prefix
-        } else if display_col < end_col_exclusive {
-            &mut selected
-        } else {
-            &mut suffix
-        };
-        target.push(ch);
-        display_col = display_col.saturating_add(width);
-    }
-
-    (prefix, selected, suffix)
 }
 
 fn display_width(text: &str) -> usize {
@@ -209,7 +307,9 @@ mod tests {
     use crate::cli::LaunchRequest;
     use crate::editor_session::EditorSessionState;
     use crate::screen_model::ScreenSelection;
-    use crate::screen_model::{ProjectionInput, project};
+    use crate::screen_model::{ProjectionInput, ScreenSearchOverlay, project};
+    use crate::search_query::SearchMatchKind;
+    use crate::session_guard::test_lock as session_test_lock;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
 
@@ -228,6 +328,7 @@ mod tests {
                 end_row: 0,
                 end_col_exclusive: 1,
             }),
+            search_overlays: vec![],
             message_line: message_line.map(ToString::to_string),
             command_cursor_col: None,
         }
@@ -255,6 +356,158 @@ mod tests {
     }
 
     #[test]
+    fn search_overlay_precedence_prefers_current_over_incremental_and_regular() {
+        let model = ScreenModel {
+            file_name: "test.txt".to_string(),
+            mode_label: "NORMAL".to_string(),
+            dirty: false,
+            lines: vec!["abcdef".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![
+                ScreenSearchOverlay {
+                    row: 0,
+                    start_col: 0,
+                    end_col_exclusive: 6,
+                    kind: SearchMatchKind::Regular,
+                },
+                ScreenSearchOverlay {
+                    row: 0,
+                    start_col: 1,
+                    end_col_exclusive: 5,
+                    kind: SearchMatchKind::Incremental,
+                },
+                ScreenSearchOverlay {
+                    row: 0,
+                    start_col: 2,
+                    end_col_exclusive: 4,
+                    kind: SearchMatchKind::Current,
+                },
+            ],
+            message_line: None,
+            command_cursor_col: None,
+        };
+
+        let text = render_buffer_text(&model, 6);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans.len(), 5);
+        assert_eq!(line.spans[0].content.as_ref(), "a");
+        assert_eq!(line.spans[1].content.as_ref(), "b");
+        assert_eq!(line.spans[2].content.as_ref(), "cd");
+        assert_eq!(line.spans[3].content.as_ref(), "e");
+        assert_eq!(line.spans[4].content.as_ref(), "f");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+        assert_eq!(
+            line.spans[1].style,
+            Style::default().fg(Color::White).bg(Color::Blue)
+        );
+        assert_eq!(
+            line.spans[2].style,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            line.spans[3].style,
+            Style::default().fg(Color::White).bg(Color::Blue)
+        );
+        assert_eq!(
+            line.spans[4].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+    }
+
+    #[test]
+    fn visual_selection_overrides_search_overlay_when_ranges_overlap() {
+        let model = ScreenModel {
+            file_name: "test.txt".to_string(),
+            mode_label: "VISUAL".to_string(),
+            dirty: false,
+            lines: vec!["abcdef".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: Some(ScreenSelection {
+                start_row: 0,
+                start_col: 2,
+                line_start_col: 2,
+                end_row: 0,
+                end_col_exclusive: 4,
+            }),
+            search_overlays: vec![ScreenSearchOverlay {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 6,
+                kind: SearchMatchKind::Regular,
+            }],
+            message_line: None,
+            command_cursor_col: None,
+        };
+
+        let text = render_buffer_text(&model, 6);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[0].content.as_ref(), "ab");
+        assert_eq!(line.spans[1].content.as_ref(), "cd");
+        assert_eq!(line.spans[2].content.as_ref(), "ef");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+        assert_eq!(
+            line.spans[1].style,
+            Style::default().add_modifier(Modifier::REVERSED)
+        );
+        assert_eq!(
+            line.spans[2].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+    }
+
+    #[test]
+    fn search_overlay_renders_full_width_glyph_with_background_highlight() {
+        let model = ScreenModel {
+            file_name: "test.txt".to_string(),
+            mode_label: "NORMAL".to_string(),
+            dirty: false,
+            lines: vec!["xあx".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![ScreenSearchOverlay {
+                row: 0,
+                start_col: 1,
+                end_col_exclusive: 3,
+                kind: SearchMatchKind::Regular,
+            }],
+            message_line: None,
+            command_cursor_col: None,
+        };
+
+        let text = render_buffer_text(&model, 6);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[0].content.as_ref(), "x");
+        assert_eq!(line.spans[1].content.as_ref(), "あ");
+        assert_eq!(line.spans[2].content.as_ref(), "x");
+        assert!(
+            line.spans[3].content.as_ref().chars().all(|ch| ch == ' '),
+            "rendered line should keep trailing padding spaces"
+        );
+        assert_eq!(
+            line.spans[1].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+    }
+
+    #[test]
     fn multiline_selection_does_not_highlight_line_number_gutter() {
         let model = ScreenModel {
             file_name: "test.txt".to_string(),
@@ -270,6 +523,7 @@ mod tests {
                 end_row: 1,
                 end_col_exclusive: 7,
             }),
+            search_overlays: vec![],
             message_line: None,
             command_cursor_col: None,
         };
@@ -277,12 +531,11 @@ mod tests {
         let text = render_buffer_text(&model, 20);
         let second_line = &text.lines[1];
 
-        assert_eq!(second_line.spans.len(), 4);
+        assert_eq!(second_line.spans.len(), 3);
         assert_eq!(second_line.spans[0].content.as_ref(), " 2 ");
         assert_eq!(second_line.spans[1].content.as_ref(), "beta");
-        assert_eq!(second_line.spans[2].content.as_ref(), "");
         assert!(
-            second_line.spans[3]
+            second_line.spans[2]
                 .content
                 .as_ref()
                 .chars()
@@ -318,6 +571,9 @@ mod tests {
 
     #[test]
     fn integrated_update_cycle_keeps_message_status_and_cursor_in_sync() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut outcome = prepare_launch(LaunchRequest::default()).expect("launch should succeed");
         let mut session_state = EditorSessionState::new(outcome.target_path.clone());
 
