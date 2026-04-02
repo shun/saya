@@ -195,7 +195,10 @@ impl CoreBridge {
         })
     }
 
-    pub fn sync_search_input(&mut self, pattern: &str) -> Result<CoreCommandOutcome, CoreSessionError> {
+    pub fn sync_search_input(
+        &mut self,
+        pattern: &str,
+    ) -> Result<CoreCommandOutcome, CoreSessionError> {
         if self.search_prompt_is_active() {
             let _ = self.dispatch_session_key("\x1b")?;
         }
@@ -205,7 +208,10 @@ impl CoreBridge {
             return Ok(CoreCommandOutcome::NoChange);
         }
 
-        log::debug!("[core_bridge] syncing search prompt through core-owned state: pattern={:?}", pattern);
+        log::debug!(
+            "[core_bridge] syncing search prompt through core-owned state: pattern={:?}",
+            pattern
+        );
         let tx = self
             .session
             .execute_normal_command(&format!("/{}", pattern))
@@ -367,7 +373,10 @@ impl CoreBridge {
     fn search_prompt_is_active(&self) -> bool {
         self.session.get_search_input_pattern().is_some()
             || self.session.is_incsearch_active()
-            || matches!(self.session.snapshot().mode, vim_core_rs::CoreMode::CommandLine)
+            || matches!(
+                self.session.snapshot().mode,
+                vim_core_rs::CoreMode::CommandLine
+            )
     }
 
     fn should_handle_ctrl_c_interrupt(&self, key: &str) -> bool {

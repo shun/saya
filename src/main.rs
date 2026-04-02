@@ -264,9 +264,8 @@ async fn main() {
                             KeyInput::Backspace => {
                                 if prompt == '/' {
                                     let _ = command_line_buffer.pop();
-                                    let _ = outcome
-                                        .core_bridge
-                                        .sync_search_input(&command_line_buffer);
+                                    let _ =
+                                        outcome.core_bridge.sync_search_input(&command_line_buffer);
                                     update_core_message_from_core(
                                         &mut outcome.core_bridge,
                                         &mut core_message,
@@ -278,9 +277,8 @@ async fn main() {
                             KeyInput::Char(c) => {
                                 command_line_buffer.push(c);
                                 if prompt == '/' {
-                                    let _ = outcome
-                                        .core_bridge
-                                        .sync_search_input(&command_line_buffer);
+                                    let _ =
+                                        outcome.core_bridge.sync_search_input(&command_line_buffer);
                                     update_core_message_from_core(
                                         &mut outcome.core_bridge,
                                         &mut core_message,

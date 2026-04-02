@@ -299,15 +299,24 @@ mod tests {
                 .update(&mut backend, viewport_changed)
                 .query_executed
         );
-        assert!(coordinator.update(&mut backend, prompt_changed).query_executed);
-        assert!(coordinator.update(&mut backend, cursor_changed).query_executed);
+        assert!(
+            coordinator
+                .update(&mut backend, prompt_changed)
+                .query_executed
+        );
+        assert!(
+            coordinator
+                .update(&mut backend, cursor_changed)
+                .query_executed
+        );
         assert_eq!(backend.query_count(), 5);
     }
 
     #[test]
     fn prompt_active_always_queries_core_owned_live_state() {
         let contract = SearchCapabilityContract::baseline_ready_contract();
-        let mut backend = FakeBackend::new(contract, sample_state(SearchQueryMode::IncsearchPreview));
+        let mut backend =
+            FakeBackend::new(contract, sample_state(SearchQueryMode::IncsearchPreview));
         let mut coordinator = SearchRefreshCoordinator::new();
         let input = SearchRefreshInput {
             revision: 10,
@@ -330,16 +339,19 @@ mod tests {
                 end_row: 2,
             })
         );
-        assert!(outcome
-            .render_state
-            .as_ref()
-            .is_some_and(|state| state.incsearch_active));
+        assert!(
+            outcome
+                .render_state
+                .as_ref()
+                .is_some_and(|state| state.incsearch_active)
+        );
     }
 
     #[test]
     fn refresh_uses_core_returned_mode_instead_of_host_gate() {
         let contract = SearchCapabilityContract::baseline_ready_contract();
-        let mut backend = FakeBackend::new(contract, sample_state(SearchQueryMode::IncsearchPreview));
+        let mut backend =
+            FakeBackend::new(contract, sample_state(SearchQueryMode::IncsearchPreview));
         let mut coordinator = SearchRefreshCoordinator::new();
         let input = SearchRefreshInput {
             revision: 10,

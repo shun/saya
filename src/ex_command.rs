@@ -174,6 +174,7 @@ fn normalize_command(command: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::screen_model::{ProjectionInput, project};
+    use crate::session_guard::test_lock as session_test_lock;
 
     use super::*;
 
@@ -217,6 +218,9 @@ mod tests {
 
     #[test]
     fn apply_local_ex_command_updates_screen_projection() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let snapshot = vim_core_rs::VimCoreSession::new("alpha\nbeta\n")
             .expect("session")
             .snapshot();

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{prepare_launch, BootstrapOutcome};
+use saya::bootstrap::{BootstrapOutcome, prepare_launch};
 use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::search_capability::SearchCapabilityContract;
 use saya::search_query::{SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery};
@@ -42,7 +42,10 @@ fn search_capability_contract_reports_live_state_query_available() {
 
     let contract = outcome.core_bridge.search_capability_contract();
 
-    assert_eq!(contract, SearchCapabilityContract::baseline_ready_contract());
+    assert_eq!(
+        contract,
+        SearchCapabilityContract::baseline_ready_contract()
+    );
     assert!(contract.live_state_query_available);
     assert!(contract.visible_rows_only);
     assert!(contract.start_col_inclusive);
@@ -74,7 +77,10 @@ fn query_visible_search_state_returns_typed_highlight_data() {
         state.capability,
         outcome.core_bridge.search_capability_contract()
     );
-    assert_eq!(state.window_id, outcome.core_bridge.snapshot().windows[0].id);
+    assert_eq!(
+        state.window_id,
+        outcome.core_bridge.snapshot().windows[0].id
+    );
     assert_eq!(state.visible_rows.start_row, 2);
     assert_eq!(state.visible_rows.end_row, 3);
     assert_eq!(state.mode, SearchQueryMode::Hlsearch);

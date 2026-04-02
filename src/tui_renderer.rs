@@ -258,9 +258,7 @@ fn style_for_overlay_kind(kind: RenderOverlayKind) -> Style {
             Style::default().fg(Color::White).bg(Color::Blue)
         }
         RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+            Style::default().fg(Color::Black).bg(Color::Yellow)
         }
     }
 }
