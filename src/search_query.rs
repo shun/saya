@@ -1,4 +1,5 @@
 use crate::search_capability::SearchCapabilityContract;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchVisibleQuery {
@@ -54,4 +55,21 @@ pub enum SearchStateError {
     InvalidViewport { start_row: usize, end_row: usize },
     ActiveWindowMissing,
     WindowNotFound { window_id: i32 },
+}
+
+impl fmt::Display for SearchStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SearchStateError::InvalidViewport { start_row, end_row } => {
+                write!(
+                    f,
+                    "invalid viewport: start_row={start_row}, end_row={end_row}"
+                )
+            }
+            SearchStateError::ActiveWindowMissing => write!(f, "active window missing"),
+            SearchStateError::WindowNotFound { window_id } => {
+                write!(f, "window not found: window_id={window_id}")
+            }
+        }
+    }
 }

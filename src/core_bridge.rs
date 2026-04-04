@@ -27,6 +27,7 @@ pub struct CoreBridge {
     session: VimCoreSession,
     pending_host_actions: VecDeque<CoreHostAction>,
     pending_messages: VecDeque<CoreMessageEvent>,
+    pending_transport_key: Option<String>,
 }
 
 impl fmt::Debug for CoreBridge {
@@ -50,6 +51,7 @@ impl CoreBridge {
             session,
             pending_host_actions: VecDeque::new(),
             pending_messages: VecDeque::new(),
+            pending_transport_key: None,
         })
     }
 
@@ -106,15 +108,36 @@ impl CoreBridge {
     /// キー入力を vim-core-rs セッションに適用する。
     /// ノーマルモードコマンドとして解釈し、結果を返す。
     pub fn dispatch_key(&mut self, key: &str) -> Result<CoreCommandOutcome, CoreSessionError> {
+        if self.should_buffer_transport_prefix(key) {
+            log::debug!(
+                "[core_bridge] buffering transport-level key prefix for next dispatch: {:?}",
+                key
+            );
+            self.pending_transport_key = Some(key.to_string());
+            return Ok(CoreCommandOutcome::NoChange);
+        }
+
+        let key = if let Some(prefix) = self.take_pending_transport_key() {
+            let combined = format!("{prefix}{key}");
+            log::debug!(
+                "[core_bridge] coalesced buffered transport prefix with incoming key: prefix={:?}, key={:?}, combined={:?}",
+                prefix,
+                key,
+                combined
+            );
+            combined
+        } else {
+            key.to_string()
+        };
         log::debug!(
             "[core_bridge] dispatching key: {:?} (len={})",
             key,
             key.len()
         );
-        let outcome = if self.should_handle_ctrl_c_interrupt(key) {
+        let outcome = if self.should_handle_ctrl_c_interrupt(&key) {
             self.handle_ctrl_c_interrupt()?
         } else {
-            self.dispatch_session_key(key)?
+            self.dispatch_session_key(&key)?
         };
         log::debug!(
             "[core_bridge] dispatch result: {:?}, pending_input={:?}",
@@ -336,6 +359,76 @@ impl CoreBridge {
             matches,
         })
     }
+
+    pub fn query_visible_search_state_for_window(
+        &mut self,
+        window_id: i32,
+        query: SearchVisibleQuery,
+    ) -> Result<SearchVisibleState, SearchStateError> {
+        if query.start_row == 0 || query.end_row < query.start_row {
+            log::debug!(
+                "[core_bridge] rejecting window search query because viewport is invalid: window_id={}, query={:?}",
+                window_id,
+                query
+            );
+            return Err(SearchStateError::InvalidViewport {
+                start_row: query.start_row,
+                end_row: query.end_row,
+            });
+        }
+
+        let capability = self.search_capability_contract();
+        let core_state = self
+            .session
+            .query_visible_search_state_for_window(
+                window_id,
+                query.start_row as i32,
+                query.end_row as i32,
+            )
+            .map_err(map_search_query_error)?;
+        let matches = core_state
+            .ranges
+            .into_iter()
+            .map(|range| SearchMatch {
+                kind: map_match_kind(range.match_type),
+                start_row: range.start_row,
+                start_col: range.start_col,
+                end_row: range.end_row,
+                end_col: range.end_col,
+            })
+            .collect::<Vec<_>>();
+        let mut matches = matches;
+        matches.sort_by_key(|range| {
+            let kind_rank = match range.kind {
+                SearchMatchKind::Current => 0usize,
+                SearchMatchKind::Incremental => 1usize,
+                SearchMatchKind::Regular => 2usize,
+            };
+            (
+                kind_rank,
+                range.start_row,
+                range.start_col,
+                range.end_row,
+                range.end_col,
+            )
+        });
+
+        Ok(SearchVisibleState {
+            capability,
+            visible_rows: SearchVisibleRows {
+                start_row: core_state.start_row,
+                end_row: core_state.end_row,
+            },
+            window_id: core_state.window_id,
+            mode: map_search_mode(core_state.mode),
+            pattern: core_state.pattern,
+            input_pattern: core_state.input_pattern,
+            hlsearch_enabled: core_state.hlsearch_enabled,
+            hlsearch_suspended: core_state.hlsearch_suspended,
+            incsearch_active: core_state.incsearch_active,
+            matches,
+        })
+    }
 }
 
 fn map_match_kind(match_type: CoreMatchType) -> SearchMatchKind {
@@ -377,6 +470,22 @@ impl CoreBridge {
                 self.session.snapshot().mode,
                 vim_core_rs::CoreMode::CommandLine
             )
+    }
+
+    fn should_buffer_transport_prefix(&self, key: &str) -> bool {
+        key == "\u{17}"
+            && self.pending_transport_key.is_none()
+            && matches!(
+                self.session.snapshot().mode,
+                vim_core_rs::CoreMode::Normal
+                    | vim_core_rs::CoreMode::Visual
+                    | vim_core_rs::CoreMode::VisualLine
+                    | vim_core_rs::CoreMode::VisualBlock
+            )
+    }
+
+    fn take_pending_transport_key(&mut self) -> Option<String> {
+        self.pending_transport_key.take()
     }
 
     fn should_handle_ctrl_c_interrupt(&self, key: &str) -> bool {
@@ -1033,6 +1142,38 @@ mod tests {
         assert!(
             bridge.take_pending_messages().is_empty(),
             "canceling pending input should not enqueue exit guidance"
+        );
+    }
+
+    #[test]
+    fn ctrl_w_prefix_is_coalesced_across_separate_dispatch_calls() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge =
+            CoreBridge::new("first\nsecond\nthird\n").expect("core bridge should initialize");
+        bridge.set_screen_size(24, 80);
+
+        let first = bridge
+            .dispatch_key("\u{17}")
+            .expect("ctrl-w prefix should be accepted");
+        assert_eq!(first, CoreCommandOutcome::NoChange);
+        assert_eq!(
+            bridge.snapshot().windows.len(),
+            1,
+            "buffering the transport prefix alone should not mutate layout yet"
+        );
+
+        bridge
+            .dispatch_key("s")
+            .expect("second key should complete the ctrl-w sequence");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(
+            snapshot.windows.len(),
+            2,
+            "Ctrl-w followed by s in separate dispatch calls should create a split"
         );
     }
 

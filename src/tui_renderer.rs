@@ -1,10 +1,12 @@
-use crate::screen_model::ScreenModel;
+#[cfg(test)]
+use crate::screen_model::{CommandLineModel, PaneRect};
+use crate::screen_model::{ScreenModel, WorkspaceScreenModel};
 use crate::terminal_lifecycle::TerminalBackend;
 use crossterm::{execute, terminal};
 use ratatui::Terminal;
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use std::io::{self, Stdout};
 use unicode_width::UnicodeWidthChar;
 
@@ -43,55 +45,179 @@ impl TuiRenderer {
         })
     }
 
-    pub fn draw(&mut self, model: &ScreenModel) -> io::Result<()> {
-        draw_editor_frame(&mut self.terminal, model, self.needs_full_clear)?;
+    pub fn draw(&mut self, model: &WorkspaceScreenModel) -> io::Result<()> {
+        draw_workspace_frame(&mut self.terminal, model, self.needs_full_clear)?;
         self.needs_full_clear = false;
         Ok(())
     }
 }
 
-fn draw_editor_frame<B: Backend>(
+fn draw_workspace_frame<B: Backend>(
     terminal: &mut Terminal<B>,
-    model: &ScreenModel,
+    model: &WorkspaceScreenModel,
     force_full_clear: bool,
 ) -> io::Result<()> {
     if force_full_clear {
         terminal.clear()?;
     }
-    terminal.draw(|f| render_editor_frame(f, model))?;
+    terminal.draw(|f| render_workspace(f, model))?;
     Ok(())
 }
 
-fn render_editor_frame(f: &mut Frame<'_>, model: &ScreenModel) {
+fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel) {
     let size = f.area();
     f.render_widget(Clear, size);
+    let layout = compute_workspace_layout(size, model);
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ]
-            .as_ref(),
-        )
-        .split(size);
-
-    let buffer_content = Paragraph::new(render_buffer_text(model, layout[0].width));
-    trace_renderer_line(model, layout[0].width);
-    f.render_widget(buffer_content, layout[0]);
-
-    let status_bar = Paragraph::new(render_status_line(model))
-        .style(Style::default().bg(Color::White).fg(Color::Black));
-    f.render_widget(status_bar, layout[1]);
-    f.render_widget(Paragraph::new(render_message_line(model)), layout[2]);
-
-    if let Some(col) = model.command_cursor_col {
-        f.set_cursor_position((col, layout[2].y));
-    } else if model.cursor_row < layout[0].height {
-        f.set_cursor_position((model.cursor_col, model.cursor_row));
+    for pane in &layout.panes {
+        render_pane(f, pane.model, pane.is_active, pane.rect);
     }
+
+    if let Some((message_line, message_rect)) =
+        visible_global_message_line(model).zip(layout.global_message_rect)
+    {
+        f.render_widget(Paragraph::new(message_line), message_rect);
+    }
+
+    if let Some((command_line, command_rect)) = model.command_line.as_ref().zip(layout.command_rect)
+    {
+        f.render_widget(Paragraph::new(command_line.text.as_str()), command_rect);
+        f.set_cursor_position((command_line.cursor_col.min(size.width), command_rect.y));
+        return;
+    }
+
+    if let Some((cursor_x, cursor_y)) = layout.cursor {
+        f.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneLayout<'a> {
+    model: &'a ScreenModel,
+    rect: Rect,
+    is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceLayout<'a> {
+    panes: Vec<PaneLayout<'a>>,
+    global_message_rect: Option<Rect>,
+    command_rect: Option<Rect>,
+    cursor: Option<(u16, u16)>,
+}
+
+fn compute_workspace_layout<'a>(
+    size: Rect,
+    model: &'a WorkspaceScreenModel,
+) -> WorkspaceLayout<'a> {
+    let global_rows = workspace_global_rows(model);
+    let workspace_height = size.height.saturating_sub(global_rows).max(1);
+
+    let panes = model
+        .panes
+        .iter()
+        .map(|pane| PaneLayout {
+            model: pane,
+            is_active: pane.window_id == model.active_window_id,
+            rect: Rect {
+                x: pane.rect.x.min(size.width),
+                y: pane.rect.y.min(workspace_height),
+                width: pane
+                    .rect
+                    .width
+                    .min(size.width.saturating_sub(pane.rect.x))
+                    .max(1),
+                height: pane
+                    .rect
+                    .height
+                    .min(workspace_height.saturating_sub(pane.rect.y))
+                    .max(1),
+            },
+        })
+        .collect::<Vec<_>>();
+
+    let global_message_rect = visible_global_message_line(model).map(|_| Rect {
+        x: 0,
+        y: size.height.saturating_sub(global_rows),
+        width: size.width,
+        height: 1,
+    });
+
+    let command_rect = model.command_line.as_ref().map(|_| Rect {
+        x: 0,
+        y: size.height.saturating_sub(1),
+        width: size.width,
+        height: 1,
+    });
+
+    let cursor = if command_rect.is_some() {
+        None
+    } else {
+        panes
+            .iter()
+            .find(|pane| pane.is_active)
+            .and_then(|active_pane| {
+                let body_height = active_pane.rect.height.saturating_sub(1);
+                (active_pane.model.cursor_row < body_height).then_some((
+                    active_pane
+                        .rect
+                        .x
+                        .saturating_add(active_pane.model.cursor_col),
+                    active_pane
+                        .rect
+                        .y
+                        .saturating_add(active_pane.model.cursor_row),
+                ))
+            })
+    };
+
+    WorkspaceLayout {
+        panes,
+        global_message_rect,
+        command_rect,
+        cursor,
+    }
+}
+
+fn workspace_global_rows(model: &WorkspaceScreenModel) -> u16 {
+    u16::from(visible_global_message_line(model).is_some())
+        + u16::from(model.command_line.is_some())
+}
+
+fn visible_global_message_line(model: &WorkspaceScreenModel) -> Option<&str> {
+    model
+        .global_message_line
+        .as_deref()
+        .filter(|message| !message.is_empty())
+}
+
+fn render_pane(f: &mut Frame<'_>, model: &ScreenModel, is_active: bool, rect: Rect) {
+    let body_height = rect.height.saturating_sub(1).max(1);
+    let body_rect = Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: body_height,
+    };
+    let status_rect = Rect {
+        x: rect.x,
+        y: rect.y.saturating_add(body_height),
+        width: rect.width,
+        height: 1,
+    };
+    f.render_widget(Clear, rect);
+    let buffer_content =
+        Paragraph::new(render_buffer_text(model, body_rect.width)).block(Block::default());
+    trace_renderer_line(model, body_rect.width);
+    f.render_widget(buffer_content, body_rect);
+
+    let status_style = if is_active {
+        Style::default().bg(Color::White).fg(Color::Black)
+    } else {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    };
+    let status_bar = Paragraph::new(render_status_line(model)).style(status_style);
+    f.render_widget(status_bar, status_rect);
 }
 
 fn render_status_line(model: &ScreenModel) -> String {
@@ -103,8 +229,30 @@ fn render_status_line(model: &ScreenModel) -> String {
     }
 }
 
+#[cfg(test)]
 fn render_message_line(model: &ScreenModel) -> &str {
     model.message_line.as_deref().unwrap_or("")
+}
+
+#[cfg(test)]
+fn draw_editor_frame<B: Backend>(
+    terminal: &mut Terminal<B>,
+    model: &ScreenModel,
+    force_full_clear: bool,
+) -> io::Result<()> {
+    draw_workspace_frame(
+        terminal,
+        &WorkspaceScreenModel {
+            panes: vec![model.clone()],
+            active_window_id: model.window_id,
+            global_message_line: model.message_line.clone(),
+            command_line: model.command_cursor_col.map(|cursor_col| CommandLineModel {
+                text: model.message_line.clone().unwrap_or_default(),
+                cursor_col,
+            }),
+        },
+        force_full_clear,
+    )
 }
 
 fn render_buffer_text(model: &ScreenModel, width: u16) -> Text<'static> {
@@ -313,6 +461,14 @@ mod tests {
 
     fn screen_model_with_message(message_line: Option<&str>) -> ScreenModel {
         ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 3,
+            },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
             dirty: true,
@@ -329,6 +485,7 @@ mod tests {
             search_overlays: vec![],
             message_line: message_line.map(ToString::to_string),
             command_cursor_col: None,
+            is_active: true,
         }
     }
 
@@ -356,6 +513,14 @@ mod tests {
     #[test]
     fn search_overlay_precedence_prefers_current_over_incremental_and_regular() {
         let model = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 6,
+                height: 3,
+            },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
             dirty: false,
@@ -385,6 +550,7 @@ mod tests {
             ],
             message_line: None,
             command_cursor_col: None,
+            is_active: true,
         };
 
         let text = render_buffer_text(&model, 6);
@@ -424,6 +590,14 @@ mod tests {
     #[test]
     fn visual_selection_overrides_search_overlay_when_ranges_overlap() {
         let model = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 6,
+                height: 3,
+            },
             file_name: "test.txt".to_string(),
             mode_label: "VISUAL".to_string(),
             dirty: false,
@@ -445,6 +619,7 @@ mod tests {
             }],
             message_line: None,
             command_cursor_col: None,
+            is_active: true,
         };
 
         let text = render_buffer_text(&model, 6);
@@ -471,6 +646,14 @@ mod tests {
     #[test]
     fn search_overlay_renders_full_width_glyph_with_background_highlight() {
         let model = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 6,
+                height: 3,
+            },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
             dirty: false,
@@ -486,6 +669,7 @@ mod tests {
             }],
             message_line: None,
             command_cursor_col: None,
+            is_active: true,
         };
 
         let text = render_buffer_text(&model, 6);
@@ -508,6 +692,14 @@ mod tests {
     #[test]
     fn multiline_selection_does_not_highlight_line_number_gutter() {
         let model = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 4,
+            },
             file_name: "test.txt".to_string(),
             mode_label: "V-LINE".to_string(),
             dirty: false,
@@ -524,6 +716,7 @@ mod tests {
             search_overlays: vec![],
             message_line: None,
             command_cursor_col: None,
+            is_active: true,
         };
 
         let text = render_buffer_text(&model, 20);
@@ -617,5 +810,295 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position(Position::new(model.cursor_col, model.cursor_row));
+    }
+
+    #[test]
+    fn workspace_render_uses_active_window_id_even_when_pane_flags_are_stale() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 8)).expect("test terminal should initialize");
+        let model = WorkspaceScreenModel {
+            panes: vec![
+                ScreenModel {
+                    window_id: 10,
+                    buffer_id: 10,
+                    rect: PaneRect {
+                        x: 0,
+                        y: 0,
+                        width: 20,
+                        height: 4,
+                    },
+                    file_name: "left.txt".to_string(),
+                    mode_label: "NORMAL".to_string(),
+                    dirty: false,
+                    lines: vec!["left".to_string()],
+                    cursor_row: 0,
+                    cursor_col: 0,
+                    visual_selection: None,
+                    search_overlays: vec![],
+                    message_line: None,
+                    command_cursor_col: None,
+                    is_active: false,
+                },
+                ScreenModel {
+                    window_id: 20,
+                    buffer_id: 20,
+                    rect: PaneRect {
+                        x: 20,
+                        y: 0,
+                        width: 20,
+                        height: 4,
+                    },
+                    file_name: "right.txt".to_string(),
+                    mode_label: "NORMAL".to_string(),
+                    dirty: false,
+                    lines: vec!["right".to_string()],
+                    cursor_row: 1,
+                    cursor_col: 2,
+                    visual_selection: None,
+                    search_overlays: vec![],
+                    message_line: None,
+                    command_cursor_col: None,
+                    is_active: false,
+                },
+            ],
+            active_window_id: 20,
+            global_message_line: None,
+            command_line: None,
+        };
+
+        draw_workspace_frame(&mut terminal, &model, true).expect("workspace render should succeed");
+
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(22, 1));
+    }
+
+    #[test]
+    fn workspace_render_does_not_reserve_empty_global_message_row() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 4)).expect("test terminal should initialize");
+        let model = WorkspaceScreenModel {
+            panes: vec![ScreenModel {
+                window_id: 1,
+                buffer_id: 1,
+                rect: PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 20,
+                    height: 4,
+                },
+                file_name: "alpha.txt".to_string(),
+                mode_label: "NORMAL".to_string(),
+                dirty: false,
+                lines: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+                cursor_row: 2,
+                cursor_col: 1,
+                visual_selection: None,
+                search_overlays: vec![],
+                message_line: None,
+                command_cursor_col: None,
+                is_active: true,
+            }],
+            active_window_id: 1,
+            global_message_line: None,
+            command_line: None,
+        };
+
+        draw_workspace_frame(&mut terminal, &model, true).expect("workspace render should succeed");
+
+        let rendered = format!("{}", terminal.backend());
+        let rows: Vec<&str> = rendered.lines().collect();
+        assert!(
+            rows.get(3)
+                .is_some_and(|row| row.contains("alpha.txt") && row.contains("NORMAL")),
+            "message/command がない時は最下段まで local status line を使うこと: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn workspace_render_uses_single_bottom_row_for_command_line_without_message() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 4)).expect("test terminal should initialize");
+        let model = WorkspaceScreenModel {
+            panes: vec![ScreenModel {
+                window_id: 1,
+                buffer_id: 1,
+                rect: PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 20,
+                    height: 3,
+                },
+                file_name: "alpha.txt".to_string(),
+                mode_label: "NORMAL".to_string(),
+                dirty: false,
+                lines: vec!["alpha".to_string(), "beta".to_string()],
+                cursor_row: 0,
+                cursor_col: 0,
+                visual_selection: None,
+                search_overlays: vec![],
+                message_line: None,
+                command_cursor_col: None,
+                is_active: true,
+            }],
+            active_window_id: 1,
+            global_message_line: None,
+            command_line: Some(CommandLineModel {
+                text: ":w".to_string(),
+                cursor_col: 2,
+            }),
+        };
+
+        draw_workspace_frame(&mut terminal, &model, true).expect("workspace render should succeed");
+
+        let rendered = format!("{}", terminal.backend());
+        let rows: Vec<&str> = rendered.lines().collect();
+        assert!(
+            rows.get(2)
+                .is_some_and(|row| row.contains("alpha.txt") && row.contains("NORMAL")),
+            "command line だけの時は status line の直下 1 行だけを予約すること: {:?}",
+            rows
+        );
+        assert!(
+            rows.get(3).is_some_and(|row| row.contains(":w")),
+            "最下段に command line を描画すること: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn workspace_layout_exposes_no_global_rows_when_message_and_command_are_absent() {
+        let model = WorkspaceScreenModel {
+            panes: vec![screen_model_with_message(None)],
+            active_window_id: 1,
+            global_message_line: None,
+            command_line: None,
+        };
+
+        let layout = compute_workspace_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 4,
+            },
+            &model,
+        );
+
+        assert_eq!(layout.global_message_rect, None);
+        assert_eq!(layout.command_rect, None);
+        assert_eq!(layout.panes[0].rect.height, 3);
+        assert_eq!(layout.cursor, Some((0, 0)));
+    }
+
+    #[test]
+    fn workspace_layout_exposes_single_command_row_without_empty_message_row() {
+        let mut pane = screen_model_with_message(None);
+        pane.rect.height = 3;
+        let model = WorkspaceScreenModel {
+            panes: vec![pane],
+            active_window_id: 1,
+            global_message_line: None,
+            command_line: Some(CommandLineModel {
+                text: ":w".to_string(),
+                cursor_col: 2,
+            }),
+        };
+
+        let layout = compute_workspace_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 4,
+            },
+            &model,
+        );
+
+        assert_eq!(layout.global_message_rect, None);
+        assert_eq!(
+            layout.command_rect,
+            Some(Rect {
+                x: 0,
+                y: 3,
+                width: 20,
+                height: 1,
+            })
+        );
+        assert_eq!(layout.panes[0].rect.height, 3);
+        assert_eq!(layout.cursor, None);
+    }
+
+    #[test]
+    fn workspace_layout_does_not_reserve_row_for_empty_global_message() {
+        let model = WorkspaceScreenModel {
+            panes: vec![screen_model_with_message(None)],
+            active_window_id: 1,
+            global_message_line: Some(String::new()),
+            command_line: None,
+        };
+
+        let layout = compute_workspace_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 4,
+            },
+            &model,
+        );
+
+        assert_eq!(
+            layout.global_message_rect, None,
+            "空の message line では global row を予約しないこと"
+        );
+        assert_eq!(
+            layout.panes[0].rect.height, 3,
+            "空 message で pane body/status の高さを削らないこと"
+        );
+    }
+
+    #[test]
+    fn workspace_layout_stacks_message_above_command_without_overlap() {
+        let model = WorkspaceScreenModel {
+            panes: vec![screen_model_with_message(None)],
+            active_window_id: 1,
+            global_message_line: Some("saved".to_string()),
+            command_line: Some(CommandLineModel {
+                text: ":w".to_string(),
+                cursor_col: 2,
+            }),
+        };
+
+        let layout = compute_workspace_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 5,
+            },
+            &model,
+        );
+
+        assert_eq!(
+            layout.global_message_rect,
+            Some(Rect {
+                x: 0,
+                y: 3,
+                width: 20,
+                height: 1,
+            })
+        );
+        assert_eq!(
+            layout.command_rect,
+            Some(Rect {
+                x: 0,
+                y: 4,
+                width: 20,
+                height: 1,
+            })
+        );
+        assert_eq!(layout.panes[0].rect.height, 3);
     }
 }

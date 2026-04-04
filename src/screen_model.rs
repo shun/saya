@@ -4,12 +4,16 @@
 //! 抽出し、ScreenModel として TuiRenderer に渡す。
 //! 描画側は ScreenModel だけを入力とし、CoreSnapshot に直接依存しない。
 
+use std::collections::BTreeMap;
+use std::fmt;
+
 use unicode_width::UnicodeWidthChar;
-use vim_core_rs::{CoreMode, CoreSnapshot};
+use vim_core_rs::{CoreMode, CoreSnapshot, CoreWindowInfo};
 
 use crate::core_bridge::VisualSelection;
 use crate::editor_session::EditorSessionState;
 use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
+use crate::viewport::WindowViewportStore;
 
 /// 描画専用 view model。
 ///
@@ -17,6 +21,9 @@ use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
 /// EditorSessionState を直接参照しない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenModel {
+    pub window_id: i32,
+    pub buffer_id: i32,
+    pub rect: PaneRect,
     /// 現在のファイル名（未設定なら "[新規]"）
     pub file_name: String,
     /// 現在のモードラベル（例: "NORMAL", "INSERT"）
@@ -36,6 +43,50 @@ pub struct ScreenModel {
     /// メッセージ欄に表示する通知（エラーやガイダンス）
     pub message_line: Option<String>,
     pub command_cursor_col: Option<u16>,
+    pub is_active: bool,
+}
+
+pub type PaneScreenModel = ScreenModel;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PaneRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandLineModel {
+    pub text: String,
+    pub cursor_col: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceScreenModel {
+    pub panes: Vec<PaneScreenModel>,
+    pub active_window_id: i32,
+    pub global_message_line: Option<String>,
+    pub command_line: Option<CommandLineModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceProjectionError {
+    ActiveWindowMissing,
+    WindowNotFound { window_id: i32 },
+}
+
+impl fmt::Display for WorkspaceProjectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkspaceProjectionError::ActiveWindowMissing => {
+                write!(f, "active window could not be resolved")
+            }
+            WorkspaceProjectionError::WindowNotFound { window_id } => {
+                write!(f, "window not found: window_id={window_id}")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +141,12 @@ pub struct ProjectionInput<'a> {
     pub core_message: Option<&'a str>,
     pub system_warning: Option<&'a str>,
     pub transient_info: Option<&'a str>,
+    pub window_id: i32,
+    pub buffer_id: i32,
+    pub rect: PaneRect,
+    pub is_active: bool,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
     pub viewport_top: usize,
     pub body_height: usize,
 }
@@ -100,6 +157,8 @@ impl<'a> ProjectionInput<'a> {
         session_state: &'a EditorSessionState,
         transient_message: Option<&'a str>,
     ) -> Self {
+        let active_window = resolve_projection_active_window(snapshot);
+        let active_buffer_id = active_window.map(|window| window.buf_id).unwrap_or(0);
         Self {
             snapshot,
             session_state,
@@ -109,6 +168,18 @@ impl<'a> ProjectionInput<'a> {
             core_message: None,
             system_warning: None,
             transient_info: transient_message,
+            window_id: active_window.map(|window| window.id).unwrap_or(0),
+            buffer_id: active_buffer_id,
+            rect: active_window
+                .map(PaneRect::from_core_window)
+                .unwrap_or_default(),
+            is_active: active_window.is_some(),
+            cursor_row: active_window
+                .map(|window| window.cursor_row)
+                .unwrap_or(snapshot.cursor_row),
+            cursor_col: active_window
+                .map(|window| window.cursor_col)
+                .unwrap_or(snapshot.cursor_col),
             viewport_top: 0,
             body_height: usize::MAX,
         }
@@ -149,6 +220,41 @@ impl<'a> ProjectionInput<'a> {
         self.transient_info = transient_info;
         self
     }
+
+    pub fn with_window(mut self, window: &CoreWindowInfo, rect: PaneRect, is_active: bool) -> Self {
+        self.window_id = window.id;
+        self.buffer_id = window.buf_id;
+        self.rect = rect;
+        self.is_active = is_active;
+        self.cursor_row = window.cursor_row;
+        self.cursor_col = window.cursor_col;
+        self
+    }
+}
+
+pub struct WorkspaceProjectionInput<'a> {
+    pub snapshot: &'a CoreSnapshot,
+    pub session_state: &'a EditorSessionState,
+    pub visual_selection: Option<&'a VisualSelection>,
+    pub search_states: &'a BTreeMap<i32, SearchVisibleState>,
+    pub command_preview: Option<&'a str>,
+    pub core_message: Option<&'a str>,
+    pub system_warning: Option<&'a str>,
+    pub transient_info: Option<&'a str>,
+    pub viewport_store: &'a WindowViewportStore,
+    pub terminal_width: u16,
+    pub terminal_height: u16,
+}
+
+impl PaneRect {
+    pub fn from_core_window(window: &CoreWindowInfo) -> Self {
+        Self {
+            x: u16::try_from(window.col).unwrap_or(u16::MAX),
+            y: u16::try_from(window.row).unwrap_or(u16::MAX),
+            width: u16::try_from(window.width).unwrap_or(u16::MAX),
+            height: u16::try_from(window.height).unwrap_or(u16::MAX),
+        }
+    }
 }
 
 /// CoreSnapshot と EditorSessionState から ScreenModel を生成する。
@@ -159,8 +265,8 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         "[screen_model] projecting: mode={:?}, dirty={}, cursor=({},{}), command_preview={:?}, core_message={:?}, system_warning={:?}, transient_info={:?}",
         input.snapshot.mode,
         input.snapshot.dirty,
-        input.snapshot.cursor_row,
-        input.snapshot.cursor_col,
+        input.cursor_row,
+        input.cursor_col,
         input.command_preview,
         input.core_message,
         input.system_warning,
@@ -178,15 +284,11 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     trace_projection_lines("full", &full_lines, 0);
     let lines = slice_visible_lines(&full_lines, input.viewport_top, input.body_height);
     trace_projection_lines("visible", &lines, input.viewport_top);
-    let cursor_row = resolve_cursor_row(
-        input.snapshot.cursor_row,
-        input.viewport_top,
-        input.body_height,
-    );
+    let cursor_row = resolve_cursor_row(input.cursor_row, input.viewport_top, input.body_height);
     let cursor_col = resolve_cursor_col(
         &input.snapshot.text,
-        input.snapshot.cursor_row,
-        input.snapshot.cursor_col,
+        input.cursor_row,
+        input.cursor_col,
         input.session_state.tab_size(),
         input.session_state.line_numbers(),
         input.session_state.number_width(),
@@ -210,6 +312,9 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     );
 
     ScreenModel {
+        window_id: input.window_id,
+        buffer_id: input.buffer_id,
+        rect: input.rect,
         file_name,
         mode_label,
         dirty,
@@ -220,7 +325,124 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         search_overlays,
         message_line,
         command_cursor_col: None,
+        is_active: input.is_active,
     }
+}
+
+pub fn project_workspace(
+    input: &WorkspaceProjectionInput<'_>,
+) -> Result<WorkspaceScreenModel, WorkspaceProjectionError> {
+    let active_window_id = input.snapshot.active_window_id();
+    let Some(active_window_id) = active_window_id else {
+        log::debug!("[screen_model] workspace projection aborted: active window missing");
+        return Err(WorkspaceProjectionError::ActiveWindowMissing);
+    };
+    let command_line = input.command_preview.map(|preview| CommandLineModel {
+        text: preview.to_string(),
+        cursor_col: u16::try_from(display_width(
+            preview,
+            usize::from(input.session_state.tab_size().max(1)),
+        ))
+        .unwrap_or(u16::MAX),
+    });
+    let global_message_line = if command_line.is_some() {
+        None
+    } else {
+        resolve_message_state(
+            &ProjectionInput::new(input.snapshot, input.session_state, input.transient_info)
+                .with_core_message(input.core_message)
+                .with_system_warning(input.system_warning),
+        )
+        .map(|state| state.text)
+    };
+    let reserved_rows =
+        u16::from(global_message_line.is_some()) + u16::from(command_line.is_some());
+    let workspace_height = input.terminal_height.saturating_sub(reserved_rows).max(1);
+    let pane_window_ids = input
+        .snapshot
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .collect::<Vec<_>>();
+
+    let panes = pane_window_ids
+        .into_iter()
+        .map(|window_id| {
+            let Some(window) = input.snapshot.window(window_id) else {
+                log::debug!(
+                    "[screen_model] workspace projection aborted: snapshot.window(window_id) returned None: window_id={}, active_window_id={:?}",
+                    window_id,
+                    active_window_id,
+                );
+                return Err(WorkspaceProjectionError::WindowNotFound { window_id });
+            };
+            let rect = map_window_rect(window, input.terminal_width, workspace_height);
+            let body_height = usize::from(rect.height.saturating_sub(1).max(1));
+            let viewport_top = input
+                .viewport_store
+                .get(window.id)
+                .map(|viewport| viewport.top_line())
+                .unwrap_or_else(|| window.topline.saturating_sub(1));
+            let is_active = active_window_id == window_id;
+            let mut pane_input = ProjectionInput::new(input.snapshot, input.session_state, None)
+                .with_window(window, rect, is_active)
+                .with_visual_selection(if is_active {
+                    input.visual_selection
+                } else {
+                    None
+                })
+                .with_search_state(input.search_states.get(&window.id))
+                .with_viewport(viewport_top, body_height);
+            if is_active {
+                log::debug!(
+                    "[screen_model] active pane cursor projected from snapshot: window_id={}, snapshot_cursor=({},{}), window_cursor=({},{}), rect=({},{},{},{})",
+                    window.id,
+                    input.snapshot.cursor_row,
+                    input.snapshot.cursor_col,
+                    window.cursor_row,
+                    window.cursor_col,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height
+                );
+                pane_input.cursor_row = input.snapshot.cursor_row;
+                pane_input.cursor_col = input.snapshot.cursor_col;
+            } else {
+                log::debug!(
+                    "[screen_model] inactive pane cursor projected from window metadata: window_id={}, cursor=({},{}), rect=({},{},{},{})",
+                    window.id,
+                    window.cursor_row,
+                    window.cursor_col,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height
+                );
+                pane_input.cursor_row = window.cursor_row;
+                pane_input.cursor_col = window.cursor_col;
+            }
+            Ok(project(&pane_input))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(WorkspaceScreenModel {
+        panes,
+        active_window_id,
+        global_message_line,
+        command_line,
+    })
+}
+
+fn resolve_projection_active_window(snapshot: &CoreSnapshot) -> Option<&CoreWindowInfo> {
+    let active_window_id = snapshot.active_window_id();
+    let active_window = active_window_id.and_then(|window_id| snapshot.window(window_id));
+    log::debug!(
+        "[screen_model] resolve projection active window: snapshot_active_window_id={:?}, chosen_window_id={:?}",
+        active_window_id,
+        active_window.map(|window| window.id),
+    );
+    active_window
 }
 
 fn trace_projection_lines(phase: &str, lines: &[String], viewport_top: usize) {
@@ -640,6 +862,15 @@ fn project_search_overlays(input: &ProjectionInput<'_>) -> Vec<ScreenSearchOverl
         return Vec::new();
     };
 
+    if search_state.window_id != input.window_id {
+        log::debug!(
+            "[screen_model] search state window mismatch: input_window_id={}, search_window_id={}",
+            input.window_id,
+            search_state.window_id
+        );
+        return Vec::new();
+    }
+
     if search_state.matches.is_empty() {
         log::debug!("[screen_model] search state has no matches");
         return Vec::new();
@@ -677,61 +908,12 @@ fn project_search_overlays(input: &ProjectionInput<'_>) -> Vec<ScreenSearchOverl
 
     let mut overlays = Vec::new();
     for search_match in &search_state.matches {
-        let match_start_row = search_match.start_row.max(start_row);
-        let match_end_row = search_match.end_row.min(end_row);
-        if match_start_row > match_end_row {
-            continue;
-        }
-
-        for row in match_start_row..=match_end_row {
-            let absolute_row = row - 1;
-            let relative_row = absolute_row.saturating_sub(input.viewport_top);
-            let start_col = if row == search_match.start_row {
-                resolve_display_col_for_position(
-                    &input.snapshot.text,
-                    search_match.start_row - 1,
-                    search_match.start_col,
-                    input.session_state.tab_size(),
-                    input.session_state.line_numbers(),
-                    input.session_state.number_width(),
-                )
-            } else {
-                line_number_offset(
-                    &input.snapshot.text,
-                    input.session_state.line_numbers(),
-                    input.session_state.number_width(),
-                )
-            };
-            let end_col_exclusive = if row == search_match.end_row {
-                resolve_display_col_for_position(
-                    &input.snapshot.text,
-                    search_match.end_row - 1,
-                    search_match.end_col,
-                    input.session_state.tab_size(),
-                    input.session_state.line_numbers(),
-                    input.session_state.number_width(),
-                )
-            } else {
-                visible_line_end_col_exclusive(
-                    &input.snapshot.text,
-                    absolute_row,
-                    input.session_state.tab_size(),
-                    input.session_state.line_numbers(),
-                    input.session_state.number_width(),
-                )
-            };
-
-            if end_col_exclusive <= start_col {
-                continue;
-            }
-
-            overlays.push(ScreenSearchOverlay {
-                row: u16::try_from(relative_row).unwrap_or(u16::MAX),
-                start_col,
-                end_col_exclusive,
-                kind: search_match.kind,
-            });
-        }
+        overlays.extend(project_search_match_overlays(
+            input,
+            search_match,
+            start_row,
+            end_row,
+        ));
     }
 
     overlays.sort_by_key(|overlay| {
@@ -758,6 +940,118 @@ fn project_search_overlays(input: &ProjectionInput<'_>) -> Vec<ScreenSearchOverl
     );
 
     overlays
+}
+
+fn project_search_match_overlays(
+    input: &ProjectionInput<'_>,
+    search_match: &crate::search_query::SearchMatch,
+    visible_start_row: usize,
+    visible_end_row: usize,
+) -> Vec<ScreenSearchOverlay> {
+    let match_start_row = search_match.start_row.max(visible_start_row);
+    let match_end_row = search_match.end_row.min(visible_end_row);
+    if match_start_row > match_end_row {
+        return Vec::new();
+    }
+
+    let mut overlays = Vec::new();
+    for row in match_start_row..=match_end_row {
+        let Some((start_col, end_col_exclusive)) =
+            resolve_search_overlay_display_bounds(input, search_match, row)
+        else {
+            continue;
+        };
+        let relative_row = row.saturating_sub(1).saturating_sub(input.viewport_top);
+        overlays.push(ScreenSearchOverlay {
+            row: u16::try_from(relative_row).unwrap_or(u16::MAX),
+            start_col,
+            end_col_exclusive,
+            kind: search_match.kind,
+        });
+    }
+
+    overlays
+}
+
+fn resolve_search_overlay_display_bounds(
+    input: &ProjectionInput<'_>,
+    search_match: &crate::search_query::SearchMatch,
+    row: usize,
+) -> Option<(u16, u16)> {
+    let start_col = if row == search_match.start_row {
+        resolve_display_col_for_position(
+            &input.snapshot.text,
+            search_match.start_row - 1,
+            search_match.start_col,
+            input.session_state.tab_size(),
+            input.session_state.line_numbers(),
+            input.session_state.number_width(),
+        )
+    } else {
+        line_number_offset(
+            &input.snapshot.text,
+            input.session_state.line_numbers(),
+            input.session_state.number_width(),
+        )
+    };
+    let end_col_exclusive = if row == search_match.end_row {
+        resolve_display_col_for_position(
+            &input.snapshot.text,
+            search_match.end_row - 1,
+            search_match.end_col,
+            input.session_state.tab_size(),
+            input.session_state.line_numbers(),
+            input.session_state.number_width(),
+        )
+    } else {
+        visible_line_end_col_exclusive(
+            &input.snapshot.text,
+            row - 1,
+            input.session_state.tab_size(),
+            input.session_state.line_numbers(),
+            input.session_state.number_width(),
+        )
+    };
+
+    if end_col_exclusive <= start_col {
+        log::debug!(
+            "[screen_model] ignoring search overlay with non-positive width: window_id={}, row={}, start_col={}, end_col_exclusive={}",
+            input.window_id,
+            row,
+            start_col,
+            end_col_exclusive
+        );
+        return None;
+    }
+
+    Some((start_col, end_col_exclusive))
+}
+
+fn map_window_rect(
+    window: &CoreWindowInfo,
+    terminal_width: u16,
+    workspace_height: u16,
+) -> PaneRect {
+    let x = u16::try_from(window.col)
+        .unwrap_or(u16::MAX)
+        .min(terminal_width);
+    let y = u16::try_from(window.row)
+        .unwrap_or(u16::MAX)
+        .min(workspace_height);
+    let width = u16::try_from(window.width)
+        .unwrap_or(u16::MAX)
+        .min(terminal_width.saturating_sub(x))
+        .max(1);
+    let height = u16::try_from(window.height)
+        .unwrap_or(u16::MAX)
+        .min(workspace_height.saturating_sub(y))
+        .max(1);
+    PaneRect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]
@@ -1461,6 +1755,14 @@ mod tests {
     fn redraw_input_limited_to_screen_model_only() {
         // ScreenModel だけで描画に必要な全情報が揃うことを型レベルで検証
         let model = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 2,
+            },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
             dirty: false,
@@ -1471,6 +1773,7 @@ mod tests {
             search_overlays: vec![],
             message_line: None,
             command_cursor_col: None,
+            is_active: true,
         };
 
         // ScreenModel の各フィールドにアクセスできること（コンパイル時検証）
@@ -1498,12 +1801,15 @@ mod tests {
 
         let bridge = CoreBridge::new("\tあx\n").expect("core bridge");
         let snapshot = bridge.snapshot();
+        let active_window_id = snapshot
+            .active_window_id()
+            .expect("active window should exist");
         let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
             None, 4, true, 4,
         );
         let search_state = SearchVisibleState {
             capability: SearchCapabilityContract::baseline_ready_contract(),
-            window_id: 1,
+            window_id: active_window_id,
             visible_rows: SearchVisibleRows {
                 start_row: 1,
                 end_row: 1,
@@ -1548,10 +1854,13 @@ mod tests {
 
         let bridge = CoreBridge::new("zero\nalpha\nbeta\nomega\n").expect("core bridge");
         let snapshot = bridge.snapshot();
+        let active_window_id = snapshot
+            .active_window_id()
+            .expect("active window should exist");
         let session_state = EditorSessionState::new(None);
         let search_state = SearchVisibleState {
             capability: SearchCapabilityContract::baseline_ready_contract(),
-            window_id: 1,
+            window_id: active_window_id,
             visible_rows: SearchVisibleRows {
                 start_row: 2,
                 end_row: 3,
@@ -1611,5 +1920,277 @@ mod tests {
             ],
             "visible rows のみが投影され、current match が区別されること"
         );
+    }
+
+    #[test]
+    fn ignores_search_overlay_for_different_window_id() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("alpha\nbeta\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let search_state = SearchVisibleState {
+            capability: SearchCapabilityContract::baseline_ready_contract(),
+            window_id: 999_999,
+            visible_rows: SearchVisibleRows {
+                start_row: 1,
+                end_row: 1,
+            },
+            hlsearch_enabled: true,
+            hlsearch_suspended: false,
+            incsearch_active: false,
+            mode: SearchQueryMode::Hlsearch,
+            pattern: Some("alpha".to_string()),
+            input_pattern: None,
+            matches: vec![SearchMatch {
+                kind: SearchMatchKind::Current,
+                start_row: 1,
+                start_col: 0,
+                end_row: 1,
+                end_col: 5,
+            }],
+        };
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_search_state(Some(&search_state)),
+        );
+
+        assert!(
+            model.search_overlays.is_empty(),
+            "別 window の search overlay は投影しないこと"
+        );
+    }
+
+    #[test]
+    fn projection_input_keeps_explicit_failure_when_snapshot_has_no_active_window() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("alpha\nbeta\ngamma\n").expect("core bridge");
+        bridge
+            .apply_ex_command(":split")
+            .expect("split should succeed");
+        let mut snapshot = bridge.snapshot();
+        for (index, window) in snapshot.windows.iter_mut().enumerate() {
+            window.id = 41 + i32::try_from(index).expect("window index fits in i32");
+            window.is_active = false;
+        }
+        snapshot.cursor_row = 7;
+        snapshot.cursor_col = 11;
+        let session_state = EditorSessionState::new(None);
+
+        let input = ProjectionInput::new(&snapshot, &session_state, None);
+
+        assert_eq!(
+            input.window_id, 0,
+            "active_window_id() が取れない snapshot では first window を採用せず explicit failure を保つこと"
+        );
+        assert_eq!(
+            input.buffer_id, 0,
+            "active window が解決できない場合は first window の buffer を流用しないこと"
+        );
+        assert_eq!(
+            input.rect,
+            PaneRect::default(),
+            "active window が解決できない場合は geometry fallback を作らないこと"
+        );
+        assert_eq!(
+            input.cursor_row, snapshot.cursor_row,
+            "global cursor は snapshot の active cursor contract をそのまま使うこと"
+        );
+        assert_eq!(input.cursor_col, snapshot.cursor_col);
+    }
+
+    #[test]
+    fn workspace_projection_does_not_infer_active_pane_from_windows_scan() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("alpha\nbeta\ngamma\n").expect("core bridge");
+        bridge
+            .apply_ex_command(":split")
+            .expect("split should succeed");
+        let mut snapshot = bridge.snapshot();
+        for (index, window) in snapshot.windows.iter_mut().enumerate() {
+            window.id = 71 + i32::try_from(index).expect("window index fits in i32");
+            window.is_active = false;
+        }
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+
+        let result = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            command_preview: None,
+            core_message: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        });
+
+        assert_eq!(
+            result,
+            Err(WorkspaceProjectionError::ActiveWindowMissing),
+            "active_window_id() が None のときは windows 走査で active pane を推測しないこと"
+        );
+    }
+
+    #[test]
+    fn workspace_projection_uses_snapshot_cursor_for_active_pane_and_window_cursor_for_inactive_pane()
+     {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("alpha\nbeta\ngamma\ndelta\n").expect("core bridge");
+        bridge
+            .apply_ex_command(":split")
+            .expect("split should succeed");
+        let mut snapshot = bridge.snapshot();
+        let active_window_id = snapshot
+            .active_window_id()
+            .expect("split snapshot should have an active window");
+        let mut active_window_snapshot = snapshot
+            .window(active_window_id)
+            .expect("active window should exist")
+            .clone();
+        let mut inactive_window_snapshot = snapshot
+            .windows
+            .iter()
+            .find(|window| window.id != active_window_id)
+            .expect("inactive window should exist")
+            .clone();
+        snapshot.cursor_row = 2;
+        snapshot.cursor_col = 2;
+        active_window_snapshot.cursor_row = 4;
+        active_window_snapshot.cursor_col = 1;
+        inactive_window_snapshot.cursor_row = 3;
+        inactive_window_snapshot.cursor_col = 3;
+        snapshot.windows = vec![active_window_snapshot, inactive_window_snapshot];
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            command_preview: None,
+            core_message: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        })
+        .expect("workspace projection should still build for split snapshots");
+
+        let active_pane = model
+            .panes
+            .iter()
+            .find(|pane| pane.window_id == active_window_id)
+            .expect("active pane should exist");
+        let inactive_pane = model
+            .panes
+            .iter()
+            .find(|pane| pane.window_id != active_window_id)
+            .expect("inactive pane should exist");
+
+        assert_eq!(
+            active_pane.cursor_row, 2,
+            "active pane は snapshot 全体の cursor_row を使うこと"
+        );
+        assert_eq!(
+            active_pane.cursor_col, 2,
+            "active pane は snapshot 全体の cursor_col を使うこと"
+        );
+        assert_eq!(
+            inactive_pane.cursor_row, 3,
+            "inactive pane は window metadata の cursor_row を使うこと"
+        );
+        assert_eq!(
+            inactive_pane.cursor_col, 3,
+            "inactive pane は window metadata の cursor_col を使うこと"
+        );
+    }
+
+    #[test]
+    fn workspace_projection_keeps_full_height_when_global_rows_are_empty() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("alpha\nbeta\ngamma\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            command_preview: None,
+            core_message: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        })
+        .expect("workspace projection should succeed");
+
+        let expected_height = snapshot.windows[0].height as u16;
+        assert_eq!(
+            model.panes[0].rect.height, expected_height,
+            "message/command が空なら host が pane height を余計に削らないこと"
+        );
+    }
+
+    #[test]
+    fn workspace_projection_reserves_only_one_row_for_command_line_without_message() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("alpha\nbeta\ngamma\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            command_preview: Some(":w"),
+            core_message: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        })
+        .expect("workspace projection should succeed");
+
+        let expected_height = snapshot.windows[0].height as u16;
+        assert_eq!(
+            model.panes[0].rect.height, expected_height,
+            "command line だけの時も message row を重複予約せず core の pane height を保つこと"
+        );
+        assert_eq!(model.global_message_line, None);
     }
 }

@@ -18,13 +18,19 @@ use saya::saya_live_runtime::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
     RuntimeInitError, RuntimeMode,
 };
-use saya::screen_model::{ProjectionInput, project};
-use saya::search_refresh::{SearchModeHint, SearchRefreshCoordinator, SearchRefreshInput};
+use saya::screen_model::{
+    ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput, WorkspaceScreenModel,
+    project, project_workspace,
+};
+use saya::search_query::{SearchStateError, SearchVisibleState};
+use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
-use saya::viewport::ViewportState;
+use saya::viewport::WindowViewportStore;
 use vim_core_rs::{CoreMessageEvent, CoreMode};
 
+use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +66,14 @@ async fn main() {
         std::process::exit(0);
     }
 
+    if std::env::var_os("SAYA_PTY_SMOKE").is_some() {
+        if let Err(error) = run_binary_pty_smoke(launch_request) {
+            eprintln!("[main][pty-smoke] {error}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     // UI 初期化
     let mut backend = CrosstermBackendImpl;
     let (mut outcome, terminal_session) =
@@ -76,10 +90,11 @@ async fn main() {
     let mut core_message: Option<String> = None;
     let mut system_warning: Option<String> = bootstrap_warning_message(&outcome.warnings);
     let mut transient_msg: Option<String> = None;
-    let mut viewport = ViewportState::new();
-    let mut search_refresh = SearchRefreshCoordinator::new();
+    let mut viewport_store = WindowViewportStore::new();
+    let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_buffer = String::new();
+    let mut last_successful_workspace_model: Option<WorkspaceScreenModel> = None;
     let mut runtime_session = match RuntimeSessionOwner::spawn(outcome.callback_registry.clone()) {
         Ok(runtime_session) => Some(runtime_session),
         Err(error) => {
@@ -117,44 +132,42 @@ async fn main() {
 
     // 初期描画
     sync_core_screen_size(&mut outcome);
-    let snapshot = outcome.core_bridge.snapshot();
-    let visual_selection = outcome.core_bridge.current_visual_selection();
-    let body_height = current_body_height();
-    let total_lines = buffer_line_count(&snapshot.text);
-    if let Some(window) = snapshot
-        .windows
-        .iter()
-        .find(|window| window.is_active)
-        .or_else(|| snapshot.windows.first())
-    {
-        viewport.sync_from_core_topline(window.topline, body_height, total_lines);
+    let (terminal_width, terminal_height) = current_terminal_size();
+    match apply_workspace_redraw_transaction(
+        &mut last_successful_workspace_model,
+        build_workspace_render_output(
+            &mut outcome,
+            &session_state,
+            &mut viewport_store,
+            &mut search_refresh_store,
+            command_line_prompt,
+            &command_line_buffer,
+            core_message.as_deref(),
+            system_warning.as_deref(),
+            transient_msg.as_deref(),
+            terminal_width,
+            terminal_height,
+        ),
+    ) {
+        Ok(render_output) => {
+            if let Some(message) = render_output.failure_message {
+                transient_msg = Some(message);
+            }
+            trace_workspace_render_pipeline(
+                "initial",
+                &outcome.core_bridge.snapshot().text,
+                &render_output.model,
+            );
+            let _ = renderer.draw(&render_output.model);
+        }
+        Err(error) => {
+            transient_msg = Some(error.to_string());
+            log::debug!(
+                "[main] initial workspace redraw failed without rollback: error={:?}",
+                error
+            );
+        }
     }
-    viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, total_lines);
-    let search_refresh_outcome = search_refresh.update(
-        &mut outcome.core_bridge,
-        SearchRefreshInput {
-            revision: snapshot.revision as u64,
-            viewport_top: viewport.top_line(),
-            viewport_height: body_height,
-            cursor_row: snapshot.cursor_row,
-            cursor_col: snapshot.cursor_col,
-            prompt_revision: resolve_prompt_revision(command_line_prompt, &command_line_buffer),
-            search_mode_hint: resolve_search_mode_hint(command_line_prompt, &command_line_buffer),
-        },
-    );
-    let command_preview =
-        command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
-    let model = project(
-        &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
-            .with_command_preview(command_preview.as_deref())
-            .with_core_message(core_message.as_deref())
-            .with_system_warning(system_warning.as_deref())
-            .with_visual_selection(visual_selection.as_ref())
-            .with_search_state(search_refresh_outcome.render_state.as_ref())
-            .with_viewport(viewport.top_line(), body_height),
-    );
-    trace_render_pipeline("initial", &snapshot.text, &model.lines, viewport.top_line());
-    let _ = renderer.draw(&model);
 
     // メインループ
     let shutdown_reason = 'main: loop {
@@ -386,57 +399,42 @@ async fn main() {
 
         if need_redraw {
             sync_core_screen_size(&mut outcome);
-            let snapshot = outcome.core_bridge.snapshot();
-            let visual_selection = outcome.core_bridge.current_visual_selection();
-            let body_height = current_body_height();
-            let total_lines = buffer_line_count(&snapshot.text);
-            if let Some(window) = snapshot
-                .windows
-                .iter()
-                .find(|window| window.is_active)
-                .or_else(|| snapshot.windows.first())
-            {
-                viewport.sync_from_core_topline(window.topline, body_height, total_lines);
+            let (terminal_width, terminal_height) = current_terminal_size();
+            match apply_workspace_redraw_transaction(
+                &mut last_successful_workspace_model,
+                build_workspace_render_output(
+                    &mut outcome,
+                    &session_state,
+                    &mut viewport_store,
+                    &mut search_refresh_store,
+                    command_line_prompt,
+                    &command_line_buffer,
+                    core_message.as_deref(),
+                    system_warning.as_deref(),
+                    transient_msg.as_deref(),
+                    terminal_width,
+                    terminal_height,
+                ),
+            ) {
+                Ok(render_output) => {
+                    if let Some(message) = render_output.failure_message {
+                        transient_msg = Some(message);
+                    }
+                    trace_workspace_render_pipeline(
+                        "redraw",
+                        &outcome.core_bridge.snapshot().text,
+                        &render_output.model,
+                    );
+                    let _ = renderer.draw(&render_output.model);
+                }
+                Err(error) => {
+                    transient_msg = Some(error.to_string());
+                    log::debug!(
+                        "[main] redraw failed without rollback because no successful model exists yet: error={:?}",
+                        error
+                    );
+                }
             }
-            viewport.ensure_cursor_visible(snapshot.cursor_row, body_height, total_lines);
-            let search_refresh_outcome = search_refresh.update(
-                &mut outcome.core_bridge,
-                SearchRefreshInput {
-                    revision: snapshot.revision as u64,
-                    viewport_top: viewport.top_line(),
-                    viewport_height: body_height,
-                    cursor_row: snapshot.cursor_row,
-                    cursor_col: snapshot.cursor_col,
-                    prompt_revision: resolve_prompt_revision(
-                        command_line_prompt,
-                        &command_line_buffer,
-                    ),
-                    search_mode_hint: resolve_search_mode_hint(
-                        command_line_prompt,
-                        &command_line_buffer,
-                    ),
-                },
-            );
-            log::debug!(
-                "[main] search refresh updated: key={:?}, query_executed={}, capability={:?}, render_state_present={}",
-                search_refresh_outcome.cache_key,
-                search_refresh_outcome.query_executed,
-                search_refresh_outcome.capability,
-                search_refresh_outcome.render_state.is_some()
-            );
-            let command_preview =
-                command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
-            let model = project(
-                &ProjectionInput::new(&snapshot, &session_state, transient_msg.as_deref())
-                    .with_command_preview(command_preview.as_deref())
-                    .with_core_message(core_message.as_deref())
-                    .with_system_warning(system_warning.as_deref())
-                    .with_visual_selection(visual_selection.as_ref())
-                    .with_search_state(search_refresh_outcome.render_state.as_ref())
-                    .with_viewport(viewport.top_line(), body_height),
-            );
-            trace_render_pipeline("redraw", &snapshot.text, &model.lines, viewport.top_line());
-            let _ = renderer.draw(&model);
         }
     };
 
@@ -546,6 +544,154 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     }
 
     eprintln!("[main][smoke] completed with shutdown reason: {:?}", reason);
+    Ok(())
+}
+
+fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), String> {
+    eprintln!("[main][pty-smoke] preparing PTY launch");
+    let mut backend = CrosstermBackendImpl;
+    let (mut outcome, terminal_session) =
+        prepare_launch_and_start_terminal(launch_request, &mut backend)
+            .map_err(format_launch_start_error)?;
+
+    let mut renderer = TuiRenderer::new().map_err(|error| format!("TUI init failed: {error}"))?;
+    let session_state = outcome.editor_session_state();
+    let mut viewport_store = WindowViewportStore::new();
+    let mut search_refresh_store = WindowSearchRefreshStore::new();
+    let mut last_successful_workspace_model: Option<WorkspaceScreenModel> = None;
+    sync_core_screen_size(&mut outcome);
+
+    let (terminal_width, terminal_height) = current_terminal_size();
+    let initial_render = apply_workspace_redraw_transaction(
+        &mut last_successful_workspace_model,
+        build_workspace_render_output(
+            &mut outcome,
+            &session_state,
+            &mut viewport_store,
+            &mut search_refresh_store,
+            None,
+            "",
+            None,
+            None,
+            None,
+            terminal_width,
+            terminal_height,
+        ),
+    )
+    .map_err(|error| format!("initial PTY redraw failed: {error}"))?;
+
+    let initial_active_pane = initial_render
+        .model
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == initial_render.model.active_window_id)
+        .ok_or_else(|| "initial PTY draw missing active pane".to_string())?;
+    eprintln!(
+        "[main][pty-smoke] initial draw: panes={}, active_window_id={}, cursor=({},{}), status={:?}, message={:?}",
+        initial_render.model.panes.len(),
+        initial_render.model.active_window_id,
+        initial_active_pane.cursor_row,
+        initial_active_pane.cursor_col,
+        initial_render
+            .model
+            .panes
+            .iter()
+            .find(|pane| pane.window_id == initial_render.model.active_window_id)
+            .map(|pane| format!("{} | {}", pane.file_name, pane.mode_label)),
+        initial_render.model.global_message_line,
+    );
+    renderer
+        .draw(&initial_render.model)
+        .map_err(|error| format!("initial PTY draw failed: {error}"))?;
+
+    std::thread::sleep(std::time::Duration::from_millis(25));
+
+    outcome
+        .core_bridge
+        .apply_ex_command(":split")
+        .map_err(|error| format!("PTY split command failed: {error:?}"))?;
+
+    let split_render = apply_workspace_redraw_transaction(
+        &mut last_successful_workspace_model,
+        build_workspace_render_output(
+            &mut outcome,
+            &session_state,
+            &mut viewport_store,
+            &mut search_refresh_store,
+            None,
+            "",
+            None,
+            None,
+            None,
+            terminal_width,
+            terminal_height,
+        ),
+    )
+    .map_err(|error| format!("split PTY redraw failed: {error}"))?;
+
+    let split_active_pane = split_render
+        .model
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == split_render.model.active_window_id)
+        .ok_or_else(|| "split PTY draw missing active pane".to_string())?;
+    let split_status = split_render
+        .model
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == split_render.model.active_window_id)
+        .map(|pane| format!("{} | {}", pane.file_name, pane.mode_label));
+    eprintln!(
+        "[main][pty-smoke] split draw: panes={}, active_window_id={}, cursor=({},{}), status={:?}, message={:?}",
+        split_render.model.panes.len(),
+        split_render.model.active_window_id,
+        split_active_pane.cursor_row,
+        split_active_pane.cursor_col,
+        split_status,
+        split_render.model.global_message_line,
+    );
+    renderer
+        .draw(&split_render.model)
+        .map_err(|error| format!("split PTY draw failed: {error}"))?;
+
+    std::thread::sleep(std::time::Duration::from_millis(25));
+
+    let rollback_render = apply_workspace_redraw_transaction(
+        &mut last_successful_workspace_model,
+        Err(WorkspaceRedrawError::Projection(
+            WorkspaceProjectionError::ActiveWindowMissing,
+        )),
+    )
+    .map_err(|error| format!("rollback PTY redraw failed: {error}"))?;
+
+    let rollback_active_pane = rollback_render
+        .model
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == rollback_render.model.active_window_id);
+    eprintln!(
+        "[main][pty-smoke] rollback draw: panes={}, active_window_id={}, cursor=({}, {}), message={:?}",
+        rollback_render.model.panes.len(),
+        rollback_render.model.active_window_id,
+        rollback_active_pane
+            .map(|pane| pane.cursor_row)
+            .unwrap_or_default(),
+        rollback_active_pane
+            .map(|pane| pane.cursor_col)
+            .unwrap_or_default(),
+        rollback_render.model.global_message_line,
+    );
+    renderer
+        .draw(&rollback_render.model)
+        .map_err(|error| format!("rollback PTY draw failed: {error}"))?;
+
+    drop(renderer);
+    drop(outcome);
+    terminal_session
+        .restore()
+        .map_err(|error| format!("PTY smoke terminal restore failed: {error:?}"))?;
+
+    eprintln!("[main][pty-smoke] completed successfully");
     Ok(())
 }
 
@@ -847,12 +993,8 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
 
     fn current_window_snapshot(&mut self) -> ReadonlyWindowSnapshot {
         let snapshot = self.outcome.core_bridge.snapshot();
-        let active_window_id = snapshot
-            .windows
-            .iter()
-            .find(|window| window.is_active)
-            .map(|window| window.id as u64)
-            .unwrap_or(1);
+        let active_window_id = resolve_runtime_current_window_id(&snapshot)
+            .expect("runtime current window should resolve from active window id");
         ReadonlyWindowSnapshot {
             id: active_window_id,
         }
@@ -946,12 +1088,127 @@ fn normal_quit_warning_message() -> &'static str {
     "No write since last change (add ! to override)"
 }
 
-fn current_body_height() -> usize {
-    let rows = crossterm::terminal::size()
-        .map(|(_, rows)| rows)
-        .unwrap_or(3);
-    // 本文 + status line + message line の 3 段構成を前提に本文高さを計算する。
-    usize::from(rows.saturating_sub(2).max(1))
+fn current_terminal_size() -> (u16, u16) {
+    crossterm::terminal::size().unwrap_or((80, 24))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceRenderOutput {
+    model: WorkspaceScreenModel,
+    failure_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceRedrawError {
+    Projection(WorkspaceProjectionError),
+    Search {
+        window_id: i32,
+        error: SearchStateError,
+    },
+}
+
+impl fmt::Display for WorkspaceRedrawError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkspaceRedrawError::Projection(error) => {
+                write!(f, "workspace projection failed: {error}")
+            }
+            WorkspaceRedrawError::Search { window_id, error } => {
+                write!(
+                    f,
+                    "workspace search refresh failed: window_id={window_id}, {error}"
+                )
+            }
+        }
+    }
+}
+
+impl From<WorkspaceProjectionError> for WorkspaceRedrawError {
+    fn from(error: WorkspaceProjectionError) -> Self {
+        WorkspaceRedrawError::Projection(error)
+    }
+}
+
+fn apply_workspace_redraw_transaction(
+    last_successful_workspace_model: &mut Option<WorkspaceScreenModel>,
+    render_result: Result<WorkspaceScreenModel, WorkspaceRedrawError>,
+) -> Result<WorkspaceRenderOutput, WorkspaceRedrawError> {
+    match render_result {
+        Ok(model) => {
+            *last_successful_workspace_model = Some(model.clone());
+            Ok(WorkspaceRenderOutput {
+                model,
+                failure_message: None,
+            })
+        }
+        Err(error) => {
+            log::debug!(
+                "[main] workspace redraw failed; attempting rollback to last successful model: error={:?}",
+                error
+            );
+            if let Some(last_successful) = last_successful_workspace_model.as_ref() {
+                let mut rollback_model = last_successful.clone();
+                let failure_message = error.to_string();
+                rollback_model.global_message_line = Some(failure_message.clone());
+                Ok(WorkspaceRenderOutput {
+                    model: rollback_model,
+                    failure_message: Some(failure_message),
+                })
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn build_workspace_render_output(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &saya::editor_session::EditorSessionState,
+    viewport_store: &mut WindowViewportStore,
+    search_refresh_store: &mut WindowSearchRefreshStore,
+    command_line_prompt: Option<char>,
+    command_line_buffer: &str,
+    core_message: Option<&str>,
+    system_warning: Option<&str>,
+    transient_msg: Option<&str>,
+    terminal_width: u16,
+    terminal_height: u16,
+) -> Result<WorkspaceScreenModel, WorkspaceRedrawError> {
+    let snapshot = outcome.core_bridge.snapshot();
+    let visual_selection = outcome.core_bridge.current_visual_selection();
+    viewport_store.sync_from_windows(&snapshot.windows);
+    search_refresh_store.retain_windows(
+        &snapshot
+            .windows
+            .iter()
+            .map(|window| window.id)
+            .collect::<Vec<_>>(),
+    );
+    let search_states = collect_workspace_search_states(
+        &mut outcome.core_bridge,
+        &snapshot,
+        viewport_store,
+        search_refresh_store,
+        resolve_prompt_revision(command_line_prompt, command_line_buffer),
+        resolve_search_mode_hint(command_line_prompt, command_line_buffer),
+    )?;
+    let command_preview =
+        command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
+
+    project_workspace(&WorkspaceProjectionInput {
+        snapshot: &snapshot,
+        session_state,
+        visual_selection: visual_selection.as_ref(),
+        search_states: &search_states,
+        command_preview: command_preview.as_deref(),
+        core_message,
+        system_warning,
+        transient_info: transient_msg,
+        viewport_store,
+        terminal_width,
+        terminal_height,
+    })
+    .map_err(WorkspaceRedrawError::from)
 }
 
 fn sync_core_screen_size(outcome: &mut saya::bootstrap::BootstrapOutcome) {
@@ -966,27 +1223,94 @@ fn buffer_line_count(text: &str) -> usize {
     text.lines().count().max(1)
 }
 
-fn trace_render_pipeline(
+fn resolve_runtime_current_window_id(snapshot: &vim_core_rs::CoreSnapshot) -> Option<u64> {
+    let active_window_id = snapshot
+        .active_window_id()
+        .map(|window_id| window_id as u64);
+    log::debug!(
+        "[main] resolve runtime current window id: snapshot_active_window_id={:?}, chosen_window_id={:?}",
+        snapshot.active_window_id(),
+        active_window_id,
+    );
+    active_window_id
+}
+
+fn trace_workspace_render_pipeline(
     phase: &str,
     snapshot_text: &str,
-    visible_lines: &[String],
-    viewport_top: usize,
+    workspace_model: &saya::screen_model::WorkspaceScreenModel,
 ) {
     if std::env::var_os("SAYA_TRACE_RENDER").is_none() {
         return;
     }
 
+    let Some(active_pane) = workspace_model
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == workspace_model.active_window_id)
+    else {
+        return;
+    };
     let absolute_row = 6usize;
     let snapshot_line = snapshot_text.lines().nth(absolute_row).unwrap_or("");
+    let viewport_top = usize::from(active_pane.rect.y);
     let visible_row = absolute_row.checked_sub(viewport_top);
     let projected_line = visible_row
-        .and_then(|row| visible_lines.get(row))
+        .and_then(|row| active_pane.lines.get(row))
         .map(String::as_str)
         .unwrap_or("");
 
     eprintln!(
         "[saya-trace][main][{phase}] viewport_top={viewport_top} abs_row=7 snapshot={snapshot_line:?} projected={projected_line:?}"
     );
+}
+
+fn collect_workspace_search_states(
+    core_bridge: &mut saya::core_bridge::CoreBridge,
+    snapshot: &vim_core_rs::CoreSnapshot,
+    viewport_store: &WindowViewportStore,
+    search_refresh_store: &mut WindowSearchRefreshStore,
+    prompt_revision: Option<u64>,
+    search_mode_hint: SearchModeHint,
+) -> Result<BTreeMap<i32, SearchVisibleState>, WorkspaceRedrawError> {
+    let mut search_states = BTreeMap::new();
+    for window in &snapshot.windows {
+        let body_height = usize::try_from(window.height.saturating_sub(1))
+            .unwrap_or(1)
+            .max(1);
+        let viewport_top = viewport_store
+            .get(window.id)
+            .map(|viewport| viewport.top_line())
+            .unwrap_or_else(|| window.topline.saturating_sub(1));
+        let outcome = search_refresh_store.update_window(
+            core_bridge,
+            SearchRefreshInput {
+                window_id: window.id,
+                revision: snapshot.revision as u64,
+                viewport_top,
+                viewport_height: body_height,
+                cursor_row: window.cursor_row,
+                cursor_col: window.cursor_col,
+                prompt_revision,
+                search_mode_hint,
+            },
+        );
+        if let Some(error) = outcome.query_error {
+            log::debug!(
+                "[main] workspace search refresh failed: window_id={}, error={:?}",
+                window.id,
+                error
+            );
+            return Err(WorkspaceRedrawError::Search {
+                window_id: window.id,
+                error,
+            });
+        }
+        if let Some(render_state) = outcome.render_state {
+            search_states.insert(window.id, render_state);
+        }
+    }
+    Ok(search_states)
 }
 
 fn resolve_search_mode_hint(
@@ -1226,6 +1550,76 @@ mod tests {
         let omega = resolve_prompt_revision(Some('/'), "cd");
 
         assert_ne!(alpha, omega);
+    }
+
+    #[test]
+    fn runtime_current_window_id_keeps_explicit_failure_when_snapshot_has_no_active_window() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let bridge = saya::core_bridge::CoreBridge::new("alpha\nbeta\n").expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.windows[0].id = 42;
+        snapshot.windows[0].is_active = false;
+
+        assert_eq!(
+            resolve_runtime_current_window_id(&snapshot),
+            None,
+            "runtime current window は固定 fallback を返さず explicit failure を保つこと"
+        );
+    }
+
+    #[test]
+    fn workspace_redraw_transaction_rolls_back_to_last_successful_model_with_failure_message() {
+        let mut last_successful_workspace_model = Some(WorkspaceScreenModel {
+            panes: vec![saya::screen_model::ScreenModel {
+                window_id: 1,
+                buffer_id: 1,
+                rect: saya::screen_model::PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 20,
+                    height: 3,
+                },
+                file_name: "alpha.txt".to_string(),
+                mode_label: "NORMAL".to_string(),
+                dirty: false,
+                lines: vec!["alpha".to_string()],
+                cursor_row: 0,
+                cursor_col: 0,
+                visual_selection: None,
+                search_overlays: vec![],
+                message_line: None,
+                command_cursor_col: None,
+                is_active: true,
+            }],
+            active_window_id: 1,
+            global_message_line: None,
+            command_line: None,
+        });
+
+        let output = apply_workspace_redraw_transaction(
+            &mut last_successful_workspace_model,
+            Err(WorkspaceRedrawError::Projection(
+                WorkspaceProjectionError::ActiveWindowMissing,
+            )),
+        )
+        .expect("rollback should return the previous successful model");
+
+        assert_eq!(output.model.active_window_id, 1);
+        assert_eq!(output.model.panes.len(), 1);
+        assert_eq!(
+            output.model.global_message_line,
+            Some("workspace projection failed: active window could not be resolved".to_string())
+        );
+        assert_eq!(output.failure_message, output.model.global_message_line);
+        assert_eq!(
+            last_successful_workspace_model
+                .as_ref()
+                .expect("last successful model should be retained")
+                .global_message_line,
+            None
+        );
     }
 
     #[test]

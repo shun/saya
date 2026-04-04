@@ -192,6 +192,37 @@ mod tests {
     }
 
     #[test]
+    fn input_loop_preserves_ctrl_w_prefix_and_following_key_as_separate_inputs() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let mut source = MockEventSource::new(
+            vec![Ok(true), Ok(true), Ok(false), Ok(false)],
+            vec![
+                Ok(ctrl_char_event('w')),
+                Ok(Event::Key(KeyEvent {
+                    code: KeyCode::Char('s'),
+                    modifiers: KeyModifiers::NONE,
+                    kind: KeyEventKind::Press,
+                    state: KeyEventState::NONE,
+                })),
+            ],
+        );
+
+        let stop_for_thread = stop_requested.clone();
+        let handle = std::thread::spawn(move || {
+            run_terminal_input_loop(&mut source, sender, stop_for_thread);
+        });
+
+        let first = receiver.blocking_recv().expect("first event");
+        let second = receiver.blocking_recv().expect("second event");
+        stop_requested.store(true, Ordering::Relaxed);
+        handle.join().expect("input loop thread should stop");
+
+        assert_eq!(first, UiEvent::Input(KeyInput::Ctrl('w')));
+        assert_eq!(second, UiEvent::Input(KeyInput::Char('s')));
+    }
+
+    #[test]
     fn input_loop_exits_when_receiver_is_closed() {
         let (sender, receiver) = mpsc::channel(4);
         drop(receiver);
