@@ -14,7 +14,7 @@ use saya::app_startup::prepare_launch_and_start_terminal;
 use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::runtime_integration::{
     RuntimeCommandEffect, RuntimeDispatchOutcome, RuntimeEventMapper, RuntimeHostSession,
-    RuntimeOutcomeProjector, RuntimeSessionOwner,
+    RuntimeOutcomeProjector, RuntimeSessionOwner, RuntimeShutdownIntent,
 };
 use saya::saya_live_runtime::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
@@ -310,6 +310,7 @@ struct RecordingRuntimeHostSession {
     executed_commands: Vec<String>,
     transient_messages: Vec<String>,
     dispatched_follow_up_events: Vec<RuntimeEventPayload>,
+    dispatched_shutdown_intents: Vec<RuntimeShutdownIntent>,
     buffer: ReadonlyBufferSnapshot,
     window: ReadonlyWindowSnapshot,
     editor: ReadonlyEditorSnapshot,
@@ -321,6 +322,7 @@ impl Default for RecordingRuntimeHostSession {
             executed_commands: Vec::new(),
             transient_messages: Vec::new(),
             dispatched_follow_up_events: Vec::new(),
+            dispatched_shutdown_intents: Vec::new(),
             buffer: ReadonlyBufferSnapshot {
                 id: 1,
                 path: None,
@@ -369,14 +371,20 @@ impl RuntimeHostSession for RecordingRuntimeHostSession {
         name: &str,
     ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
         self.executed_commands.push(name.to_string());
-        let follow_up_events = if name == "write" {
+        let (follow_up_events, shutdown_intent) = if name == "write" {
             let event = RuntimeEventMapper::buffer_write_post(self.current_buffer_snapshot());
             self.dispatched_follow_up_events.push(event.clone());
-            vec![event]
+            (vec![event], None)
+        } else if name == "writeAndQuit" {
+            let event = RuntimeEventMapper::buffer_write_post(self.current_buffer_snapshot());
+            self.dispatched_follow_up_events.push(event.clone());
+            self.dispatched_shutdown_intents
+                .push(RuntimeShutdownIntent::UserQuit);
+            (vec![event], Some(RuntimeShutdownIntent::UserQuit))
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
-        let transient_message = if name == "write" {
+        let transient_message = if name == "write" || name == "writeAndQuit" {
             Some("Saved successfully".to_string())
         } else {
             None
@@ -387,6 +395,7 @@ impl RuntimeHostSession for RecordingRuntimeHostSession {
         Ok(RuntimeCommandEffect {
             transient_message,
             follow_up_events,
+            shutdown_intent,
         })
     }
 }
@@ -435,6 +444,7 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
         RuntimeDispatchOutcome {
             transient_message: Some("Saved successfully".to_string()),
             requires_redraw: true,
+            shutdown_intent: None,
         }
     );
     assert_eq!(
@@ -454,6 +464,74 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
                 line_count: 4,
             }
         )]
+    );
+    assert!(
+        host_session.dispatched_shutdown_intents.is_empty(),
+        "write only の host command は shutdown intent を持たないこと"
+    );
+
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_follow_up_events() {
+    let config_path = unique_path("live-session-owner-shutdown-init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.events.on("bufferOpen", async () => {
+                await saya.commands.execute("writeAndQuit");
+            });
+            saya.events.on("bufferWritePost", async (payload) => {
+                await saya.commands.execute(`wrote:${payload.buffer.id}:${payload.buffer.lineCount}`);
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+        input_source: InputSource::Empty,
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup config should prepare callback seed");
+
+    let mut runtime = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+        .expect("live runtime session owner should initialize");
+    let mut host_session = RecordingRuntimeHostSession::with_buffer("live-session.md", 4);
+
+    let dispatch_outcome = runtime
+        .dispatch(
+            RuntimeEventMapper::buffer_open(host_session.current_buffer_snapshot()),
+            &mut host_session,
+        )
+        .await;
+
+    assert_eq!(
+        dispatch_outcome,
+        RuntimeDispatchOutcome {
+            transient_message: Some("Saved successfully".to_string()),
+            requires_redraw: true,
+            shutdown_intent: Some(RuntimeShutdownIntent::UserQuit),
+        }
+    );
+    assert_eq!(
+        host_session.executed_commands,
+        vec!["writeAndQuit".to_string(), "wrote:55:4".to_string()]
+    );
+    assert_eq!(
+        host_session.dispatched_follow_up_events,
+        vec![RuntimeEventMapper::buffer_write_post(
+            ReadonlyBufferSnapshot {
+                id: 55,
+                path: Some(PathBuf::from("live-session.md")),
+                line_count: 4,
+            }
+        )]
+    );
+    assert_eq!(
+        host_session.dispatched_shutdown_intents,
+        vec![RuntimeShutdownIntent::UserQuit]
     );
 
     std::fs::remove_file(&config_path).expect("remove config");
@@ -525,6 +603,7 @@ fn runtime_outcome_projector_requests_redraw_for_callback_failure_messages() {
                 "Runtime callback failed on bufferOpen handler 0: script error: boom".to_string()
             ),
             requires_redraw: true,
+            shutdown_intent: None,
         }
     );
 }

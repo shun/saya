@@ -16,12 +16,20 @@ use crate::saya_live_runtime::{
 pub struct RuntimeDispatchOutcome {
     pub transient_message: Option<String>,
     pub requires_redraw: bool,
+    pub shutdown_intent: Option<RuntimeShutdownIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeCommandEffect {
     pub transient_message: Option<String>,
     pub follow_up_events: Vec<RuntimeEventPayload>,
+    pub shutdown_intent: Option<RuntimeShutdownIntent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeShutdownIntent {
+    UserQuit,
+    UserForceQuit,
 }
 
 pub trait RuntimeHostSession {
@@ -55,6 +63,7 @@ impl RuntimeOutcomeProjector {
         RuntimeDispatchOutcome {
             transient_message: None,
             requires_redraw: runtime_dispatch_requests_redraw(report),
+            shutdown_intent: None,
         }
     }
 
@@ -63,6 +72,7 @@ impl RuntimeOutcomeProjector {
         RuntimeDispatchOutcome {
             requires_redraw: transient_message.is_some(),
             transient_message,
+            shutdown_intent: None,
         }
     }
 }
@@ -282,9 +292,11 @@ impl RuntimeSessionOwner {
                                     RuntimeDispatchOutcome {
                                         transient_message: Some(message),
                                         requires_redraw: true,
+                                        shutdown_intent: None,
                                     },
                                 );
                             }
+                            merge_shutdown_intent(&mut projected.shutdown_intent, effect.shutdown_intent);
                             follow_up_events.extend(effect.follow_up_events.clone());
                             let _ = request.reply.send(Ok(()));
                         }
@@ -325,6 +337,20 @@ fn merge_dispatch_outcome(target: &mut RuntimeDispatchOutcome, next: RuntimeDisp
         target.transient_message = next.transient_message;
     }
     target.requires_redraw |= next.requires_redraw;
+    merge_shutdown_intent(&mut target.shutdown_intent, next.shutdown_intent);
+}
+
+fn merge_shutdown_intent(
+    target: &mut Option<RuntimeShutdownIntent>,
+    next: Option<RuntimeShutdownIntent>,
+) {
+    match (target.as_ref().copied(), next) {
+        (None, Some(intent)) => *target = Some(intent),
+        (Some(RuntimeShutdownIntent::UserQuit), Some(RuntimeShutdownIntent::UserForceQuit)) => {
+            *target = Some(RuntimeShutdownIntent::UserForceQuit);
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -351,6 +377,7 @@ mod tests {
                         .to_string()
                 ),
                 requires_redraw: true,
+                shutdown_intent: None,
             }
         );
     }

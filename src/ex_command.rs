@@ -1,12 +1,6 @@
 use crate::editor_session::EditorSessionState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalHostCommand {
-    Save,
-    SaveThenQuit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchOptionCommand {
     EnableHlSearch,
     DisableHlSearch,
@@ -19,7 +13,6 @@ pub enum SearchOptionCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExCommandRoute {
-    LocalHost(LocalHostCommand),
     SearchOption(SearchOptionCommand),
     PresentationLocal,
     CoreOwned,
@@ -65,11 +58,6 @@ pub fn apply_local_ex_command(
     Some(message.to_string())
 }
 
-pub fn parse_local_host_command(command: &str) -> Option<LocalHostCommand> {
-    let normalized = normalize_command(command)?;
-    parse_local_host_command_normalized(&normalized)
-}
-
 pub fn parse_search_option_command(command: &str) -> Option<SearchOptionCommand> {
     let normalized = normalize_command(command)?;
     parse_search_option_command_normalized(&normalized)
@@ -80,15 +68,6 @@ pub fn route_ex_command(command: &str) -> ExCommandRoute {
         log::debug!("[ex_command] routing empty ex command as core-owned no-op");
         return ExCommandRoute::CoreOwned;
     };
-
-    if let Some(host_command) = parse_local_host_command_normalized(&normalized) {
-        log::debug!(
-            "[ex_command] routing command to host save policy: command={:?}, host_command={:?}",
-            command,
-            host_command
-        );
-        return ExCommandRoute::LocalHost(host_command);
-    }
 
     if let Some(search_option) = parse_search_option_command_normalized(&normalized) {
         log::debug!(
@@ -107,19 +86,19 @@ pub fn route_ex_command(command: &str) -> ExCommandRoute {
         return ExCommandRoute::PresentationLocal;
     }
 
+    if is_save_family_command_normalized(&normalized) {
+        log::debug!(
+            "[ex_command] routing save-family command to core-owned ex handler: command={:?}",
+            command
+        );
+        return ExCommandRoute::CoreOwned;
+    }
+
     log::debug!(
         "[ex_command] routing command to core-owned ex handler: command={:?}",
         command
     );
     ExCommandRoute::CoreOwned
-}
-
-fn parse_local_host_command_normalized(normalized: &str) -> Option<LocalHostCommand> {
-    match normalized {
-        "w" | "write" => Some(LocalHostCommand::Save),
-        "wq" | "x" => Some(LocalHostCommand::SaveThenQuit),
-        _ => None,
-    }
 }
 
 fn parse_search_option_command_normalized(normalized: &str) -> Option<SearchOptionCommand> {
@@ -141,6 +120,10 @@ fn is_presentation_local_command_normalized(normalized: &str) -> bool {
         "set number" | "set nu" | "set nonumber" | "set nonu"
     ) || normalized.starts_with("set numberwidth=")
         || normalized.starts_with("set nuw=")
+}
+
+fn is_save_family_command_normalized(normalized: &str) -> bool {
+    matches!(normalized, "w" | "write" | "wq" | "x" | "xit" | "exit")
 }
 
 fn apply_number_width_command(
@@ -270,23 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_local_host_command_routes_write_variants_to_host_policy() {
-        assert_eq!(parse_local_host_command(":w"), Some(LocalHostCommand::Save));
-        assert_eq!(
-            parse_local_host_command("write"),
-            Some(LocalHostCommand::Save)
-        );
-        assert_eq!(
-            parse_local_host_command(":wq"),
-            Some(LocalHostCommand::SaveThenQuit)
-        );
-        assert_eq!(
-            parse_local_host_command("x"),
-            Some(LocalHostCommand::SaveThenQuit)
-        );
-    }
-
-    #[test]
     fn parse_search_option_command_routes_search_option_commands_to_core_owned_updates() {
         assert_eq!(
             parse_search_option_command(":set hlsearch"),
@@ -335,19 +301,15 @@ mod tests {
     }
 
     #[test]
-    fn route_ex_command_keeps_host_commands_separate_from_search_options() {
+    fn route_ex_command_routes_save_family_commands_to_core_owned_handlers() {
+        assert_eq!(route_ex_command(":w"), ExCommandRoute::CoreOwned);
+        assert_eq!(route_ex_command(":wq"), ExCommandRoute::CoreOwned);
+        assert_eq!(route_ex_command(":x"), ExCommandRoute::CoreOwned);
+        assert_eq!(route_ex_command(":xit"), ExCommandRoute::CoreOwned);
         assert_eq!(
-            route_ex_command(":w"),
-            ExCommandRoute::LocalHost(LocalHostCommand::Save)
-        );
-        assert_eq!(
-            route_ex_command(":wq"),
-            ExCommandRoute::LocalHost(LocalHostCommand::SaveThenQuit)
-        );
-        assert_eq!(
-            parse_local_host_command(":set hlsearch"),
-            None,
-            "search option commands must not be parsed as host-local commands"
+            route_ex_command(":exit"),
+            ExCommandRoute::CoreOwned,
+            "exit alias should also stay core-owned"
         );
     }
 

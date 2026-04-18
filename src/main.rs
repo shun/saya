@@ -3,16 +3,13 @@ use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
 use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
-use saya::ex_command::{
-    ExCommandRoute, LocalHostCommand, apply_local_ex_command, parse_local_host_command,
-    route_ex_command,
-};
-use saya::host_io::{SaveResult, write_to_path};
+use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
+use saya::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::input_loop::{CrosstermEventSource, run_terminal_input_loop};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::runtime_integration::{
     RuntimeCommandEffect, RuntimeDispatchOutcome, RuntimeEventMapper, RuntimeHostSession,
-    RuntimeSessionOwner,
+    RuntimeSessionOwner, RuntimeShutdownIntent,
 };
 use saya::saya_live_runtime::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
@@ -109,7 +106,7 @@ async fn main() {
     };
 
     let mut startup_runtime_redraw = false;
-    dispatch_buffer_open_with_runtime(
+    let startup_shutdown_reason = dispatch_buffer_open_with_runtime(
         runtime_session.as_mut(),
         &mut outcome,
         &mut session_state,
@@ -170,69 +167,74 @@ async fn main() {
     }
 
     // メインループ
-    let shutdown_reason = 'main: loop {
-        let action = coordinator.next_action().await;
+    let shutdown_reason = if let Some(reason) = startup_shutdown_reason {
+        log::debug!(
+            "[main] startup runtime dispatch requested shutdown before entering loop: reason={:?}",
+            reason
+        );
+        reason
+    } else {
+        'main: loop {
+            let action = coordinator.next_action().await;
 
-        let events_to_process = coordinator.drain_pending();
-        // action が NeedRedraw などで event 自体が drained に含まれないことは修正済みなので
-        // drained に Input などのイベントが入っている。
-        // ※ next_action が Exit なら終了処理
-        if let LoopAction::Exit(reason) = action {
-            log::debug!("[main] coordinator requested shutdown: reason={:?}", reason);
-            break 'main reason;
-        }
+            let events_to_process = coordinator.drain_pending();
+            // action が NeedRedraw などで event 自体が drained に含まれないことは修正済みなので
+            // drained に Input などのイベントが入っている。
+            // ※ next_action が Exit なら終了処理
+            if let LoopAction::Exit(reason) = action {
+                log::debug!("[main] coordinator requested shutdown: reason={:?}", reason);
+                break 'main reason;
+            }
 
-        let mut need_redraw = coordinator.take_redraw_pending();
+            let mut need_redraw = coordinator.take_redraw_pending();
 
-        for event in events_to_process {
-            match event {
-                UiEvent::Input(key) => {
-                    let mut handled = false;
+            for event in events_to_process {
+                match event {
+                    UiEvent::Input(key) => {
+                        let mut handled = false;
 
-                    if let Some(prompt) = command_line_prompt {
-                        match key {
-                            KeyInput::Escape => {
-                                if prompt == '/' {
-                                    let _ = outcome.core_bridge.cancel_search_input();
-                                    update_core_message_from_core(
-                                        &mut outcome.core_bridge,
-                                        &mut core_message,
-                                    );
-                                }
-                                command_line_prompt = None;
-                                command_line_buffer.clear();
-                            }
-                            KeyInput::Enter => {
-                                if prompt == ':' {
-                                    let cmd = format!("{}{}", prompt, command_line_buffer);
+                        if let Some(prompt) = command_line_prompt {
+                            match key {
+                                KeyInput::Escape => {
+                                    if prompt == '/' {
+                                        let _ = outcome.core_bridge.cancel_search_input();
+                                        update_core_message_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut core_message,
+                                        );
+                                    }
                                     command_line_prompt = None;
                                     command_line_buffer.clear();
-                                    match route_ex_command(&cmd) {
-                                        ExCommandRoute::LocalHost(_) => {
-                                            if let Some(reason) =
-                                                process_local_host_command_with_runtime(
-                                                    &cmd,
-                                                    &mut outcome,
-                                                    &mut session_state,
-                                                    &mut transient_msg,
-                                                    &mut system_warning,
-                                                    runtime_session.as_mut(),
-                                                    &mut need_redraw,
-                                                )
-                                                .await
-                                            {
-                                                break 'main reason;
+                                }
+                                KeyInput::Enter => {
+                                    if prompt == ':' {
+                                        let cmd = format!("{}{}", prompt, command_line_buffer);
+                                        command_line_prompt = None;
+                                        command_line_buffer.clear();
+                                        match route_ex_command(&cmd) {
+                                            ExCommandRoute::PresentationLocal => {
+                                                if let Some(message) =
+                                                    apply_local_ex_command(&mut session_state, &cmd)
+                                                {
+                                                    transient_msg = Some(message);
+                                                } else {
+                                                    log::debug!(
+                                                        "[main] presentation-local route fell through to core-owned handler: command={:?}",
+                                                        cmd
+                                                    );
+                                                    let _ =
+                                                        outcome.core_bridge.apply_ex_command(&cmd);
+                                                    update_core_message_from_core(
+                                                        &mut outcome.core_bridge,
+                                                        &mut core_message,
+                                                    );
+                                                }
                                             }
-                                        }
-                                        ExCommandRoute::PresentationLocal => {
-                                            if let Some(message) =
-                                                apply_local_ex_command(&mut session_state, &cmd)
-                                            {
-                                                transient_msg = Some(message);
-                                            } else {
+                                            ExCommandRoute::SearchOption(search_option) => {
                                                 log::debug!(
-                                                    "[main] presentation-local route fell through to core-owned handler: command={:?}",
-                                                    cmd
+                                                    "[main] routing search option command to core-owned option update: command={:?}, search_option={:?}",
+                                                    cmd,
+                                                    search_option
                                                 );
                                                 let _ = outcome.core_bridge.apply_ex_command(&cmd);
                                                 update_core_message_from_core(
@@ -240,199 +242,195 @@ async fn main() {
                                                     &mut core_message,
                                                 );
                                             }
+                                            ExCommandRoute::CoreOwned => {
+                                                let _ = outcome.core_bridge.apply_ex_command(&cmd);
+                                                update_core_message_from_core(
+                                                    &mut outcome.core_bridge,
+                                                    &mut core_message,
+                                                );
+                                            }
                                         }
-                                        ExCommandRoute::SearchOption(search_option) => {
-                                            log::debug!(
-                                                "[main] routing search option command to core-owned option update: command={:?}, search_option={:?}",
-                                                cmd,
-                                                search_option
-                                            );
-                                            let _ = outcome.core_bridge.apply_ex_command(&cmd);
-                                            update_core_message_from_core(
-                                                &mut outcome.core_bridge,
-                                                &mut core_message,
-                                            );
-                                        }
-                                        ExCommandRoute::CoreOwned => {
-                                            let _ = outcome.core_bridge.apply_ex_command(&cmd);
-                                            update_core_message_from_core(
-                                                &mut outcome.core_bridge,
-                                                &mut core_message,
-                                            );
-                                        }
+                                    } else if prompt == '/' {
+                                        let _ = outcome
+                                            .core_bridge
+                                            .commit_search_input(&command_line_buffer);
+                                        update_core_message_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut core_message,
+                                        );
+                                        command_line_prompt = None;
+                                        command_line_buffer.clear();
                                     }
-                                } else if prompt == '/' {
-                                    let _ = outcome
-                                        .core_bridge
-                                        .commit_search_input(&command_line_buffer);
-                                    update_core_message_from_core(
-                                        &mut outcome.core_bridge,
-                                        &mut core_message,
-                                    );
-                                    command_line_prompt = None;
-                                    command_line_buffer.clear();
+                                    session_state
+                                        .update_dirty(outcome.core_bridge.snapshot().dirty);
                                 }
-                                session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
-                            }
-                            KeyInput::Backspace => {
-                                if prompt == '/' {
-                                    let _ = command_line_buffer.pop();
-                                    let _ =
-                                        outcome.core_bridge.sync_search_input(&command_line_buffer);
-                                    update_core_message_from_core(
-                                        &mut outcome.core_bridge,
-                                        &mut core_message,
-                                    );
-                                } else if command_line_buffer.pop().is_none() {
-                                    command_line_prompt = None;
+                                KeyInput::Backspace => {
+                                    if prompt == '/' {
+                                        let _ = command_line_buffer.pop();
+                                        let _ = outcome
+                                            .core_bridge
+                                            .sync_search_input(&command_line_buffer);
+                                        update_core_message_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut core_message,
+                                        );
+                                    } else if command_line_buffer.pop().is_none() {
+                                        command_line_prompt = None;
+                                    }
                                 }
-                            }
-                            KeyInput::Char(c) => {
-                                command_line_buffer.push(c);
-                                if prompt == '/' {
-                                    let _ =
-                                        outcome.core_bridge.sync_search_input(&command_line_buffer);
-                                    update_core_message_from_core(
-                                        &mut outcome.core_bridge,
-                                        &mut core_message,
-                                    );
+                                KeyInput::Char(c) => {
+                                    command_line_buffer.push(c);
+                                    if prompt == '/' {
+                                        let _ = outcome
+                                            .core_bridge
+                                            .sync_search_input(&command_line_buffer);
+                                        update_core_message_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut core_message,
+                                        );
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
-                        }
-                        handled = true;
-                        need_redraw = true;
+                            handled = true;
+                            need_redraw = true;
 
-                        if let Some(reason) = process_pending_host_actions_with_runtime(
-                            &mut outcome,
-                            &mut session_state,
-                            &mut transient_msg,
-                            &mut system_warning,
-                            runtime_session.as_mut(),
-                            &mut need_redraw,
-                        )
-                        .await
+                            if let Some(reason) = process_pending_host_actions_with_runtime(
+                                &mut outcome,
+                                &mut session_state,
+                                &mut transient_msg,
+                                &mut system_warning,
+                                runtime_session.as_mut(),
+                                &mut need_redraw,
+                            )
+                            .await
+                            {
+                                break 'main reason;
+                            }
+                        } else if (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
+                            && outcome.core_bridge.snapshot().mode == CoreMode::Normal
                         {
-                            break 'main reason;
-                        }
-                    } else if (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
-                        && outcome.core_bridge.snapshot().mode == CoreMode::Normal
-                    {
-                        if let KeyInput::Char(c) = key {
-                            command_line_prompt = Some(c);
-                        }
-                        command_line_buffer.clear();
-                        handled = true;
-                        need_redraw = true;
-                    }
-
-                    if !handled {
-                        let intent = resolve_intent(&key);
-                        match intent {
-                            EditorIntent::EditKey(k) => {
-                                let _ = outcome.core_bridge.dispatch_key(&k);
-                                update_core_message_from_core(
-                                    &mut outcome.core_bridge,
-                                    &mut core_message,
-                                );
-
-                                if let Some(reason) = process_pending_host_actions_with_runtime(
-                                    &mut outcome,
-                                    &mut session_state,
-                                    &mut transient_msg,
-                                    &mut system_warning,
-                                    runtime_session.as_mut(),
-                                    &mut need_redraw,
-                                )
-                                .await
-                                {
-                                    break 'main reason;
-                                }
-
-                                session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
-                                need_redraw = true;
+                            if let KeyInput::Char(c) = key {
+                                command_line_prompt = Some(c);
                             }
-                            EditorIntent::Save => {
-                                let snapshot = outcome.core_bridge.snapshot();
-                                let save_outcome =
-                                    save_snapshot_result(&snapshot.text, &mut session_state);
-                                transient_msg = save_outcome.transient_message;
-                                if save_outcome.wrote {
-                                    dispatch_buffer_write_post_with_runtime(
-                                        runtime_session.as_mut(),
+                            command_line_buffer.clear();
+                            handled = true;
+                            need_redraw = true;
+                        }
+
+                        if !handled {
+                            let intent = resolve_intent(&key);
+                            match intent {
+                                EditorIntent::EditKey(k) => {
+                                    let _ = outcome.core_bridge.dispatch_key(&k);
+                                    update_core_message_from_core(
+                                        &mut outcome.core_bridge,
+                                        &mut core_message,
+                                    );
+
+                                    if let Some(reason) = process_pending_host_actions_with_runtime(
                                         &mut outcome,
                                         &mut session_state,
                                         &mut transient_msg,
+                                        &mut system_warning,
+                                        runtime_session.as_mut(),
                                         &mut need_redraw,
                                     )
-                                    .await;
+                                    .await
+                                    {
+                                        break 'main reason;
+                                    }
+
+                                    session_state
+                                        .update_dirty(outcome.core_bridge.snapshot().dirty);
+                                    need_redraw = true;
                                 }
-                                need_redraw = true;
-                            }
-                            EditorIntent::Quit { force } => {
-                                let decision = session_state.evaluate_quit(force);
-                                if let Some(reason) = shutdown_reason_from_quit_decision(
-                                    decision,
-                                    force,
-                                    &mut system_warning,
-                                ) {
-                                    break 'main reason;
+                                EditorIntent::Save => {
+                                    let snapshot = outcome.core_bridge.snapshot();
+                                    let save_outcome =
+                                        save_snapshot_result(&snapshot.text, &mut session_state);
+                                    transient_msg = save_outcome.transient_message;
+                                    if save_outcome.wrote {
+                                        if let Some(reason) =
+                                            dispatch_buffer_write_post_with_runtime(
+                                                runtime_session.as_mut(),
+                                                &mut outcome,
+                                                &mut session_state,
+                                                &mut transient_msg,
+                                                &mut need_redraw,
+                                            )
+                                            .await
+                                        {
+                                            break 'main reason;
+                                        }
+                                    }
+                                    need_redraw = true;
                                 }
-                                need_redraw = true;
+                                EditorIntent::Quit { force } => {
+                                    let decision = session_state.evaluate_quit(force);
+                                    if let Some(reason) = shutdown_reason_from_quit_decision(
+                                        decision,
+                                        force,
+                                        &mut system_warning,
+                                    ) {
+                                        break 'main reason;
+                                    }
+                                    need_redraw = true;
+                                }
                             }
                         }
                     }
-                }
-                UiEvent::Resize { .. } => {
-                    need_redraw = true;
-                }
-                UiEvent::Shutdown(reason) => {
-                    log::debug!(
-                        "[main] explicit shutdown event received in drain: reason={:?}",
-                        reason
-                    );
-                    break 'main reason;
-                }
-                _ => {}
-            }
-        }
-
-        if need_redraw {
-            sync_core_screen_size(&mut outcome);
-            let (terminal_width, terminal_height) = current_terminal_size();
-            match apply_workspace_redraw_transaction(
-                &mut last_successful_workspace_model,
-                build_workspace_render_output(
-                    &mut outcome,
-                    &session_state,
-                    &mut viewport_store,
-                    &mut search_refresh_store,
-                    command_line_prompt,
-                    &command_line_buffer,
-                    core_message.as_deref(),
-                    system_warning.as_deref(),
-                    transient_msg.as_deref(),
-                    terminal_width,
-                    terminal_height,
-                ),
-            ) {
-                Ok(render_output) => {
-                    if let Some(message) = render_output.failure_message {
-                        transient_msg = Some(message);
+                    UiEvent::Resize { .. } => {
+                        need_redraw = true;
                     }
-                    trace_workspace_render_pipeline(
-                        "redraw",
-                        &outcome.core_bridge.snapshot().text,
-                        &render_output.model,
-                    );
-                    let _ = renderer.draw(&render_output.model);
+                    UiEvent::Shutdown(reason) => {
+                        log::debug!(
+                            "[main] explicit shutdown event received in drain: reason={:?}",
+                            reason
+                        );
+                        break 'main reason;
+                    }
+                    _ => {}
                 }
-                Err(error) => {
-                    transient_msg = Some(error.to_string());
-                    log::debug!(
-                        "[main] redraw failed without rollback because no successful model exists yet: error={:?}",
-                        error
-                    );
+            }
+
+            if need_redraw {
+                sync_core_screen_size(&mut outcome);
+                let (terminal_width, terminal_height) = current_terminal_size();
+                match apply_workspace_redraw_transaction(
+                    &mut last_successful_workspace_model,
+                    build_workspace_render_output(
+                        &mut outcome,
+                        &session_state,
+                        &mut viewport_store,
+                        &mut search_refresh_store,
+                        command_line_prompt,
+                        &command_line_buffer,
+                        core_message.as_deref(),
+                        system_warning.as_deref(),
+                        transient_msg.as_deref(),
+                        terminal_width,
+                        terminal_height,
+                    ),
+                ) {
+                    Ok(render_output) => {
+                        if let Some(message) = render_output.failure_message {
+                            transient_msg = Some(message);
+                        }
+                        trace_workspace_render_pipeline(
+                            "redraw",
+                            &outcome.core_bridge.snapshot().text,
+                            &render_output.model,
+                        );
+                        let _ = renderer.draw(&render_output.model);
+                    }
+                    Err(error) => {
+                        transient_msg = Some(error.to_string());
+                        log::debug!(
+                            "[main] redraw failed without rollback because no successful model exists yet: error={:?}",
+                            error
+                        );
+                    }
                 }
             }
         }
@@ -515,14 +513,20 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     if session_state.target_path().is_none() {
         eprintln!("[main][smoke] stdin startup detected, verifying save-path restriction");
         let snapshot = outcome.core_bridge.snapshot();
-        let save_message = save_snapshot(&snapshot.text, &mut session_state)
+        let save_message = save_snapshot_result(&snapshot.text, &mut session_state)
+            .transient_message
             .unwrap_or_else(|| "No file name to save".to_string());
         return Err(save_message);
     }
 
-    eprintln!("[main][smoke] saving and quitting through host command");
-    let reason = process_local_host_command(
-        ":wq",
+    eprintln!("[main][smoke] saving and quitting through host action coordination");
+    outcome
+        .core_bridge
+        .apply_ex_command(":wq")
+        .map_err(|error| format!("smoke :wq failed: {:?}", error))?;
+    session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+
+    let reason = process_pending_host_actions_without_runtime(
         &mut outcome,
         &mut session_state,
         &mut transient_msg,
@@ -703,17 +707,116 @@ async fn process_pending_host_actions_with_runtime(
     mut runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
 ) -> Option<ShutdownReason> {
-    for action in outcome.core_bridge.take_pending_host_actions() {
+    let current_revision = outcome.core_bridge.snapshot().revision;
+    let mut shutdown_reason = None;
+    for action in prioritize_save_family_host_actions(
+        outcome.core_bridge.take_pending_host_actions(),
+        current_revision,
+    ) {
         match action {
-            CoreHostAction::Write { .. } => {
-                handle_write_host_action_with_runtime(
+            CoreHostAction::Write { path, .. } => {
+                if let Some(reason) = handle_write_host_action_with_runtime(
                     outcome,
                     session_state,
+                    Some(path.as_str()),
                     transient_msg,
                     runtime_session.as_deref_mut(),
                     need_redraw,
                 )
-                .await;
+                .await
+                {
+                    merge_shutdown_reason(&mut shutdown_reason, Some(reason));
+                }
+            }
+            CoreHostAction::Quit { force, .. } => {
+                let decision = session_state.evaluate_quit(force);
+                if let Some(reason) =
+                    shutdown_reason_from_quit_decision(decision, force, system_warning)
+                {
+                    merge_shutdown_reason(&mut shutdown_reason, Some(reason));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    shutdown_reason
+}
+
+fn prioritize_save_family_host_actions(
+    actions: Vec<CoreHostAction>,
+    current_revision: u64,
+) -> Vec<CoreHostAction> {
+    let mut writes = Vec::new();
+    let mut quits = Vec::new();
+
+    for action in actions {
+        match action {
+            CoreHostAction::Write {
+                issued_after_revision,
+                ..
+            } if issued_after_revision == current_revision => {
+                writes.push(action);
+            }
+            CoreHostAction::Quit {
+                issued_after_revision,
+                ..
+            } if issued_after_revision == current_revision => {
+                quits.push(action);
+            }
+            CoreHostAction::Write {
+                issued_after_revision,
+                ..
+            } => {
+                log::debug!(
+                    "[main] skipping stale write host action: current_revision={}, issued_after_revision={}",
+                    current_revision,
+                    issued_after_revision
+                );
+            }
+            CoreHostAction::Quit {
+                issued_after_revision,
+                ..
+            } => {
+                log::debug!(
+                    "[main] skipping stale quit host action: current_revision={}, issued_after_revision={}",
+                    current_revision,
+                    issued_after_revision
+                );
+            }
+            other => {
+                log::debug!(
+                    "[main] ignoring unsupported pending host action during save-family coordination: {:?}",
+                    other
+                );
+            }
+        }
+    }
+
+    writes.extend(quits);
+    writes
+}
+
+fn process_pending_host_actions_without_runtime(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
+) -> Option<ShutdownReason> {
+    let current_revision = outcome.core_bridge.snapshot().revision;
+    for action in prioritize_save_family_host_actions(
+        outcome.core_bridge.take_pending_host_actions(),
+        current_revision,
+    ) {
+        match action {
+            CoreHostAction::Write { path, .. } => {
+                let snapshot = outcome.core_bridge.snapshot();
+                let save_outcome = save_snapshot_result_with_path_override(
+                    &snapshot.text,
+                    session_state,
+                    Some(path.as_str()),
+                );
+                *transient_msg = save_outcome.transient_message;
             }
             CoreHostAction::Quit { force, .. } => {
                 let decision = session_state.evaluate_quit(force);
@@ -733,20 +836,23 @@ async fn process_pending_host_actions_with_runtime(
 async fn handle_write_host_action_with_runtime(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
+    path_override: Option<&str>,
     transient_msg: &mut Option<String>,
     runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
-) {
+) -> Option<ShutdownReason> {
     let snapshot = outcome.core_bridge.snapshot();
     log::debug!(
         "[main] processing write host action with runtime integration: path_present={}, contents_len={}",
-        session_state.target_path().is_some(),
+        path_override.filter(|path| !path.is_empty()).is_some()
+            || session_state.target_path().is_some(),
         snapshot.text.len()
     );
-    let save_outcome = save_snapshot_result(&snapshot.text, session_state);
+    let save_outcome =
+        save_snapshot_result_with_path_override(&snapshot.text, session_state, path_override);
     *transient_msg = save_outcome.transient_message;
     if save_outcome.wrote {
-        dispatch_buffer_write_post_with_runtime(
+        return dispatch_buffer_write_post_with_runtime(
             runtime_session,
             outcome,
             session_state,
@@ -755,6 +861,8 @@ async fn handle_write_host_action_with_runtime(
         )
         .await;
     }
+
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -767,7 +875,15 @@ fn save_snapshot_result(
     buffer_contents: &str,
     session_state: &mut saya::editor_session::EditorSessionState,
 ) -> SaveSnapshotOutcome {
-    match session_state.build_save_request(buffer_contents) {
+    save_snapshot_result_with_path_override(buffer_contents, session_state, None)
+}
+
+fn save_snapshot_result_with_path_override(
+    buffer_contents: &str,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    path_override: Option<&str>,
+) -> SaveSnapshotOutcome {
+    match build_save_request_for_host_write(buffer_contents, session_state, path_override) {
         Ok(req) => match write_to_path(&req) {
             SaveResult::Saved => {
                 session_state.record_save_success();
@@ -794,82 +910,175 @@ fn save_snapshot_result(
     }
 }
 
-fn save_snapshot(
+fn build_save_request_for_host_write(
     buffer_contents: &str,
-    session_state: &mut saya::editor_session::EditorSessionState,
-) -> Option<String> {
-    save_snapshot_result(buffer_contents, session_state).transient_message
+    session_state: &saya::editor_session::EditorSessionState,
+    path_override: Option<&str>,
+) -> Result<SaveRequest, SaveRequestError> {
+    let Some(path_override) = path_override.filter(|path| !path.is_empty()) else {
+        return session_state.build_save_request(buffer_contents);
+    };
+
+    if session_state.read_only() {
+        return Err(SaveRequestError::ReadOnly);
+    }
+
+    Ok(SaveRequest {
+        path: std::path::PathBuf::from(path_override),
+        contents: buffer_contents.to_string(),
+    })
 }
 
-fn process_local_host_command(
-    command: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
-    transient_msg: &mut Option<String>,
-    system_warning: &mut Option<String>,
-) -> Option<ShutdownReason> {
-    let host_command = parse_local_host_command(command)?;
-    let snapshot = outcome.core_bridge.snapshot();
-    log::debug!(
-        "[main] processing local host command: command={}, host_command={:?}, dirty={}",
-        command,
-        host_command,
-        snapshot.dirty
-    );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainHostCommand {
+    Save,
+    SaveThenQuit,
+}
 
-    *transient_msg = save_snapshot(&snapshot.text, session_state);
-
-    match host_command {
-        LocalHostCommand::Save => None,
-        LocalHostCommand::SaveThenQuit => (!session_state.is_dirty()
-            && session_state.last_save_error().is_none())
-        .then_some(ShutdownReason::UserQuit)
-        .or_else(|| {
-            *system_warning = Some(normal_quit_warning_message().to_string());
-            None
-        }),
+fn parse_main_host_command(command: &str) -> Option<MainHostCommand> {
+    let normalized = normalize_main_host_command(command)?;
+    match normalized.as_str() {
+        "w" | "write" => Some(MainHostCommand::Save),
+        "wq" | "x" | "xit" | "exit" => Some(MainHostCommand::SaveThenQuit),
+        _ => None,
     }
 }
 
-async fn process_local_host_command_with_runtime(
+fn runtime_save_then_quit_ex_command(command: &str) -> Option<&'static str> {
+    let normalized = normalize_main_host_command(command)?;
+    match normalized.as_str() {
+        "wq" => Some(":wq"),
+        "x" | "xit" | "exit" => Some(":x"),
+        _ => None,
+    }
+}
+
+fn normalize_main_host_command(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    let trimmed = trimmed.strip_prefix(':').unwrap_or(trimmed).trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn runtime_shutdown_intent_from_quit_decision(
+    force: bool,
+    decision: QuitDecision,
+) -> Option<RuntimeShutdownIntent> {
+    match decision {
+        QuitDecision::Allow => Some(RuntimeShutdownIntent::UserQuit),
+        QuitDecision::ForceQuit => Some(RuntimeShutdownIntent::UserForceQuit),
+        QuitDecision::WarnUnsaved => {
+            log::debug!(
+                "[main] runtime host command quit intent was rejected by session policy: force={}, decision={:?}",
+                force,
+                decision
+            );
+            None
+        }
+    }
+}
+
+fn merge_runtime_shutdown_intent(
+    current: &mut Option<RuntimeShutdownIntent>,
+    next: Option<RuntimeShutdownIntent>,
+) {
+    match (*current, next) {
+        (None, Some(intent)) => *current = Some(intent),
+        (Some(RuntimeShutdownIntent::UserQuit), Some(RuntimeShutdownIntent::UserForceQuit)) => {
+            *current = Some(RuntimeShutdownIntent::UserForceQuit);
+        }
+        _ => {}
+    }
+}
+
+fn merge_shutdown_reason(current: &mut Option<ShutdownReason>, next: Option<ShutdownReason>) {
+    match (current.clone(), next) {
+        (None, Some(reason)) => *current = Some(reason),
+        (Some(ShutdownReason::UserQuit), Some(ShutdownReason::UserForceQuit)) => {
+            *current = Some(ShutdownReason::UserForceQuit);
+        }
+        _ => {}
+    }
+}
+
+fn execute_runtime_host_command_through_core(
+    ex_command: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    outcome
+        .core_bridge
+        .apply_ex_command(ex_command)
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: ex_command.to_string(),
+            message: format!("{error:?}"),
+        })?;
+
+    let mut effect = RuntimeCommandEffect::default();
+    let current_revision = outcome.core_bridge.snapshot().revision;
+    for action in prioritize_save_family_host_actions(
+        outcome.core_bridge.take_pending_host_actions(),
+        current_revision,
+    ) {
+        match action {
+            CoreHostAction::Write { path, .. } => {
+                let snapshot = outcome.core_bridge.snapshot();
+                let save_outcome = save_snapshot_result_with_path_override(
+                    &snapshot.text,
+                    session_state,
+                    Some(path.as_str()),
+                );
+                effect.transient_message = save_outcome.transient_message;
+                if save_outcome.wrote {
+                    let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
+                    effect
+                        .follow_up_events
+                        .push(RuntimeEventMapper::buffer_write_post(
+                            host_session.current_buffer_snapshot(),
+                        ));
+                }
+            }
+            CoreHostAction::Quit { force, .. } => {
+                let decision = session_state.evaluate_quit(force);
+                merge_runtime_shutdown_intent(
+                    &mut effect.shutdown_intent,
+                    runtime_shutdown_intent_from_quit_decision(force, decision),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(effect)
+}
+
+fn execute_runtime_host_command(
     command: &str,
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
-    transient_msg: &mut Option<String>,
-    system_warning: &mut Option<String>,
-    runtime_session: Option<&mut RuntimeSessionOwner>,
-    need_redraw: &mut bool,
-) -> Option<ShutdownReason> {
-    let host_command = parse_local_host_command(command)?;
-    let snapshot = outcome.core_bridge.snapshot();
-    log::debug!(
-        "[main] processing local host command with runtime integration: command={}, host_command={:?}, dirty={}",
-        command,
-        host_command,
-        snapshot.dirty
-    );
-
-    let save_outcome = save_snapshot_result(&snapshot.text, session_state);
-    *transient_msg = save_outcome.transient_message;
-    if save_outcome.wrote {
-        dispatch_buffer_write_post_with_runtime(
-            runtime_session,
-            outcome,
-            session_state,
-            transient_msg,
-            need_redraw,
-        )
-        .await;
-    }
-
-    match host_command {
-        LocalHostCommand::Save => None,
-        LocalHostCommand::SaveThenQuit => (!session_state.is_dirty()
-            && session_state.last_save_error().is_none())
-        .then_some(ShutdownReason::UserQuit)
-        .or_else(|| {
-            *system_warning = Some(normal_quit_warning_message().to_string());
-            None
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    match parse_main_host_command(command) {
+        Some(MainHostCommand::Save) => {
+            execute_runtime_host_command_through_core(":w", outcome, session_state)
+        }
+        Some(MainHostCommand::SaveThenQuit) => {
+            let core_command = runtime_save_then_quit_ex_command(command).ok_or_else(|| {
+                RuntimeCommandError::UnknownCommand {
+                    name: command.to_string(),
+                }
+            })?;
+            log::debug!(
+                "[main] routing runtime save/quit command through core coordinator: command={:?}, core_command={}",
+                command,
+                core_command
+            );
+            execute_runtime_host_command_through_core(core_command, outcome, session_state)
+        }
+        None => Err(RuntimeCommandError::UnknownCommand {
+            name: command.to_string(),
         }),
     }
 }
@@ -914,14 +1123,14 @@ async fn dispatch_buffer_open_with_runtime(
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
-) {
+) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
-        return;
+        return None;
     };
     let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
     let payload = RuntimeEventMapper::buffer_open(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
-    apply_runtime_dispatch_outcome(transient_msg, need_redraw, dispatch_outcome);
+    apply_runtime_dispatch_outcome(transient_msg, need_redraw, dispatch_outcome)
 }
 
 async fn dispatch_buffer_write_post_with_runtime(
@@ -930,21 +1139,21 @@ async fn dispatch_buffer_write_post_with_runtime(
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
-) {
+) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
-        return;
+        return None;
     };
     let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
     let payload = RuntimeEventMapper::buffer_write_post(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
-    apply_runtime_dispatch_outcome(transient_msg, need_redraw, dispatch_outcome);
+    apply_runtime_dispatch_outcome(transient_msg, need_redraw, dispatch_outcome)
 }
 
 fn apply_runtime_dispatch_outcome(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     dispatch_outcome: RuntimeDispatchOutcome,
-) {
+) -> Option<ShutdownReason> {
     if let Some(message) = dispatch_outcome.transient_message {
         log::debug!(
             "[main] applying normalized runtime transient message to application state: {}",
@@ -956,6 +1165,10 @@ fn apply_runtime_dispatch_outcome(
         log::debug!("[main] applying normalized runtime redraw request to main loop");
         *need_redraw = true;
     }
+    dispatch_outcome.shutdown_intent.map(|intent| match intent {
+        RuntimeShutdownIntent::UserQuit => ShutdownReason::UserQuit,
+        RuntimeShutdownIntent::UserForceQuit => ShutdownReason::UserForceQuit,
+    })
 }
 
 struct MainRuntimeHostSession<'a> {
@@ -1015,30 +1228,7 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             "[main] executing runtime host command through application session owner: {}",
             name
         );
-        match parse_local_host_command(name) {
-            Some(LocalHostCommand::Save) => {
-                let snapshot = self.outcome.core_bridge.snapshot();
-                let save_outcome = save_snapshot_result(&snapshot.text, self.session_state);
-                let follow_up_events = if save_outcome.wrote {
-                    vec![RuntimeEventMapper::buffer_write_post(
-                        self.current_buffer_snapshot(),
-                    )]
-                } else {
-                    Vec::new()
-                };
-                Ok(RuntimeCommandEffect {
-                    transient_message: save_outcome.transient_message,
-                    follow_up_events,
-                })
-            }
-            Some(LocalHostCommand::SaveThenQuit) => Err(RuntimeCommandError::CommandFailed {
-                name: name.to_string(),
-                message: "quit commands are not available from runtime callbacks in the first live integration pass".to_string(),
-            }),
-            None => Err(RuntimeCommandError::UnknownCommand {
-                name: name.to_string(),
-            }),
-        }
+        execute_runtime_host_command(name, self.outcome, self.session_state)
     }
 }
 
@@ -1481,6 +1671,15 @@ mod tests {
     }
 
     #[test]
+    fn merge_shutdown_reason_prefers_force_quit_over_clean_quit() {
+        let mut shutdown_reason = Some(ShutdownReason::UserQuit);
+
+        merge_shutdown_reason(&mut shutdown_reason, Some(ShutdownReason::UserForceQuit));
+
+        assert_eq!(shutdown_reason, Some(ShutdownReason::UserForceQuit));
+    }
+
+    #[test]
     fn save_error_message_reports_read_only_mode() {
         let message = save_error_message(&SaveRequestError::ReadOnly);
 
@@ -1530,7 +1729,8 @@ mod tests {
             snapshot.text.len(),
             session_state.is_dirty()
         );
-        let transient_msg = save_snapshot(&snapshot.text, &mut session_state);
+        let save_outcome = save_snapshot_result(&snapshot.text, &mut session_state);
+        let transient_msg = save_outcome.transient_message;
         let expected_error = session_state
             .last_save_error()
             .expect("save failure should be recorded")
@@ -1542,6 +1742,175 @@ mod tests {
         assert!(session_state.is_dirty());
 
         std::fs::remove_file(&target_path).expect("cleanup");
+    }
+
+    #[test]
+    fn parse_main_host_command_recognizes_save_and_quit_family_commands() {
+        assert_eq!(parse_main_host_command(":w"), Some(MainHostCommand::Save));
+        assert_eq!(
+            parse_main_host_command("write"),
+            Some(MainHostCommand::Save)
+        );
+        assert_eq!(
+            parse_main_host_command(":wq"),
+            Some(MainHostCommand::SaveThenQuit)
+        );
+        assert_eq!(
+            parse_main_host_command("wq"),
+            Some(MainHostCommand::SaveThenQuit)
+        );
+        assert_eq!(
+            parse_main_host_command("exit"),
+            Some(MainHostCommand::SaveThenQuit)
+        );
+        assert_eq!(parse_main_host_command("set number"), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_host_command_executor_routes_quit_family_through_coordinator() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("runtime-host-command");
+        std::fs::write(&target_path, "initial\n").expect("test file");
+
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path.clone()),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        outcome.core_bridge.dispatch_key("i").unwrap();
+        outcome.core_bridge.dispatch_key("X").unwrap();
+        outcome.core_bridge.dispatch_key("\x1b").unwrap();
+        session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+
+        let effect = execute_runtime_host_command("exit", &mut outcome, &mut session_state)
+            .expect("runtime quit-family command should succeed");
+
+        assert_eq!(
+            effect.transient_message,
+            Some("Saved successfully".to_string())
+        );
+        assert_eq!(
+            effect.shutdown_intent,
+            Some(RuntimeShutdownIntent::UserQuit)
+        );
+        assert!(matches!(
+            effect.follow_up_events.as_slice(),
+            [saya::saya_live_runtime::RuntimeEventPayload::BufferWritePost(_)]
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&target_path).expect("saved file should exist"),
+            "Xinitial\n"
+        );
+
+        std::fs::remove_file(&target_path).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_runtime_dispatch_outcome_returns_shutdown_reason_from_runtime_intent() {
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+
+        let shutdown_reason = apply_runtime_dispatch_outcome(
+            &mut transient_msg,
+            &mut need_redraw,
+            RuntimeDispatchOutcome {
+                transient_message: Some("Saved successfully".to_string()),
+                requires_redraw: true,
+                shutdown_intent: Some(RuntimeShutdownIntent::UserQuit),
+            },
+        );
+
+        assert_eq!(shutdown_reason, Some(ShutdownReason::UserQuit));
+        assert_eq!(transient_msg, Some("Saved successfully".to_string()));
+        assert!(need_redraw);
+    }
+
+    #[test]
+    fn save_snapshot_result_with_path_override_writes_to_explicit_host_path() {
+        let original_path = unique_path("write-override-original");
+        let alternate_path = unique_path("write-override-alternate");
+        std::fs::write(&original_path, "original\n").expect("original file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(original_path.clone()));
+        session_state.update_dirty(true);
+        let alternate_path_string = alternate_path.display().to_string();
+
+        let save_outcome = save_snapshot_result_with_path_override(
+            "alternate\n",
+            &mut session_state,
+            Some(&alternate_path_string),
+        );
+
+        assert_eq!(
+            save_outcome,
+            SaveSnapshotOutcome {
+                transient_message: Some("Saved successfully".to_string()),
+                wrote: true,
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(&alternate_path).expect("alternate file should exist"),
+            "alternate\n",
+            "explicit host action path should receive the save contents"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&original_path).expect("original file should remain"),
+            "original\n",
+            "session target path should stay untouched when host action provides an explicit path"
+        );
+        assert!(
+            !session_state.is_dirty(),
+            "successful save should clear dirty"
+        );
+
+        std::fs::remove_file(&original_path).expect("cleanup original");
+        std::fs::remove_file(&alternate_path).expect("cleanup alternate");
+    }
+
+    #[test]
+    fn save_family_host_actions_are_prioritized_by_revision_and_kind() {
+        let actions = vec![
+            CoreHostAction::Quit {
+                force: false,
+                issued_after_revision: 9,
+            },
+            CoreHostAction::Write {
+                path: "stale.txt".to_string(),
+                force: false,
+                issued_after_revision: 8,
+            },
+            CoreHostAction::Quit {
+                force: false,
+                issued_after_revision: 8,
+            },
+            CoreHostAction::Write {
+                path: "fresh.txt".to_string(),
+                force: false,
+                issued_after_revision: 9,
+            },
+        ];
+
+        let prioritized = prioritize_save_family_host_actions(actions, 9);
+
+        assert_eq!(
+            prioritized,
+            vec![
+                CoreHostAction::Write {
+                    path: "fresh.txt".to_string(),
+                    force: false,
+                    issued_after_revision: 9,
+                },
+                CoreHostAction::Quit {
+                    force: false,
+                    issued_after_revision: 9,
+                },
+            ]
+        );
     }
 
     #[test]
