@@ -1,26 +1,34 @@
-use saya::app_startup::{LaunchStartError, prepare_launch_and_start_terminal};
+use saya::app_startup::{
+    LaunchStartError, PreparedTuiStartup, TuiStartupContextError, prepare_tui_startup_context,
+};
 use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
 use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
 use saya::host_io::{SaveRequest, SaveResult, write_to_path};
-use saya::input_loop::{CrosstermEventSource, run_terminal_input_loop};
+use saya::input_loop::CrosstermEventSource;
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::optional_graphics::OptionalGraphicsAdapter;
+use saya::overlay_asset_store::OverlayAssetStore;
+use saya::presentation_effect::RuntimePresentationIntent;
 use saya::runtime_integration::{
     RuntimeCommandEffect, RuntimeDispatchOutcome, RuntimeEventMapper, RuntimeHostSession,
     RuntimeSessionOwner, RuntimeShutdownIntent,
 };
 use saya::saya_live_runtime::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
-    RuntimeInitError, RuntimeMode,
+    RuntimeMode,
 };
 use saya::screen_model::{
-    ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput, WorkspaceScreenModel,
-    project, project_workspace,
+    ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput, WorkspaceScreenModel, project,
+    project_workspace,
 };
 use saya::search_query::{SearchStateError, SearchVisibleState};
 use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
+use saya::terminal_capability::TerminalCapabilityProbe;
+use saya::terminal_lifecycle::TerminalSize;
+use saya::tui_render_coordinator::TuiRenderCoordinator;
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::WindowViewportStore;
 use vim_core_rs::{CoreMessageEvent, CoreMode};
@@ -29,8 +37,6 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use vim_core_rs::CoreHostAction;
 
 #[tokio::main]
@@ -64,46 +70,44 @@ async fn main() {
     }
 
     if std::env::var_os("SAYA_PTY_SMOKE").is_some() {
-        if let Err(error) = run_binary_pty_smoke(launch_request) {
+        if let Err(error) = run_binary_pty_smoke(launch_request).await {
             eprintln!("[main][pty-smoke] {error}");
             std::process::exit(1);
         }
         std::process::exit(0);
     }
 
-    // UI 初期化
     let mut backend = CrosstermBackendImpl;
-    let (mut outcome, terminal_session) =
-        match prepare_launch_and_start_terminal(launch_request, &mut backend) {
-            Ok((outcome, terminal_session)) => (outcome, terminal_session),
-            Err(error) => {
-                log::debug!("{}", format_launch_start_error(error));
-                std::process::exit(1);
-            }
-        };
+    let mut capability_probe = TerminalCapabilityProbe::from_env();
+    let PreparedTuiStartup {
+        mut outcome,
+        mut terminal_broker,
+        capability_profile,
+        mut runtime_session,
+        runtime_init_message,
+    } = match prepare_tui_startup_context(launch_request, &mut backend, &mut capability_probe) {
+        Ok(startup) => startup,
+        Err(error) => {
+            log::debug!("{}", format_tui_startup_context_error(error));
+            std::process::exit(1);
+        }
+    };
 
-    let mut renderer = TuiRenderer::new().expect("TUI Renderer init failed");
+    let renderer = TuiRenderer::new().expect("TUI Renderer init failed");
+    let mut render_coordinator = TuiRenderCoordinator::new(
+        renderer,
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
     let mut session_state = outcome.editor_session_state();
     let mut core_message: Option<String> = None;
     let mut system_warning: Option<String> = bootstrap_warning_message(&outcome.warnings);
-    let mut transient_msg: Option<String> = None;
+    let mut transient_msg: Option<String> = runtime_init_message;
     let mut viewport_store = WindowViewportStore::new();
     let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_buffer = String::new();
-    let mut last_successful_workspace_model: Option<WorkspaceScreenModel> = None;
-    let mut runtime_session = match RuntimeSessionOwner::spawn(outcome.callback_registry.clone()) {
-        Ok(runtime_session) => Some(runtime_session),
-        Err(error) => {
-            let message = format_runtime_init_error(&error);
-            log::debug!(
-                "[main] failed to initialize runtime session owner from startup registry: {:?}",
-                error
-            );
-            transient_msg = Some(message);
-            None
-        }
-    };
+    let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
 
     let mut startup_runtime_redraw = false;
     let startup_shutdown_reason = dispatch_buffer_open_with_runtime(
@@ -112,50 +116,53 @@ async fn main() {
         &mut session_state,
         &mut transient_msg,
         &mut startup_runtime_redraw,
+        &mut runtime_presentation_intents,
     )
     .await;
 
     // イベントループ初期化
     let (mut coordinator, sender) = EventLoopCoordinator::new();
 
-    // 入力監視タスク
-    let input_sender = sender.clone();
-    let input_stop_requested = Arc::new(AtomicBool::new(false));
-    let input_stop_for_task = input_stop_requested.clone();
-    let input_task = tokio::task::spawn_blocking(move || {
-        let mut source = CrosstermEventSource;
-        run_terminal_input_loop(&mut source, input_sender, input_stop_for_task);
-    });
+    log::debug!(
+        "[main] terminal capability profile resolved before interactive input: {:?}",
+        capability_profile
+    );
+    terminal_broker
+        .start_interactive_input(sender.clone(), CrosstermEventSource)
+        .expect("interactive input should start after the capability probe");
 
     // 初期描画
     sync_core_screen_size(&mut outcome);
     let (terminal_width, terminal_height) = current_terminal_size();
-    match apply_workspace_redraw_transaction(
-        &mut last_successful_workspace_model,
-        build_workspace_render_output(
-            &mut outcome,
-            &session_state,
-            &mut viewport_store,
-            &mut search_refresh_store,
-            command_line_prompt,
-            &command_line_buffer,
-            core_message.as_deref(),
-            system_warning.as_deref(),
-            transient_msg.as_deref(),
-            terminal_width,
-            terminal_height,
-        ),
+    let initial_render = build_workspace_render_output(
+        &mut outcome,
+        &session_state,
+        &mut viewport_store,
+        &mut search_refresh_store,
+        command_line_prompt,
+        &command_line_buffer,
+        core_message.as_deref(),
+        system_warning.as_deref(),
+        transient_msg.as_deref(),
+        terminal_width,
+        terminal_height,
+    );
+    let initial_render_failure = initial_render.as_ref().err().map(ToString::to_string);
+    match render_coordinator.render_workspace_result(
+        initial_render,
+        &capability_profile,
+        &runtime_presentation_intents,
+        Some(&mut terminal_broker),
     ) {
         Ok(render_output) => {
-            if let Some(message) = render_output.failure_message {
+            if let Some(message) = initial_render_failure {
                 transient_msg = Some(message);
             }
             trace_workspace_render_pipeline(
                 "initial",
                 &outcome.core_bridge.snapshot().text,
-                &render_output.model,
+                &render_output.rendered_workspace,
             );
-            let _ = renderer.draw(&render_output.model);
         }
         Err(error) => {
             transient_msg = Some(error.to_string());
@@ -302,6 +309,7 @@ async fn main() {
                                 &mut system_warning,
                                 runtime_session.as_mut(),
                                 &mut need_redraw,
+                                &mut runtime_presentation_intents,
                             )
                             .await
                             {
@@ -335,6 +343,7 @@ async fn main() {
                                         &mut system_warning,
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
+                                        &mut runtime_presentation_intents,
                                     )
                                     .await
                                     {
@@ -358,6 +367,7 @@ async fn main() {
                                                 &mut session_state,
                                                 &mut transient_msg,
                                                 &mut need_redraw,
+                                                &mut runtime_presentation_intents,
                                             )
                                             .await
                                         {
@@ -380,7 +390,8 @@ async fn main() {
                             }
                         }
                     }
-                    UiEvent::Resize { .. } => {
+                    UiEvent::Resize { columns, rows } => {
+                        terminal_broker.record_resize(TerminalSize { columns, rows });
                         need_redraw = true;
                     }
                     UiEvent::Shutdown(reason) => {
@@ -397,32 +408,35 @@ async fn main() {
             if need_redraw {
                 sync_core_screen_size(&mut outcome);
                 let (terminal_width, terminal_height) = current_terminal_size();
-                match apply_workspace_redraw_transaction(
-                    &mut last_successful_workspace_model,
-                    build_workspace_render_output(
-                        &mut outcome,
-                        &session_state,
-                        &mut viewport_store,
-                        &mut search_refresh_store,
-                        command_line_prompt,
-                        &command_line_buffer,
-                        core_message.as_deref(),
-                        system_warning.as_deref(),
-                        transient_msg.as_deref(),
-                        terminal_width,
-                        terminal_height,
-                    ),
+                let redraw_result = build_workspace_render_output(
+                    &mut outcome,
+                    &session_state,
+                    &mut viewport_store,
+                    &mut search_refresh_store,
+                    command_line_prompt,
+                    &command_line_buffer,
+                    core_message.as_deref(),
+                    system_warning.as_deref(),
+                    transient_msg.as_deref(),
+                    terminal_width,
+                    terminal_height,
+                );
+                let redraw_failure = redraw_result.as_ref().err().map(ToString::to_string);
+                match render_coordinator.render_workspace_result(
+                    redraw_result,
+                    &capability_profile,
+                    &runtime_presentation_intents,
+                    Some(&mut terminal_broker),
                 ) {
                     Ok(render_output) => {
-                        if let Some(message) = render_output.failure_message {
+                        if let Some(message) = redraw_failure {
                             transient_msg = Some(message);
                         }
                         trace_workspace_render_pipeline(
                             "redraw",
                             &outcome.core_bridge.snapshot().text,
-                            &render_output.model,
+                            &render_output.rendered_workspace,
                         );
-                        let _ = renderer.draw(&render_output.model);
                     }
                     Err(error) => {
                         transient_msg = Some(error.to_string());
@@ -443,21 +457,19 @@ async fn main() {
     let mut shutdown_sequence = coordinator.begin_shutdown(shutdown_reason);
     shutdown_sequence.record_loop_stopped();
 
-    log::debug!("[main] requesting input loop shutdown");
-    input_stop_requested.store(true, Ordering::Relaxed);
+    log::debug!("[main] requesting terminal broker shutdown");
+    terminal_broker.request_shutdown();
     drop(sender);
-    if let Err(error) = input_task.await {
-        log::debug!("[main] input task join failed: {}", error);
-    }
 
-    drop(renderer);
+    drop(render_coordinator);
     log::debug!("[main] dropping editor outcome for session cleanup");
     drop(outcome);
     shutdown_sequence.record_session_released();
 
-    let restore_result = terminal_session
-        .restore()
-        .map_err(|error| format!("{error:?}"));
+    let restore_result = terminal_broker
+        .shutdown()
+        .await
+        .map_err(|error| error.to_string());
     shutdown_sequence.record_terminal_restored(restore_result);
 
     if let Some(error) = shutdown_sequence.restore_error() {
@@ -551,62 +563,82 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     Ok(())
 }
 
-fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), String> {
+async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), String> {
     eprintln!("[main][pty-smoke] preparing PTY launch");
     let mut backend = CrosstermBackendImpl;
-    let (mut outcome, terminal_session) =
-        prepare_launch_and_start_terminal(launch_request, &mut backend)
-            .map_err(format_launch_start_error)?;
+    let mut capability_probe = TerminalCapabilityProbe::from_env();
+    let PreparedTuiStartup {
+        mut outcome,
+        mut terminal_broker,
+        capability_profile,
+        runtime_session: _runtime_session,
+        runtime_init_message,
+    } = prepare_tui_startup_context(launch_request, &mut backend, &mut capability_probe)
+        .map_err(format_tui_startup_context_error)?;
+    eprintln!(
+        "[main][pty-smoke] capability profile: {:?}",
+        capability_profile
+    );
+    if let Some(message) = runtime_init_message.as_deref() {
+        eprintln!("[main][pty-smoke] runtime init degraded: {message}");
+    }
 
-    let mut renderer = TuiRenderer::new().map_err(|error| format!("TUI init failed: {error}"))?;
-    let session_state = outcome.editor_session_state();
+    let renderer = TuiRenderer::new().map_err(|error| format!("TUI init failed: {error}"))?;
+    let mut render_coordinator = TuiRenderCoordinator::new(
+        renderer,
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut session_state = outcome.editor_session_state();
+    let mut transient_msg = runtime_init_message;
+    let mut system_warning = bootstrap_warning_message(&outcome.warnings);
     let mut viewport_store = WindowViewportStore::new();
     let mut search_refresh_store = WindowSearchRefreshStore::new();
-    let mut last_successful_workspace_model: Option<WorkspaceScreenModel> = None;
+    let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     sync_core_screen_size(&mut outcome);
 
     let (terminal_width, terminal_height) = current_terminal_size();
-    let initial_render = apply_workspace_redraw_transaction(
-        &mut last_successful_workspace_model,
-        build_workspace_render_output(
-            &mut outcome,
-            &session_state,
-            &mut viewport_store,
-            &mut search_refresh_store,
-            None,
-            "",
-            None,
-            None,
-            None,
-            terminal_width,
-            terminal_height,
-        ),
-    )
+    let initial_render = render_coordinator
+        .render_workspace_result(
+            build_workspace_render_output(
+                &mut outcome,
+                &session_state,
+                &mut viewport_store,
+                &mut search_refresh_store,
+                None,
+                "",
+                None,
+                None,
+                None,
+                terminal_width,
+                terminal_height,
+            ),
+            &capability_profile,
+            &runtime_presentation_intents,
+            Some(&mut terminal_broker),
+        )
     .map_err(|error| format!("initial PTY redraw failed: {error}"))?;
 
     let initial_active_pane = initial_render
-        .model
+        .rendered_workspace
         .panes
         .iter()
-        .find(|pane| pane.window_id == initial_render.model.active_window_id)
+        .find(|pane| pane.window_id == initial_render.rendered_workspace.active_window_id)
         .ok_or_else(|| "initial PTY draw missing active pane".to_string())?;
     eprintln!(
         "[main][pty-smoke] initial draw: panes={}, active_window_id={}, cursor=({},{}), status={:?}, message={:?}",
-        initial_render.model.panes.len(),
-        initial_render.model.active_window_id,
+        initial_render.rendered_workspace.panes.len(),
+        initial_render.rendered_workspace.active_window_id,
         initial_active_pane.cursor_row,
         initial_active_pane.cursor_col,
         initial_render
-            .model
+            .rendered_workspace
             .panes
             .iter()
-            .find(|pane| pane.window_id == initial_render.model.active_window_id)
+            .find(|pane| pane.window_id == initial_render.rendered_workspace.active_window_id)
             .map(|pane| format!("{} | {}", pane.file_name, pane.mode_label)),
-        initial_render.model.global_message_line,
+        initial_render.rendered_workspace.global_message_line,
     );
-    renderer
-        .draw(&initial_render.model)
-        .map_err(|error| format!("initial PTY draw failed: {error}"))?;
 
     std::thread::sleep(std::time::Duration::from_millis(25));
 
@@ -615,85 +647,204 @@ fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), 
         .apply_ex_command(":split")
         .map_err(|error| format!("PTY split command failed: {error:?}"))?;
 
-    let split_render = apply_workspace_redraw_transaction(
-        &mut last_successful_workspace_model,
-        build_workspace_render_output(
-            &mut outcome,
-            &session_state,
-            &mut viewport_store,
-            &mut search_refresh_store,
-            None,
-            "",
-            None,
-            None,
-            None,
-            terminal_width,
-            terminal_height,
-        ),
-    )
+    let split_render = render_coordinator
+        .render_workspace_result(
+            build_workspace_render_output(
+                &mut outcome,
+                &session_state,
+                &mut viewport_store,
+                &mut search_refresh_store,
+                None,
+                "",
+                None,
+                None,
+                None,
+                terminal_width,
+                terminal_height,
+            ),
+            &capability_profile,
+            &runtime_presentation_intents,
+            Some(&mut terminal_broker),
+        )
     .map_err(|error| format!("split PTY redraw failed: {error}"))?;
 
     let split_active_pane = split_render
-        .model
+        .rendered_workspace
         .panes
         .iter()
-        .find(|pane| pane.window_id == split_render.model.active_window_id)
+        .find(|pane| pane.window_id == split_render.rendered_workspace.active_window_id)
         .ok_or_else(|| "split PTY draw missing active pane".to_string())?;
     let split_status = split_render
-        .model
+        .rendered_workspace
         .panes
         .iter()
-        .find(|pane| pane.window_id == split_render.model.active_window_id)
+        .find(|pane| pane.window_id == split_render.rendered_workspace.active_window_id)
         .map(|pane| format!("{} | {}", pane.file_name, pane.mode_label));
     eprintln!(
         "[main][pty-smoke] split draw: panes={}, active_window_id={}, cursor=({},{}), status={:?}, message={:?}",
-        split_render.model.panes.len(),
-        split_render.model.active_window_id,
+        split_render.rendered_workspace.panes.len(),
+        split_render.rendered_workspace.active_window_id,
         split_active_pane.cursor_row,
         split_active_pane.cursor_col,
         split_status,
-        split_render.model.global_message_line,
+        split_render.rendered_workspace.global_message_line,
     );
-    renderer
-        .draw(&split_render.model)
-        .map_err(|error| format!("split PTY draw failed: {error}"))?;
 
     std::thread::sleep(std::time::Duration::from_millis(25));
 
-    let rollback_render = apply_workspace_redraw_transaction(
-        &mut last_successful_workspace_model,
-        Err(WorkspaceRedrawError::Projection(
-            WorkspaceProjectionError::ActiveWindowMissing,
-        )),
-    )
+    let resized_width = 72;
+    let resized_height = 18;
+    terminal_broker.record_resize(TerminalSize {
+        columns: resized_width,
+        rows: resized_height,
+    });
+    let resize_render = render_coordinator
+        .render_workspace_result(
+            build_workspace_render_output(
+                &mut outcome,
+                &session_state,
+                &mut viewport_store,
+                &mut search_refresh_store,
+                None,
+                "",
+                None,
+                None,
+                None,
+                resized_width,
+                resized_height,
+            ),
+            &capability_profile,
+            &runtime_presentation_intents,
+            Some(&mut terminal_broker),
+        )
+        .map_err(|error| format!("resize PTY redraw failed: {error}"))?;
+    eprintln!(
+        "[main][pty-smoke] resize draw: panes={}, active_window_id={}, terminal=({},{}), latest_size={:?}, message={:?}",
+        resize_render.rendered_workspace.panes.len(),
+        resize_render.rendered_workspace.active_window_id,
+        resized_width,
+        resized_height,
+        terminal_broker.latest_size(),
+        resize_render.rendered_workspace.global_message_line,
+    );
+
+    let rollback_render = render_coordinator
+        .render_workspace_result(
+            Err(WorkspaceRedrawError::Projection(
+                WorkspaceProjectionError::ActiveWindowMissing,
+            )),
+            &capability_profile,
+            &runtime_presentation_intents,
+            Some(&mut terminal_broker),
+        )
     .map_err(|error| format!("rollback PTY redraw failed: {error}"))?;
 
     let rollback_active_pane = rollback_render
-        .model
+        .rendered_workspace
         .panes
         .iter()
-        .find(|pane| pane.window_id == rollback_render.model.active_window_id);
+        .find(|pane| pane.window_id == rollback_render.rendered_workspace.active_window_id);
     eprintln!(
         "[main][pty-smoke] rollback draw: panes={}, active_window_id={}, cursor=({}, {}), message={:?}",
-        rollback_render.model.panes.len(),
-        rollback_render.model.active_window_id,
+        rollback_render.rendered_workspace.panes.len(),
+        rollback_render.rendered_workspace.active_window_id,
         rollback_active_pane
             .map(|pane| pane.cursor_row)
             .unwrap_or_default(),
         rollback_active_pane
             .map(|pane| pane.cursor_col)
             .unwrap_or_default(),
-        rollback_render.model.global_message_line,
+        rollback_render.rendered_workspace.global_message_line,
     );
-    renderer
-        .draw(&rollback_render.model)
-        .map_err(|error| format!("rollback PTY draw failed: {error}"))?;
 
-    drop(renderer);
+    outcome
+        .core_bridge
+        .apply_ex_command(":write")
+        .map_err(|error| format!("PTY save command failed: {error:?}"))?;
+    let mut save_redraw = false;
+    let save_shutdown = process_pending_host_actions_with_runtime(
+        &mut outcome,
+        &mut session_state,
+        &mut transient_msg,
+        &mut system_warning,
+        None,
+        &mut save_redraw,
+        &mut runtime_presentation_intents,
+    )
+    .await;
+    if save_shutdown.is_some() {
+        return Err(format!(
+            "PTY save should not request shutdown, got: {:?}",
+            save_shutdown
+        ));
+    }
+    let saved_path = session_state
+        .target_path()
+        .cloned()
+        .ok_or_else(|| "PTY save missing target path".to_string())?;
+    let saved_contents = std::fs::read_to_string(&saved_path)
+        .map_err(|error| format!("failed to read saved PTY target: {error}"))?;
+    eprintln!(
+        "[main][pty-smoke] save result: need_redraw={}, transient={:?}, bytes={}",
+        save_redraw,
+        transient_msg,
+        saved_contents.len(),
+    );
+
+    outcome
+        .core_bridge
+        .apply_ex_command(":quit")
+        .map_err(|error| format!("PTY quit command failed: {error:?}"))?;
+    let mut quit_redraw = false;
+    let quit_reason = process_pending_host_actions_with_runtime(
+        &mut outcome,
+        &mut session_state,
+        &mut transient_msg,
+        &mut system_warning,
+        None,
+        &mut quit_redraw,
+        &mut runtime_presentation_intents,
+    )
+    .await
+    .ok_or_else(|| "PTY quit should produce a shutdown reason".to_string())?;
+    if quit_reason != ShutdownReason::UserQuit {
+        return Err(format!(
+            "PTY quit returned unexpected shutdown reason: {:?}",
+            quit_reason
+        ));
+    }
+    eprintln!("[main][pty-smoke] quit reason: {:?}", quit_reason);
+
+    outcome
+        .core_bridge
+        .apply_ex_command(":quit!")
+        .map_err(|error| format!("PTY force quit command failed: {error:?}"))?;
+    let mut force_quit_redraw = false;
+    let force_quit_reason = process_pending_host_actions_with_runtime(
+        &mut outcome,
+        &mut session_state,
+        &mut transient_msg,
+        &mut system_warning,
+        None,
+        &mut force_quit_redraw,
+        &mut runtime_presentation_intents,
+    )
+    .await
+    .ok_or_else(|| "PTY force quit should produce a shutdown reason".to_string())?;
+    if force_quit_reason != ShutdownReason::UserForceQuit {
+        return Err(format!(
+            "PTY force quit returned unexpected shutdown reason: {:?}",
+            force_quit_reason
+        ));
+    }
+    eprintln!("[main][pty-smoke] force quit reason: {:?}", force_quit_reason);
+
+    drop(render_coordinator);
     drop(outcome);
-    terminal_session
-        .restore()
-        .map_err(|error| format!("PTY smoke terminal restore failed: {error:?}"))?;
+    terminal_broker
+        .shutdown()
+        .await
+        .map_err(|error| format!("PTY smoke terminal restore failed: {error}"))?;
 
     eprintln!("[main][pty-smoke] completed successfully");
     Ok(())
@@ -706,6 +857,7 @@ async fn process_pending_host_actions_with_runtime(
     system_warning: &mut Option<String>,
     mut runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
 ) -> Option<ShutdownReason> {
     let current_revision = outcome.core_bridge.snapshot().revision;
     let mut shutdown_reason = None;
@@ -722,6 +874,7 @@ async fn process_pending_host_actions_with_runtime(
                     transient_msg,
                     runtime_session.as_deref_mut(),
                     need_redraw,
+                    runtime_presentation_intents,
                 )
                 .await
                 {
@@ -840,6 +993,7 @@ async fn handle_write_host_action_with_runtime(
     transient_msg: &mut Option<String>,
     runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
 ) -> Option<ShutdownReason> {
     let snapshot = outcome.core_bridge.snapshot();
     log::debug!(
@@ -858,6 +1012,7 @@ async fn handle_write_host_action_with_runtime(
             session_state,
             transient_msg,
             need_redraw,
+            runtime_presentation_intents,
         )
         .await;
     }
@@ -1123,6 +1278,7 @@ async fn dispatch_buffer_open_with_runtime(
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         return None;
@@ -1130,7 +1286,12 @@ async fn dispatch_buffer_open_with_runtime(
     let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
     let payload = RuntimeEventMapper::buffer_open(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
-    apply_runtime_dispatch_outcome(transient_msg, need_redraw, dispatch_outcome)
+    apply_runtime_dispatch_outcome(
+        transient_msg,
+        need_redraw,
+        runtime_presentation_intents,
+        dispatch_outcome,
+    )
 }
 
 async fn dispatch_buffer_write_post_with_runtime(
@@ -1139,6 +1300,7 @@ async fn dispatch_buffer_write_post_with_runtime(
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         return None;
@@ -1146,26 +1308,45 @@ async fn dispatch_buffer_write_post_with_runtime(
     let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
     let payload = RuntimeEventMapper::buffer_write_post(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
-    apply_runtime_dispatch_outcome(transient_msg, need_redraw, dispatch_outcome)
+    apply_runtime_dispatch_outcome(
+        transient_msg,
+        need_redraw,
+        runtime_presentation_intents,
+        dispatch_outcome,
+    )
 }
 
 fn apply_runtime_dispatch_outcome(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
     dispatch_outcome: RuntimeDispatchOutcome,
 ) -> Option<ShutdownReason> {
-    if let Some(message) = dispatch_outcome.transient_message {
+    let RuntimeDispatchOutcome {
+        transient_message,
+        requires_redraw,
+        shutdown_intent,
+        presentation_intents,
+    } = dispatch_outcome;
+    if let Some(message) = transient_message {
         log::debug!(
             "[main] applying normalized runtime transient message to application state: {}",
             message
         );
         *transient_msg = Some(message);
     }
-    if dispatch_outcome.requires_redraw {
+    if !presentation_intents.is_empty() || !runtime_presentation_intents.is_empty() {
+        log::debug!(
+            "[main] updating runtime presentation intents in application state: count={}",
+            presentation_intents.len()
+        );
+    }
+    *runtime_presentation_intents = presentation_intents;
+    if requires_redraw {
         log::debug!("[main] applying normalized runtime redraw request to main loop");
         *need_redraw = true;
     }
-    dispatch_outcome.shutdown_intent.map(|intent| match intent {
+    shutdown_intent.map(|intent| match intent {
         RuntimeShutdownIntent::UserQuit => ShutdownReason::UserQuit,
         RuntimeShutdownIntent::UserForceQuit => ShutdownReason::UserForceQuit,
     })
@@ -1240,20 +1421,6 @@ fn runtime_mode_from_core(mode: CoreMode) -> RuntimeMode {
     }
 }
 
-fn format_runtime_init_error(error: &RuntimeInitError) -> String {
-    match error {
-        RuntimeInitError::WorkerStartFailed { message } => {
-            format!("Runtime initialization failed: {}", message)
-        }
-        RuntimeInitError::UnsupportedEvent { name } => {
-            format!("Runtime initialization failed: unsupported event {}", name)
-        }
-        RuntimeInitError::BootstrapFailed { message } => {
-            format!("Runtime initialization failed: {}", message)
-        }
-    }
-}
-
 fn shutdown_reason_from_quit_decision(
     decision: QuitDecision,
     force: bool,
@@ -1282,6 +1449,7 @@ fn current_terminal_size() -> (u16, u16) {
     crossterm::terminal::size().unwrap_or((80, 24))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceRenderOutput {
     model: WorkspaceScreenModel,
@@ -1319,6 +1487,7 @@ impl From<WorkspaceProjectionError> for WorkspaceRedrawError {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn apply_workspace_redraw_transaction(
     last_successful_workspace_model: &mut Option<WorkspaceScreenModel>,
     render_result: Result<WorkspaceScreenModel, WorkspaceRedrawError>,
@@ -1562,6 +1731,18 @@ fn format_launch_start_error(error: LaunchStartError) -> String {
         LaunchStartError::Bootstrap(error) => format_bootstrap_error(error),
         LaunchStartError::Terminal(error) => {
             format!("terminal lifecycle の初期化に失敗しました: {:?}", error)
+        }
+        LaunchStartError::Policy(error) => {
+            format!("TUI-only policy に違反する起動要求です: {error}")
+        }
+    }
+}
+
+fn format_tui_startup_context_error(error: TuiStartupContextError) -> String {
+    match error {
+        TuiStartupContextError::Launch(error) => format_launch_start_error(error),
+        TuiStartupContextError::CapabilityProbe(error) => {
+            format!("terminal capability probe failed during startup composition: {error}")
         }
     }
 }
@@ -1814,14 +1995,17 @@ mod tests {
     fn apply_runtime_dispatch_outcome_returns_shutdown_reason_from_runtime_intent() {
         let mut transient_msg = None;
         let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
 
         let shutdown_reason = apply_runtime_dispatch_outcome(
             &mut transient_msg,
             &mut need_redraw,
+            &mut runtime_presentation_intents,
             RuntimeDispatchOutcome {
                 transient_message: Some("Saved successfully".to_string()),
                 requires_redraw: true,
                 shutdown_intent: Some(RuntimeShutdownIntent::UserQuit),
+                presentation_intents: Vec::new(),
             },
         );
 

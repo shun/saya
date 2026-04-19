@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::callback_registry_seed::CallbackRegistrySeed;
+use crate::presentation_effect::RuntimePresentationIntent;
 use crate::runtime_message::runtime_callback_failure_message;
 use crate::runtime_refresh::runtime_dispatch_requests_redraw;
 use crate::saya_live_runtime::{
@@ -17,6 +18,7 @@ pub struct RuntimeDispatchOutcome {
     pub transient_message: Option<String>,
     pub requires_redraw: bool,
     pub shutdown_intent: Option<RuntimeShutdownIntent>,
+    pub presentation_intents: Vec<RuntimePresentationIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -24,6 +26,7 @@ pub struct RuntimeCommandEffect {
     pub transient_message: Option<String>,
     pub follow_up_events: Vec<RuntimeEventPayload>,
     pub shutdown_intent: Option<RuntimeShutdownIntent>,
+    pub presentation_intents: Vec<RuntimePresentationIntent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +67,7 @@ impl RuntimeOutcomeProjector {
             transient_message: None,
             requires_redraw: runtime_dispatch_requests_redraw(report),
             shutdown_intent: None,
+            presentation_intents: Vec::new(),
         }
     }
 
@@ -73,6 +77,7 @@ impl RuntimeOutcomeProjector {
             requires_redraw: transient_message.is_some(),
             transient_message,
             shutdown_intent: None,
+            presentation_intents: Vec::new(),
         }
     }
 }
@@ -286,17 +291,16 @@ impl RuntimeSessionOwner {
                     match host_session.execute_host_command(&request.name) {
                         Ok(effect) => {
                             self.refresh_cached_snapshots(host_session);
-                            if let Some(message) = effect.transient_message.clone() {
-                                merge_dispatch_outcome(
-                                    &mut projected,
-                                    RuntimeDispatchOutcome {
-                                        transient_message: Some(message),
-                                        requires_redraw: true,
-                                        shutdown_intent: None,
-                                    },
-                                );
-                            }
-                            merge_shutdown_intent(&mut projected.shutdown_intent, effect.shutdown_intent);
+                            merge_dispatch_outcome(
+                                &mut projected,
+                                RuntimeDispatchOutcome {
+                                    transient_message: effect.transient_message.clone(),
+                                    requires_redraw: effect.transient_message.is_some()
+                                        || !effect.presentation_intents.is_empty(),
+                                    shutdown_intent: effect.shutdown_intent,
+                                    presentation_intents: effect.presentation_intents.clone(),
+                                },
+                            );
                             follow_up_events.extend(effect.follow_up_events.clone());
                             let _ = request.reply.send(Ok(()));
                         }
@@ -338,6 +342,7 @@ fn merge_dispatch_outcome(target: &mut RuntimeDispatchOutcome, next: RuntimeDisp
     }
     target.requires_redraw |= next.requires_redraw;
     merge_shutdown_intent(&mut target.shutdown_intent, next.shutdown_intent);
+    target.presentation_intents.extend(next.presentation_intents);
 }
 
 fn merge_shutdown_intent(
@@ -378,6 +383,7 @@ mod tests {
                 ),
                 requires_redraw: true,
                 shutdown_intent: None,
+                presentation_intents: Vec::new(),
             }
         );
     }

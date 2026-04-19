@@ -35,6 +35,13 @@ pub struct TuiRenderer {
     needs_full_clear: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderTextMode {
+    Plain,
+    StyledAnsi,
+    StyledTrueColor,
+}
+
 impl TuiRenderer {
     pub fn new() -> io::Result<Self> {
         let backend = CrosstermBackend::new(io::stdout());
@@ -46,7 +53,15 @@ impl TuiRenderer {
     }
 
     pub fn draw(&mut self, model: &WorkspaceScreenModel) -> io::Result<()> {
-        draw_workspace_frame(&mut self.terminal, model, self.needs_full_clear)?;
+        self.draw_with_mode(model, RenderTextMode::StyledTrueColor)
+    }
+
+    pub fn draw_with_mode(
+        &mut self,
+        model: &WorkspaceScreenModel,
+        text_mode: RenderTextMode,
+    ) -> io::Result<()> {
+        draw_workspace_frame(&mut self.terminal, model, self.needs_full_clear, text_mode)?;
         self.needs_full_clear = false;
         Ok(())
     }
@@ -56,21 +71,22 @@ fn draw_workspace_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     model: &WorkspaceScreenModel,
     force_full_clear: bool,
+    text_mode: RenderTextMode,
 ) -> io::Result<()> {
     if force_full_clear {
         terminal.clear()?;
     }
-    terminal.draw(|f| render_workspace(f, model))?;
+    terminal.draw(|f| render_workspace(f, model, text_mode))?;
     Ok(())
 }
 
-fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel) {
+fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: RenderTextMode) {
     let size = f.area();
     f.render_widget(Clear, size);
     let layout = compute_workspace_layout(size, model);
 
     for pane in &layout.panes {
-        render_pane(f, pane.model, pane.is_active, pane.rect);
+        render_pane(f, pane.model, pane.is_active, pane.rect, text_mode);
     }
 
     if let Some((message_line, message_rect)) =
@@ -191,7 +207,13 @@ fn visible_global_message_line(model: &WorkspaceScreenModel) -> Option<&str> {
         .filter(|message| !message.is_empty())
 }
 
-fn render_pane(f: &mut Frame<'_>, model: &ScreenModel, is_active: bool, rect: Rect) {
+fn render_pane(
+    f: &mut Frame<'_>,
+    model: &ScreenModel,
+    is_active: bool,
+    rect: Rect,
+    text_mode: RenderTextMode,
+) {
     let body_height = rect.height.saturating_sub(1).max(1);
     let body_rect = Rect {
         x: rect.x,
@@ -207,17 +229,24 @@ fn render_pane(f: &mut Frame<'_>, model: &ScreenModel, is_active: bool, rect: Re
     };
     f.render_widget(Clear, rect);
     let buffer_content =
-        Paragraph::new(render_buffer_text(model, body_rect.width)).block(Block::default());
+        Paragraph::new(render_buffer_text(model, body_rect.width, text_mode)).block(Block::default());
     trace_renderer_line(model, body_rect.width);
     f.render_widget(buffer_content, body_rect);
 
-    let status_style = if is_active {
+    let status_style = status_style(is_active, text_mode);
+    let status_bar = Paragraph::new(render_status_line(model)).style(status_style);
+    f.render_widget(status_bar, status_rect);
+}
+
+fn status_style(is_active: bool, text_mode: RenderTextMode) -> Style {
+    if text_mode == RenderTextMode::Plain {
+        return Style::default();
+    }
+    if is_active {
         Style::default().bg(Color::White).fg(Color::Black)
     } else {
         Style::default().bg(Color::DarkGray).fg(Color::White)
-    };
-    let status_bar = Paragraph::new(render_status_line(model)).style(status_style);
-    f.render_widget(status_bar, status_rect);
+    }
 }
 
 fn render_status_line(model: &ScreenModel) -> String {
@@ -252,15 +281,16 @@ fn draw_editor_frame<B: Backend>(
             }),
         },
         force_full_clear,
+        RenderTextMode::StyledTrueColor,
     )
 }
 
-fn render_buffer_text(model: &ScreenModel, width: u16) -> Text<'static> {
+fn render_buffer_text(model: &ScreenModel, width: u16, text_mode: RenderTextMode) -> Text<'static> {
     let lines = model
         .lines
         .iter()
         .enumerate()
-        .map(|(index, line)| render_line(model, index, line, width))
+        .map(|(index, line)| render_line(model, index, line, width, text_mode))
         .collect::<Vec<_>>();
     Text::from(lines)
 }
@@ -277,14 +307,20 @@ fn trace_renderer_line(model: &ScreenModel, width: u16) {
     );
 }
 
-fn render_line(model: &ScreenModel, index: usize, line: &str, width: u16) -> Line<'static> {
+fn render_line(
+    model: &ScreenModel,
+    index: usize,
+    line: &str,
+    width: u16,
+    text_mode: RenderTextMode,
+) -> Line<'static> {
     let row = u16::try_from(index).unwrap_or(u16::MAX);
     let overlays = collect_render_overlays(model, row, line);
     if overlays.is_empty() {
         return pad_line_to_width(Line::from(line.to_string()), width);
     }
 
-    render_layered_line(line, &overlays, width)
+    render_layered_line(line, &overlays, width, text_mode)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,7 +384,12 @@ fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<Ren
     overlays
 }
 
-fn render_layered_line(line: &str, overlays: &[RenderOverlayRange], width: u16) -> Line<'static> {
+fn render_layered_line(
+    line: &str,
+    overlays: &[RenderOverlayRange],
+    width: u16,
+    text_mode: RenderTextMode,
+) -> Line<'static> {
     let line_width = display_width(line);
     let mut boundaries = vec![0usize, line_width];
     for overlay in overlays {
@@ -372,7 +413,7 @@ fn render_layered_line(line: &str, overlays: &[RenderOverlayRange], width: u16) 
                 overlay.start_col < end_col_exclusive && overlay.end_col_exclusive > start_col
             })
             .max_by_key(|overlay| overlay_kind_rank(overlay.kind))
-            .map(|overlay| style_for_overlay_kind(overlay.kind))
+            .map(|overlay| style_for_overlay_kind(overlay.kind, text_mode))
             .unwrap_or_default();
         if style == Style::default() {
             spans.push(Span::raw(text));
@@ -393,7 +434,10 @@ fn overlay_kind_rank(kind: RenderOverlayKind) -> usize {
     }
 }
 
-fn style_for_overlay_kind(kind: RenderOverlayKind) -> Style {
+fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) -> Style {
+    if text_mode == RenderTextMode::Plain {
+        return Style::default();
+    }
     match kind {
         RenderOverlayKind::VisualSelection => Style::default().add_modifier(Modifier::REVERSED),
         RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => {
@@ -553,7 +597,7 @@ mod tests {
             is_active: true,
         };
 
-        let text = render_buffer_text(&model, 6);
+        let text = render_buffer_text(&model, 6, RenderTextMode::StyledTrueColor);
         let line = &text.lines[0];
 
         assert_eq!(line.spans.len(), 5);
@@ -622,7 +666,7 @@ mod tests {
             is_active: true,
         };
 
-        let text = render_buffer_text(&model, 6);
+        let text = render_buffer_text(&model, 6, RenderTextMode::StyledTrueColor);
         let line = &text.lines[0];
 
         assert_eq!(line.spans.len(), 3);
@@ -672,7 +716,7 @@ mod tests {
             is_active: true,
         };
 
-        let text = render_buffer_text(&model, 6);
+        let text = render_buffer_text(&model, 6, RenderTextMode::StyledTrueColor);
         let line = &text.lines[0];
 
         assert_eq!(line.spans.len(), 4);
@@ -719,7 +763,7 @@ mod tests {
             is_active: true,
         };
 
-        let text = render_buffer_text(&model, 20);
+        let text = render_buffer_text(&model, 20, RenderTextMode::StyledTrueColor);
         let second_line = &text.lines[1];
 
         assert_eq!(second_line.spans.len(), 3);
@@ -866,7 +910,8 @@ mod tests {
             command_line: None,
         };
 
-        draw_workspace_frame(&mut terminal, &model, true).expect("workspace render should succeed");
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+            .expect("workspace render should succeed");
 
         terminal
             .backend_mut()
@@ -904,7 +949,8 @@ mod tests {
             command_line: None,
         };
 
-        draw_workspace_frame(&mut terminal, &model, true).expect("workspace render should succeed");
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+            .expect("workspace render should succeed");
 
         let rendered = format!("{}", terminal.backend());
         let rows: Vec<&str> = rendered.lines().collect();
@@ -950,7 +996,8 @@ mod tests {
             }),
         };
 
-        draw_workspace_frame(&mut terminal, &model, true).expect("workspace render should succeed");
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+            .expect("workspace render should succeed");
 
         let rendered = format!("{}", terminal.backend());
         let rows: Vec<&str> = rendered.lines().collect();

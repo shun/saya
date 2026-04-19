@@ -167,7 +167,7 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
     .expect("config file");
 
     let mut terminal_backend = DummyTerminalBackend::default();
-    let (outcome, terminal_session) = prepare_launch_and_start_terminal(
+    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
         LaunchRequest {
             input_source: InputSource::Empty,
             config_source: ConfigSource::File(config_path.clone()),
@@ -176,9 +176,9 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
         &mut terminal_backend,
     )
     .expect("startup config should prepare callback seed");
-    assert!(terminal_session.is_raw_mode_enabled());
-    assert!(terminal_session.is_alternate_screen_enabled());
-    drop(terminal_session);
+    assert!(terminal_broker.is_raw_mode_enabled());
+    assert!(terminal_broker.is_alternate_screen_enabled());
+    drop(terminal_broker);
     assert_eq!(
         terminal_backend.calls,
         vec![
@@ -252,7 +252,7 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
     .expect("config file");
 
     let mut terminal_backend = DummyTerminalBackend::default();
-    let (outcome, terminal_session) = prepare_launch_and_start_terminal(
+    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
         LaunchRequest {
             input_source: InputSource::Empty,
             config_source: ConfigSource::File(config_path.clone()),
@@ -262,9 +262,9 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
     )
     .expect("startup config should prepare callback seed");
 
-    assert!(terminal_session.is_raw_mode_enabled());
-    assert!(terminal_session.is_alternate_screen_enabled());
-    drop(terminal_session);
+    assert!(terminal_broker.is_raw_mode_enabled());
+    assert!(terminal_broker.is_alternate_screen_enabled());
+    drop(terminal_broker);
     assert_eq!(
         terminal_backend.calls,
         vec![
@@ -396,6 +396,7 @@ impl RuntimeHostSession for RecordingRuntimeHostSession {
             transient_message,
             follow_up_events,
             shutdown_intent,
+            presentation_intents: Vec::new(),
         })
     }
 }
@@ -403,6 +404,9 @@ impl RuntimeHostSession for RecordingRuntimeHostSession {
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_through_normalized_outcome()
  {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("live-session-owner-init.ts");
     std::fs::write(
         &config_path,
@@ -445,6 +449,7 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
             transient_message: Some("Saved successfully".to_string()),
             requires_redraw: true,
             shutdown_intent: None,
+            presentation_intents: Vec::new(),
         }
     );
     assert_eq!(
@@ -475,6 +480,9 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_follow_up_events() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("live-session-owner-shutdown-init.ts");
     std::fs::write(
         &config_path,
@@ -513,6 +521,7 @@ async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_fo
             transient_message: Some("Saved successfully".to_string()),
             requires_redraw: true,
             shutdown_intent: Some(RuntimeShutdownIntent::UserQuit),
+            presentation_intents: Vec::new(),
         }
     );
     assert_eq!(
@@ -539,6 +548,9 @@ async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_fo
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_projects_callback_failure_into_transient_message_and_redraw() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("live-session-owner-failure-init.ts");
     std::fs::write(
         &config_path,
@@ -604,6 +616,7 @@ fn runtime_outcome_projector_requests_redraw_for_callback_failure_messages() {
             ),
             requires_redraw: true,
             shutdown_intent: None,
+            presentation_intents: Vec::new(),
         }
     );
 }

@@ -494,13 +494,11 @@ fn pty_smoke_renders_split_and_rollback_display() {
     let target_path = unique_path("pty-smoke");
     std::fs::write(&target_path, "alpha\nbeta\ngamma\n").expect("test target should be writable");
     let transcript_path = unique_path("pty-smoke-transcript");
-    let cargo_target_dir = unique_path("pty-smoke-target-dir");
-    std::fs::create_dir_all(&cargo_target_dir).expect("pty smoke target dir should be creatable");
+    let cargo_target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
 
     let build_output = Command::new("gtimeout")
         .arg("120")
         .env("VIM_CORE_FROM_SOURCE", "1")
-        .env("CARGO_TARGET_DIR", &cargo_target_dir)
         .arg("cargo")
         .arg("build")
         .arg("--bin")
@@ -534,7 +532,6 @@ fn pty_smoke_renders_split_and_rollback_display() {
     let transcript = std::fs::read_to_string(&transcript_path).unwrap_or_default();
     let _ = std::fs::remove_file(&target_path);
     let _ = std::fs::remove_file(&transcript_path);
-    let _ = std::fs::remove_dir_all(&cargo_target_dir);
 
     assert!(
         output.status.success(),
@@ -555,6 +552,22 @@ fn pty_smoke_renders_split_and_rollback_display() {
     assert!(
         transcript.contains("[pty-smoke] rollback draw"),
         "transcript should include the rollback draw marker: {transcript}"
+    );
+    assert!(
+        transcript.contains("[pty-smoke] resize draw"),
+        "transcript should include the resize draw marker: {transcript}"
+    );
+    assert!(
+        transcript.contains("[pty-smoke] save result"),
+        "transcript should include the save result marker: {transcript}"
+    );
+    assert!(
+        transcript.contains("[pty-smoke] quit reason: UserQuit"),
+        "transcript should include the normal quit marker: {transcript}"
+    );
+    assert!(
+        transcript.contains("[pty-smoke] force quit reason: UserForceQuit"),
+        "transcript should include the force quit marker: {transcript}"
     );
     assert!(
         transcript.contains("pty-smoke") && transcript.contains("NORMAL"),

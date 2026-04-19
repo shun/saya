@@ -46,6 +46,12 @@ fn cwd_test_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn startup_suite_scope_statement() -> &'static str {
     "main startup and session orchestration suite for host/application launch preparation, session guard cleanup, bootstrap cleanup, startup warning routing, and initial projection"
 }
@@ -168,6 +174,7 @@ impl TerminalBackend for RecordingTerminalBackend {
 /// CLI 引数パースから起動完了まで、既存ファイル起動の一連の流れが成立する。
 #[test]
 fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
+    let _lock = test_lock();
     let target_path = unique_path("existing-file");
     let target_content = "Hello Saya\nSecond line\n";
     std::fs::write(&target_path, target_content).expect("テストファイルの作成");
@@ -215,6 +222,7 @@ fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
 /// ScreenModel に "[新規]" 表示が反映される。
 #[test]
 fn new_buffer_startup_flow_without_target_path() {
+    let _lock = test_lock();
     // 1. CLI 引数パース（対象パスなし）
     let request =
         parse_launch_request::<&[&str], &&str>(&[]).expect("空引数のパースが成功すること");
@@ -251,6 +259,7 @@ fn new_buffer_startup_flow_without_target_path() {
 /// 存在しないファイルを指定した場合、起動失敗として BootstrapError を返す。
 #[test]
 fn read_failure_startup_flow_returns_fatal_error() {
+    let _lock = test_lock();
     let missing_path = unique_path("nonexistent");
 
     // 1. CLI 引数パース
@@ -275,6 +284,7 @@ fn read_failure_startup_flow_returns_fatal_error() {
 /// 読み込み不能ファイル（権限不足）で起動失敗となる。
 #[test]
 fn read_failure_startup_flow_for_permission_denied() {
+    let _lock = test_lock();
     let restricted_path = unique_path("permission-denied");
     std::fs::write(&restricted_path, "restricted").expect("テストファイルの作成");
 
@@ -311,6 +321,7 @@ fn read_failure_startup_flow_for_permission_denied() {
 /// 起動準備が失敗した場合、terminal lifecycle backend が一切触られない。
 #[test]
 fn startup_failure_leaves_terminal_lifecycle_uninitialized() {
+    let _lock = test_lock();
     let missing_path = unique_path("terminal-uninitialized");
     let request = LaunchRequest {
         input_source: InputSource::File(missing_path),
@@ -334,6 +345,7 @@ fn startup_failure_leaves_terminal_lifecycle_uninitialized() {
 /// 起動失敗後にセッションガードが解放され、再度起動可能であることを確認する。
 #[test]
 fn session_guard_released_after_startup_failure() {
+    let _lock = test_lock();
     let missing_path = unique_path("session-cleanup");
 
     // 1. 最初の起動試行（失敗する）
@@ -359,6 +371,7 @@ fn session_guard_released_after_startup_failure() {
 /// 起動成功後に outcome を drop すると、セッションガードが解放される。
 #[test]
 fn session_guard_released_after_successful_startup_outcome_dropped() {
+    let _lock = test_lock();
     // 1. 成功起動
     {
         let _outcome = prepare_launch(LaunchRequest {
@@ -455,6 +468,7 @@ fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
 /// 設定ファイル付きの起動で config が warning なく読み込まれる。
 #[test]
 fn startup_with_vim_style_u_option_loads_config_without_warning() {
+    let _lock = test_lock();
     let config_path = unique_path("config-ok.json");
     std::fs::write(&config_path, "{ \"tabSize\": 4 }").expect("設定ファイルの作成");
 
@@ -481,6 +495,7 @@ fn startup_with_vim_style_u_option_loads_config_without_warning() {
 /// 存在しない設定ファイルを指定した場合、warning 付きで既定値起動する。
 #[test]
 fn startup_with_missing_config_falls_back_with_warning() {
+    let _lock = test_lock();
     let missing_config = unique_path("config-missing.json");
 
     let request = parse_launch_request(["--config", missing_config.to_str().unwrap()])
@@ -498,6 +513,7 @@ fn startup_with_missing_config_falls_back_with_warning() {
 
 #[test]
 fn startup_warning_projects_into_initial_message_line() {
+    let _lock = test_lock();
     let missing_config = unique_path("config-warning-projection.json");
 
     let request = parse_launch_request(["--config", missing_config.to_str().unwrap()])
@@ -518,6 +534,7 @@ fn startup_warning_projects_into_initial_message_line() {
 
 #[test]
 fn startup_from_stdin_populates_initial_snapshot() {
+    let _lock = test_lock();
     let request = parse_launch_request(["-"]).expect("CLI 引数のパースが成功すること");
     let mut stdin = Cursor::new("stdin line 1\nstdin line 2\n");
 
@@ -534,6 +551,7 @@ fn startup_from_stdin_populates_initial_snapshot() {
 
 #[test]
 fn startup_with_initial_line_number_moves_cursor_to_requested_line() {
+    let _lock = test_lock();
     let target_path = unique_path("cursor-line");
     std::fs::write(&target_path, "line1\nline2\nline3\n").expect("テストファイルの作成");
 
@@ -549,6 +567,7 @@ fn startup_with_initial_line_number_moves_cursor_to_requested_line() {
 
 #[test]
 fn startup_with_end_of_file_moves_cursor_to_last_line() {
+    let _lock = test_lock();
     let target_path = unique_path("cursor-end");
     std::fs::write(&target_path, "line1\nline2\nline3\n").expect("テストファイルの作成");
 
@@ -564,6 +583,7 @@ fn startup_with_end_of_file_moves_cursor_to_last_line() {
 
 #[test]
 fn startup_with_read_only_rejects_save_request() {
+    let _lock = test_lock();
     let target_path = unique_path("read-only");
     std::fs::write(&target_path, "line1\n").expect("テストファイルの作成");
 
@@ -580,6 +600,7 @@ fn startup_with_read_only_rejects_save_request() {
 
 #[test]
 fn startup_with_dash_dash_accepts_leading_dash_file_name() {
+    let _lock = test_lock();
     let target_path = unique_path("-leading-name.txt");
     std::fs::write(&target_path, "dash file\n").expect("テストファイルの作成");
 
@@ -595,6 +616,7 @@ fn startup_with_dash_dash_accepts_leading_dash_file_name() {
 
 #[test]
 fn startup_with_relative_config_path_resolves_line_numbers_from_current_directory() {
+    let _lock = test_lock();
     let _cwd_lock = cwd_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

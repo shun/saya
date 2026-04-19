@@ -4,9 +4,10 @@
 /// 代表的な editing-flow smoke のみを残す。
 /// Requirements: 2.1, 2.2, 2.3, 2.4, 2.5
 use std::path::PathBuf;
+use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{BootstrapOutcome, prepare_launch};
+use saya::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
 use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::editor_session::EditorSessionState;
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
@@ -19,6 +20,12 @@ fn unique_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-integ-edit-{name}-{nanos}"))
+}
+
+fn test_lock() -> MutexGuard<'static, ()> {
+    launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// テスト用に起動済みセッションを生成するヘルパー。
@@ -52,6 +59,7 @@ fn launch_empty() -> BootstrapOutcome {
 /// CoreBridge + InputRouter + ScreenModel を横断して成立する。
 #[test]
 fn mode_transition_flow_through_input_router_to_screen_model() {
+    let _lock = test_lock();
     let mut outcome = launch_with_content("hello\n");
 
     // 起動直後はノーマルモード
@@ -99,6 +107,7 @@ fn mode_transition_flow_through_input_router_to_screen_model() {
 // are application responsibilities.
 #[test]
 fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
+    let _lock = test_lock();
     let mut outcome = launch_with_content("line1\nline2\nline3\nline4\nline5\nline6\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
     let mut viewport = ViewportState::new();
@@ -132,6 +141,7 @@ fn viewport_auto_scroll_keeps_cursor_visible_during_vertical_motion() {
 /// page scroll は cursor 位置ではなく core window の topline を信頼して投影する。
 #[test]
 fn page_scroll_uses_core_window_topline_for_forward_and_backward_motion() {
+    let _lock = test_lock();
     let content = (1..=40)
         .map(|line| format!("line{line}"))
         .collect::<Vec<_>>()
@@ -235,6 +245,7 @@ fn page_scroll_uses_core_window_topline_for_forward_and_backward_motion() {
 // coverage.
 #[test]
 fn visual_selection_is_projected_for_rendering() {
+    let _lock = test_lock();
     let mut outcome = launch_with_content("alpha beta gamma\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
@@ -266,6 +277,7 @@ fn visual_selection_is_projected_for_rendering() {
 // host-integration: basic input-to-screen-model smoke coverage.
 #[test]
 fn text_input_reflected_in_screen_model_lines() {
+    let _lock = test_lock();
     let mut outcome = launch_empty();
     let session_state = EditorSessionState::new(None);
 
@@ -292,6 +304,7 @@ fn text_input_reflected_in_screen_model_lines() {
 // presentation concern.
 #[test]
 fn tab_size_setting_changes_screen_projection_for_tabs() {
+    let _lock = test_lock();
     let mut outcome = launch_with_content("\ta\n");
     let session_state = EditorSessionState::new_with_tab_size(outcome.target_path.clone(), 4);
 
@@ -310,6 +323,7 @@ fn tab_size_setting_changes_screen_projection_for_tabs() {
 /// 編集操作を通じて dirty 状態が ScreenModel に正しく追随する。
 #[test]
 fn dirty_state_follows_editing_in_screen_model() {
+    let _lock = test_lock();
     let mut outcome = launch_with_content("initial\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
@@ -339,6 +353,7 @@ fn dirty_state_follows_editing_in_screen_model() {
 // delete-driven edits.
 #[test]
 fn dirty_state_set_after_delete_operation() {
+    let _lock = test_lock();
     let mut outcome = launch_with_content("hello\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
 
@@ -358,6 +373,7 @@ fn dirty_state_set_after_delete_operation() {
 /// 正しく反映されることを確認する。
 #[test]
 fn full_editing_flow_mode_move_insert_delete() {
+    let _lock = test_lock();
     let mut outcome = launch_with_content("line1\nline2\nline3\n");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
     let initial_model = project(&ProjectionInput::new(

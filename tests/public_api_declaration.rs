@@ -16,6 +16,27 @@ fn startup_public_api_type_declaration_covers_formal_configuration_surface() {
 }
 
 #[test]
+fn startup_public_api_type_declaration_does_not_expose_runtime_or_gui_transport_details() {
+    let declaration = STARTUP_SAYA_TYPE_DECLARATION.to_ascii_lowercase();
+
+    for forbidden in [
+        "overlay",
+        "graphics",
+        "protocol",
+        "bytes",
+        "kitty",
+        "sixel",
+        "window.open",
+        "gpu",
+    ] {
+        assert!(
+            !declaration.contains(forbidden),
+            "startup declaration should stay TUI-only and avoid transport leaks: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     let declaration = RUNTIME_SAYA_TYPE_DECLARATION;
 
@@ -25,4 +46,27 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("window"));
     assert!(declaration.contains("editor"));
     assert!(declaration.contains("SayaRuntimeSurface"));
+}
+
+#[test]
+fn runtime_public_api_type_declaration_does_not_expose_transport_specific_presentation_details()
+{
+    let declaration = RUNTIME_SAYA_TYPE_DECLARATION.to_ascii_lowercase();
+
+    for forbidden in [
+        "overlay",
+        "graphics",
+        "protocol",
+        "bytes",
+        "asset",
+        "kitty",
+        "sixel",
+        "wgpu",
+        "neovim",
+    ] {
+        assert!(
+            !declaration.contains(forbidden),
+            "runtime declaration should keep presentation transport private: {forbidden}"
+        );
+    }
 }
