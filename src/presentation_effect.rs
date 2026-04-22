@@ -95,8 +95,7 @@ impl PresentationEffectProjectorService for PresentationEffectProjector {
         runtime_effects: &[RuntimePresentationIntent],
         capabilities: &TerminalCapabilityProfile,
     ) -> PresentationState {
-        let global_message_line =
-            Self::fallback_message(workspace, runtime_effects, capabilities);
+        let global_message_line = Self::fallback_message(workspace, runtime_effects, capabilities);
         let overlays = if capabilities.inline_graphics.is_some() {
             runtime_effects
                 .iter()

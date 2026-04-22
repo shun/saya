@@ -13,6 +13,7 @@ use saya::app_startup::{prepare_launch_and_start_terminal, prepare_tui_startup_c
 use saya::architecture_compliance::ArchitectureComplianceGuard;
 use saya::cli::LaunchRequest;
 use saya::event_loop::EventLoopCoordinator;
+use saya::input_loop::TerminalEventSource;
 use saya::optional_graphics::{
     OptionalGraphicsAdapter, OverlayRenderResult, RecordingOverlayWriter,
 };
@@ -23,19 +24,18 @@ use saya::presentation_effect::{
     OverlayContentKey, OverlayTarget, PresentationEffectProjector,
     PresentationEffectProjectorService, RuntimePresentationIntent,
 };
-use saya::input_loop::TerminalEventSource;
+use saya::screen_model::{CommandLineModel, PaneRect, ScreenModel, WorkspaceScreenModel};
 use saya::terminal_capability::{
     CapabilityDegradationReason, InlineGraphicsProbeResult, TerminalCapabilityObservation,
     TerminalCapabilityProbe, TerminalCapabilityProbeService, TerminalSessionKind,
     TextStyleCapability,
 };
+use saya::terminal_io_broker::TerminalIoPhase;
+use saya::terminal_lifecycle::TerminalBackend;
 use saya::tui_render_coordinator::{
     RenderFrameRequest, RenderTextMode, TuiRenderCoordinator, TuiRenderCoordinatorService,
 };
-use saya::terminal_io_broker::TerminalIoPhase;
-use saya::terminal_lifecycle::TerminalBackend;
 use saya::ui_surface::{UiFeatureRequest, UiSurfaceMode, UiSurfacePolicy, UiSurfacePolicyService};
-use saya::screen_model::{CommandLineModel, PaneRect, ScreenModel, WorkspaceScreenModel};
 
 fn tui_only_architecture_suite_scope_statement() -> &'static str {
     "host/application TUI-only architecture suite for startup policy, dependency drift guard, terminal phase ownership, capability degradation, and portability"
@@ -58,24 +58,38 @@ fn tui_surface_policy_pins_tui_only_mode_and_rejects_out_of_scope_surfaces() {
     let policy = UiSurfacePolicy::default();
 
     assert_eq!(policy.resolve_mode(), UiSurfaceMode::TuiOnly);
-    assert_eq!(policy.validate_feature_request(UiFeatureRequest::CoreEditing), Ok(()));
-    assert_eq!(policy.validate_feature_request(UiFeatureRequest::StyledText), Ok(()));
+    assert_eq!(
+        policy.validate_feature_request(UiFeatureRequest::CoreEditing),
+        Ok(())
+    );
+    assert_eq!(
+        policy.validate_feature_request(UiFeatureRequest::StyledText),
+        Ok(())
+    );
     assert_eq!(
         policy.validate_feature_request(UiFeatureRequest::InlineGraphics),
         Ok(())
     );
-    assert!(policy
-        .validate_feature_request(UiFeatureRequest::DedicatedGuiWindow)
-        .is_err());
-    assert!(policy
-        .validate_feature_request(UiFeatureRequest::DirectGpuRendering)
-        .is_err());
-    assert!(policy
-        .validate_feature_request(UiFeatureRequest::GuiCompatibility)
-        .is_err());
-    assert!(policy
-        .validate_feature_request(UiFeatureRequest::NeovimCompatibility)
-        .is_err());
+    assert!(
+        policy
+            .validate_feature_request(UiFeatureRequest::DedicatedGuiWindow)
+            .is_err()
+    );
+    assert!(
+        policy
+            .validate_feature_request(UiFeatureRequest::DirectGpuRendering)
+            .is_err()
+    );
+    assert!(
+        policy
+            .validate_feature_request(UiFeatureRequest::GuiCompatibility)
+            .is_err()
+    );
+    assert!(
+        policy
+            .validate_feature_request(UiFeatureRequest::NeovimCompatibility)
+            .is_err()
+    );
 }
 
 #[test]
@@ -104,8 +118,7 @@ fn architecture_compliance_guard_rejects_gui_gpu_dependencies_from_manifest_and_
 #[test]
 fn architecture_compliance_guard_accepts_the_repository_dependency_set() {
     let guard = ArchitectureComplianceGuard::default();
-    let manifest =
-        std::fs::read_to_string("Cargo.toml").expect("Cargo.toml should be readable");
+    let manifest = std::fs::read_to_string("Cargo.toml").expect("Cargo.toml should be readable");
     let lockfile = std::fs::read_to_string("Cargo.lock").expect("Cargo.lock should be readable");
 
     guard
@@ -192,7 +205,10 @@ async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_inter
         .start_interactive_input(sender, IdleEventSource)
         .expect("interactive input should start after probe");
     broker.request_shutdown();
-    broker.shutdown().await.expect("broker shutdown should restore terminal");
+    broker
+        .shutdown()
+        .await
+        .expect("broker shutdown should restore terminal");
 
     assert_eq!(
         backend.calls,
@@ -252,10 +268,19 @@ fn prepare_tui_startup_context_composes_policy_probe_and_runtime_owner_before_ev
     let startup = prepare_tui_startup_context(LaunchRequest::default(), &mut backend, &mut probe)
         .expect("startup context should compose launch, probe, and runtime wiring");
 
-    assert_eq!(startup.terminal_broker.surface_mode(), UiSurfaceMode::TuiOnly);
+    assert_eq!(
+        startup.terminal_broker.surface_mode(),
+        UiSurfaceMode::TuiOnly
+    );
     assert_eq!(startup.terminal_broker.phase(), TerminalIoPhase::Probe);
-    assert_eq!(startup.capability_profile.session_kind, TerminalSessionKind::Local);
-    assert_eq!(startup.capability_profile.text_style, TextStyleCapability::TrueColor);
+    assert_eq!(
+        startup.capability_profile.session_kind,
+        TerminalSessionKind::Local
+    );
+    assert_eq!(
+        startup.capability_profile.text_style,
+        TextStyleCapability::TrueColor
+    );
     assert_eq!(
         startup.terminal_broker.capability_profile(),
         Some(&startup.capability_profile)
@@ -302,7 +327,7 @@ fn capability_probe_degrades_graphics_without_blocking_core_workflow_across_term
 
 #[test]
 fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_leaking_protocol_state()
-{
+ {
     let workspace = WorkspaceScreenModel {
         panes: vec![ScreenModel {
             window_id: 7,
@@ -346,15 +371,26 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             styled_text: true,
             truecolor: true,
         },
-        InlineGraphicsProbeResult::Supported(saya::terminal_capability::InlineGraphicsProtocol::Kitty),
+        InlineGraphicsProbeResult::Supported(
+            saya::terminal_capability::InlineGraphicsProtocol::Kitty,
+        ),
     )
     .detect();
 
     let projector = PresentationEffectProjector::default();
     let presentation = projector.project(&workspace, &runtime_intents, &capabilities);
 
-    assert_eq!(presentation.global_message_line.as_deref(), Some("existing warning"));
-    assert_eq!(presentation.command_line.as_ref().map(|line| line.text.as_str()), Some(":write"));
+    assert_eq!(
+        presentation.global_message_line.as_deref(),
+        Some("existing warning")
+    );
+    assert_eq!(
+        presentation
+            .command_line
+            .as_ref()
+            .map(|line| line.text.as_str()),
+        Some(":write")
+    );
     assert_eq!(presentation.overlays.len(), 1);
     assert_eq!(
         presentation.overlays[0].content_key,
@@ -362,8 +398,14 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             id: "runtime.preview".to_string(),
         }
     );
-    assert_eq!(presentation.overlays[0].target, OverlayTarget::ActivePaneCorner);
-    assert_eq!(presentation.overlays[0].fallback_text, "preview unavailable");
+    assert_eq!(
+        presentation.overlays[0].target,
+        OverlayTarget::ActivePaneCorner
+    );
+    assert_eq!(
+        presentation.overlays[0].fallback_text,
+        "preview unavailable"
+    );
 }
 
 #[test]
@@ -442,12 +484,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
         OverlayContentKey::RuntimeRegistered {
             id: "runtime.preview".to_string(),
         },
-        OverlayAssetSource::Static(OverlayAssetMedia::png(
-            "preview",
-            8,
-            4,
-            b"preview".to_vec(),
-        )),
+        OverlayAssetSource::Static(OverlayAssetMedia::png("preview", 8, 4, b"preview".to_vec())),
     );
     let plain_capabilities = TerminalCapabilityProbe::new(
         TerminalCapabilityObservation {
@@ -476,14 +513,15 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             styled_text: true,
             truecolor: true,
         },
-        InlineGraphicsProbeResult::Supported(saya::terminal_capability::InlineGraphicsProtocol::Kitty),
+        InlineGraphicsProbeResult::Supported(
+            saya::terminal_capability::InlineGraphicsProtocol::Kitty,
+        ),
     )
     .detect();
     let adapter = OptionalGraphicsAdapter::new_failing_for_tests();
 
     let plain_presentation = projector.project(&workspace, &runtime_intents, &plain_capabilities);
-    let styled_presentation =
-        projector.project(&workspace, &runtime_intents, &styled_capabilities);
+    let styled_presentation = projector.project(&workspace, &runtime_intents, &styled_capabilities);
     let graphics_presentation =
         projector.project(&workspace, &runtime_intents, &graphics_capabilities);
 
@@ -518,10 +556,22 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
     assert_eq!(plain.text_mode, RenderTextMode::Plain);
     assert_eq!(styled.text_mode, RenderTextMode::StyledTrueColor);
     assert_eq!(graphics.text_mode, RenderTextMode::StyledTrueColor);
-    assert_eq!(plain.rendered_workspace.panes[0].lines, workspace.panes[0].lines);
-    assert_eq!(styled.rendered_workspace.panes[0].lines, workspace.panes[0].lines);
-    assert_eq!(graphics.rendered_workspace.panes[0].lines, workspace.panes[0].lines);
-    assert_eq!(graphics.overlay_results, vec![OverlayRenderResult::FallbackToText]);
+    assert_eq!(
+        plain.rendered_workspace.panes[0].lines,
+        workspace.panes[0].lines
+    );
+    assert_eq!(
+        styled.rendered_workspace.panes[0].lines,
+        workspace.panes[0].lines
+    );
+    assert_eq!(
+        graphics.rendered_workspace.panes[0].lines,
+        workspace.panes[0].lines
+    );
+    assert_eq!(
+        graphics.overlay_results,
+        vec![OverlayRenderResult::FallbackToText]
+    );
     assert_eq!(
         graphics.rendered_workspace.global_message_line.as_deref(),
         Some("preview unavailable")

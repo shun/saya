@@ -43,10 +43,8 @@ pub enum OverlayRenderResult {
 }
 
 pub trait OptionalGraphicsAdapterService {
-    fn negotiate(
-        &self,
-        capabilities: &TerminalCapabilityProfile,
-    ) -> Option<InlineGraphicsProtocol>;
+    fn negotiate(&self, capabilities: &TerminalCapabilityProfile)
+    -> Option<InlineGraphicsProtocol>;
     fn project_request<'a>(
         &self,
         intent: &'a PresentationOverlayIntent,

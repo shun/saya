@@ -94,7 +94,9 @@ impl TuiRenderCoordinator {
     ) -> Result<TuiRenderOutcome, RenderFrameError> {
         match render_result {
             Ok(workspace) => {
-                let presentation = self.projector.project(&workspace, runtime_effects, capabilities);
+                let presentation =
+                    self.projector
+                        .project(&workspace, runtime_effects, capabilities);
                 self.render_workspace_with_presentation(
                     &workspace,
                     capabilities,
@@ -196,9 +198,9 @@ impl TuiRenderCoordinator {
                 Self::ensure_fallback_message(&mut rendered_workspace, &overlay.fallback_text);
                 continue;
             };
-            let Some(graphics_request) = self
-                .graphics_adapter
-                .project_request(overlay, snapshot, &rendered_workspace)
+            let Some(graphics_request) =
+                self.graphics_adapter
+                    .project_request(overlay, snapshot, &rendered_workspace)
             else {
                 overlay_results.push(OverlayRenderResult::FallbackToText);
                 Self::ensure_fallback_message(&mut rendered_workspace, &overlay.fallback_text);

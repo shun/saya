@@ -1,13 +1,19 @@
-use std::collections::VecDeque;
 use std::fmt;
 use std::path::Path;
 
 use vim_core_rs::{
-    CoreCommandOutcome, CoreEvent, CoreHostAction, CoreMatchType, CoreMessageCategory,
-    CoreMessageEvent, CoreMessageSeverity, CoreSearchHighlightMode, CoreSearchQueryError,
-    CoreSessionError, CoreSnapshot, VimCoreSession,
+    CoreCommandOutcome, CoreEvent, CoreHostAction, CoreInputResponse, CoreInputResponseError,
+    CoreMatchType, CoreMessageCategory, CoreMessageEvent, CoreMessageSeverity,
+    CoreSearchHighlightMode, CoreSearchQueryError, CoreSessionError, CoreSnapshot, VimCoreSession,
 };
 
+use crate::core_outcome::{
+    NormalizedCoreOutcome, NormalizedHostDirective, NormalizedNotification, NormalizedOutcomeBatch,
+    NormalizedOutcomeQueue, NormalizedPrompt, NormalizedStructuralOutcome, OutcomeOrigin,
+    OutcomeTrace, PromptResponseDisposition, core_event_raw_kind, core_host_action_raw_kind,
+    normalize_core_event, normalize_host_action,
+};
+use crate::core_prompt::{PromptResponseCommand, PromptResponseError, PromptResponseRejection};
 use crate::search_capability::SearchCapabilityContract;
 use crate::search_query::{
     SearchMatch, SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery,
@@ -23,10 +29,17 @@ pub struct VisualSelection {
     pub end_col: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingRedrawRequest {
+    pub full: bool,
+    pub clear_before_draw: bool,
+}
+
 pub struct CoreBridge {
     session: VimCoreSession,
-    pending_host_actions: VecDeque<CoreHostAction>,
-    pending_messages: VecDeque<CoreMessageEvent>,
+    pending_outcomes: NormalizedOutcomeQueue,
+    next_outcome_sequence: u64,
+    active_input_correlation_id: Option<u64>,
     pending_transport_key: Option<String>,
 }
 
@@ -49,8 +62,9 @@ impl CoreBridge {
         log::debug!("[core_bridge] vim-core-rs session initialized");
         Ok(Self {
             session,
-            pending_host_actions: VecDeque::new(),
-            pending_messages: VecDeque::new(),
+            pending_outcomes: NormalizedOutcomeQueue::default(),
+            next_outcome_sequence: 1,
+            active_input_correlation_id: None,
             pending_transport_key: None,
         })
     }
@@ -87,22 +101,140 @@ impl CoreBridge {
 
     pub fn take_pending_host_actions(&mut self) -> Vec<CoreHostAction> {
         self.drain_pending_host_actions_from_session();
-        let actions = self.pending_host_actions.drain(..).collect::<Vec<_>>();
+        let actions = self
+            .pending_outcomes
+            .take_matching(|outcome| matches!(outcome, NormalizedCoreOutcome::HostDirective(_)))
+            .into_iter()
+            .filter_map(legacy_host_action_from_normalized)
+            .collect::<Vec<_>>();
         log::debug!(
-            "[core_bridge] drained pending host actions: count={}",
+            "[core_bridge] projected pending host actions from normalized outcomes: count={}",
             actions.len()
         );
         actions
     }
 
     pub fn take_pending_messages(&mut self) -> Vec<CoreMessageEvent> {
-        self.drain_pending_messages_from_session();
-        let messages = self.pending_messages.drain(..).collect::<Vec<_>>();
+        self.drain_pending_events_from_session();
+        let messages = self
+            .pending_outcomes
+            .take_matching(|outcome| {
+                matches!(
+                    outcome,
+                    NormalizedCoreOutcome::Notification(NormalizedNotification::Message { .. })
+                )
+            })
+            .into_iter()
+            .filter_map(legacy_message_from_normalized)
+            .collect::<Vec<_>>();
         log::debug!(
-            "[core_bridge] drained pending core messages: count={}",
+            "[core_bridge] projected pending core messages from normalized outcomes: count={}",
             messages.len()
         );
         messages
+    }
+
+    pub fn take_pending_redraw_requests(&mut self) -> Vec<PendingRedrawRequest> {
+        self.drain_pending_events_from_session();
+        let redraw_requests = self
+            .pending_outcomes
+            .take_matching(|outcome| {
+                matches!(
+                    outcome,
+                    NormalizedCoreOutcome::Structural(
+                        NormalizedStructuralOutcome::RedrawRequested { .. }
+                    )
+                )
+            })
+            .into_iter()
+            .filter_map(legacy_redraw_request_from_normalized)
+            .collect::<Vec<_>>();
+        log::debug!(
+            "[core_bridge] projected pending redraw requests from normalized outcomes: count={}",
+            redraw_requests.len()
+        );
+        redraw_requests
+    }
+
+    pub fn take_normalized_outcomes(&mut self) -> NormalizedOutcomeBatch {
+        self.drain_pending_host_actions_from_session();
+        self.drain_pending_events_from_session();
+        let batch = self.pending_outcomes.drain();
+        log::debug!(
+            "[core_bridge] drained normalized core outcomes: count={}",
+            batch.outcomes().len()
+        );
+        batch
+    }
+
+    pub fn respond_to_prompt(
+        &mut self,
+        command: PromptResponseCommand,
+    ) -> Result<NormalizedOutcomeBatch, PromptResponseError> {
+        let actual = command.correlation_id();
+        let Some(expected) = self.active_input_correlation_id else {
+            log::debug!(
+                "[core_bridge] prompt response rejected before core call: no active prompt, actual={}",
+                actual
+            );
+            return Err(PromptResponseError::NoActivePrompt);
+        };
+        if expected != actual {
+            log::debug!(
+                "[core_bridge] prompt response rejected before core call: expected={}, actual={}",
+                expected,
+                actual
+            );
+            return Err(PromptResponseError::CorrelationMismatch { expected, actual });
+        }
+
+        let (response, disposition, raw_kind) = match command {
+            PromptResponseCommand::Submit {
+                correlation_id,
+                value,
+            } => (
+                CoreInputResponse::Submitted {
+                    correlation_id,
+                    value,
+                },
+                PromptResponseDisposition::Submitted,
+                "PromptResponse::Submit",
+            ),
+            PromptResponseCommand::Cancel { correlation_id } => (
+                CoreInputResponse::Cancelled { correlation_id },
+                PromptResponseDisposition::Cancelled,
+                "PromptResponse::Cancel",
+            ),
+        };
+
+        log::debug!(
+            "[core_bridge] submitting prompt response to core: correlation_id={}, disposition={:?}",
+            actual,
+            disposition
+        );
+        let tx = self
+            .session
+            .submit_input_response(response)
+            .map_err(map_input_response_error)?;
+
+        let mut outcomes = Vec::new();
+        let trace = self.next_outcome_trace(OutcomeOrigin::BridgePromptResponse, raw_kind);
+        outcomes.push(NormalizedCoreOutcome::Prompt(
+            NormalizedPrompt::InputResponseAccepted {
+                correlation_id: actual,
+                disposition,
+                trace,
+            },
+        ));
+        self.active_input_correlation_id = None;
+        self.collect_transaction_artifacts_into(&tx, &mut outcomes);
+
+        log::debug!(
+            "[core_bridge] prompt response normalized batch ready: correlation_id={}, count={}",
+            actual,
+            outcomes.len()
+        );
+        Ok(NormalizedOutcomeBatch::new(outcomes))
     }
 
     /// キー入力を vim-core-rs セッションに適用する。
@@ -518,11 +650,18 @@ impl CoreBridge {
         } else {
             "Type  :qa  and press <Enter> to exit Vim"
         };
-        self.pending_messages.push_back(CoreMessageEvent {
+        let event = CoreMessageEvent {
             severity: CoreMessageSeverity::Info,
             category: CoreMessageCategory::UserVisible,
             content: content.to_string(),
-        });
+        };
+        let trace = self.next_outcome_trace(
+            OutcomeOrigin::PendingSessionEvent,
+            "CoreBridge::CtrlCExitGuidance",
+        );
+        self.enqueue_normalized_outcome(NormalizedCoreOutcome::Notification(
+            NormalizedNotification::Message { event, trace },
+        ));
 
         Ok(CoreCommandOutcome::NoChange)
     }
@@ -538,48 +677,139 @@ impl CoreBridge {
 
     fn queue_transaction_artifacts(&mut self, tx: &vim_core_rs::CoreCommandTransaction) {
         for action in &tx.host_actions {
-            log::debug!(
-                "[core_bridge] queued host action from transaction: {:?}",
-                action
-            );
-            self.pending_host_actions.push_back(action.clone());
+            self.queue_host_action(action, OutcomeOrigin::TransactionHostAction);
         }
 
         for event in &tx.events {
-            if let CoreEvent::Message(message) = event {
+            self.queue_core_event(event, OutcomeOrigin::TransactionEvent);
+        }
+    }
+
+    fn collect_transaction_artifacts_into(
+        &mut self,
+        tx: &vim_core_rs::CoreCommandTransaction,
+        outcomes: &mut Vec<NormalizedCoreOutcome>,
+    ) {
+        for action in &tx.host_actions {
+            let raw_kind = core_host_action_raw_kind(action);
+            let trace = self.next_outcome_trace(OutcomeOrigin::TransactionHostAction, raw_kind);
+            log::debug!(
+                "[core_bridge] normalized prompt-response transaction host action: raw_kind={}, action={:?}",
+                raw_kind,
+                action
+            );
+            outcomes.push(normalize_host_action(action, trace));
+            if let CoreHostAction::RequestInput { correlation_id, .. } = action {
                 log::debug!(
-                    "[core_bridge] queued core message from transaction: severity={:?}, category={:?}, content={:?}",
-                    message.severity,
-                    message.category,
-                    message.content
+                    "[core_bridge] recorded active input prompt correlation from response transaction: correlation_id={}",
+                    correlation_id
                 );
-                self.pending_messages.push_back(message.clone());
+                self.active_input_correlation_id = Some(*correlation_id);
             }
+        }
+
+        for event in &tx.events {
+            let raw_kind = core_event_raw_kind(event);
+            let trace = self.next_outcome_trace(OutcomeOrigin::TransactionEvent, raw_kind);
+            log::debug!(
+                "[core_bridge] normalized prompt-response transaction event: raw_kind={}, event={:?}",
+                raw_kind,
+                event
+            );
+            outcomes.push(normalize_core_event(event, trace));
         }
     }
 
     fn drain_pending_host_actions_from_session(&mut self) {
         while let Some(action) = self.session.take_pending_host_action() {
-            log::debug!(
-                "[core_bridge] queued host action from pending session state: {:?}",
-                action
-            );
-            self.pending_host_actions.push_back(action);
+            self.queue_host_action(&action, OutcomeOrigin::PendingSessionHostAction);
         }
     }
 
-    fn drain_pending_messages_from_session(&mut self) {
+    fn drain_pending_events_from_session(&mut self) {
         while let Some(event) = self.session.take_pending_event() {
-            if let CoreEvent::Message(message) = event {
+            self.queue_core_event(&event, OutcomeOrigin::PendingSessionEvent);
+        }
+    }
+
+    fn queue_host_action(&mut self, action: &CoreHostAction, origin: OutcomeOrigin) {
+        let raw_kind = core_host_action_raw_kind(action);
+        log::debug!(
+            "[core_bridge] queued host action: origin={:?}, raw_kind={}, action={:?}",
+            origin,
+            raw_kind,
+            action
+        );
+        let trace = self.next_outcome_trace(origin, raw_kind);
+        self.enqueue_normalized_outcome(normalize_host_action(action, trace));
+        if let CoreHostAction::RequestInput { correlation_id, .. } = action {
+            log::debug!(
+                "[core_bridge] recorded active input prompt correlation: correlation_id={}",
+                correlation_id
+            );
+            self.active_input_correlation_id = Some(*correlation_id);
+        }
+    }
+
+    fn queue_core_event(&mut self, event: &CoreEvent, origin: OutcomeOrigin) {
+        let raw_kind = core_event_raw_kind(event);
+        let trace = self.next_outcome_trace(origin, raw_kind);
+        self.enqueue_normalized_outcome(normalize_core_event(event, trace));
+        match event {
+            CoreEvent::Message(message) => {
                 log::debug!(
-                    "[core_bridge] queued core message from pending session state: severity={:?}, category={:?}, content={:?}",
+                    "[core_bridge] queued core message: origin={:?}, severity={:?}, category={:?}, content={:?}",
+                    origin,
                     message.severity,
                     message.category,
                     message.content
                 );
-                self.pending_messages.push_back(message);
+            }
+            CoreEvent::Redraw {
+                full,
+                clear_before_draw,
+            } => {
+                log::debug!(
+                    "[core_bridge] queued redraw request: origin={:?}, full={}, clear_before_draw={}",
+                    origin,
+                    full,
+                    clear_before_draw
+                );
+            }
+            other => {
+                log::debug!(
+                    "[core_bridge] queued normalized-only core event: origin={:?}, raw_kind={}, event={:?}",
+                    origin,
+                    raw_kind,
+                    other
+                );
             }
         }
+    }
+
+    fn next_outcome_trace(
+        &mut self,
+        origin: OutcomeOrigin,
+        raw_kind: &'static str,
+    ) -> OutcomeTrace {
+        let trace = OutcomeTrace {
+            sequence: self.next_outcome_sequence,
+            origin,
+            raw_kind,
+        };
+        self.next_outcome_sequence += 1;
+        trace
+    }
+
+    fn enqueue_normalized_outcome(&mut self, outcome: NormalizedCoreOutcome) {
+        let trace = *outcome.trace();
+        log::debug!(
+            "[core_bridge] append normalized outcome: sequence={}, origin={:?}, raw_kind={}",
+            trace.sequence,
+            trace.origin,
+            trace.raw_kind
+        );
+        self.pending_outcomes.push_back(outcome);
     }
 }
 
@@ -611,6 +841,110 @@ fn normalize_selection_bounds(
     }
 }
 
+fn map_input_response_error(error: CoreInputResponseError) -> PromptResponseError {
+    match error {
+        CoreInputResponseError::NoPendingInput => {
+            PromptResponseError::CoreRejected(PromptResponseRejection::NoPendingInput)
+        }
+        CoreInputResponseError::CorrelationMismatch { expected, actual } => {
+            PromptResponseError::CoreRejected(PromptResponseRejection::CoreCorrelationMismatch {
+                expected,
+                actual,
+            })
+        }
+        CoreInputResponseError::Command(error) => PromptResponseError::CoreRejected(
+            PromptResponseRejection::CommandRejected(format!("{error:?}")),
+        ),
+    }
+}
+
+fn legacy_host_action_from_normalized(outcome: NormalizedCoreOutcome) -> Option<CoreHostAction> {
+    match outcome {
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Write {
+            path,
+            force,
+            issued_after_revision,
+            trace,
+        }) => {
+            log::debug!(
+                "[core_bridge] projected legacy write host action: sequence={}, revision={}",
+                trace.sequence,
+                issued_after_revision
+            );
+            Some(CoreHostAction::Write {
+                path,
+                force,
+                issued_after_revision,
+            })
+        }
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Quit {
+            force,
+            issued_after_revision,
+            trace,
+        }) => {
+            log::debug!(
+                "[core_bridge] projected legacy quit host action: sequence={}, revision={}",
+                trace.sequence,
+                issued_after_revision
+            );
+            Some(CoreHostAction::Quit {
+                force,
+                issued_after_revision,
+            })
+        }
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::VfsRequest {
+            request,
+            trace,
+        }) => {
+            log::debug!(
+                "[core_bridge] projected legacy vfs host action: sequence={}",
+                trace.sequence
+            );
+            Some(CoreHostAction::VfsRequest(request))
+        }
+        _ => None,
+    }
+}
+
+fn legacy_message_from_normalized(outcome: NormalizedCoreOutcome) -> Option<CoreMessageEvent> {
+    match outcome {
+        NormalizedCoreOutcome::Notification(NormalizedNotification::Message { event, trace }) => {
+            log::debug!(
+                "[core_bridge] projected legacy message: sequence={}, severity={:?}, category={:?}",
+                trace.sequence,
+                event.severity,
+                event.category
+            );
+            Some(event)
+        }
+        _ => None,
+    }
+}
+
+fn legacy_redraw_request_from_normalized(
+    outcome: NormalizedCoreOutcome,
+) -> Option<PendingRedrawRequest> {
+    match outcome {
+        NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::RedrawRequested {
+            full,
+            clear_before_draw,
+            trace,
+        }) => {
+            log::debug!(
+                "[core_bridge] projected legacy redraw request: sequence={}, full={}, clear_before_draw={}",
+                trace.sequence,
+                full,
+                clear_before_draw
+            );
+            Some(PendingRedrawRequest {
+                full,
+                clear_before_draw,
+            })
+        }
+        _ => None,
+    }
+}
+
 fn escape_path_for_file_command(target_path: &Path) -> String {
     let mut escaped = String::new();
     for ch in target_path.to_string_lossy().chars() {
@@ -628,10 +962,18 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use vim_core_rs::{
-        CoreCommandOutcome, CoreMessageCategory, CoreMessageSeverity, CoreMode, CorePendingInput,
+        CoreCommandOutcome, CoreCommandTransaction, CoreEvent, CoreHostAction, CoreMessageCategory,
+        CoreMessageEvent, CoreMessageSeverity, CoreMode, CorePendingInput,
     };
 
     use super::CoreBridge;
+    use crate::core_outcome::{
+        ApplicationOutcomeState, NormalizedCoreOutcome, NormalizedHostDirective,
+        NormalizedNotification, NormalizedOutcomeBatch, NormalizedPrompt,
+        NormalizedStructuralOutcome, OutcomeOrigin, PromptInputTransition,
+        PromptResponseDisposition, fold_normalized_outcomes,
+    };
+    use crate::core_prompt::{PromptResponseCommand, PromptResponseError};
 
     use crate::session_guard::test_lock as session_test_lock;
 
@@ -678,6 +1020,478 @@ mod tests {
         let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
 
         assert!(bridge.take_pending_messages().is_empty());
+    }
+
+    #[test]
+    fn starts_with_no_pending_redraw_requests() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+
+        assert!(bridge.take_pending_redraw_requests().is_empty());
+    }
+
+    #[test]
+    fn normalized_outcomes_preserve_transaction_total_order_and_sequence() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+        let tx = CoreCommandTransaction {
+            outcome: CoreCommandOutcome::NoChange,
+            snapshot: bridge.snapshot(),
+            host_actions: vec![
+                CoreHostAction::Write {
+                    path: "notes.txt".to_string(),
+                    force: false,
+                    issued_after_revision: 1,
+                },
+                CoreHostAction::Bell,
+            ],
+            events: vec![
+                CoreEvent::Message(CoreMessageEvent {
+                    severity: CoreMessageSeverity::Info,
+                    category: CoreMessageCategory::UserVisible,
+                    content: "written".to_string(),
+                }),
+                CoreEvent::Redraw {
+                    full: false,
+                    clear_before_draw: true,
+                },
+            ],
+        };
+
+        bridge.queue_transaction_artifacts(&tx);
+        let batch = bridge.take_normalized_outcomes();
+
+        let traces = batch
+            .outcomes()
+            .iter()
+            .map(|outcome| *outcome.trace())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            traces
+                .iter()
+                .map(|trace| trace.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            traces.iter().map(|trace| trace.origin).collect::<Vec<_>>(),
+            vec![
+                OutcomeOrigin::TransactionHostAction,
+                OutcomeOrigin::TransactionHostAction,
+                OutcomeOrigin::TransactionEvent,
+                OutcomeOrigin::TransactionEvent,
+            ]
+        );
+        assert_eq!(
+            traces
+                .iter()
+                .map(|trace| trace.raw_kind)
+                .collect::<Vec<_>>(),
+            vec![
+                "CoreHostAction::Write",
+                "CoreHostAction::Bell",
+                "CoreEvent::Message",
+                "CoreEvent::Redraw",
+            ]
+        );
+        assert!(matches!(
+            batch.outcomes()[0],
+            NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Write { .. })
+        ));
+        assert!(matches!(
+            batch.outcomes()[1],
+            NormalizedCoreOutcome::Notification(NormalizedNotification::Bell { .. })
+        ));
+        assert!(matches!(
+            batch.outcomes()[3],
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::RedrawRequested {
+                full: false,
+                clear_before_draw: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn normalized_outcomes_append_pending_session_state_after_transaction_payload() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+        let tx = CoreCommandTransaction {
+            outcome: CoreCommandOutcome::NoChange,
+            snapshot: bridge.snapshot(),
+            host_actions: vec![CoreHostAction::Write {
+                path: "notes.txt".to_string(),
+                force: false,
+                issued_after_revision: 1,
+            }],
+            events: vec![CoreEvent::Message(CoreMessageEvent {
+                severity: CoreMessageSeverity::Info,
+                category: CoreMessageCategory::UserVisible,
+                content: "transaction message".to_string(),
+            })],
+        };
+
+        bridge.queue_transaction_artifacts(&tx);
+        bridge.queue_host_action(
+            &CoreHostAction::Quit {
+                force: true,
+                issued_after_revision: 2,
+            },
+            OutcomeOrigin::PendingSessionHostAction,
+        );
+        bridge.queue_core_event(
+            &CoreEvent::Redraw {
+                full: true,
+                clear_before_draw: false,
+            },
+            OutcomeOrigin::PendingSessionEvent,
+        );
+
+        let batch = bridge.take_normalized_outcomes();
+        let traces = batch
+            .outcomes()
+            .iter()
+            .map(|outcome| *outcome.trace())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            traces
+                .iter()
+                .map(|trace| trace.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            traces.iter().map(|trace| trace.origin).collect::<Vec<_>>(),
+            vec![
+                OutcomeOrigin::TransactionHostAction,
+                OutcomeOrigin::TransactionEvent,
+                OutcomeOrigin::PendingSessionHostAction,
+                OutcomeOrigin::PendingSessionEvent,
+            ]
+        );
+    }
+
+    #[test]
+    fn take_normalized_outcomes_moves_batch_and_clears_bridge_queue() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+        let tx = CoreCommandTransaction {
+            outcome: CoreCommandOutcome::NoChange,
+            snapshot: bridge.snapshot(),
+            host_actions: vec![CoreHostAction::Quit {
+                force: true,
+                issued_after_revision: 1,
+            }],
+            events: vec![],
+        };
+
+        bridge.queue_transaction_artifacts(&tx);
+
+        assert_eq!(bridge.take_normalized_outcomes().outcomes().len(), 1);
+        assert!(
+            bridge.take_normalized_outcomes().is_empty(),
+            "normalized outcome drain must clear the bridge queue"
+        );
+    }
+
+    #[test]
+    fn respond_to_prompt_returns_completion_batch_that_folds_active_prompt_closed() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should be queued");
+        let request_batch = bridge.take_normalized_outcomes();
+        assert!(matches!(
+            request_batch.outcomes().first(),
+            Some(NormalizedCoreOutcome::Prompt(
+                NormalizedPrompt::RequestInput {
+                    correlation_id: 1,
+                    ..
+                }
+            ))
+        ));
+        let requested = fold_normalized_outcomes(request_batch, ApplicationOutcomeState::default());
+        assert!(matches!(
+            requested.effects.prompt.input_transition,
+            Some(PromptInputTransition::Requested { .. })
+        ));
+
+        let response_batch = bridge
+            .respond_to_prompt(PromptResponseCommand::Submit {
+                correlation_id: 1,
+                value: "alice".to_string(),
+            })
+            .expect("prompt response should be accepted");
+
+        assert!(matches!(
+            response_batch.outcomes().first(),
+            Some(NormalizedCoreOutcome::Prompt(
+                NormalizedPrompt::InputResponseAccepted {
+                    correlation_id: 1,
+                    disposition: PromptResponseDisposition::Submitted,
+                    ..
+                }
+            ))
+        ));
+
+        let completed = fold_normalized_outcomes(response_batch, requested.state);
+        assert!(completed.state.prompt.active_input.is_none());
+        assert!(matches!(
+            completed.effects.prompt.input_transition,
+            Some(PromptInputTransition::Submitted { correlation_id: 1 })
+        ));
+        assert!(matches!(
+            bridge.respond_to_prompt(PromptResponseCommand::Cancel { correlation_id: 1 }),
+            Err(PromptResponseError::NoActivePrompt)
+        ));
+    }
+
+    #[test]
+    fn respond_to_prompt_rejects_missing_and_mismatched_active_prompt_without_clearing_it() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+
+        assert!(matches!(
+            bridge.respond_to_prompt(PromptResponseCommand::Cancel { correlation_id: 1 }),
+            Err(PromptResponseError::NoActivePrompt)
+        ));
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should be queued");
+        let _ = bridge.take_normalized_outcomes();
+
+        assert!(matches!(
+            bridge.respond_to_prompt(PromptResponseCommand::Cancel { correlation_id: 2 }),
+            Err(PromptResponseError::CorrelationMismatch {
+                expected: 1,
+                actual: 2
+            })
+        ));
+
+        assert!(
+            bridge
+                .respond_to_prompt(PromptResponseCommand::Cancel { correlation_id: 1 })
+                .is_ok(),
+            "mismatch must not clear the bridge active input correlation"
+        );
+    }
+
+    #[test]
+    fn legacy_message_projection_consumes_only_projected_normalized_outcome() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+        let tx = CoreCommandTransaction {
+            outcome: CoreCommandOutcome::NoChange,
+            snapshot: bridge.snapshot(),
+            host_actions: vec![CoreHostAction::Write {
+                path: "notes.txt".to_string(),
+                force: false,
+                issued_after_revision: 1,
+            }],
+            events: vec![CoreEvent::Message(CoreMessageEvent {
+                severity: CoreMessageSeverity::Info,
+                category: CoreMessageCategory::UserVisible,
+                content: "written".to_string(),
+            })],
+        };
+
+        bridge.queue_transaction_artifacts(&tx);
+
+        let messages = bridge.take_pending_messages();
+        assert_eq!(messages.len(), 1);
+
+        let remaining = bridge.take_normalized_outcomes();
+        assert_eq!(
+            remaining.outcomes().len(),
+            1,
+            "legacy message projection must not duplicate consumed messages or drop host directives"
+        );
+        assert!(matches!(
+            remaining.outcomes()[0],
+            NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Write { .. })
+        ));
+    }
+
+    #[test]
+    fn legacy_host_action_projection_consumes_host_directives_from_normalized_queue() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+        let tx = CoreCommandTransaction {
+            outcome: CoreCommandOutcome::NoChange,
+            snapshot: bridge.snapshot(),
+            host_actions: vec![CoreHostAction::Quit {
+                force: true,
+                issued_after_revision: 1,
+            }],
+            events: vec![CoreEvent::Redraw {
+                full: true,
+                clear_before_draw: false,
+            }],
+        };
+
+        bridge.queue_transaction_artifacts(&tx);
+
+        let actions = bridge.take_pending_host_actions();
+        assert_eq!(actions.len(), 1);
+
+        let remaining = bridge.take_normalized_outcomes();
+        assert_eq!(
+            remaining.outcomes().len(),
+            1,
+            "legacy host projection must leave non-host normalized outcomes queued"
+        );
+        assert!(matches!(
+            remaining.outcomes()[0],
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::RedrawRequested {
+                full: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn headless_application_regression_folds_core_foundation_without_effect_replay() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("buffer text").expect("core bridge should initialize");
+        let mut folded_state = ApplicationOutcomeState::default();
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should be queued");
+        let requested = fold_normalized_outcomes(bridge.take_normalized_outcomes(), folded_state);
+        folded_state = requested.state;
+        assert!(matches!(
+            requested.effects.prompt.input_transition,
+            Some(PromptInputTransition::Requested { .. })
+        ));
+        assert_eq!(
+            folded_state
+                .prompt
+                .active_input
+                .as_ref()
+                .map(|session| session.correlation_id),
+            Some(1)
+        );
+
+        let response_batch = bridge
+            .respond_to_prompt(PromptResponseCommand::Cancel { correlation_id: 1 })
+            .expect("prompt cancel should be accepted");
+        let cancelled = fold_normalized_outcomes(response_batch, folded_state);
+        folded_state = cancelled.state;
+        assert!(folded_state.prompt.active_input.is_none());
+        assert!(matches!(
+            cancelled.effects.prompt.input_transition,
+            Some(PromptInputTransition::Cancelled { correlation_id: 1 })
+        ));
+
+        let tx = CoreCommandTransaction {
+            outcome: CoreCommandOutcome::NoChange,
+            snapshot: bridge.snapshot(),
+            host_actions: vec![
+                CoreHostAction::Write {
+                    path: "notes.txt".to_string(),
+                    force: false,
+                    issued_after_revision: 1,
+                },
+                CoreHostAction::Quit {
+                    force: false,
+                    issued_after_revision: 1,
+                },
+            ],
+            events: vec![
+                CoreEvent::Message(CoreMessageEvent {
+                    severity: CoreMessageSeverity::Info,
+                    category: CoreMessageCategory::UserVisible,
+                    content: "saved".to_string(),
+                }),
+                CoreEvent::Redraw {
+                    full: false,
+                    clear_before_draw: true,
+                },
+                CoreEvent::BufferAdded { buf_id: 3 },
+                CoreEvent::LayoutChanged,
+            ],
+        };
+
+        bridge.queue_transaction_artifacts(&tx);
+        let folded = fold_normalized_outcomes(bridge.take_normalized_outcomes(), folded_state);
+
+        assert!(matches!(
+            folded.effects.host_directives.as_slice(),
+            [
+                NormalizedHostDirective::Write { .. },
+                NormalizedHostDirective::Quit { .. }
+            ]
+        ));
+        assert_eq!(
+            folded
+                .effects
+                .notification
+                .latest_user_visible_message
+                .as_ref()
+                .map(|message| message.content.as_str()),
+            Some("saved")
+        );
+        assert_eq!(folded.effects.structural.invalidate_buffers, vec![3]);
+        assert!(folded.effects.structural.layout_dirty);
+        assert_eq!(
+            folded.effects.structural.redraw.map(|redraw| {
+                (
+                    redraw.full,
+                    redraw.clear_before_draw,
+                    redraw.required_by_structure_change,
+                )
+            }),
+            Some((true, true, true))
+        );
+
+        let replay = fold_normalized_outcomes(NormalizedOutcomeBatch::default(), folded.state);
+
+        assert!(replay.effects.host_directives.is_empty());
+        assert!(
+            replay
+                .effects
+                .notification
+                .latest_user_visible_message
+                .is_none()
+        );
+        assert!(replay.effects.prompt.input_transition.is_none());
+        assert!(replay.effects.structural.redraw.is_none());
+        assert!(
+            bridge.take_normalized_outcomes().is_empty(),
+            "headless application regression must leave the bridge drain contract clear"
+        );
     }
 
     #[test]
@@ -761,6 +1575,26 @@ mod tests {
             }),
             "echoerr message should be queued: {:?}",
             messages
+        );
+    }
+
+    #[test]
+    fn dispatch_key_queues_pending_redraw_request() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
+
+        bridge
+            .apply_ex_command(":redraw")
+            .expect(":redraw should succeed");
+        let redraws = bridge.take_pending_redraw_requests();
+
+        assert!(
+            !redraws.is_empty(),
+            ":redraw should enqueue at least one redraw request: {:?}",
+            redraws
         );
     }
 

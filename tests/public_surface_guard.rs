@@ -71,3 +71,16 @@ fn runtime_surface_excludes_compatibility_string_apis() {
         "runtime surface should not expose vim namespace"
     );
 }
+
+#[test]
+fn main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
+    let source = std::fs::read_to_string("src/main.rs")
+        .expect("main source should be readable from the repository root");
+
+    for raw_enum in ["CoreHostAction", "CoreEvent"] {
+        assert!(
+            !source.contains(raw_enum),
+            "main loop must consume folded normalized outcomes instead of raw {raw_enum}"
+        );
+    }
+}

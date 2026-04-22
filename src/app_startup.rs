@@ -36,9 +36,7 @@ pub fn prepare_launch_and_start_terminal<'a, B: TerminalBackend>(
 ) -> Result<(BootstrapOutcome, TerminalIoBroker<'a, B>), LaunchStartError> {
     let policy = UiSurfacePolicy;
     let surface_mode = policy.resolve_mode();
-    log::debug!(
-        "[app_startup] resolved startup UI surface policy: mode={surface_mode:?}"
-    );
+    log::debug!("[app_startup] resolved startup UI surface policy: mode={surface_mode:?}");
     for feature_request in [
         UiFeatureRequest::CoreEditing,
         UiFeatureRequest::StyledText,
@@ -94,8 +92,8 @@ where
     B: TerminalBackend,
     P: TerminalCapabilityProbeService,
 {
-    let (outcome, mut terminal_broker) =
-        prepare_launch_and_start_terminal(request, backend).map_err(TuiStartupContextError::Launch)?;
+    let (outcome, mut terminal_broker) = prepare_launch_and_start_terminal(request, backend)
+        .map_err(TuiStartupContextError::Launch)?;
     let capability_profile = terminal_broker
         .run_probe(probe)
         .map_err(TuiStartupContextError::CapabilityProbe)?;
@@ -105,18 +103,19 @@ where
         capability_profile
     );
 
-    let (runtime_session, runtime_init_message) =
-        match RuntimeSessionOwner::spawn(outcome.callback_registry.clone()) {
-            Ok(runtime_session) => (Some(runtime_session), None),
-            Err(error) => {
-                let message = format_runtime_init_error(&error);
-                log::debug!(
-                    "[app_startup] runtime session owner initialization degraded during startup composition: {:?}",
-                    error
-                );
-                (None, Some(message))
-            }
-        };
+    let (runtime_session, runtime_init_message) = match RuntimeSessionOwner::spawn(
+        outcome.callback_registry.clone(),
+    ) {
+        Ok(runtime_session) => (Some(runtime_session), None),
+        Err(error) => {
+            let message = format_runtime_init_error(&error);
+            log::debug!(
+                "[app_startup] runtime session owner initialization degraded during startup composition: {:?}",
+                error
+            );
+            (None, Some(message))
+        }
+    };
 
     Ok(PreparedTuiStartup {
         outcome,

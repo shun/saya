@@ -1,8 +1,8 @@
 use std::fmt;
 
 const BANNED_DEPENDENCIES: &[&str] = &[
-    "wgpu", "egui", "eframe", "iced", "tao", "winit", "gtk", "gpui", "sdl2", "glium",
-    "glutin", "skia", "ash", "vulkano",
+    "wgpu", "egui", "eframe", "iced", "tao", "winit", "gtk", "gpui", "sdl2", "glium", "glutin",
+    "skia", "ash", "vulkano",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

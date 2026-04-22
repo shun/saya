@@ -25,7 +25,10 @@ impl fmt::Display for PolicyViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PolicyViolation::UnsupportedSurface { requested } => {
-                write!(f, "TUI-only policy rejected unsupported surface request: {requested:?}")
+                write!(
+                    f,
+                    "TUI-only policy rejected unsupported surface request: {requested:?}"
+                )
             }
         }
     }

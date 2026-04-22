@@ -342,7 +342,9 @@ fn merge_dispatch_outcome(target: &mut RuntimeDispatchOutcome, next: RuntimeDisp
     }
     target.requires_redraw |= next.requires_redraw;
     merge_shutdown_intent(&mut target.shutdown_intent, next.shutdown_intent);
-    target.presentation_intents.extend(next.presentation_intents);
+    target
+        .presentation_intents
+        .extend(next.presentation_intents);
 }
 
 fn merge_shutdown_intent(

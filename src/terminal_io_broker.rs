@@ -112,9 +112,7 @@ impl<'a, B: TerminalBackend> TerminalIoBroker<'a, B> {
         }
 
         let profile = probe.detect();
-        log::debug!(
-            "[terminal_io_broker] capability probe completed: profile={profile:?}"
-        );
+        log::debug!("[terminal_io_broker] capability probe completed: profile={profile:?}");
         self.capability_profile = Some(profile.clone());
         Ok(profile)
     }
@@ -162,9 +160,7 @@ impl<'a, B: TerminalBackend> TerminalIoBroker<'a, B> {
             });
         }
         let mut stdout = std::io::stdout();
-        stdout
-            .write_all(bytes)
-            .map_err(terminal_transport_error)?;
+        stdout.write_all(bytes).map_err(terminal_transport_error)?;
         stdout.flush().map_err(terminal_transport_error)?;
         log::debug!(
             "[terminal_io_broker] wrote optional overlay bytes during interactive phase: bytes={}",

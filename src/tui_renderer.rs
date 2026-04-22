@@ -228,8 +228,8 @@ fn render_pane(
         height: 1,
     };
     f.render_widget(Clear, rect);
-    let buffer_content =
-        Paragraph::new(render_buffer_text(model, body_rect.width, text_mode)).block(Block::default());
+    let buffer_content = Paragraph::new(render_buffer_text(model, body_rect.width, text_mode))
+        .block(Block::default());
     trace_renderer_line(model, body_rect.width);
     f.render_widget(buffer_content, body_rect);
 

@@ -73,7 +73,10 @@ impl fmt::Display for OverlayAssetError {
                 write!(f, "overlay asset content key is unknown: {key}")
             }
             Self::MaterializationFailed { key, message } => {
-                write!(f, "overlay asset materialization failed for {key}: {message}")
+                write!(
+                    f,
+                    "overlay asset materialization failed for {key}: {message}"
+                )
             }
             Self::ReleasedAsset { asset_ref, key } => {
                 write!(
@@ -146,13 +149,11 @@ impl OverlayAssetStoreService for OverlayAssetStore {
             }
         }
 
-        let source = self
-            .registered
-            .get(key)
-            .cloned()
-            .ok_or_else(|| OverlayAssetError::UnknownContentKey {
+        let source = self.registered.get(key).cloned().ok_or_else(|| {
+            OverlayAssetError::UnknownContentKey {
                 key: key.describe(),
-            })?;
+            }
+        })?;
         let media = match source {
             OverlayAssetSource::Static(media) => media,
             OverlayAssetSource::Failure { message } => {

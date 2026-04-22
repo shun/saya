@@ -3,6 +3,10 @@ use saya::app_startup::{
 };
 use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
+use saya::core_outcome::{
+    ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
+    fold_normalized_outcomes,
+};
 use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
@@ -21,8 +25,8 @@ use saya::saya_live_runtime::{
     RuntimeMode,
 };
 use saya::screen_model::{
-    ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput, WorkspaceScreenModel, project,
-    project_workspace,
+    ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput, WorkspaceScreenModel,
+    project, project_workspace,
 };
 use saya::search_query::{SearchStateError, SearchVisibleState};
 use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
@@ -31,13 +35,20 @@ use saya::terminal_lifecycle::TerminalSize;
 use saya::tui_render_coordinator::TuiRenderCoordinator;
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::WindowViewportStore;
-use vim_core_rs::{CoreMessageEvent, CoreMode};
+#[cfg(test)]
+use vim_core_rs::CoreMessageEvent;
+use vim_core_rs::CoreMode;
 
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use vim_core_rs::CoreHostAction;
+
+#[derive(Debug, Default)]
+struct MainOutcomeAccumulator {
+    state: ApplicationOutcomeState,
+    host_directives: Vec<NormalizedHostDirective>,
+}
 
 #[tokio::main]
 async fn main() {
@@ -103,6 +114,7 @@ async fn main() {
     let mut core_message: Option<String> = None;
     let mut system_warning: Option<String> = bootstrap_warning_message(&outcome.warnings);
     let mut transient_msg: Option<String> = runtime_init_message;
+    let mut outcome_accumulator = MainOutcomeAccumulator::default();
     let mut viewport_store = WindowViewportStore::new();
     let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut command_line_prompt: Option<char> = None;
@@ -205,9 +217,11 @@ async fn main() {
                                 KeyInput::Escape => {
                                     if prompt == '/' {
                                         let _ = outcome.core_bridge.cancel_search_input();
-                                        update_core_message_from_core(
+                                        consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
                                             &mut core_message,
+                                            &mut need_redraw,
                                         );
                                     }
                                     command_line_prompt = None;
@@ -231,9 +245,11 @@ async fn main() {
                                                     );
                                                     let _ =
                                                         outcome.core_bridge.apply_ex_command(&cmd);
-                                                    update_core_message_from_core(
+                                                    consume_core_outcomes_from_core(
                                                         &mut outcome.core_bridge,
+                                                        &mut outcome_accumulator,
                                                         &mut core_message,
+                                                        &mut need_redraw,
                                                     );
                                                 }
                                             }
@@ -244,16 +260,20 @@ async fn main() {
                                                     search_option
                                                 );
                                                 let _ = outcome.core_bridge.apply_ex_command(&cmd);
-                                                update_core_message_from_core(
+                                                consume_core_outcomes_from_core(
                                                     &mut outcome.core_bridge,
+                                                    &mut outcome_accumulator,
                                                     &mut core_message,
+                                                    &mut need_redraw,
                                                 );
                                             }
                                             ExCommandRoute::CoreOwned => {
                                                 let _ = outcome.core_bridge.apply_ex_command(&cmd);
-                                                update_core_message_from_core(
+                                                consume_core_outcomes_from_core(
                                                     &mut outcome.core_bridge,
+                                                    &mut outcome_accumulator,
                                                     &mut core_message,
+                                                    &mut need_redraw,
                                                 );
                                             }
                                         }
@@ -261,9 +281,11 @@ async fn main() {
                                         let _ = outcome
                                             .core_bridge
                                             .commit_search_input(&command_line_buffer);
-                                        update_core_message_from_core(
+                                        consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
                                             &mut core_message,
+                                            &mut need_redraw,
                                         );
                                         command_line_prompt = None;
                                         command_line_buffer.clear();
@@ -277,9 +299,11 @@ async fn main() {
                                         let _ = outcome
                                             .core_bridge
                                             .sync_search_input(&command_line_buffer);
-                                        update_core_message_from_core(
+                                        consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
                                             &mut core_message,
+                                            &mut need_redraw,
                                         );
                                     } else if command_line_buffer.pop().is_none() {
                                         command_line_prompt = None;
@@ -291,9 +315,11 @@ async fn main() {
                                         let _ = outcome
                                             .core_bridge
                                             .sync_search_input(&command_line_buffer);
-                                        update_core_message_from_core(
+                                        consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
                                             &mut core_message,
+                                            &mut need_redraw,
                                         );
                                     }
                                 }
@@ -304,6 +330,7 @@ async fn main() {
 
                             if let Some(reason) = process_pending_host_actions_with_runtime(
                                 &mut outcome,
+                                &mut outcome_accumulator,
                                 &mut session_state,
                                 &mut transient_msg,
                                 &mut system_warning,
@@ -331,13 +358,16 @@ async fn main() {
                             match intent {
                                 EditorIntent::EditKey(k) => {
                                     let _ = outcome.core_bridge.dispatch_key(&k);
-                                    update_core_message_from_core(
+                                    consume_core_outcomes_from_core(
                                         &mut outcome.core_bridge,
+                                        &mut outcome_accumulator,
                                         &mut core_message,
+                                        &mut need_redraw,
                                     );
 
                                     if let Some(reason) = process_pending_host_actions_with_runtime(
                                         &mut outcome,
+                                        &mut outcome_accumulator,
                                         &mut session_state,
                                         &mut transient_msg,
                                         &mut system_warning,
@@ -494,6 +524,8 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     ));
     let mut transient_msg: Option<String> = None;
     let mut system_warning: Option<String> = None;
+    let mut need_redraw = false;
+    let mut outcome_accumulator = MainOutcomeAccumulator::default();
 
     eprintln!(
         "[main][smoke] projected startup ui: first_line={:?}, message_line={:?}, file_name={}, mode={}, dirty={}, line_numbers={}, number_width={}",
@@ -519,7 +551,12 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
         .core_bridge
         .dispatch_key("\x1b")
         .map_err(|error| format!("escape failed: {:?}", error))?;
-    update_core_message_from_core(&mut outcome.core_bridge, &mut transient_msg);
+    consume_core_outcomes_from_core(
+        &mut outcome.core_bridge,
+        &mut outcome_accumulator,
+        &mut transient_msg,
+        &mut need_redraw,
+    );
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
 
     if session_state.target_path().is_none() {
@@ -536,10 +573,17 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
         .core_bridge
         .apply_ex_command(":wq")
         .map_err(|error| format!("smoke :wq failed: {:?}", error))?;
+    consume_core_outcomes_from_core(
+        &mut outcome.core_bridge,
+        &mut outcome_accumulator,
+        &mut transient_msg,
+        &mut need_redraw,
+    );
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
 
     let reason = process_pending_host_actions_without_runtime(
         &mut outcome,
+        &mut outcome_accumulator,
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
@@ -595,6 +639,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
     let mut viewport_store = WindowViewportStore::new();
     let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
+    let mut outcome_accumulator = MainOutcomeAccumulator::default();
     sync_core_screen_size(&mut outcome);
 
     let (terminal_width, terminal_height) = current_terminal_size();
@@ -617,7 +662,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
             &runtime_presentation_intents,
             Some(&mut terminal_broker),
         )
-    .map_err(|error| format!("initial PTY redraw failed: {error}"))?;
+        .map_err(|error| format!("initial PTY redraw failed: {error}"))?;
 
     let initial_active_pane = initial_render
         .rendered_workspace
@@ -666,7 +711,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
             &runtime_presentation_intents,
             Some(&mut terminal_broker),
         )
-    .map_err(|error| format!("split PTY redraw failed: {error}"))?;
+        .map_err(|error| format!("split PTY redraw failed: {error}"))?;
 
     let split_active_pane = split_render
         .rendered_workspace
@@ -737,7 +782,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
             &runtime_presentation_intents,
             Some(&mut terminal_broker),
         )
-    .map_err(|error| format!("rollback PTY redraw failed: {error}"))?;
+        .map_err(|error| format!("rollback PTY redraw failed: {error}"))?;
 
     let rollback_active_pane = rollback_render
         .rendered_workspace
@@ -762,8 +807,15 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         .apply_ex_command(":write")
         .map_err(|error| format!("PTY save command failed: {error:?}"))?;
     let mut save_redraw = false;
+    consume_core_outcomes_from_core(
+        &mut outcome.core_bridge,
+        &mut outcome_accumulator,
+        &mut transient_msg,
+        &mut save_redraw,
+    );
     let save_shutdown = process_pending_host_actions_with_runtime(
         &mut outcome,
+        &mut outcome_accumulator,
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
@@ -796,8 +848,15 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         .apply_ex_command(":quit")
         .map_err(|error| format!("PTY quit command failed: {error:?}"))?;
     let mut quit_redraw = false;
+    consume_core_outcomes_from_core(
+        &mut outcome.core_bridge,
+        &mut outcome_accumulator,
+        &mut transient_msg,
+        &mut quit_redraw,
+    );
     let quit_reason = process_pending_host_actions_with_runtime(
         &mut outcome,
+        &mut outcome_accumulator,
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
@@ -820,8 +879,15 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         .apply_ex_command(":quit!")
         .map_err(|error| format!("PTY force quit command failed: {error:?}"))?;
     let mut force_quit_redraw = false;
+    consume_core_outcomes_from_core(
+        &mut outcome.core_bridge,
+        &mut outcome_accumulator,
+        &mut transient_msg,
+        &mut force_quit_redraw,
+    );
     let force_quit_reason = process_pending_host_actions_with_runtime(
         &mut outcome,
+        &mut outcome_accumulator,
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
@@ -837,7 +903,10 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
             force_quit_reason
         ));
     }
-    eprintln!("[main][pty-smoke] force quit reason: {:?}", force_quit_reason);
+    eprintln!(
+        "[main][pty-smoke] force quit reason: {:?}",
+        force_quit_reason
+    );
 
     drop(render_coordinator);
     drop(outcome);
@@ -852,6 +921,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
 
 async fn process_pending_host_actions_with_runtime(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome_accumulator: &mut MainOutcomeAccumulator,
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     system_warning: &mut Option<String>,
@@ -861,12 +931,10 @@ async fn process_pending_host_actions_with_runtime(
 ) -> Option<ShutdownReason> {
     let current_revision = outcome.core_bridge.snapshot().revision;
     let mut shutdown_reason = None;
-    for action in prioritize_save_family_host_actions(
-        outcome.core_bridge.take_pending_host_actions(),
-        current_revision,
-    ) {
-        match action {
-            CoreHostAction::Write { path, .. } => {
+    let directives = std::mem::take(&mut outcome_accumulator.host_directives);
+    for directive in prioritize_save_family_host_directives(directives, current_revision) {
+        match directive {
+            NormalizedHostDirective::Write { path, .. } => {
                 if let Some(reason) = handle_write_host_action_with_runtime(
                     outcome,
                     session_state,
@@ -881,7 +949,7 @@ async fn process_pending_host_actions_with_runtime(
                     merge_shutdown_reason(&mut shutdown_reason, Some(reason));
                 }
             }
-            CoreHostAction::Quit { force, .. } => {
+            NormalizedHostDirective::Quit { force, .. } => {
                 let decision = session_state.evaluate_quit(force);
                 if let Some(reason) =
                     shutdown_reason_from_quit_decision(decision, force, system_warning)
@@ -889,35 +957,42 @@ async fn process_pending_host_actions_with_runtime(
                     merge_shutdown_reason(&mut shutdown_reason, Some(reason));
                 }
             }
-            _ => {}
+            NormalizedHostDirective::VfsRequest { request, trace } => {
+                log::debug!(
+                    "[main] retaining unsupported normalized VFS directive for future host I/O: sequence={}, request={:?}",
+                    trace.sequence,
+                    request
+                );
+            }
         }
     }
 
     shutdown_reason
 }
 
-fn prioritize_save_family_host_actions(
-    actions: Vec<CoreHostAction>,
+fn prioritize_save_family_host_directives(
+    directives: Vec<NormalizedHostDirective>,
     current_revision: u64,
-) -> Vec<CoreHostAction> {
+) -> Vec<NormalizedHostDirective> {
     let mut writes = Vec::new();
     let mut quits = Vec::new();
+    let mut other_directives = Vec::new();
 
-    for action in actions {
-        match action {
-            CoreHostAction::Write {
+    for directive in directives {
+        match directive {
+            NormalizedHostDirective::Write {
                 issued_after_revision,
                 ..
             } if issued_after_revision == current_revision => {
-                writes.push(action);
+                writes.push(directive);
             }
-            CoreHostAction::Quit {
+            NormalizedHostDirective::Quit {
                 issued_after_revision,
                 ..
             } if issued_after_revision == current_revision => {
-                quits.push(action);
+                quits.push(directive);
             }
-            CoreHostAction::Write {
+            NormalizedHostDirective::Write {
                 issued_after_revision,
                 ..
             } => {
@@ -927,7 +1002,7 @@ fn prioritize_save_family_host_actions(
                     issued_after_revision
                 );
             }
-            CoreHostAction::Quit {
+            NormalizedHostDirective::Quit {
                 issued_after_revision,
                 ..
             } => {
@@ -939,30 +1014,31 @@ fn prioritize_save_family_host_actions(
             }
             other => {
                 log::debug!(
-                    "[main] ignoring unsupported pending host action during save-family coordination: {:?}",
+                    "[main] preserving unsupported normalized host directive during save-family coordination: {:?}",
                     other
                 );
+                other_directives.push(other);
             }
         }
     }
 
     writes.extend(quits);
+    writes.extend(other_directives);
     writes
 }
 
 fn process_pending_host_actions_without_runtime(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome_accumulator: &mut MainOutcomeAccumulator,
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     system_warning: &mut Option<String>,
 ) -> Option<ShutdownReason> {
     let current_revision = outcome.core_bridge.snapshot().revision;
-    for action in prioritize_save_family_host_actions(
-        outcome.core_bridge.take_pending_host_actions(),
-        current_revision,
-    ) {
-        match action {
-            CoreHostAction::Write { path, .. } => {
+    let directives = std::mem::take(&mut outcome_accumulator.host_directives);
+    for directive in prioritize_save_family_host_directives(directives, current_revision) {
+        match directive {
+            NormalizedHostDirective::Write { path, .. } => {
                 let snapshot = outcome.core_bridge.snapshot();
                 let save_outcome = save_snapshot_result_with_path_override(
                     &snapshot.text,
@@ -971,7 +1047,7 @@ fn process_pending_host_actions_without_runtime(
                 );
                 *transient_msg = save_outcome.transient_message;
             }
-            CoreHostAction::Quit { force, .. } => {
+            NormalizedHostDirective::Quit { force, .. } => {
                 let decision = session_state.evaluate_quit(force);
                 if let Some(reason) =
                     shutdown_reason_from_quit_decision(decision, force, system_warning)
@@ -979,7 +1055,13 @@ fn process_pending_host_actions_without_runtime(
                     return Some(reason);
                 }
             }
-            _ => {}
+            NormalizedHostDirective::VfsRequest { request, trace } => {
+                log::debug!(
+                    "[main] retaining unsupported normalized VFS directive without runtime: sequence={}, request={:?}",
+                    trace.sequence,
+                    request
+                );
+            }
         }
     }
 
@@ -1173,13 +1255,31 @@ fn execute_runtime_host_command_through_core(
         })?;
 
     let mut effect = RuntimeCommandEffect::default();
+    let folded = fold_normalized_outcomes(
+        outcome.core_bridge.take_normalized_outcomes(),
+        ApplicationOutcomeState::default(),
+    );
+    if let Some(message) = folded.effects.notification.latest_user_visible_message {
+        log::debug!(
+            "[main] runtime host command consumed core message effect: {:?}",
+            message
+        );
+        effect.transient_message = Some(message.content);
+    }
+    if let Some(redraw) = folded.effects.structural.redraw {
+        log::debug!(
+            "[main] runtime host command consumed structural redraw effect: full={}, clear_before_draw={}, required_by_structure_change={}",
+            redraw.full,
+            redraw.clear_before_draw,
+            redraw.required_by_structure_change
+        );
+    }
     let current_revision = outcome.core_bridge.snapshot().revision;
-    for action in prioritize_save_family_host_actions(
-        outcome.core_bridge.take_pending_host_actions(),
-        current_revision,
-    ) {
-        match action {
-            CoreHostAction::Write { path, .. } => {
+    for directive in
+        prioritize_save_family_host_directives(folded.effects.host_directives, current_revision)
+    {
+        match directive {
+            NormalizedHostDirective::Write { path, .. } => {
                 let snapshot = outcome.core_bridge.snapshot();
                 let save_outcome = save_snapshot_result_with_path_override(
                     &snapshot.text,
@@ -1196,14 +1296,20 @@ fn execute_runtime_host_command_through_core(
                         ));
                 }
             }
-            CoreHostAction::Quit { force, .. } => {
+            NormalizedHostDirective::Quit { force, .. } => {
                 let decision = session_state.evaluate_quit(force);
                 merge_runtime_shutdown_intent(
                     &mut effect.shutdown_intent,
                     runtime_shutdown_intent_from_quit_decision(force, decision),
                 );
             }
-            _ => {}
+            NormalizedHostDirective::VfsRequest { request, trace } => {
+                log::debug!(
+                    "[main] runtime host command retained unsupported normalized VFS directive: sequence={}, request={:?}",
+                    trace.sequence,
+                    request
+                );
+            }
         }
     }
 
@@ -1245,19 +1351,88 @@ fn save_error_message(error: &SaveRequestError) -> String {
     }
 }
 
-fn update_core_message_from_core(
+fn consume_core_outcomes_from_core(
     core_bridge: &mut saya::core_bridge::CoreBridge,
+    accumulator: &mut MainOutcomeAccumulator,
     core_message: &mut Option<String>,
+    need_redraw: &mut bool,
 ) {
-    if let Some(message) = latest_user_visible_message(core_bridge.take_pending_messages()) {
-        log::debug!(
-            "[main] replacing core message from core bridge: {:?}",
-            message
-        );
-        *core_message = Some(message);
+    let batch = core_bridge.take_normalized_outcomes();
+    if batch.is_empty() {
+        return;
     }
+
+    let current = std::mem::take(&mut accumulator.state);
+    let folded = fold_normalized_outcomes(batch, current);
+    let effects = folded.effects;
+    accumulator.state = folded.state;
+    apply_core_dispatch_effects(effects, accumulator, core_message, need_redraw);
 }
 
+fn apply_core_dispatch_effects(
+    effects: ApplicationDispatchEffects,
+    accumulator: &mut MainOutcomeAccumulator,
+    core_message: &mut Option<String>,
+    need_redraw: &mut bool,
+) {
+    if let Some(message) = effects.notification.latest_user_visible_message {
+        log::debug!(
+            "[main] replacing core message from normalized notification effect: {:?}",
+            message
+        );
+        *core_message = Some(message.content);
+    }
+    if let Some(message) = effects.notification.latest_non_user_message {
+        log::debug!(
+            "[main] observed non-user core message from normalized notification effect: {:?}",
+            message
+        );
+    }
+    if effects.notification.bell_count > 0 {
+        log::debug!(
+            "[main] observed bell notification effect: count={}",
+            effects.notification.bell_count
+        );
+    }
+    if let Some(prompt) = effects.prompt.pager_prompt {
+        log::debug!("[main] observed pager prompt effect: kind={:?}", prompt);
+    }
+    if let Some(transition) = effects.prompt.input_transition {
+        log::debug!(
+            "[main] observed input prompt transition effect: {:?}",
+            transition
+        );
+    }
+    if let Some(redraw) = effects.structural.redraw {
+        log::debug!(
+            "[main] applying structural redraw effect: full={}, clear_before_draw={}, required_by_structure_change={}",
+            redraw.full,
+            redraw.clear_before_draw,
+            redraw.required_by_structure_change
+        );
+        *need_redraw = true;
+    }
+    if !effects.structural.invalidate_buffers.is_empty()
+        || !effects.structural.invalidate_windows.is_empty()
+        || effects.structural.layout_dirty
+    {
+        log::debug!(
+            "[main] observed structural invalidation effect: buffers={:?}, windows={:?}, layout_dirty={}",
+            effects.structural.invalidate_buffers,
+            effects.structural.invalidate_windows,
+            effects.structural.layout_dirty
+        );
+    }
+    for diagnostic in &effects.diagnostics {
+        log::debug!(
+            "[main] observed normalized diagnostic effect: {:?}",
+            diagnostic
+        );
+    }
+    accumulator.host_directives.extend(effects.host_directives);
+}
+
+#[cfg(test)]
 fn latest_user_visible_message(messages: Vec<CoreMessageEvent>) -> Option<String> {
     messages
         .into_iter()
@@ -1894,30 +2069,38 @@ mod tests {
             .apply_ex_command(":w")
             .expect(":w command should succeed");
 
-        let actions = outcome.core_bridge.take_pending_host_actions();
+        let mut outcome_accumulator = MainOutcomeAccumulator::default();
+        let mut transient_msg = None;
+        let mut system_warning = None;
+        let mut need_redraw = false;
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut transient_msg,
+            &mut need_redraw,
+        );
         assert!(
             matches!(
-                actions.as_slice(),
-                [vim_core_rs::CoreHostAction::Write { .. }]
+                outcome_accumulator.host_directives.as_slice(),
+                [NormalizedHostDirective::Write { .. }]
             ),
-            ":w 後に write host action が 1 件発行されること: {:?}",
-            actions
+            ":w 後に normalized write directive が 1 件発行されること: {:?}",
+            outcome_accumulator.host_directives
         );
-
-        let snapshot = outcome.core_bridge.snapshot();
-        log::debug!(
-            "[main::tests] processing write host action failure path: text_len={}, dirty={}",
-            snapshot.text.len(),
-            session_state.is_dirty()
+        let shutdown = process_pending_host_actions_without_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
         );
-        let save_outcome = save_snapshot_result(&snapshot.text, &mut session_state);
-        let transient_msg = save_outcome.transient_message;
         let expected_error = session_state
             .last_save_error()
             .expect("save failure should be recorded")
             .to_string();
         let expected_message = format!("Save failed: {}", expected_error);
 
+        assert_eq!(shutdown, None);
         assert_eq!(transient_msg, Some(expected_message.clone()));
         assert_eq!(transient_msg.as_deref(), Some(expected_message.as_str()));
         assert!(session_state.is_dirty());
@@ -2058,40 +2241,51 @@ mod tests {
 
     #[test]
     fn save_family_host_actions_are_prioritized_by_revision_and_kind() {
-        let actions = vec![
-            CoreHostAction::Quit {
+        let trace = |sequence| saya::core_outcome::OutcomeTrace {
+            sequence,
+            origin: saya::core_outcome::OutcomeOrigin::TransactionHostAction,
+            raw_kind: "test",
+        };
+        let directives = vec![
+            NormalizedHostDirective::Quit {
                 force: false,
                 issued_after_revision: 9,
+                trace: trace(1),
             },
-            CoreHostAction::Write {
+            NormalizedHostDirective::Write {
                 path: "stale.txt".to_string(),
                 force: false,
                 issued_after_revision: 8,
+                trace: trace(2),
             },
-            CoreHostAction::Quit {
+            NormalizedHostDirective::Quit {
                 force: false,
                 issued_after_revision: 8,
+                trace: trace(3),
             },
-            CoreHostAction::Write {
+            NormalizedHostDirective::Write {
                 path: "fresh.txt".to_string(),
                 force: false,
                 issued_after_revision: 9,
+                trace: trace(4),
             },
         ];
 
-        let prioritized = prioritize_save_family_host_actions(actions, 9);
+        let prioritized = prioritize_save_family_host_directives(directives, 9);
 
         assert_eq!(
             prioritized,
             vec![
-                CoreHostAction::Write {
+                NormalizedHostDirective::Write {
                     path: "fresh.txt".to_string(),
                     force: false,
                     issued_after_revision: 9,
+                    trace: trace(4),
                 },
-                CoreHostAction::Quit {
+                NormalizedHostDirective::Quit {
                     force: false,
                     issued_after_revision: 9,
+                    trace: trace(1),
                 },
             ]
         );
@@ -2245,6 +2439,36 @@ mod tests {
         assert_eq!(
             latest_user_visible_message(messages),
             Some("visible warning".to_string())
+        );
+    }
+
+    #[test]
+    fn consume_core_outcomes_marks_need_redraw_when_bridge_has_pending_redraw() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut accumulator = MainOutcomeAccumulator::default();
+        let mut core_message = None;
+        let mut need_redraw = false;
+
+        bridge
+            .apply_ex_command(":redraw")
+            .expect(":redraw should succeed");
+        consume_core_outcomes_from_core(
+            &mut bridge,
+            &mut accumulator,
+            &mut core_message,
+            &mut need_redraw,
+        );
+
+        assert!(
+            need_redraw,
+            "pending redraw from core should mark need_redraw"
+        );
+        assert!(
+            bridge.take_normalized_outcomes().is_empty(),
+            "normalized outcomes should be drained after helper runs"
         );
     }
 

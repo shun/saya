@@ -49,20 +49,11 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
 }
 
 #[test]
-fn runtime_public_api_type_declaration_does_not_expose_transport_specific_presentation_details()
-{
+fn runtime_public_api_type_declaration_does_not_expose_transport_specific_presentation_details() {
     let declaration = RUNTIME_SAYA_TYPE_DECLARATION.to_ascii_lowercase();
 
     for forbidden in [
-        "overlay",
-        "graphics",
-        "protocol",
-        "bytes",
-        "asset",
-        "kitty",
-        "sixel",
-        "wgpu",
-        "neovim",
+        "overlay", "graphics", "protocol", "bytes", "asset", "kitty", "sixel", "wgpu", "neovim",
     ] {
         assert!(
             !declaration.contains(forbidden),
