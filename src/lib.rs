@@ -6,6 +6,7 @@ pub mod callback_registry_seed;
 pub mod cli;
 pub mod config_runtime;
 pub mod core_bridge;
+pub mod core_notification_prompt;
 pub mod core_outcome;
 pub mod core_prompt;
 pub mod editor_session;

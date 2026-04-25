@@ -185,6 +185,9 @@ fn hex_payload(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::overlay_asset_store::{OverlayAssetMedia, OverlayAssetRef};
+    use crate::core_notification_prompt::{
+        MessageLineCandidate, resolve_workspace_message_line,
+    };
     use crate::presentation_effect::{OverlayContentKey, OverlayTarget, PresentationOverlayIntent};
     use crate::screen_model::{PaneRect, ScreenModel};
     use crate::terminal_capability::{
@@ -236,7 +239,11 @@ mod tests {
                 is_active: true,
             }],
             active_window_id: 3,
-            global_message_line: None,
+            message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: None,
         };
         let asset_ref = OverlayAssetRef {

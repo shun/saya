@@ -1,3 +1,7 @@
+use crate::core_notification_prompt::{
+    MessageLineCandidate, MessageLineSource, WorkspaceMessageLineState,
+    resolve_workspace_message_line,
+};
 use crate::screen_model::{CommandLineModel, WorkspaceScreenModel};
 use crate::terminal_capability::TerminalCapabilityProfile;
 
@@ -43,9 +47,15 @@ pub struct RuntimePresentationIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PresentationState {
-    pub global_message_line: Option<String>,
+    pub message_line: WorkspaceMessageLineState,
     pub command_line: Option<CommandLineModel>,
     pub overlays: Vec<PresentationOverlayIntent>,
+}
+
+impl PresentationState {
+    pub fn visible_message_text(&self) -> Option<&str> {
+        self.message_line.visible_text()
+    }
 }
 
 pub trait PresentationEffectProjectorService {
@@ -61,31 +71,46 @@ pub trait PresentationEffectProjectorService {
 pub struct PresentationEffectProjector;
 
 impl PresentationEffectProjector {
-    fn fallback_message(
-        workspace: &WorkspaceScreenModel,
+    fn fallback_candidates(
         runtime_effects: &[RuntimePresentationIntent],
         capabilities: &TerminalCapabilityProfile,
-    ) -> Option<String> {
-        if workspace.global_message_line.is_some() {
-            return workspace.global_message_line.clone();
-        }
+    ) -> Vec<MessageLineCandidate> {
         if capabilities.inline_graphics.is_some() {
-            return None;
+            return Vec::new();
         }
 
         let fallback = runtime_effects
             .iter()
             .map(|intent| intent.fallback_text.trim())
             .find(|text| !text.is_empty())
-            .map(ToOwned::to_owned);
-        if let Some(message) = fallback.as_deref() {
+            .map(|text| {
+                MessageLineCandidate::legacy(MessageLineSource::RuntimeOverlayFallback, text)
+            });
+        if let Some(candidate) = fallback.as_ref() {
             log::debug!(
-                "[presentation_effect] promoting runtime overlay fallback into message line: {}",
-                message
+                "[presentation_effect] promoting runtime overlay fallback into message candidates: {}",
+                candidate.text
+            );
+        } else {
+            log::debug!(
+                "[presentation_effect] runtime overlay fallback suppressed because no non-empty fallback text was available"
             );
         }
-        fallback
+        fallback.into_iter().collect()
     }
+}
+
+pub fn merge_presentation_message_line(
+    workspace: &WorkspaceMessageLineState,
+    fallback_candidates: impl IntoIterator<Item = MessageLineCandidate>,
+) -> WorkspaceMessageLineState {
+    let mut candidates = Vec::new();
+    if let Some(visible) = workspace.visible.clone() {
+        candidates.push(visible);
+    }
+    candidates.extend(workspace.suppressed.clone());
+    candidates.extend(fallback_candidates);
+    resolve_workspace_message_line(candidates)
 }
 
 impl PresentationEffectProjectorService for PresentationEffectProjector {
@@ -95,7 +120,10 @@ impl PresentationEffectProjectorService for PresentationEffectProjector {
         runtime_effects: &[RuntimePresentationIntent],
         capabilities: &TerminalCapabilityProfile,
     ) -> PresentationState {
-        let global_message_line = Self::fallback_message(workspace, runtime_effects, capabilities);
+        let message_line = merge_presentation_message_line(
+            &workspace.message_line,
+            Self::fallback_candidates(runtime_effects, capabilities),
+        );
         let overlays = if capabilities.inline_graphics.is_some() {
             runtime_effects
                 .iter()
@@ -110,12 +138,12 @@ impl PresentationEffectProjectorService for PresentationEffectProjector {
         };
         log::debug!(
             "[presentation_effect] projected presentation state: message_present={}, command_line_present={}, overlay_count={}",
-            global_message_line.is_some(),
+            message_line.visible_text().is_some(),
             workspace.command_line.is_some(),
             overlays.len()
         );
         PresentationState {
-            global_message_line,
+            message_line,
             command_line: workspace.command_line.clone(),
             overlays,
         }
@@ -125,6 +153,9 @@ impl PresentationEffectProjectorService for PresentationEffectProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_notification_prompt::{
+        MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
+    };
     use crate::screen_model::{PaneRect, ScreenModel};
     use crate::terminal_capability::{
         InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
@@ -155,7 +186,11 @@ mod tests {
                 is_active: true,
             }],
             active_window_id: 1,
-            global_message_line: None,
+            message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: None,
         }
     }
@@ -187,9 +222,51 @@ mod tests {
         );
 
         assert_eq!(
-            presentation.global_message_line.as_deref(),
+            presentation.visible_message_text(),
             Some("preview unavailable")
         );
         assert!(presentation.overlays.is_empty());
+    }
+
+    #[test]
+    fn projector_keeps_core_message_visible_and_retains_runtime_fallback_as_suppressed() {
+        let mut workspace = workspace_model();
+        workspace.message_line = resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
+            MessageLineSource::CoreNotification,
+            "core note",
+        )]);
+        let capabilities = TerminalCapabilityProbe::new(
+            TerminalCapabilityObservation {
+                session_kind: TerminalSessionKind::Local,
+                basic_terminal_control: true,
+                styled_text: false,
+                truecolor: false,
+            },
+            InlineGraphicsProbeResult::Disabled,
+        )
+        .detect();
+        let projector = PresentationEffectProjector;
+
+        let presentation = projector.project(
+            &workspace,
+            &[RuntimePresentationIntent {
+                content_key: OverlayContentKey::RuntimeRegistered {
+                    id: "runtime.preview".to_string(),
+                },
+                target: OverlayTarget::StatusArea,
+                fallback_text: "preview unavailable".to_string(),
+            }],
+            &capabilities,
+        );
+
+        assert_eq!(presentation.visible_message_text(), Some("core note"));
+        assert_eq!(
+            presentation.message_line.visible_source(),
+            Some(MessageLineSource::CoreNotification)
+        );
+        assert_eq!(
+            presentation.message_line.suppressed_sources(),
+            vec![MessageLineSource::RuntimeOverlayFallback]
+        );
     }
 }

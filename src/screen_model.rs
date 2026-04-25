@@ -11,6 +11,11 @@ use unicode_width::UnicodeWidthChar;
 use vim_core_rs::{CoreMode, CoreSnapshot, CoreWindowInfo};
 
 use crate::core_bridge::VisualSelection;
+use crate::core_notification_prompt::{
+    BellIndication, InputPromptView, MessageLineCandidate, MessageLineSource, PagerPromptView,
+    SuppressedPromptHint, WorkspaceMessageLineState, WorkspaceNotificationPromptView,
+    resolve_workspace_message_line,
+};
 use crate::editor_session::EditorSessionState;
 use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
 use crate::viewport::WindowViewportStore;
@@ -66,8 +71,26 @@ pub struct CommandLineModel {
 pub struct WorkspaceScreenModel {
     pub panes: Vec<PaneScreenModel>,
     pub active_window_id: i32,
-    pub global_message_line: Option<String>,
+    pub message_line: WorkspaceMessageLineState,
+    pub prompt_line: Option<InputPromptView>,
+    pub pager_prompt: Option<PagerPromptView>,
+    pub suppressed_prompt_hints: Vec<SuppressedPromptHint>,
+    pub bell: Option<BellIndication>,
     pub command_line: Option<CommandLineModel>,
+}
+
+impl WorkspaceScreenModel {
+    pub fn visible_message_text(&self) -> Option<&str> {
+        self.message_line.visible_text()
+    }
+
+    pub fn visible_message_source(&self) -> Option<MessageLineSource> {
+        self.message_line.visible_source()
+    }
+
+    pub fn suppressed_message_sources(&self) -> Vec<MessageLineSource> {
+        self.message_line.suppressed_sources()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +262,7 @@ pub struct WorkspaceProjectionInput<'a> {
     pub search_states: &'a BTreeMap<i32, SearchVisibleState>,
     pub command_preview: Option<&'a str>,
     pub core_message: Option<&'a str>,
+    pub notification_prompt: Option<&'a WorkspaceNotificationPromptView>,
     pub system_warning: Option<&'a str>,
     pub transient_info: Option<&'a str>,
     pub viewport_store: &'a WindowViewportStore,
@@ -345,18 +369,9 @@ pub fn project_workspace(
         ))
         .unwrap_or(u16::MAX),
     });
-    let global_message_line = if command_line.is_some() {
-        None
-    } else {
-        resolve_message_state(
-            &ProjectionInput::new(input.snapshot, input.session_state, input.transient_info)
-                .with_core_message(input.core_message)
-                .with_system_warning(input.system_warning),
-        )
-        .map(|state| state.text)
-    };
-    let reserved_rows =
-        u16::from(global_message_line.is_some()) + u16::from(command_line.is_some());
+    let workspace_message_line = resolve_workspace_message_line_state(input);
+    let reserved_rows = u16::from(workspace_message_line.visible_text().is_some())
+        + u16::from(command_line.is_some());
     let workspace_height = input.terminal_height.saturating_sub(reserved_rows).max(1);
     let pane_window_ids = input
         .snapshot
@@ -429,9 +444,68 @@ pub fn project_workspace(
     Ok(WorkspaceScreenModel {
         panes,
         active_window_id,
-        global_message_line,
+        message_line: workspace_message_line,
+        prompt_line: input
+            .notification_prompt
+            .and_then(|prompt| prompt.input_prompt.clone()),
+        pager_prompt: input.notification_prompt.and_then(|prompt| prompt.pager_prompt),
+        suppressed_prompt_hints: input
+            .notification_prompt
+            .map(|prompt| prompt.suppressed_prompt_hints.clone())
+            .unwrap_or_default(),
+        bell: input.notification_prompt.and_then(|prompt| prompt.bell),
         command_line,
     })
+}
+
+pub(crate) fn resolve_workspace_message_line_state(
+    input: &WorkspaceProjectionInput<'_>,
+) -> WorkspaceMessageLineState {
+    let mut candidates = Vec::new();
+
+    if let Some(preview) = input.command_preview {
+        candidates.push(MessageLineCandidate::legacy(
+            MessageLineSource::CommandPreview,
+            preview,
+        ));
+    }
+    let projected_core_message = input
+        .notification_prompt
+        .and_then(|prompt| prompt.notification_message.as_ref())
+        .map(|message| message.text.as_str())
+        .or(input.core_message);
+    if let Some(message) = projected_core_message {
+        candidates.push(MessageLineCandidate::legacy(
+            MessageLineSource::CoreNotification,
+            message,
+        ));
+    }
+    if let Some(message) = input.system_warning {
+        candidates.push(MessageLineCandidate::legacy(
+            MessageLineSource::SystemWarning,
+            message,
+        ));
+    }
+    if let Some(message) = input.transient_info {
+        candidates.push(MessageLineCandidate::legacy(
+            MessageLineSource::TransientInfo,
+            message,
+        ));
+    }
+    if let Some(error) = input.session_state.last_save_error() {
+        candidates.push(MessageLineCandidate::legacy(
+            MessageLineSource::TransientInfo,
+            format!("保存失敗: {error}"),
+        ));
+    }
+
+    let state = resolve_workspace_message_line(candidates);
+    log::debug!(
+        "[screen_model] workspace message line resolved: visible_source={:?}, suppressed_sources={:?}",
+        state.visible_source(),
+        state.suppressed_sources()
+    );
+    state
 }
 
 fn resolve_projection_active_window(snapshot: &CoreSnapshot) -> Option<&CoreWindowInfo> {
@@ -2031,6 +2105,7 @@ mod tests {
             search_states: &search_states,
             command_preview: None,
             core_message: None,
+            notification_prompt: None,
             system_warning: None,
             transient_info: None,
             viewport_store: &viewport_store,
@@ -2088,6 +2163,7 @@ mod tests {
             search_states: &search_states,
             command_preview: None,
             core_message: None,
+            notification_prompt: None,
             system_warning: None,
             transient_info: None,
             viewport_store: &viewport_store,
@@ -2144,6 +2220,7 @@ mod tests {
             search_states: &search_states,
             command_preview: None,
             core_message: None,
+            notification_prompt: None,
             system_warning: None,
             transient_info: None,
             viewport_store: &viewport_store,
@@ -2178,6 +2255,7 @@ mod tests {
             search_states: &search_states,
             command_preview: Some(":w"),
             core_message: None,
+            notification_prompt: None,
             system_warning: None,
             transient_info: None,
             viewport_store: &viewport_store,
@@ -2191,6 +2269,98 @@ mod tests {
             model.panes[0].rect.height, expected_height,
             "command line だけの時も message row を重複予約せず core の pane height を保つこと"
         );
-        assert_eq!(model.global_message_line, None);
+        assert_eq!(model.visible_message_text(), None);
+    }
+
+    #[test]
+    fn workspace_message_line_state_preserves_suppressed_notifications_while_command_preview_is_active()
+     {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("alpha\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+        let input = WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            command_preview: Some(":%s/foo/bar"),
+            core_message: Some("core note"),
+            notification_prompt: None,
+            system_warning: Some("system warning"),
+            transient_info: Some("saved"),
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        };
+
+        let state = resolve_workspace_message_line_state(&input);
+        assert_eq!(
+            state.visible_source(),
+            Some(MessageLineSource::CommandPreview)
+        );
+        assert_eq!(state.visible_text(), Some(":%s/foo/bar"));
+        assert_eq!(
+            state.suppressed_sources(),
+            vec![
+                MessageLineSource::SystemWarning,
+                MessageLineSource::CoreNotification,
+                MessageLineSource::TransientInfo,
+            ]
+        );
+
+        let model = project_workspace(&input).expect("workspace projection should succeed");
+        assert_eq!(
+            model.command_line.as_ref().map(|line| line.text.as_str()),
+            Some(":%s/foo/bar")
+        );
+        assert_eq!(model.visible_message_text(), Some(":%s/foo/bar"));
+    }
+
+    #[test]
+    fn workspace_message_line_state_distinguishes_system_warning_from_core_notification() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("alpha\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+        let input = WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            command_preview: None,
+            core_message: Some("shared text"),
+            notification_prompt: None,
+            system_warning: Some("shared text"),
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        };
+
+        let state = resolve_workspace_message_line_state(&input);
+        assert_eq!(
+            state.visible_source(),
+            Some(MessageLineSource::SystemWarning)
+        );
+        assert_eq!(state.visible_text(), Some("shared text"));
+        assert_eq!(
+            state.suppressed_sources(),
+            vec![MessageLineSource::CoreNotification]
+        );
+
+        let model = project_workspace(&input).expect("workspace projection should succeed");
+        assert_eq!(model.visible_message_text(), Some("shared text"));
+        assert_eq!(model.command_line, None);
     }
 }

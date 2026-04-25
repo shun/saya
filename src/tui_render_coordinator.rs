@@ -1,3 +1,4 @@
+use crate::core_notification_prompt::{MessageLineCandidate, MessageLineSource};
 use crate::optional_graphics::{
     OptionalGraphicsAdapter, OptionalGraphicsAdapterService, OverlayRenderResult,
     OverlayTerminalWriter,
@@ -5,7 +6,7 @@ use crate::optional_graphics::{
 use crate::overlay_asset_store::{OverlayAssetRef, OverlayAssetStore, OverlayAssetStoreService};
 use crate::presentation_effect::{
     PresentationEffectProjector, PresentationEffectProjectorService, PresentationState,
-    RuntimePresentationIntent,
+    RuntimePresentationIntent, merge_presentation_message_line,
 };
 use crate::screen_model::WorkspaceScreenModel;
 use crate::terminal_capability::{TerminalCapabilityProfile, TextStyleCapability};
@@ -109,9 +110,18 @@ impl TuiRenderCoordinator {
                 let Some(last_successful) = self.last_successful_workspace.clone() else {
                     return Err(RenderFrameError::Projection { message });
                 };
-                let mut rollback = last_successful;
-                rollback.global_message_line = Some(message);
-                let rollback_presentation = self.projector.project(&rollback, &[], capabilities);
+                let rollback = last_successful;
+                let rollback_presentation = PresentationState {
+                    message_line: merge_presentation_message_line(
+                        &rollback.message_line,
+                        [MessageLineCandidate::legacy(
+                            MessageLineSource::RenderProjectionError,
+                            message,
+                        )],
+                    ),
+                    command_line: rollback.command_line.clone(),
+                    overlays: Vec::new(),
+                };
                 self.render_workspace_with_presentation(
                     &rollback,
                     capabilities,
@@ -135,15 +145,22 @@ impl TuiRenderCoordinator {
         presentation: &PresentationState,
     ) -> WorkspaceScreenModel {
         let mut rendered = workspace.clone();
-        rendered.global_message_line = presentation.global_message_line.clone();
+        rendered.message_line = presentation.message_line.clone();
         rendered.command_line = presentation.command_line.clone();
         rendered
     }
 
     fn ensure_fallback_message(workspace: &mut WorkspaceScreenModel, fallback_text: &str) {
-        if workspace.global_message_line.is_none() && !fallback_text.trim().is_empty() {
-            workspace.global_message_line = Some(fallback_text.to_string());
+        if fallback_text.trim().is_empty() {
+            return;
         }
+        workspace.message_line = merge_presentation_message_line(
+            &workspace.message_line,
+            [MessageLineCandidate::legacy(
+                MessageLineSource::RuntimeOverlayFallback,
+                fallback_text,
+            )],
+        );
     }
 
     fn render_workspace_with_presentation(
@@ -250,5 +267,140 @@ impl TuiRenderCoordinatorService for TuiRenderCoordinator {
             request.presentation,
             request.overlay_writer,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core_notification_prompt::{
+        BellIndication, MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
+    };
+    use crate::screen_model::{PaneRect, ScreenModel, WorkspaceProjectionError};
+    use crate::terminal_capability::{
+        InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
+        TerminalCapabilityProbeService, TerminalSessionKind,
+    };
+
+    fn capabilities_without_graphics() -> TerminalCapabilityProfile {
+        TerminalCapabilityProbe::new(
+            TerminalCapabilityObservation {
+                session_kind: TerminalSessionKind::Local,
+                basic_terminal_control: true,
+                styled_text: false,
+                truecolor: false,
+            },
+            InlineGraphicsProbeResult::Disabled,
+        )
+        .detect()
+    }
+
+    fn workspace() -> WorkspaceScreenModel {
+        WorkspaceScreenModel {
+            panes: vec![ScreenModel {
+                window_id: 1,
+                buffer_id: 1,
+                rect: PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 20,
+                    height: 4,
+                },
+                file_name: "sample.txt".to_string(),
+                mode_label: "NORMAL".to_string(),
+                dirty: false,
+                lines: vec!["alpha".to_string()],
+                cursor_row: 0,
+                cursor_col: 0,
+                visual_selection: None,
+                search_overlays: vec![],
+                message_line: None,
+                command_cursor_col: None,
+                is_active: true,
+            }],
+            active_window_id: 1,
+            message_line: resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
+                MessageLineSource::CoreNotification,
+                "core note",
+            )]),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: Some(BellIndication { count: 1 }),
+            command_line: None,
+        }
+    }
+
+    #[test]
+    fn render_workspace_result_keeps_core_message_visible_when_projection_rolls_back() {
+        let mut coordinator = TuiRenderCoordinator::new_for_tests(
+            OverlayAssetStore::default(),
+            OptionalGraphicsAdapter::default(),
+        );
+        let capabilities = capabilities_without_graphics();
+
+        let first = coordinator
+            .render_workspace_result::<WorkspaceProjectionError>(
+                Ok(workspace()),
+                &capabilities,
+                &[],
+                None,
+            )
+            .expect("initial render should succeed");
+        assert_eq!(
+            first.rendered_workspace.visible_message_source(),
+            Some(MessageLineSource::CoreNotification)
+        );
+
+        let second = coordinator
+            .render_workspace_result::<WorkspaceProjectionError>(
+                Err(WorkspaceProjectionError::ActiveWindowMissing),
+                &capabilities,
+                &[],
+                None,
+            )
+            .expect("rollback render should succeed");
+
+        assert_eq!(second.rendered_workspace.visible_message_text(), Some("core note"));
+        assert_eq!(
+            second.rendered_workspace.visible_message_source(),
+            Some(MessageLineSource::CoreNotification)
+        );
+        assert_eq!(
+            second.rendered_workspace.suppressed_message_sources(),
+            vec![MessageLineSource::RenderProjectionError]
+        );
+    }
+
+    #[test]
+    fn render_workspace_result_retains_runtime_fallback_as_suppressed_when_core_message_exists() {
+        let mut coordinator = TuiRenderCoordinator::new_for_tests(
+            OverlayAssetStore::default(),
+            OptionalGraphicsAdapter::default(),
+        );
+        let capabilities = capabilities_without_graphics();
+        let outcome = coordinator
+            .render_workspace_result::<WorkspaceProjectionError>(
+                Ok(workspace()),
+                &capabilities,
+                &[RuntimePresentationIntent {
+                    content_key: crate::presentation_effect::OverlayContentKey::RuntimeRegistered {
+                        id: "runtime.preview".to_string(),
+                    },
+                    target: crate::presentation_effect::OverlayTarget::StatusArea,
+                    fallback_text: "preview unavailable".to_string(),
+                }],
+                None,
+            )
+            .expect("render should succeed");
+
+        assert_eq!(
+            outcome.rendered_workspace.visible_message_source(),
+            Some(MessageLineSource::CoreNotification)
+        );
+        assert_eq!(
+            outcome.rendered_workspace.suppressed_message_sources(),
+            vec![MessageLineSource::RuntimeOverlayFallback]
+        );
     }
 }

@@ -84,3 +84,56 @@ fn main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
         );
     }
 }
+
+#[test]
+fn notification_projection_module_keeps_raw_core_enums_out_of_ui_surface() {
+    let source = std::fs::read_to_string("src/core_notification_prompt.rs")
+        .expect("notification projection module should be readable from the repository root");
+
+    for raw_enum in ["CoreHostAction", "CoreEvent"] {
+        assert!(
+            !source.contains(raw_enum),
+            "notification projection module must not depend on raw {raw_enum}"
+        );
+    }
+}
+
+#[test]
+fn testing_docs_pin_suite_specific_gtimeout_acceptance_commands() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    for command in [
+        "gtimeout 120 cargo test notification_prompt -- --test-threads=1",
+        "gtimeout 120 cargo test public_surface_guard -- --test-threads=1",
+    ] {
+        assert!(
+            docs.contains(command),
+            "testing docs should pin the suite-specific gtimeout acceptance command: {command}"
+        );
+    }
+}
+
+#[test]
+fn typed_message_line_migration_forbids_direct_string_overwrite_paths() {
+    for path in [
+        "src/screen_model.rs",
+        "src/presentation_effect.rs",
+        "src/tui_render_coordinator.rs",
+        "src/tui_renderer.rs",
+        "src/main.rs",
+    ] {
+        let source =
+            std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        for forbidden in [
+            "global_message_line =",
+            "pub global_message_line: Option<String>",
+            ".global_message_line =",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "typed message line migration forbids direct string overwrite path in {path}: {forbidden}"
+            );
+        }
+    }
+}

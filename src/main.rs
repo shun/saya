@@ -3,10 +3,16 @@ use saya::app_startup::{
 };
 use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
+use saya::core_notification_prompt::{
+    NotificationPromptProjectionState, ProjectionFrame, PromptInputAction,
+    handle_prompt_key, record_prompt_response_error,
+};
 use saya::core_outcome::{
     ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
+    NormalizedOutcomeBatch,
     fold_normalized_outcomes,
 };
+use saya::core_prompt::PromptResponseCommand;
 use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
@@ -48,6 +54,8 @@ use std::hash::{Hash, Hasher};
 struct MainOutcomeAccumulator {
     state: ApplicationOutcomeState,
     host_directives: Vec<NormalizedHostDirective>,
+    projection: NotificationPromptProjectionState,
+    last_projection_frame: Option<ProjectionFrame>,
 }
 
 #[tokio::main]
@@ -111,7 +119,6 @@ async fn main() {
         OptionalGraphicsAdapter::default(),
     );
     let mut session_state = outcome.editor_session_state();
-    let mut core_message: Option<String> = None;
     let mut system_warning: Option<String> = bootstrap_warning_message(&outcome.warnings);
     let mut transient_msg: Option<String> = runtime_init_message;
     let mut outcome_accumulator = MainOutcomeAccumulator::default();
@@ -153,7 +160,7 @@ async fn main() {
         &mut search_refresh_store,
         command_line_prompt,
         &command_line_buffer,
-        core_message.as_deref(),
+        outcome_accumulator.last_projection_frame.as_ref(),
         system_warning.as_deref(),
         transient_msg.as_deref(),
         terminal_width,
@@ -212,17 +219,49 @@ async fn main() {
                     UiEvent::Input(key) => {
                         let mut handled = false;
 
-                        if let Some(prompt) = command_line_prompt {
+                        match handle_prompt_key(&mut outcome_accumulator.projection, &key) {
+                            PromptInputAction::Consumed | PromptInputAction::AwaitingCore => {
+                                handled = true;
+                                need_redraw = true;
+                            }
+                            PromptInputAction::Submit(command)
+                            | PromptInputAction::Cancel(command) => {
+                                handled = true;
+                                dispatch_prompt_response_command(
+                                    &mut outcome.core_bridge,
+                                    &mut outcome_accumulator,
+                                    command,
+                                    &mut need_redraw,
+                                );
+
+                                if let Some(reason) = process_pending_host_actions_with_runtime(
+                                    &mut outcome,
+                                    &mut outcome_accumulator,
+                                    &mut session_state,
+                                    &mut transient_msg,
+                                    &mut system_warning,
+                                    runtime_session.as_mut(),
+                                    &mut need_redraw,
+                                    &mut runtime_presentation_intents,
+                                )
+                                .await
+                                {
+                                    break 'main reason;
+                                }
+                            }
+                            PromptInputAction::NotPromptInput => {}
+                        }
+
+                        if !handled && let Some(prompt) = command_line_prompt {
                             match key {
                                 KeyInput::Escape => {
                                     if prompt == '/' {
                                         let _ = outcome.core_bridge.cancel_search_input();
-                                        consume_core_outcomes_from_core(
-                                            &mut outcome.core_bridge,
-                                            &mut outcome_accumulator,
-                                            &mut core_message,
-                                            &mut need_redraw,
-                                        );
+                                            consume_core_outcomes_from_core(
+                                                &mut outcome.core_bridge,
+                                                &mut outcome_accumulator,
+                                                &mut need_redraw,
+                                            );
                                     }
                                     command_line_prompt = None;
                                     command_line_buffer.clear();
@@ -248,7 +287,6 @@ async fn main() {
                                                     consume_core_outcomes_from_core(
                                                         &mut outcome.core_bridge,
                                                         &mut outcome_accumulator,
-                                                        &mut core_message,
                                                         &mut need_redraw,
                                                     );
                                                 }
@@ -263,7 +301,6 @@ async fn main() {
                                                 consume_core_outcomes_from_core(
                                                     &mut outcome.core_bridge,
                                                     &mut outcome_accumulator,
-                                                    &mut core_message,
                                                     &mut need_redraw,
                                                 );
                                             }
@@ -272,7 +309,6 @@ async fn main() {
                                                 consume_core_outcomes_from_core(
                                                     &mut outcome.core_bridge,
                                                     &mut outcome_accumulator,
-                                                    &mut core_message,
                                                     &mut need_redraw,
                                                 );
                                             }
@@ -284,7 +320,6 @@ async fn main() {
                                         consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
                                             &mut outcome_accumulator,
-                                            &mut core_message,
                                             &mut need_redraw,
                                         );
                                         command_line_prompt = None;
@@ -302,7 +337,6 @@ async fn main() {
                                         consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
                                             &mut outcome_accumulator,
-                                            &mut core_message,
                                             &mut need_redraw,
                                         );
                                     } else if command_line_buffer.pop().is_none() {
@@ -318,7 +352,6 @@ async fn main() {
                                         consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
                                             &mut outcome_accumulator,
-                                            &mut core_message,
                                             &mut need_redraw,
                                         );
                                     }
@@ -342,7 +375,8 @@ async fn main() {
                             {
                                 break 'main reason;
                             }
-                        } else if (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
+                        } else if !handled
+                            && (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
                             && outcome.core_bridge.snapshot().mode == CoreMode::Normal
                         {
                             if let KeyInput::Char(c) = key {
@@ -361,7 +395,6 @@ async fn main() {
                                     consume_core_outcomes_from_core(
                                         &mut outcome.core_bridge,
                                         &mut outcome_accumulator,
-                                        &mut core_message,
                                         &mut need_redraw,
                                     );
 
@@ -435,6 +468,19 @@ async fn main() {
                 }
             }
 
+            if outcome_accumulator.projection.prompt().active_input().is_some()
+                && command_line_prompt.is_some()
+            {
+                log::debug!(
+                    "[main] clearing local command/search preview because core-owned prompt is active: prompt={:?}, buffer_len={}",
+                    command_line_prompt,
+                    command_line_buffer.len()
+                );
+                command_line_prompt = None;
+                command_line_buffer.clear();
+                need_redraw = true;
+            }
+
             if need_redraw {
                 sync_core_screen_size(&mut outcome);
                 let (terminal_width, terminal_height) = current_terminal_size();
@@ -445,7 +491,7 @@ async fn main() {
                     &mut search_refresh_store,
                     command_line_prompt,
                     &command_line_buffer,
-                    core_message.as_deref(),
+                    outcome_accumulator.last_projection_frame.as_ref(),
                     system_warning.as_deref(),
                     transient_msg.as_deref(),
                     terminal_width,
@@ -554,7 +600,6 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     consume_core_outcomes_from_core(
         &mut outcome.core_bridge,
         &mut outcome_accumulator,
-        &mut transient_msg,
         &mut need_redraw,
     );
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
@@ -576,7 +621,6 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     consume_core_outcomes_from_core(
         &mut outcome.core_bridge,
         &mut outcome_accumulator,
-        &mut transient_msg,
         &mut need_redraw,
     );
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
@@ -682,7 +726,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
             .iter()
             .find(|pane| pane.window_id == initial_render.rendered_workspace.active_window_id)
             .map(|pane| format!("{} | {}", pane.file_name, pane.mode_label)),
-        initial_render.rendered_workspace.global_message_line,
+        initial_render.rendered_workspace.visible_message_text(),
     );
 
     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -732,7 +776,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         split_active_pane.cursor_row,
         split_active_pane.cursor_col,
         split_status,
-        split_render.rendered_workspace.global_message_line,
+        split_render.rendered_workspace.visible_message_text(),
     );
 
     std::thread::sleep(std::time::Duration::from_millis(25));
@@ -770,7 +814,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         resized_width,
         resized_height,
         terminal_broker.latest_size(),
-        resize_render.rendered_workspace.global_message_line,
+        resize_render.rendered_workspace.visible_message_text(),
     );
 
     let rollback_render = render_coordinator
@@ -799,7 +843,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         rollback_active_pane
             .map(|pane| pane.cursor_col)
             .unwrap_or_default(),
-        rollback_render.rendered_workspace.global_message_line,
+        rollback_render.rendered_workspace.visible_message_text(),
     );
 
     outcome
@@ -810,7 +854,6 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
     consume_core_outcomes_from_core(
         &mut outcome.core_bridge,
         &mut outcome_accumulator,
-        &mut transient_msg,
         &mut save_redraw,
     );
     let save_shutdown = process_pending_host_actions_with_runtime(
@@ -851,7 +894,6 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
     consume_core_outcomes_from_core(
         &mut outcome.core_bridge,
         &mut outcome_accumulator,
-        &mut transient_msg,
         &mut quit_redraw,
     );
     let quit_reason = process_pending_host_actions_with_runtime(
@@ -882,7 +924,6 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
     consume_core_outcomes_from_core(
         &mut outcome.core_bridge,
         &mut outcome_accumulator,
-        &mut transient_msg,
         &mut force_quit_redraw,
     );
     let force_quit_reason = process_pending_host_actions_with_runtime(
@@ -1354,7 +1395,6 @@ fn save_error_message(error: &SaveRequestError) -> String {
 fn consume_core_outcomes_from_core(
     core_bridge: &mut saya::core_bridge::CoreBridge,
     accumulator: &mut MainOutcomeAccumulator,
-    core_message: &mut Option<String>,
     need_redraw: &mut bool,
 ) {
     let batch = core_bridge.take_normalized_outcomes();
@@ -1362,17 +1402,32 @@ fn consume_core_outcomes_from_core(
         return;
     }
 
+    consume_normalized_batch(batch, accumulator, need_redraw);
+}
+
+fn consume_normalized_batch(
+    batch: NormalizedOutcomeBatch,
+    accumulator: &mut MainOutcomeAccumulator,
+    need_redraw: &mut bool,
+) {
     let current = std::mem::take(&mut accumulator.state);
     let folded = fold_normalized_outcomes(batch, current);
+    let projection_frame = accumulator.projection.apply_seam(folded.downstream_consume_seam());
     let effects = folded.effects;
     accumulator.state = folded.state;
-    apply_core_dispatch_effects(effects, accumulator, core_message, need_redraw);
+    accumulator.last_projection_frame = Some(projection_frame.clone());
+    apply_core_dispatch_effects(
+        effects,
+        &projection_frame,
+        accumulator,
+        need_redraw,
+    );
 }
 
 fn apply_core_dispatch_effects(
     effects: ApplicationDispatchEffects,
+    projection_frame: &ProjectionFrame,
     accumulator: &mut MainOutcomeAccumulator,
-    core_message: &mut Option<String>,
     need_redraw: &mut bool,
 ) {
     if let Some(message) = effects.notification.latest_user_visible_message {
@@ -1380,7 +1435,6 @@ fn apply_core_dispatch_effects(
             "[main] replacing core message from normalized notification effect: {:?}",
             message
         );
-        *core_message = Some(message.content);
     }
     if let Some(message) = effects.notification.latest_non_user_message {
         log::debug!(
@@ -1401,6 +1455,22 @@ fn apply_core_dispatch_effects(
         log::debug!(
             "[main] observed input prompt transition effect: {:?}",
             transition
+        );
+    }
+    if let Some(prompt) = projection_frame.input_prompt.as_ref() {
+        log::debug!(
+            "[main] retained prompt projection is active: correlation_id={}, input_kind={:?}, buffer_len={}, status={:?}",
+            prompt.correlation_id,
+            prompt.input_kind,
+            prompt.input.len(),
+            prompt.status
+        );
+    }
+    if let Some(error) = projection_frame.response_error.as_ref() {
+        log::debug!(
+            "[main] prompt projection recorded response error: sequence={}, error={}",
+            projection_frame.sequence,
+            error
         );
     }
     if let Some(redraw) = effects.structural.redraw {
@@ -1430,6 +1500,28 @@ fn apply_core_dispatch_effects(
         );
     }
     accumulator.host_directives.extend(effects.host_directives);
+}
+
+fn dispatch_prompt_response_command(
+    core_bridge: &mut saya::core_bridge::CoreBridge,
+    accumulator: &mut MainOutcomeAccumulator,
+    command: PromptResponseCommand,
+    need_redraw: &mut bool,
+) {
+    log::debug!(
+        "[main] routing prompt response through core bridge: correlation_id={}",
+        command.correlation_id()
+    );
+    match core_bridge.respond_to_prompt(command) {
+        Ok(batch) => {
+            consume_normalized_batch(batch, accumulator, need_redraw);
+        }
+        Err(error) => {
+            log::debug!("[main] prompt response rejected: {}", error);
+            record_prompt_response_error(&mut accumulator.projection, error);
+        }
+    }
+    *need_redraw = true;
 }
 
 #[cfg(test)]
@@ -1681,9 +1773,17 @@ fn apply_workspace_redraw_transaction(
                 error
             );
             if let Some(last_successful) = last_successful_workspace_model.as_ref() {
-                let mut rollback_model = last_successful.clone();
                 let failure_message = error.to_string();
-                rollback_model.global_message_line = Some(failure_message.clone());
+                let rollback_model = WorkspaceScreenModel {
+                    message_line: saya::presentation_effect::merge_presentation_message_line(
+                        &last_successful.message_line,
+                        [saya::core_notification_prompt::MessageLineCandidate::legacy(
+                            saya::core_notification_prompt::MessageLineSource::RenderProjectionError,
+                            failure_message.as_str(),
+                        )],
+                    ),
+                    ..last_successful.clone()
+                };
                 Ok(WorkspaceRenderOutput {
                     model: rollback_model,
                     failure_message: Some(failure_message),
@@ -1702,7 +1802,7 @@ fn build_workspace_render_output(
     search_refresh_store: &mut WindowSearchRefreshStore,
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
-    core_message: Option<&str>,
+    projection_frame: Option<&ProjectionFrame>,
     system_warning: Option<&str>,
     transient_msg: Option<&str>,
     terminal_width: u16,
@@ -1728,6 +1828,7 @@ fn build_workspace_render_output(
     )?;
     let command_preview =
         command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
+    let notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
 
     project_workspace(&WorkspaceProjectionInput {
         snapshot: &snapshot,
@@ -1735,7 +1836,8 @@ fn build_workspace_render_output(
         visual_selection: visual_selection.as_ref(),
         search_states: &search_states,
         command_preview: command_preview.as_deref(),
-        core_message,
+        core_message: None,
+        notification_prompt: notification_prompt.as_ref(),
         system_warning,
         transient_info: transient_msg,
         viewport_store,
@@ -2076,7 +2178,6 @@ mod tests {
         consume_core_outcomes_from_core(
             &mut outcome.core_bridge,
             &mut outcome_accumulator,
-            &mut transient_msg,
             &mut need_redraw,
         );
         assert!(
@@ -2341,7 +2442,13 @@ mod tests {
                 is_active: true,
             }],
             active_window_id: 1,
-            global_message_line: None,
+            message_line: saya::core_notification_prompt::resolve_workspace_message_line(
+                Vec::<saya::core_notification_prompt::MessageLineCandidate>::new(),
+            ),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: None,
         });
 
@@ -2356,15 +2463,18 @@ mod tests {
         assert_eq!(output.model.active_window_id, 1);
         assert_eq!(output.model.panes.len(), 1);
         assert_eq!(
-            output.model.global_message_line,
-            Some("workspace projection failed: active window could not be resolved".to_string())
+            output.model.visible_message_text(),
+            Some("workspace projection failed: active window could not be resolved")
         );
-        assert_eq!(output.failure_message, output.model.global_message_line);
+        assert_eq!(
+            output.failure_message.as_deref(),
+            output.model.visible_message_text()
+        );
         assert_eq!(
             last_successful_workspace_model
                 .as_ref()
                 .expect("last successful model should be retained")
-                .global_message_line,
+                .visible_message_text(),
             None
         );
     }
@@ -2449,7 +2559,6 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
         let mut accumulator = MainOutcomeAccumulator::default();
-        let mut core_message = None;
         let mut need_redraw = false;
 
         bridge
@@ -2458,7 +2567,6 @@ mod tests {
         consume_core_outcomes_from_core(
             &mut bridge,
             &mut accumulator,
-            &mut core_message,
             &mut need_redraw,
         );
 
@@ -2469,6 +2577,204 @@ mod tests {
         assert!(
             bridge.take_normalized_outcomes().is_empty(),
             "normalized outcomes should be drained after helper runs"
+        );
+    }
+
+    #[test]
+    fn consume_core_outcomes_tracks_active_prompt_in_projection_state() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut accumulator = MainOutcomeAccumulator::default();
+        let mut need_redraw = false;
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should succeed");
+        consume_core_outcomes_from_core(
+            &mut bridge,
+            &mut accumulator,
+            &mut need_redraw,
+        );
+
+        assert_eq!(
+            accumulator
+                .projection
+                .prompt()
+                .active_input()
+                .map(|view| view.correlation_id),
+            Some(1)
+        );
+        assert_eq!(
+            accumulator
+                .last_projection_frame
+                .as_ref()
+                .and_then(|frame| frame.input_prompt.as_ref())
+                .map(|view| view.prompt.as_str()),
+            Some("Name")
+        );
+    }
+
+    #[test]
+    fn prompt_response_success_is_routed_through_bridge_and_closes_only_after_folded_batch() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut accumulator = MainOutcomeAccumulator::default();
+        let mut need_redraw = false;
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should succeed");
+        consume_core_outcomes_from_core(
+            &mut bridge,
+            &mut accumulator,
+            &mut need_redraw,
+        );
+        assert_eq!(
+            accumulator
+                .projection
+                .prompt()
+                .active_input()
+                .map(|view| view.correlation_id),
+            Some(1)
+        );
+
+        let action = saya::core_notification_prompt::handle_prompt_key(
+            &mut accumulator.projection,
+            &KeyInput::Enter,
+        );
+        let command = match action {
+            saya::core_notification_prompt::PromptInputAction::Submit(command) => command,
+            other => panic!("expected submit action, got {other:?}"),
+        };
+
+        dispatch_prompt_response_command(
+            &mut bridge,
+            &mut accumulator,
+            command,
+            &mut need_redraw,
+        );
+
+        assert!(need_redraw);
+        assert!(accumulator.projection.prompt().active_input().is_none());
+        assert_eq!(
+            accumulator
+                .projection
+                .prompt()
+                .last_transition()
+                .map(|transition| transition.kind),
+            Some(saya::core_notification_prompt::PromptTransitionKind::Submitted)
+        );
+    }
+
+    #[test]
+    fn structural_redraw_does_not_close_active_prompt() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut accumulator = MainOutcomeAccumulator::default();
+        let mut need_redraw = false;
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should succeed");
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
+        assert_eq!(
+            accumulator
+                .projection
+                .prompt()
+                .active_input()
+                .map(|view| view.correlation_id),
+            Some(1)
+        );
+
+        need_redraw = false;
+        bridge
+            .apply_ex_command(":redraw")
+            .expect(":redraw should succeed");
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
+
+        assert!(need_redraw, "structural redraw should still request a redraw");
+        assert_eq!(
+            accumulator
+                .projection
+                .prompt()
+                .active_input()
+                .map(|view| view.correlation_id),
+            Some(1),
+            "redraw-only dispatch must not close the active prompt"
+        );
+    }
+
+    #[test]
+    fn prompt_response_error_restores_active_prompt_and_preserves_buffer() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut accumulator = MainOutcomeAccumulator::default();
+        let mut need_redraw = false;
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should succeed");
+        consume_core_outcomes_from_core(
+            &mut bridge,
+            &mut accumulator,
+            &mut need_redraw,
+        );
+        assert!(matches!(
+            saya::core_notification_prompt::handle_prompt_key(
+                &mut accumulator.projection,
+                &KeyInput::Char('x'),
+            ),
+            saya::core_notification_prompt::PromptInputAction::Consumed
+        ));
+        let action = saya::core_notification_prompt::handle_prompt_key(
+            &mut accumulator.projection,
+            &KeyInput::Enter,
+        );
+        let command = match action {
+            saya::core_notification_prompt::PromptInputAction::Submit(command) => command,
+            other => panic!("expected submit action, got {other:?}"),
+        };
+
+        dispatch_prompt_response_command(
+            &mut bridge,
+            &mut accumulator,
+            saya::core_prompt::PromptResponseCommand::Submit {
+                correlation_id: command.correlation_id() + 1,
+                value: "ignored".to_string(),
+            },
+            &mut need_redraw,
+        );
+
+        assert!(matches!(
+            accumulator
+                .projection
+                .prompt()
+                .active_input()
+                .map(|view| view.status),
+            Some(saya::core_notification_prompt::InputPromptStatus::Active)
+        ));
+        assert_eq!(
+            accumulator
+                .projection
+                .prompt()
+                .active_input()
+                .map(|view| view.input.as_str()),
+            Some("x")
+        );
+        assert!(
+            accumulator
+                .projection
+                .prompt()
+                .last_response_error()
+                .is_some_and(|message| message.contains("expected=1"))
         );
     }
 

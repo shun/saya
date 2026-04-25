@@ -81,6 +81,18 @@ Run the suite serially with this command.
 gtimeout 120 cargo test -- --test-threads=1
 ```
 
+Run the notification prompt contract suite with its pinned acceptance command.
+
+```bash
+gtimeout 120 cargo test notification_prompt -- --test-threads=1
+```
+
+Run the public surface guard suite with its pinned acceptance command.
+
+```bash
+gtimeout 120 cargo test public_surface_guard -- --test-threads=1
+```
+
 ## Why serial execution matters
 
 `saya` uses a single-session guard because `vim-core-rs` permits only one live

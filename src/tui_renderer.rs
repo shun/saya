@@ -89,10 +89,16 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
         render_pane(f, pane.model, pane.is_active, pane.rect, text_mode);
     }
 
-    if let Some((message_line, message_rect)) =
-        visible_global_message_line(model).zip(layout.global_message_rect)
-    {
+    if let Some((message_line, message_rect)) = message_row_text(model).zip(layout.message_rect) {
         f.render_widget(Paragraph::new(message_line), message_rect);
+    }
+
+    if let Some((pager_line, pager_rect)) = pager_row_text(model).zip(layout.pager_rect) {
+        f.render_widget(Paragraph::new(pager_line), pager_rect);
+    }
+
+    if let Some((prompt_line, prompt_rect)) = prompt_row_text(model).zip(layout.prompt_rect) {
+        f.render_widget(Paragraph::new(prompt_line), prompt_rect);
     }
 
     if let Some((command_line, command_rect)) = model.command_line.as_ref().zip(layout.command_rect)
@@ -117,7 +123,9 @@ struct PaneLayout<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceLayout<'a> {
     panes: Vec<PaneLayout<'a>>,
-    global_message_rect: Option<Rect>,
+    message_rect: Option<Rect>,
+    pager_rect: Option<Rect>,
+    prompt_rect: Option<Rect>,
     command_rect: Option<Rect>,
     cursor: Option<(u16, u16)>,
 }
@@ -152,19 +160,15 @@ fn compute_workspace_layout<'a>(
         })
         .collect::<Vec<_>>();
 
-    let global_message_rect = visible_global_message_line(model).map(|_| Rect {
-        x: 0,
-        y: size.height.saturating_sub(global_rows),
-        width: size.width,
-        height: 1,
-    });
-
-    let command_rect = model.command_line.as_ref().map(|_| Rect {
-        x: 0,
-        y: size.height.saturating_sub(1),
-        width: size.width,
-        height: 1,
-    });
+    let mut next_row = size.height;
+    let command_rect = bottom_row_rect(
+        size.width,
+        &mut next_row,
+        model.command_line.as_ref().map(|_| ()),
+    );
+    let prompt_rect = bottom_row_rect(size.width, &mut next_row, prompt_row_text(model));
+    let pager_rect = bottom_row_rect(size.width, &mut next_row, pager_row_text(model));
+    let message_rect = bottom_row_rect(size.width, &mut next_row, message_row_text(model));
 
     let cursor = if command_rect.is_some() {
         None
@@ -189,22 +193,67 @@ fn compute_workspace_layout<'a>(
 
     WorkspaceLayout {
         panes,
-        global_message_rect,
+        message_rect,
+        pager_rect,
+        prompt_rect,
         command_rect,
         cursor,
     }
 }
 
 fn workspace_global_rows(model: &WorkspaceScreenModel) -> u16 {
-    u16::from(visible_global_message_line(model).is_some())
+    u16::from(message_row_text(model).is_some())
+        + u16::from(pager_row_text(model).is_some())
+        + u16::from(prompt_row_text(model).is_some())
         + u16::from(model.command_line.is_some())
 }
 
-fn visible_global_message_line(model: &WorkspaceScreenModel) -> Option<&str> {
+fn bottom_row_rect<T>(width: u16, next_row: &mut u16, row: Option<T>) -> Option<Rect> {
+    row.and_then(|_| {
+        if *next_row <= 1 {
+            return None;
+        }
+        *next_row = next_row.saturating_sub(1);
+        Some(Rect {
+            x: 0,
+            y: *next_row,
+            width,
+            height: 1,
+        })
+    })
+}
+
+fn message_row_text(model: &WorkspaceScreenModel) -> Option<String> {
+    let message = model.visible_message_text().map(str::trim).unwrap_or_default();
+    let bell = model.bell.map(|bell| format!("[bell x{}]", bell.count));
+    match (message.is_empty(), bell) {
+        (false, Some(bell_marker)) => Some(format!("{message} {bell_marker}")),
+        (false, None) => Some(message.to_string()),
+        (true, Some(bell_marker)) => Some(bell_marker),
+        (true, None) => None,
+    }
+}
+
+fn pager_row_text(model: &WorkspaceScreenModel) -> Option<String> {
     model
-        .global_message_line
-        .as_deref()
-        .filter(|message| !message.is_empty())
+        .pager_prompt
+        .map(|pager| format!("[pager: {:?}]", pager.kind))
+}
+
+fn prompt_row_text(model: &WorkspaceScreenModel) -> Option<String> {
+    model.prompt_line.as_ref().map(|prompt| match prompt.status {
+        crate::core_notification_prompt::InputPromptStatus::Active => {
+            format!("{} {}", prompt.prompt, prompt.input).trim_end().to_string()
+        }
+        crate::core_notification_prompt::InputPromptStatus::AwaitingCore { disposition } => {
+            format!(
+                "{} {} [{:?}]",
+                prompt.prompt, prompt.input, disposition
+            )
+            .trim_end()
+            .to_string()
+        }
+    })
 }
 
 fn render_pane(
@@ -260,7 +309,12 @@ fn render_status_line(model: &ScreenModel) -> String {
 
 #[cfg(test)]
 fn render_message_line(model: &ScreenModel) -> &str {
-    model.message_line.as_deref().unwrap_or("")
+    let message = model.message_line.as_deref().unwrap_or("");
+    if message.trim().is_empty() {
+        ""
+    } else {
+        message
+    }
 }
 
 #[cfg(test)]
@@ -274,7 +328,23 @@ fn draw_editor_frame<B: Backend>(
         &WorkspaceScreenModel {
             panes: vec![model.clone()],
             active_window_id: model.window_id,
-            global_message_line: model.message_line.clone(),
+            message_line: model.message_line.as_deref().map_or_else(
+                || crate::core_notification_prompt::resolve_workspace_message_line(
+                    Vec::<crate::core_notification_prompt::MessageLineCandidate>::new(),
+                ),
+                |message| {
+                    crate::core_notification_prompt::resolve_workspace_message_line(vec![
+                        crate::core_notification_prompt::MessageLineCandidate::legacy(
+                            crate::core_notification_prompt::MessageLineSource::TransientInfo,
+                            message,
+                        ),
+                    ])
+                },
+            ),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: model.command_cursor_col.map(|cursor_col| CommandLineModel {
                 text: model.message_line.clone().unwrap_or_default(),
                 cursor_col,
@@ -495,6 +565,11 @@ mod tests {
     use super::*;
     use crate::bootstrap::prepare_launch;
     use crate::cli::LaunchRequest;
+    use crate::core_notification_prompt::{
+        BellIndication, InputPromptStatus, InputPromptView, MessageLineCandidate,
+        MessageLineSource, PagerPromptView, PromptHintSuppressionReason,
+        SuppressedPromptHint, resolve_workspace_message_line,
+    };
     use crate::editor_session::EditorSessionState;
     use crate::screen_model::ScreenSelection;
     use crate::screen_model::{ProjectionInput, ScreenSearchOverlay, project};
@@ -502,6 +577,7 @@ mod tests {
     use crate::session_guard::test_lock as session_test_lock;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
+    use vim_core_rs::{CoreInputRequestKind, CorePagerPromptKind};
 
     fn screen_model_with_message(message_line: Option<&str>) -> ScreenModel {
         ScreenModel {
@@ -533,6 +609,27 @@ mod tests {
         }
     }
 
+    fn workspace_with_typed_message(message_line: Option<&str>) -> WorkspaceScreenModel {
+        WorkspaceScreenModel {
+            panes: vec![screen_model_with_message(None)],
+            active_window_id: 1,
+            message_line: message_line.map_or_else(
+                || resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+                |message| {
+                    resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
+                        MessageLineSource::CoreNotification,
+                        message,
+                    )])
+                },
+            ),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
+            command_line: None,
+        }
+    }
+
     #[test]
     fn status_line_does_not_embed_message_line() {
         let model = screen_model_with_message(Some("保存しました"));
@@ -550,6 +647,13 @@ mod tests {
     #[test]
     fn message_line_is_empty_when_no_message_exists() {
         let model = screen_model_with_message(None);
+
+        assert_eq!(render_message_line(&model), "");
+    }
+
+    #[test]
+    fn message_line_with_whitespace_is_not_rendered() {
+        let model = screen_model_with_message(Some("   "));
 
         assert_eq!(render_message_line(&model), "");
     }
@@ -906,7 +1010,11 @@ mod tests {
                 },
             ],
             active_window_id: 20,
-            global_message_line: None,
+            message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: None,
         };
 
@@ -945,7 +1053,11 @@ mod tests {
                 is_active: true,
             }],
             active_window_id: 1,
-            global_message_line: None,
+            message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: None,
         };
 
@@ -989,7 +1101,11 @@ mod tests {
                 is_active: true,
             }],
             active_window_id: 1,
-            global_message_line: None,
+            message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: Some(CommandLineModel {
                 text: ":w".to_string(),
                 cursor_col: 2,
@@ -1016,12 +1132,7 @@ mod tests {
 
     #[test]
     fn workspace_layout_exposes_no_global_rows_when_message_and_command_are_absent() {
-        let model = WorkspaceScreenModel {
-            panes: vec![screen_model_with_message(None)],
-            active_window_id: 1,
-            global_message_line: None,
-            command_line: None,
-        };
+        let model = workspace_with_typed_message(None);
 
         let layout = compute_workspace_layout(
             Rect {
@@ -1033,7 +1144,7 @@ mod tests {
             &model,
         );
 
-        assert_eq!(layout.global_message_rect, None);
+        assert_eq!(layout.message_rect, None);
         assert_eq!(layout.command_rect, None);
         assert_eq!(layout.panes[0].rect.height, 3);
         assert_eq!(layout.cursor, Some((0, 0)));
@@ -1046,7 +1157,11 @@ mod tests {
         let model = WorkspaceScreenModel {
             panes: vec![pane],
             active_window_id: 1,
-            global_message_line: None,
+            message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
             command_line: Some(CommandLineModel {
                 text: ":w".to_string(),
                 cursor_col: 2,
@@ -1063,7 +1178,7 @@ mod tests {
             &model,
         );
 
-        assert_eq!(layout.global_message_rect, None);
+        assert_eq!(layout.message_rect, None);
         assert_eq!(
             layout.command_rect,
             Some(Rect {
@@ -1079,12 +1194,7 @@ mod tests {
 
     #[test]
     fn workspace_layout_does_not_reserve_row_for_empty_global_message() {
-        let model = WorkspaceScreenModel {
-            panes: vec![screen_model_with_message(None)],
-            active_window_id: 1,
-            global_message_line: Some(String::new()),
-            command_line: None,
-        };
+        let model = workspace_with_typed_message(Some(""));
 
         let layout = compute_workspace_layout(
             Rect {
@@ -1097,7 +1207,7 @@ mod tests {
         );
 
         assert_eq!(
-            layout.global_message_rect, None,
+            layout.message_rect, None,
             "空の message line では global row を予約しないこと"
         );
         assert_eq!(
@@ -1108,15 +1218,11 @@ mod tests {
 
     #[test]
     fn workspace_layout_stacks_message_above_command_without_overlap() {
-        let model = WorkspaceScreenModel {
-            panes: vec![screen_model_with_message(None)],
-            active_window_id: 1,
-            global_message_line: Some("saved".to_string()),
-            command_line: Some(CommandLineModel {
-                text: ":w".to_string(),
-                cursor_col: 2,
-            }),
-        };
+        let mut model = workspace_with_typed_message(Some("saved"));
+        model.command_line = Some(CommandLineModel {
+            text: ":w".to_string(),
+            cursor_col: 2,
+        });
 
         let layout = compute_workspace_layout(
             Rect {
@@ -1129,7 +1235,7 @@ mod tests {
         );
 
         assert_eq!(
-            layout.global_message_rect,
+            layout.message_rect,
             Some(Rect {
                 x: 0,
                 y: 3,
@@ -1147,5 +1253,99 @@ mod tests {
             })
         );
         assert_eq!(layout.panes[0].rect.height, 3);
+    }
+
+    #[test]
+    fn workspace_render_draws_message_prompt_pager_and_bell_rows_without_suppressed_hints() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(32, 6)).expect("test terminal should initialize");
+        let mut model = workspace_with_typed_message(Some("saved"));
+        model.pager_prompt = Some(PagerPromptView {
+            kind: CorePagerPromptKind::More,
+            one_shot: true,
+        });
+        model.prompt_line = Some(InputPromptView {
+            prompt: "Name:".to_string(),
+            input: "abc".to_string(),
+            correlation_id: 7,
+            input_kind: CoreInputRequestKind::CommandLine,
+            status: InputPromptStatus::Active,
+        });
+        model.suppressed_prompt_hints = vec![SuppressedPromptHint {
+            pager_prompt: PagerPromptView {
+                kind: CorePagerPromptKind::HitReturn,
+                one_shot: true,
+            },
+            reason: PromptHintSuppressionReason::ActiveInputPrompt,
+        }];
+        model.bell = Some(BellIndication { count: 2 });
+
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+            .expect("workspace render should succeed");
+
+        let rendered = format!("{}", terminal.backend());
+        let rows: Vec<&str> = rendered.lines().collect();
+        assert!(
+            rows.iter().any(|row| row.contains("saved") && row.contains("[bell x2]")),
+            "message row should include both visible message and bell marker: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("[pager: More]")),
+            "pager hint should render as its own row: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("Name: abc")),
+            "prompt line should render as its own row: {:?}",
+            rows
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Confirm")),
+            "suppressed prompt hints must stay headless-only: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn workspace_layout_saturates_prompt_rows_on_small_terminal_without_overlap() {
+        let mut model = workspace_with_typed_message(Some("saved"));
+        model.pager_prompt = Some(PagerPromptView {
+            kind: CorePagerPromptKind::More,
+            one_shot: true,
+        });
+        model.prompt_line = Some(InputPromptView {
+            prompt: "Name:".to_string(),
+            input: "abc".to_string(),
+            correlation_id: 7,
+            input_kind: CoreInputRequestKind::CommandLine,
+            status: InputPromptStatus::Active,
+        });
+        model.command_line = Some(CommandLineModel {
+            text: ":w".to_string(),
+            cursor_col: 2,
+        });
+
+        let layout = compute_workspace_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 2,
+            },
+            &model,
+        );
+
+        let mut rows = Vec::new();
+        rows.extend(layout.message_rect.map(|rect| rect.y));
+        rows.extend(layout.pager_rect.map(|rect| rect.y));
+        rows.extend(layout.prompt_rect.map(|rect| rect.y));
+        rows.extend(layout.command_rect.map(|rect| rect.y));
+        rows.sort_unstable();
+        rows.dedup();
+
+        assert_eq!(layout.command_rect.map(|rect| rect.y), Some(1));
+        assert_eq!(layout.panes[0].rect.height, 1);
+        assert_eq!(rows.len(), 1, "small terminal must not overlap reserved rows");
     }
 }
