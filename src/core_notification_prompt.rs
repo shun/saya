@@ -641,14 +641,12 @@ fn reconcile_retained_prompt_state(
             };
             prompt.set_active_input(next);
         }
-        None if prompt
-            .last_transition()
-            .is_some_and(|transition| {
-                matches!(
-                    transition.kind,
-                    PromptTransitionKind::Submitted | PromptTransitionKind::Cancelled
-                )
-            }) =>
+        None if prompt.last_transition().is_some_and(|transition| {
+            matches!(
+                transition.kind,
+                PromptTransitionKind::Submitted | PromptTransitionKind::Cancelled
+            )
+        }) =>
         {
             prompt.active_input = None;
         }

@@ -231,10 +231,11 @@ mod tests {
     #[test]
     fn projector_keeps_core_message_visible_and_retains_runtime_fallback_as_suppressed() {
         let mut workspace = workspace_model();
-        workspace.message_line = resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
-            MessageLineSource::CoreNotification,
-            "core note",
-        )]);
+        workspace.message_line =
+            resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
+                MessageLineSource::CoreNotification,
+                "core note",
+            )]);
         let capabilities = TerminalCapabilityProbe::new(
             TerminalCapabilityObservation {
                 session_kind: TerminalSessionKind::Local,

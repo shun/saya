@@ -3,9 +3,9 @@ use std::sync::{Mutex, OnceLock};
 use saya::core_notification_prompt::{
     BellIndication, InputPromptStatus, InputPromptView, MessageLineCandidate, MessageLineSource,
     NotificationPromptProjectionState, PagerPromptView, ProjectionFrame,
-    PromptHintSuppressionReason, PromptInputAction, PromptTransitionKind,
-    RetainedPromptState, SuppressedPromptHint, handle_prompt_key,
-    record_prompt_response_error, resolve_workspace_message_line,
+    PromptHintSuppressionReason, PromptInputAction, PromptTransitionKind, RetainedPromptState,
+    SuppressedPromptHint, handle_prompt_key, record_prompt_response_error,
+    resolve_workspace_message_line,
 };
 use saya::core_outcome::{
     ApplicationOutcomeState, NormalizedCoreOutcome, NormalizedOutcomeBatch, NormalizedPrompt,
@@ -357,7 +357,10 @@ fn apply_seam_projects_request_input_and_non_replayed_pager_prompt() {
 
     assert_eq!(request_frame.sequence, 1);
     assert_eq!(
-        request_frame.input_prompt.as_ref().map(|view| view.correlation_id),
+        request_frame
+            .input_prompt
+            .as_ref()
+            .map(|view| view.correlation_id),
         Some(41)
     );
     assert_eq!(request_frame.pager_prompt, None);
@@ -374,7 +377,10 @@ fn apply_seam_projects_request_input_and_non_replayed_pager_prompt() {
     );
     assert_eq!(replay_frame.sequence, 2);
     assert_eq!(
-        replay_frame.input_prompt.as_ref().map(|view| view.correlation_id),
+        replay_frame
+            .input_prompt
+            .as_ref()
+            .map(|view| view.correlation_id),
         Some(41)
     );
     assert!(replay_frame.pager_prompt.is_none());
@@ -402,7 +408,10 @@ fn apply_seam_closes_prompt_only_after_folded_submission_transition() {
         )]),
     );
     assert_eq!(
-        requested.input_prompt.as_ref().map(|view| view.correlation_id),
+        requested
+            .input_prompt
+            .as_ref()
+            .map(|view| view.correlation_id),
         Some(7)
     );
 
@@ -437,7 +446,10 @@ fn apply_seam_closes_prompt_only_after_folded_submission_transition() {
     assert!(completed.input_prompt.is_none());
     assert!(state.prompt().active_input().is_none());
     assert_eq!(
-        state.prompt().last_transition().map(|transition| transition.kind),
+        state
+            .prompt()
+            .last_transition()
+            .map(|transition| transition.kind),
         Some(PromptTransitionKind::Submitted)
     );
 }
@@ -459,10 +471,16 @@ fn handle_prompt_key_and_response_error_restore_active_prompt_without_losing_buf
         )]),
     );
 
-    for key in [KeyInput::Char(':'), KeyInput::Char('/'), KeyInput::Char('x')] {
+    for key in [
+        KeyInput::Char(':'),
+        KeyInput::Char('/'),
+        KeyInput::Char('x'),
+    ] {
         match handle_prompt_key(&mut state, &key) {
             PromptInputAction::Consumed => {}
-            other => panic!("expected prompt input to stay inside prompt controller, got {other:?}"),
+            other => {
+                panic!("expected prompt input to stay inside prompt controller, got {other:?}")
+            }
         }
     }
 
@@ -474,7 +492,10 @@ fn handle_prompt_key_and_response_error_restore_active_prompt_without_losing_buf
         other => panic!("expected submit action, got {other:?}"),
     }
     assert_eq!(
-        state.prompt().active_input().map(|view| view.input.as_str()),
+        state
+            .prompt()
+            .active_input()
+            .map(|view| view.input.as_str()),
         Some(":/x")
     );
 
@@ -491,7 +512,10 @@ fn handle_prompt_key_and_response_error_restore_active_prompt_without_losing_buf
         Some(InputPromptStatus::Active)
     ));
     assert_eq!(
-        state.prompt().active_input().map(|view| view.input.as_str()),
+        state
+            .prompt()
+            .active_input()
+            .map(|view| view.input.as_str()),
         Some(":/x")
     );
     assert!(

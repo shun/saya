@@ -549,6 +549,7 @@ pub struct RedrawEffect {
     pub full: bool,
     pub clear_before_draw: bool,
     pub required_by_structure_change: bool,
+    pub coalesced_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -765,13 +766,28 @@ fn merge_redraw(
             redraw.full |= full;
             redraw.clear_before_draw |= clear_before_draw;
             redraw.required_by_structure_change |= required_by_structure_change;
+            redraw.coalesced_count += 1;
+            log::debug!(
+                "[core_outcome] coalesced redraw effect: full={}, clear_before_draw={}, required_by_structure_change={}, coalesced_count={}",
+                redraw.full,
+                redraw.clear_before_draw,
+                redraw.required_by_structure_change,
+                redraw.coalesced_count
+            );
         }
         None => {
             effect.redraw = Some(RedrawEffect {
                 full,
                 clear_before_draw,
                 required_by_structure_change,
+                coalesced_count: 1,
             });
+            log::debug!(
+                "[core_outcome] started redraw effect: full={}, clear_before_draw={}, required_by_structure_change={}, coalesced_count=1",
+                full,
+                clear_before_draw,
+                required_by_structure_change
+            );
         }
     }
 }

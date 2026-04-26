@@ -7,6 +7,35 @@ use saya::saya_live_runtime::runtime_public_surface_paths;
 use saya::startup_runtime::startup_public_surface_paths;
 
 const FORBIDDEN_COMPAT_STRING_APIS: &[&str] = &["vim.cmd", ":set", ":map"];
+const STRUCTURAL_ACCEPTANCE_COMMAND: &str = "gtimeout 30s cargo test --test structural_refresh_contract && gtimeout 30s cargo test --test core_outcome_contract && gtimeout 30s cargo test --test tui_render_coordinator && gtimeout 30s cargo test --test integration_terminal && gtimeout 30s cargo test --test public_surface_guard";
+
+struct BoundaryGuard<'a> {
+    boundary: &'a str,
+    path: &'a str,
+    forbidden_terms: &'a [&'a str],
+}
+
+impl BoundaryGuard<'_> {
+    fn assert_clean(&self) {
+        let source = std::fs::read_to_string(self.path).unwrap_or_else(|error| {
+            panic!("{} boundary source is readable: {error}", self.boundary)
+        });
+        let violations = self
+            .forbidden_terms
+            .iter()
+            .copied()
+            .filter(|term| source.contains(term))
+            .collect::<Vec<_>>();
+
+        assert!(
+            violations.is_empty(),
+            "{} boundary must not directly consume forbidden structural-refresh seams in {}: {:?}",
+            self.boundary,
+            self.path,
+            violations
+        );
+    }
+}
 
 fn public_surface_suite_scope_statement() -> &'static str {
     "public-surface boundary suite for startup/runtime surface names and namespace exclusions in host/application API gating"
@@ -86,6 +115,106 @@ fn main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
 }
 
 #[test]
+fn main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
+    let source = std::fs::read_to_string("src/main.rs")
+        .expect("main source should be readable from the repository root");
+
+    for expected in [
+        "StructuralRefresh::from_folded_effects(&effects.structural)",
+        "last_structural_refresh",
+        "sync_from_windows_with_invalidations",
+        "with_viewport_sync_summary",
+        "projection_summary()",
+        "with_projection_summary",
+    ] {
+        assert!(
+            source.contains(expected),
+            "main consume/render path should expose task 3 structural refresh wiring: {expected}"
+        );
+    }
+}
+
+#[test]
+fn structural_refresh_consumes_only_folded_structural_effects() {
+    BoundaryGuard {
+        boundary: "structural_refresh",
+        path: "src/structural_refresh.rs",
+        forbidden_terms: &[
+            "CoreHostAction",
+            "CoreEvent",
+            "NormalizedCoreOutcome",
+            "take_pending_redraw",
+            "take_pending_redraw_requests",
+            "PendingRedrawRequest",
+        ],
+    }
+    .assert_clean();
+
+    let source = std::fs::read_to_string("src/structural_refresh.rs")
+        .expect("structural refresh source should be readable from the repository root");
+
+    assert!(
+        source.contains("StructuralEffectSet"),
+        "structural_refresh boundary should stay anchored to folded structural effects"
+    );
+}
+
+#[test]
+fn structural_refresh_does_not_own_prompt_notification_bell_or_job_behavior() {
+    BoundaryGuard {
+        boundary: "structural_refresh",
+        path: "src/structural_refresh.rs",
+        forbidden_terms: &[
+            "core_notification_prompt",
+            "Prompt",
+            "Notification",
+            "Bell",
+            "Job",
+            "prompt_line",
+            "pager_prompt",
+            "bell",
+        ],
+    }
+    .assert_clean();
+}
+
+#[test]
+fn structural_refresh_boundary_guard_names_each_checked_boundary() {
+    for guard in [
+        BoundaryGuard {
+            boundary: "structural_refresh",
+            path: "src/structural_refresh.rs",
+            forbidden_terms: &[
+                "CoreHostAction",
+                "CoreEvent",
+                "NormalizedCoreOutcome",
+                "take_pending_redraw",
+                "take_pending_redraw_requests",
+                "PendingRedrawRequest",
+                "core_notification_prompt",
+                "Prompt",
+                "Notification",
+                "Bell",
+                "Job",
+            ],
+        },
+        BoundaryGuard {
+            boundary: "main_ui_consume_path",
+            path: "src/main.rs",
+            forbidden_terms: &[
+                "CoreHostAction",
+                "CoreEvent",
+                "take_pending_redraw",
+                "take_pending_redraw_requests",
+                "PendingRedrawRequest",
+            ],
+        },
+    ] {
+        guard.assert_clean();
+    }
+}
+
+#[test]
 fn notification_projection_module_keeps_raw_core_enums_out_of_ui_surface() {
     let source = std::fs::read_to_string("src/core_notification_prompt.rs")
         .expect("notification projection module should be readable from the repository root");
@@ -110,6 +239,38 @@ fn testing_docs_pin_suite_specific_gtimeout_acceptance_commands() {
         assert!(
             docs.contains(command),
             "testing docs should pin the suite-specific gtimeout acceptance command: {command}"
+        );
+    }
+}
+
+#[test]
+fn structural_refresh_acceptance_command_is_headless_timeout_guarded_and_complete() {
+    let docs = std::fs::read_to_string("docs/testing.md")
+        .expect("testing docs should be readable from the repository root");
+
+    assert!(
+        docs.contains(STRUCTURAL_ACCEPTANCE_COMMAND),
+        "testing docs should pin the structural refresh acceptance command: {STRUCTURAL_ACCEPTANCE_COMMAND}"
+    );
+    assert!(
+        !STRUCTURAL_ACCEPTANCE_COMMAND.contains("--nocapture")
+            && !STRUCTURAL_ACCEPTANCE_COMMAND.contains("script ")
+            && !STRUCTURAL_ACCEPTANCE_COMMAND.contains("pty")
+            && !STRUCTURAL_ACCEPTANCE_COMMAND.contains("tty"),
+        "structural refresh acceptance command must remain headless and non-interactive"
+    );
+
+    for suite in [
+        "core_outcome_contract",
+        "structural_refresh_contract",
+        "tui_render_coordinator",
+        "integration_terminal",
+        "public_surface_guard",
+    ] {
+        let suite_command = format!("gtimeout 30s cargo test --test {suite}");
+        assert!(
+            STRUCTURAL_ACCEPTANCE_COMMAND.contains(&suite_command),
+            "structural refresh acceptance command must include timeout-guarded suite: {suite}"
         );
     }
 }

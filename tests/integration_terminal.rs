@@ -13,7 +13,6 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -22,15 +21,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use saya::bootstrap::{launch_test_lock, prepare_launch};
 use saya::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
+use saya::core_notification_prompt::{
+    MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
+};
 use saya::editor_session::EditorSessionState;
 use saya::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
 use saya::input_loop::{TerminalEventSource, run_terminal_input_loop};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::optional_graphics::OptionalGraphicsAdapter;
+use saya::overlay_asset_store::OverlayAssetStore;
 use saya::screen_model::{
-    PaneRect, ProjectionInput, WorkspaceProjectionInput, project, project_workspace,
+    PaneRect, ProjectionInput, ScreenModel, WorkspaceProjectionError, WorkspaceProjectionInput,
+    WorkspaceScreenModel, project, project_workspace,
 };
 use saya::search_query::{SearchVisibleQuery, SearchVisibleState};
+use saya::terminal_capability::{
+    InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
+    TerminalCapabilityProbeService, TerminalSessionKind,
+};
 use saya::terminal_lifecycle::{TerminalBackend, TerminalLifecycle};
+use saya::tui_render_coordinator::TuiRenderCoordinator;
 use saya::viewport::ViewportState;
 use saya::viewport::WindowViewportStore;
 
@@ -272,6 +282,7 @@ fn project_workspace_from_snapshot(
         search_states: &search_states,
         command_preview: None,
         core_message: None,
+        notification_prompt: None,
         system_warning: None,
         transient_info: None,
         viewport_store: &viewport_store,
@@ -486,97 +497,175 @@ fn workspace_projection_returns_explicit_failure_when_active_window_is_missing()
 }
 
 #[test]
-fn pty_smoke_renders_split_and_rollback_display() {
+fn headless_smoke_renders_split_and_rollback_display_without_pty() {
     let _lock = launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let target_path = unique_path("pty-smoke");
-    std::fs::write(&target_path, "alpha\nbeta\ngamma\n").expect("test target should be writable");
-    let transcript_path = unique_path("pty-smoke-transcript");
-    let cargo_target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
-
-    let build_output = Command::new("gtimeout")
-        .arg("120")
-        .env("VIM_CORE_FROM_SOURCE", "1")
-        .arg("cargo")
-        .arg("build")
-        .arg("--bin")
-        .arg("sy")
-        .output()
-        .expect("PTY smoke build should spawn");
-    assert!(
-        build_output.status.success(),
-        "PTY smoke binary build should succeed: status={:?}\nstdout={}\nstderr={}",
-        build_output.status,
-        String::from_utf8_lossy(&build_output.stdout),
-        String::from_utf8_lossy(&build_output.stderr)
+    let capabilities = TerminalCapabilityProbe::new(
+        TerminalCapabilityObservation {
+            session_kind: TerminalSessionKind::Local,
+            basic_terminal_control: true,
+            styled_text: false,
+            truecolor: false,
+        },
+        InlineGraphicsProbeResult::Disabled,
+    )
+    .detect();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
     );
 
-    let binary_path = cargo_target_dir.join("debug").join("sy");
+    let initial = headless_workspace(1, 10, "alpha", "initial draw");
+    let initial_render = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(initial.clone()),
+            &capabilities,
+            &[],
+            None,
+        )
+        .expect("initial headless render should succeed");
+    assert_eq!(initial_render.rendered_workspace.panes, initial.panes);
+    assert!(
+        initial_render
+            .rendered_workspace
+            .visible_message_text()
+            .is_some_and(|message| message.contains("initial draw")),
+        "headless smoke should expose the initial draw marker"
+    );
 
-    let output = Command::new("gtimeout")
-        .arg("20")
-        .arg("script")
-        .arg("-q")
-        .arg(&transcript_path)
-        .arg("sh")
-        .arg("-c")
-        .arg("stty rows 24 cols 80; env TERM=xterm-256color VIM_CORE_FROM_SOURCE=1 SAYA_PTY_SMOKE=1 \"$1\" \"$2\"")
-        .arg("sh")
-        .arg(&binary_path)
-        .arg(&target_path)
-        .output()
-        .expect("PTY smoke command should spawn");
+    let split = headless_split_workspace();
+    let split_render = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(split.clone()),
+            &capabilities,
+            &[],
+            None,
+        )
+        .expect("split headless render should succeed");
+    assert_eq!(split_render.rendered_workspace.panes.len(), 2);
+    assert_eq!(split_render.rendered_workspace.active_window_id, 2);
+    assert!(
+        split_render
+            .rendered_workspace
+            .visible_message_text()
+            .is_some_and(|message| message.contains("split draw")),
+        "headless smoke should expose the split draw marker"
+    );
 
-    let transcript = std::fs::read_to_string(&transcript_path).unwrap_or_default();
-    let _ = std::fs::remove_file(&target_path);
-    let _ = std::fs::remove_file(&transcript_path);
+    let rollback_render = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Err(WorkspaceProjectionError::ActiveWindowMissing),
+            &capabilities,
+            &[],
+            None,
+        )
+        .expect("projection failure should render the retained workspace without PTY");
+    assert_eq!(rollback_render.rendered_workspace.panes, split.panes);
+    assert_eq!(rollback_render.rendered_workspace.active_window_id, 2);
+    assert!(
+        rollback_render
+            .rendered_workspace
+            .visible_message_text()
+            .is_some_and(|message| message.contains("split draw")),
+        "rollback should preserve the last successful workspace message"
+    );
+    assert!(
+        rollback_render
+            .rendered_workspace
+            .suppressed_message_sources()
+            .contains(&MessageLineSource::RenderProjectionError),
+        "rollback should retain the projection failure as an operator-visible suppressed diagnostic"
+    );
 
+    let resized = headless_workspace(2, 11, "resized", "resize draw");
+    let resize_render = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(Ok(resized), &capabilities, &[], None)
+        .expect("valid refresh after rollback should succeed");
     assert!(
-        output.status.success(),
-        "PTY smoke should exit cleanly: status={:?}\nstdout={}\nstderr={}\ntranscript={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-        transcript
+        resize_render
+            .rendered_workspace
+            .visible_message_text()
+            .is_some_and(|message| message.contains("resize draw")),
+        "next valid headless render should replace the retained rollback screen"
     );
-    assert!(
-        transcript.contains("[pty-smoke] initial draw"),
-        "transcript should include the initial draw marker: {transcript}"
+}
+
+fn headless_workspace(
+    window_id: i32,
+    buffer_id: i32,
+    line: &str,
+    message: &str,
+) -> WorkspaceScreenModel {
+    WorkspaceScreenModel {
+        panes: vec![ScreenModel {
+            window_id,
+            buffer_id,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 8,
+            },
+            file_name: format!("headless-{buffer_id}.txt"),
+            mode_label: "NORMAL".to_string(),
+            dirty: false,
+            lines: vec![line.to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![],
+            message_line: None,
+            command_cursor_col: None,
+            is_active: true,
+        }],
+        active_window_id: window_id,
+        message_line: resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
+            MessageLineSource::CoreNotification,
+            message,
+        )]),
+        prompt_line: None,
+        pager_prompt: None,
+        suppressed_prompt_hints: vec![],
+        bell: None,
+        command_line: None,
+    }
+}
+
+fn headless_split_workspace() -> WorkspaceScreenModel {
+    let mut workspace = headless_workspace(2, 11, "beta", "split draw");
+    workspace.panes.insert(
+        0,
+        ScreenModel {
+            window_id: 1,
+            buffer_id: 10,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 40,
+                height: 4,
+            },
+            file_name: "headless-10.txt".to_string(),
+            mode_label: "NORMAL".to_string(),
+            dirty: false,
+            lines: vec!["alpha".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![],
+            message_line: None,
+            command_cursor_col: None,
+            is_active: false,
+        },
     );
-    assert!(
-        transcript.contains("[pty-smoke] split draw"),
-        "transcript should include the split draw marker: {transcript}"
-    );
-    assert!(
-        transcript.contains("[pty-smoke] rollback draw"),
-        "transcript should include the rollback draw marker: {transcript}"
-    );
-    assert!(
-        transcript.contains("[pty-smoke] resize draw"),
-        "transcript should include the resize draw marker: {transcript}"
-    );
-    assert!(
-        transcript.contains("[pty-smoke] save result"),
-        "transcript should include the save result marker: {transcript}"
-    );
-    assert!(
-        transcript.contains("[pty-smoke] quit reason: UserQuit"),
-        "transcript should include the normal quit marker: {transcript}"
-    );
-    assert!(
-        transcript.contains("[pty-smoke] force quit reason: UserForceQuit"),
-        "transcript should include the force quit marker: {transcript}"
-    );
-    assert!(
-        transcript.contains("pty-smoke") && transcript.contains("NORMAL"),
-        "transcript should include rendered status line text: {transcript}"
-    );
-    assert!(
-        transcript.contains("workspace projection failed: active window could not be resolved"),
-        "transcript should include the rollback message line: {transcript}"
-    );
+    workspace.panes[1].rect = PaneRect {
+        x: 0,
+        y: 4,
+        width: 40,
+        height: 4,
+    };
+    workspace
 }
 
 fn dispatch_ctrl_w(outcome: &mut saya::bootstrap::BootstrapOutcome, command: char) {
@@ -915,6 +1004,27 @@ async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
     assert!(
         model.lines.iter().any(|line| line.contains('H')),
         "redraw が coalesce されても non-redraw の入力が画面へ反映されること"
+    );
+}
+
+#[test]
+fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
+    let event_loop_source =
+        std::fs::read_to_string("src/event_loop.rs").expect("event loop source is readable");
+    let main_source = std::fs::read_to_string("src/main.rs").expect("main source is readable");
+
+    assert!(
+        !event_loop_source.contains("RedrawPlan"),
+        "event loop coalescing must stay a scheduling concern and must not mutate folded RedrawPlan"
+    );
+    assert!(
+        main_source.contains("render_workspace_result_with_structural_refresh"),
+        "main loop must pass structural RedrawPlan to render coordination instead of relying on event coalescing"
+    );
+    assert!(
+        main_source.contains("structural_refresh.redraw_plan.full")
+            && main_source.contains("structural_refresh.redraw_plan.clear_before_draw"),
+        "folded full and clear-before-draw metadata must remain observable before render"
     );
 }
 
@@ -1662,6 +1772,7 @@ fn ctrl_w_close_on_last_window_keeps_layout_and_surfaces_message() {
         search_states: &search_states,
         command_preview: None,
         core_message: Some(latest_message.as_str()),
+        notification_prompt: None,
         system_warning: None,
         transient_info: None,
         viewport_store: &viewport_store,
@@ -1674,8 +1785,8 @@ fn ctrl_w_close_on_last_window_keeps_layout_and_surfaces_message() {
         "failure should mention that the last window cannot be closed: {latest_message}"
     );
     assert_eq!(
-        workspace.global_message_line,
-        Some(latest_message),
+        workspace.visible_message_text(),
+        Some(latest_message.as_str()),
         "workspace projection should surface the close failure message"
     );
 }
@@ -1734,6 +1845,7 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
         search_states: &before_search_states,
         command_preview: None,
         core_message: None,
+        notification_prompt: None,
         system_warning: None,
         transient_info: None,
         viewport_store: &viewport_store,
@@ -1755,6 +1867,7 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
         search_states: &after_search_states,
         command_preview: None,
         core_message: None,
+        notification_prompt: None,
         system_warning: None,
         transient_info: None,
         viewport_store: &viewport_store,

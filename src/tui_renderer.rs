@@ -35,6 +35,12 @@ pub struct TuiRenderer {
     needs_full_clear: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RenderFrameOptions {
+    pub full_redraw: bool,
+    pub clear_before_draw: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderTextMode {
     Plain,
@@ -61,7 +67,25 @@ impl TuiRenderer {
         model: &WorkspaceScreenModel,
         text_mode: RenderTextMode,
     ) -> io::Result<()> {
-        draw_workspace_frame(&mut self.terminal, model, self.needs_full_clear, text_mode)?;
+        self.draw_with_mode_and_options(model, text_mode, RenderFrameOptions::default())
+    }
+
+    pub fn draw_with_mode_and_options(
+        &mut self,
+        model: &WorkspaceScreenModel,
+        text_mode: RenderTextMode,
+        options: RenderFrameOptions,
+    ) -> io::Result<()> {
+        let force_full_clear =
+            self.needs_full_clear || options.full_redraw || options.clear_before_draw;
+        log::debug!(
+            "[tui_renderer] drawing workspace frame: initial_clear={}, full_redraw={}, clear_before_draw={}, force_full_clear={}",
+            self.needs_full_clear,
+            options.full_redraw,
+            options.clear_before_draw,
+            force_full_clear
+        );
+        draw_workspace_frame(&mut self.terminal, model, force_full_clear, text_mode)?;
         self.needs_full_clear = false;
         Ok(())
     }
@@ -224,7 +248,10 @@ fn bottom_row_rect<T>(width: u16, next_row: &mut u16, row: Option<T>) -> Option<
 }
 
 fn message_row_text(model: &WorkspaceScreenModel) -> Option<String> {
-    let message = model.visible_message_text().map(str::trim).unwrap_or_default();
+    let message = model
+        .visible_message_text()
+        .map(str::trim)
+        .unwrap_or_default();
     let bell = model.bell.map(|bell| format!("[bell x{}]", bell.count));
     match (message.is_empty(), bell) {
         (false, Some(bell_marker)) => Some(format!("{message} {bell_marker}")),
@@ -241,19 +268,21 @@ fn pager_row_text(model: &WorkspaceScreenModel) -> Option<String> {
 }
 
 fn prompt_row_text(model: &WorkspaceScreenModel) -> Option<String> {
-    model.prompt_line.as_ref().map(|prompt| match prompt.status {
-        crate::core_notification_prompt::InputPromptStatus::Active => {
-            format!("{} {}", prompt.prompt, prompt.input).trim_end().to_string()
-        }
-        crate::core_notification_prompt::InputPromptStatus::AwaitingCore { disposition } => {
-            format!(
-                "{} {} [{:?}]",
-                prompt.prompt, prompt.input, disposition
-            )
-            .trim_end()
-            .to_string()
-        }
-    })
+    model
+        .prompt_line
+        .as_ref()
+        .map(|prompt| match prompt.status {
+            crate::core_notification_prompt::InputPromptStatus::Active => {
+                format!("{} {}", prompt.prompt, prompt.input)
+                    .trim_end()
+                    .to_string()
+            }
+            crate::core_notification_prompt::InputPromptStatus::AwaitingCore { disposition } => {
+                format!("{} {} [{:?}]", prompt.prompt, prompt.input, disposition)
+                    .trim_end()
+                    .to_string()
+            }
+        })
 }
 
 fn render_pane(
@@ -329,9 +358,12 @@ fn draw_editor_frame<B: Backend>(
             panes: vec![model.clone()],
             active_window_id: model.window_id,
             message_line: model.message_line.as_deref().map_or_else(
-                || crate::core_notification_prompt::resolve_workspace_message_line(
-                    Vec::<crate::core_notification_prompt::MessageLineCandidate>::new(),
-                ),
+                || {
+                    crate::core_notification_prompt::resolve_workspace_message_line(Vec::<
+                        crate::core_notification_prompt::MessageLineCandidate,
+                    >::new(
+                    ))
+                },
                 |message| {
                     crate::core_notification_prompt::resolve_workspace_message_line(vec![
                         crate::core_notification_prompt::MessageLineCandidate::legacy(
@@ -567,8 +599,8 @@ mod tests {
     use crate::cli::LaunchRequest;
     use crate::core_notification_prompt::{
         BellIndication, InputPromptStatus, InputPromptView, MessageLineCandidate,
-        MessageLineSource, PagerPromptView, PromptHintSuppressionReason,
-        SuppressedPromptHint, resolve_workspace_message_line,
+        MessageLineSource, PagerPromptView, PromptHintSuppressionReason, SuppressedPromptHint,
+        resolve_workspace_message_line,
     };
     use crate::editor_session::EditorSessionState;
     use crate::screen_model::ScreenSelection;
@@ -1286,7 +1318,8 @@ mod tests {
         let rendered = format!("{}", terminal.backend());
         let rows: Vec<&str> = rendered.lines().collect();
         assert!(
-            rows.iter().any(|row| row.contains("saved") && row.contains("[bell x2]")),
+            rows.iter()
+                .any(|row| row.contains("saved") && row.contains("[bell x2]")),
             "message row should include both visible message and bell marker: {:?}",
             rows
         );
@@ -1346,6 +1379,10 @@ mod tests {
 
         assert_eq!(layout.command_rect.map(|rect| rect.y), Some(1));
         assert_eq!(layout.panes[0].rect.height, 1);
-        assert_eq!(rows.len(), 1, "small terminal must not overlap reserved rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "small terminal must not overlap reserved rows"
+        );
     }
 }

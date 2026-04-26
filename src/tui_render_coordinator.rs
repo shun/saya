@@ -9,9 +9,12 @@ use crate::presentation_effect::{
     RuntimePresentationIntent, merge_presentation_message_line,
 };
 use crate::screen_model::WorkspaceScreenModel;
+use crate::structural_refresh::{
+    ProjectionFailureDiagnostic, RedrawPlan, StructuralRefreshOutcome,
+};
 use crate::terminal_capability::{TerminalCapabilityProfile, TextStyleCapability};
-pub use crate::tui_renderer::RenderTextMode;
 use crate::tui_renderer::TuiRenderer;
+pub use crate::tui_renderer::{RenderFrameOptions, RenderTextMode};
 use std::fmt;
 
 pub struct RenderFrameRequest<'a> {
@@ -19,12 +22,16 @@ pub struct RenderFrameRequest<'a> {
     pub capabilities: &'a TerminalCapabilityProfile,
     pub presentation: &'a PresentationState,
     pub overlay_writer: Option<&'a mut dyn OverlayTerminalWriter>,
+    pub redraw_plan: Option<&'a RedrawPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiRenderOutcome {
     pub rendered_workspace: WorkspaceScreenModel,
     pub text_mode: RenderTextMode,
+    pub redraw_plan: RedrawPlan,
+    pub frame_options: RenderFrameOptions,
+    pub projection_failure: Option<ProjectionFailureDiagnostic>,
     pub overlay_results: Vec<OverlayRenderResult>,
 }
 
@@ -93,6 +100,63 @@ impl TuiRenderCoordinator {
         runtime_effects: &[RuntimePresentationIntent],
         overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
     ) -> Result<TuiRenderOutcome, RenderFrameError> {
+        self.render_workspace_result_with_redraw_plan(
+            render_result,
+            capabilities,
+            runtime_effects,
+            overlay_writer,
+            RedrawPlan::default(),
+        )
+    }
+
+    pub fn render_workspace_result_with_redraw_plan<E: fmt::Display>(
+        &mut self,
+        render_result: Result<WorkspaceScreenModel, E>,
+        capabilities: &TerminalCapabilityProfile,
+        runtime_effects: &[RuntimePresentationIntent],
+        overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+        redraw_plan: RedrawPlan,
+    ) -> Result<TuiRenderOutcome, RenderFrameError> {
+        self.render_workspace_result_with_context(
+            render_result,
+            capabilities,
+            runtime_effects,
+            overlay_writer,
+            redraw_plan,
+            None,
+        )
+    }
+
+    pub fn render_workspace_result_with_structural_refresh<E: fmt::Display>(
+        &mut self,
+        render_result: Result<WorkspaceScreenModel, E>,
+        capabilities: &TerminalCapabilityProfile,
+        runtime_effects: &[RuntimePresentationIntent],
+        overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+        structural_refresh: Option<&StructuralRefreshOutcome>,
+    ) -> Result<TuiRenderOutcome, RenderFrameError> {
+        let redraw_plan = structural_refresh
+            .map(|refresh| refresh.redraw_plan.clone())
+            .unwrap_or_default();
+        self.render_workspace_result_with_context(
+            render_result,
+            capabilities,
+            runtime_effects,
+            overlay_writer,
+            redraw_plan,
+            structural_refresh,
+        )
+    }
+
+    fn render_workspace_result_with_context<E: fmt::Display>(
+        &mut self,
+        render_result: Result<WorkspaceScreenModel, E>,
+        capabilities: &TerminalCapabilityProfile,
+        runtime_effects: &[RuntimePresentationIntent],
+        overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+        redraw_plan: RedrawPlan,
+        structural_refresh: Option<&StructuralRefreshOutcome>,
+    ) -> Result<TuiRenderOutcome, RenderFrameError> {
         match render_result {
             Ok(workspace) => {
                 let presentation =
@@ -103,10 +167,16 @@ impl TuiRenderCoordinator {
                     capabilities,
                     &presentation,
                     overlay_writer,
+                    redraw_plan,
+                    None,
+                    true,
                 )
             }
             Err(error) => {
                 let message = error.to_string();
+                let projection_failure = structural_refresh.map(|refresh| {
+                    refresh.projection_failure(message.clone(), refresh.viewport_status)
+                });
                 let Some(last_successful) = self.last_successful_workspace.clone() else {
                     return Err(RenderFrameError::Projection { message });
                 };
@@ -127,6 +197,9 @@ impl TuiRenderCoordinator {
                     capabilities,
                     &rollback_presentation,
                     overlay_writer,
+                    redraw_plan,
+                    projection_failure,
+                    false,
                 )
             }
         }
@@ -169,8 +242,19 @@ impl TuiRenderCoordinator {
         capabilities: &TerminalCapabilityProfile,
         presentation: &PresentationState,
         overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+        redraw_plan: RedrawPlan,
+        projection_failure: Option<ProjectionFailureDiagnostic>,
+        update_last_successful_workspace: bool,
     ) -> Result<TuiRenderOutcome, RenderFrameError> {
-        self.render_workspace_inner(workspace, capabilities, presentation, overlay_writer)
+        self.render_workspace_inner(
+            workspace,
+            capabilities,
+            presentation,
+            overlay_writer,
+            redraw_plan,
+            projection_failure,
+            update_last_successful_workspace,
+        )
     }
 
     fn render_workspace_inner(
@@ -179,8 +263,12 @@ impl TuiRenderCoordinator {
         capabilities: &TerminalCapabilityProfile,
         presentation: &PresentationState,
         mut overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+        redraw_plan: RedrawPlan,
+        projection_failure: Option<ProjectionFailureDiagnostic>,
+        update_last_successful_workspace: bool,
     ) -> Result<TuiRenderOutcome, RenderFrameError> {
         let text_mode = Self::resolve_text_mode(capabilities);
+        let frame_options = frame_options_from_redraw_plan(&redraw_plan);
         let mut rendered_workspace = Self::apply_presentation(workspace, presentation);
         let mut overlay_results = Vec::new();
         let mut active_assets = Vec::<OverlayAssetRef>::new();
@@ -242,18 +330,43 @@ impl TuiRenderCoordinator {
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer
-                .draw_with_mode(&rendered_workspace, text_mode)
+                .draw_with_mode_and_options(&rendered_workspace, text_mode, frame_options)
                 .map_err(|error| RenderFrameError::TerminalIo {
                     message: error.to_string(),
                 })?;
         }
-        self.last_successful_workspace = Some(rendered_workspace.clone());
+        if update_last_successful_workspace {
+            self.last_successful_workspace = Some(rendered_workspace.clone());
+        } else {
+            log::debug!(
+                "[tui_render_coordinator] retained last successful workspace after rollback render"
+            );
+        }
         Ok(TuiRenderOutcome {
             rendered_workspace,
             text_mode,
+            redraw_plan,
+            frame_options,
+            projection_failure,
             overlay_results,
         })
     }
+}
+
+fn frame_options_from_redraw_plan(redraw_plan: &RedrawPlan) -> RenderFrameOptions {
+    let options = RenderFrameOptions {
+        full_redraw: redraw_plan.full,
+        clear_before_draw: redraw_plan.clear_before_draw,
+    };
+    log::debug!(
+        "[tui_render_coordinator] resolved frame options from RedrawPlan: requested={}, full={}, clear_before_draw={}, source={:?}, coalesced_count={}",
+        redraw_plan.requested,
+        redraw_plan.full,
+        redraw_plan.clear_before_draw,
+        redraw_plan.source,
+        redraw_plan.coalesced_count
+    );
+    options
 }
 
 impl TuiRenderCoordinatorService for TuiRenderCoordinator {
@@ -266,6 +379,9 @@ impl TuiRenderCoordinatorService for TuiRenderCoordinator {
             request.capabilities,
             request.presentation,
             request.overlay_writer,
+            request.redraw_plan.cloned().unwrap_or_default(),
+            None,
+            true,
         )
     }
 }
@@ -361,7 +477,10 @@ mod tests {
             )
             .expect("rollback render should succeed");
 
-        assert_eq!(second.rendered_workspace.visible_message_text(), Some("core note"));
+        assert_eq!(
+            second.rendered_workspace.visible_message_text(),
+            Some("core note")
+        );
         assert_eq!(
             second.rendered_workspace.visible_message_source(),
             Some(MessageLineSource::CoreNotification)

@@ -4,13 +4,12 @@ use saya::app_startup::{
 use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
 use saya::core_notification_prompt::{
-    NotificationPromptProjectionState, ProjectionFrame, PromptInputAction,
-    handle_prompt_key, record_prompt_response_error,
+    NotificationPromptProjectionState, ProjectionFrame, PromptInputAction, handle_prompt_key,
+    record_prompt_response_error,
 };
 use saya::core_outcome::{
     ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
-    NormalizedOutcomeBatch,
-    fold_normalized_outcomes,
+    NormalizedOutcomeBatch, fold_normalized_outcomes,
 };
 use saya::core_prompt::PromptResponseCommand;
 use saya::editor_session::{QuitDecision, SaveRequestError};
@@ -36,6 +35,7 @@ use saya::screen_model::{
 };
 use saya::search_query::{SearchStateError, SearchVisibleState};
 use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
+use saya::structural_refresh::{StructuralRefresh, StructuralRefreshOutcome};
 use saya::terminal_capability::TerminalCapabilityProbe;
 use saya::terminal_lifecycle::TerminalSize;
 use saya::tui_render_coordinator::TuiRenderCoordinator;
@@ -45,8 +45,8 @@ use saya::viewport::WindowViewportStore;
 use vim_core_rs::CoreMessageEvent;
 use vim_core_rs::CoreMode;
 
-use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -56,6 +56,7 @@ struct MainOutcomeAccumulator {
     host_directives: Vec<NormalizedHostDirective>,
     projection: NotificationPromptProjectionState,
     last_projection_frame: Option<ProjectionFrame>,
+    last_structural_refresh: Option<StructuralRefreshOutcome>,
 }
 
 #[tokio::main]
@@ -161,17 +162,19 @@ async fn main() {
         command_line_prompt,
         &command_line_buffer,
         outcome_accumulator.last_projection_frame.as_ref(),
+        outcome_accumulator.last_structural_refresh.as_mut(),
         system_warning.as_deref(),
         transient_msg.as_deref(),
         terminal_width,
         terminal_height,
     );
     let initial_render_failure = initial_render.as_ref().err().map(ToString::to_string);
-    match render_coordinator.render_workspace_result(
+    match render_coordinator.render_workspace_result_with_structural_refresh(
         initial_render,
         &capability_profile,
         &runtime_presentation_intents,
         Some(&mut terminal_broker),
+        outcome_accumulator.last_structural_refresh.as_ref(),
     ) {
         Ok(render_output) => {
             if let Some(message) = initial_render_failure {
@@ -257,11 +260,11 @@ async fn main() {
                                 KeyInput::Escape => {
                                     if prompt == '/' {
                                         let _ = outcome.core_bridge.cancel_search_input();
-                                            consume_core_outcomes_from_core(
-                                                &mut outcome.core_bridge,
-                                                &mut outcome_accumulator,
-                                                &mut need_redraw,
-                                            );
+                                        consume_core_outcomes_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
+                                            &mut need_redraw,
+                                        );
                                     }
                                     command_line_prompt = None;
                                     command_line_buffer.clear();
@@ -468,7 +471,11 @@ async fn main() {
                 }
             }
 
-            if outcome_accumulator.projection.prompt().active_input().is_some()
+            if outcome_accumulator
+                .projection
+                .prompt()
+                .active_input()
+                .is_some()
                 && command_line_prompt.is_some()
             {
                 log::debug!(
@@ -492,17 +499,19 @@ async fn main() {
                     command_line_prompt,
                     &command_line_buffer,
                     outcome_accumulator.last_projection_frame.as_ref(),
+                    outcome_accumulator.last_structural_refresh.as_mut(),
                     system_warning.as_deref(),
                     transient_msg.as_deref(),
                     terminal_width,
                     terminal_height,
                 );
                 let redraw_failure = redraw_result.as_ref().err().map(ToString::to_string);
-                match render_coordinator.render_workspace_result(
+                match render_coordinator.render_workspace_result_with_structural_refresh(
                     redraw_result,
                     &capability_profile,
                     &runtime_presentation_intents,
                     Some(&mut terminal_broker),
+                    outcome_accumulator.last_structural_refresh.as_ref(),
                 ) {
                     Ok(render_output) => {
                         if let Some(message) = redraw_failure {
@@ -699,6 +708,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 None,
                 None,
                 None,
+                None,
                 terminal_width,
                 terminal_height,
             ),
@@ -745,6 +755,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut search_refresh_store,
                 None,
                 "",
+                None,
                 None,
                 None,
                 None,
@@ -796,6 +807,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut search_refresh_store,
                 None,
                 "",
+                None,
                 None,
                 None,
                 None,
@@ -1412,16 +1424,25 @@ fn consume_normalized_batch(
 ) {
     let current = std::mem::take(&mut accumulator.state);
     let folded = fold_normalized_outcomes(batch, current);
-    let projection_frame = accumulator.projection.apply_seam(folded.downstream_consume_seam());
+    let projection_frame = accumulator
+        .projection
+        .apply_seam(folded.downstream_consume_seam());
     let effects = folded.effects;
     accumulator.state = folded.state;
     accumulator.last_projection_frame = Some(projection_frame.clone());
-    apply_core_dispatch_effects(
-        effects,
-        &projection_frame,
-        accumulator,
-        need_redraw,
-    );
+    let structural_refresh = StructuralRefresh::from_folded_effects(&effects.structural);
+    if structural_refresh.redraw_plan.requested {
+        log::debug!(
+            "[main] deriving redraw scheduling hint from structural RedrawPlan: full={}, clear_before_draw={}, source={:?}, coalesced_count={}",
+            structural_refresh.redraw_plan.full,
+            structural_refresh.redraw_plan.clear_before_draw,
+            structural_refresh.redraw_plan.source,
+            structural_refresh.redraw_plan.coalesced_count
+        );
+        *need_redraw = true;
+    }
+    accumulator.last_structural_refresh = Some(structural_refresh);
+    apply_core_dispatch_effects(effects, &projection_frame, accumulator, need_redraw);
 }
 
 fn apply_core_dispatch_effects(
@@ -1803,6 +1824,7 @@ fn build_workspace_render_output(
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
     projection_frame: Option<&ProjectionFrame>,
+    mut structural_refresh: Option<&mut StructuralRefreshOutcome>,
     system_warning: Option<&str>,
     transient_msg: Option<&str>,
     terminal_width: u16,
@@ -1810,7 +1832,24 @@ fn build_workspace_render_output(
 ) -> Result<WorkspaceScreenModel, WorkspaceRedrawError> {
     let snapshot = outcome.core_bridge.snapshot();
     let visual_selection = outcome.core_bridge.current_visual_selection();
-    viewport_store.sync_from_windows(&snapshot.windows);
+    let invalidated_windows = structural_refresh
+        .as_deref()
+        .map(|refresh| {
+            refresh
+                .invalidation
+                .window_ids
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let viewport_summary = viewport_store
+        .sync_from_windows_with_invalidations(&snapshot.windows, &invalidated_windows);
+    if let Some(refresh) = structural_refresh.as_deref_mut() {
+        *refresh = refresh
+            .clone()
+            .with_viewport_sync_summary(&viewport_summary);
+    }
     search_refresh_store.retain_windows(
         &snapshot
             .windows
@@ -1830,7 +1869,7 @@ fn build_workspace_render_output(
         command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
     let notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
 
-    project_workspace(&WorkspaceProjectionInput {
+    let projection_result = project_workspace(&WorkspaceProjectionInput {
         snapshot: &snapshot,
         session_state,
         visual_selection: visual_selection.as_ref(),
@@ -1843,8 +1882,34 @@ fn build_workspace_render_output(
         viewport_store,
         terminal_width,
         terminal_height,
-    })
-    .map_err(WorkspaceRedrawError::from)
+    });
+
+    match projection_result {
+        Ok(workspace) => {
+            let projection_summary = workspace.projection_summary();
+            if let Some(refresh) = structural_refresh.as_deref_mut() {
+                *refresh = refresh.clone().with_projection_summary(projection_summary);
+                log::debug!(
+                    "[main] structural refresh diagnostics ready before render coordination: redraw_requested={}, projection_status={:?}, viewport_status={:?}",
+                    refresh.redraw_plan.requested,
+                    refresh.projection.status,
+                    refresh.viewport_status
+                );
+            }
+            Ok(workspace)
+        }
+        Err(error) => {
+            if let Some(refresh) = structural_refresh.as_deref() {
+                let diagnostic =
+                    refresh.projection_failure(error.to_string(), refresh.viewport_status);
+                log::debug!(
+                    "[main] structural projection failure diagnostic prepared before render coordination: {:?}",
+                    diagnostic
+                );
+            }
+            Err(WorkspaceRedrawError::from(error))
+        }
+    }
 }
 
 fn sync_core_screen_size(outcome: &mut saya::bootstrap::BootstrapOutcome) {
@@ -2442,9 +2507,10 @@ mod tests {
                 is_active: true,
             }],
             active_window_id: 1,
-            message_line: saya::core_notification_prompt::resolve_workspace_message_line(
-                Vec::<saya::core_notification_prompt::MessageLineCandidate>::new(),
-            ),
+            message_line: saya::core_notification_prompt::resolve_workspace_message_line(Vec::<
+                saya::core_notification_prompt::MessageLineCandidate,
+            >::new(
+            )),
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -2564,11 +2630,7 @@ mod tests {
         bridge
             .apply_ex_command(":redraw")
             .expect(":redraw should succeed");
-        consume_core_outcomes_from_core(
-            &mut bridge,
-            &mut accumulator,
-            &mut need_redraw,
-        );
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
 
         assert!(
             need_redraw,
@@ -2592,11 +2654,7 @@ mod tests {
         bridge
             .apply_ex_command(":input Name")
             .expect("input request should succeed");
-        consume_core_outcomes_from_core(
-            &mut bridge,
-            &mut accumulator,
-            &mut need_redraw,
-        );
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
 
         assert_eq!(
             accumulator
@@ -2628,11 +2686,7 @@ mod tests {
         bridge
             .apply_ex_command(":input Name")
             .expect("input request should succeed");
-        consume_core_outcomes_from_core(
-            &mut bridge,
-            &mut accumulator,
-            &mut need_redraw,
-        );
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
         assert_eq!(
             accumulator
                 .projection
@@ -2651,12 +2705,7 @@ mod tests {
             other => panic!("expected submit action, got {other:?}"),
         };
 
-        dispatch_prompt_response_command(
-            &mut bridge,
-            &mut accumulator,
-            command,
-            &mut need_redraw,
-        );
+        dispatch_prompt_response_command(&mut bridge, &mut accumulator, command, &mut need_redraw);
 
         assert!(need_redraw);
         assert!(accumulator.projection.prompt().active_input().is_none());
@@ -2698,7 +2747,10 @@ mod tests {
             .expect(":redraw should succeed");
         consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
 
-        assert!(need_redraw, "structural redraw should still request a redraw");
+        assert!(
+            need_redraw,
+            "structural redraw should still request a redraw"
+        );
         assert_eq!(
             accumulator
                 .projection
@@ -2722,11 +2774,7 @@ mod tests {
         bridge
             .apply_ex_command(":input Name")
             .expect("input request should succeed");
-        consume_core_outcomes_from_core(
-            &mut bridge,
-            &mut accumulator,
-            &mut need_redraw,
-        );
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
         assert!(matches!(
             saya::core_notification_prompt::handle_prompt_key(
                 &mut accumulator.projection,

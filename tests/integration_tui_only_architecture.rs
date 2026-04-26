@@ -534,6 +534,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             capabilities: &plain_capabilities,
             presentation: &plain_presentation,
             overlay_writer: Some(&mut writer),
+            redraw_plan: None,
         })
         .expect("plain render should succeed");
     let styled = coordinator
@@ -542,6 +543,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             capabilities: &styled_capabilities,
             presentation: &styled_presentation,
             overlay_writer: Some(&mut writer),
+            redraw_plan: None,
         })
         .expect("styled render should succeed");
     let graphics = coordinator
@@ -550,6 +552,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             capabilities: &graphics_capabilities,
             presentation: &graphics_presentation,
             overlay_writer: Some(&mut writer),
+            redraw_plan: None,
         })
         .expect("graphics fallback render should succeed");
 

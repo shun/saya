@@ -184,10 +184,8 @@ fn hex_payload(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_notification_prompt::{MessageLineCandidate, resolve_workspace_message_line};
     use crate::overlay_asset_store::{OverlayAssetMedia, OverlayAssetRef};
-    use crate::core_notification_prompt::{
-        MessageLineCandidate, resolve_workspace_message_line,
-    };
     use crate::presentation_effect::{OverlayContentKey, OverlayTarget, PresentationOverlayIntent};
     use crate::screen_model::{PaneRect, ScreenModel};
     use crate::terminal_capability::{

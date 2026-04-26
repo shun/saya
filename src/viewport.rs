@@ -121,6 +121,15 @@ pub struct WindowViewportStore {
     states: BTreeMap<i32, ViewportState>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ViewportSyncSummary {
+    pub live_window_ids: BTreeSet<i32>,
+    pub synced_window_ids: BTreeSet<i32>,
+    pub pruned_window_ids: BTreeSet<i32>,
+    pub reevaluated_window_ids: BTreeSet<i32>,
+    pub invalidated_missing_window_ids: BTreeSet<i32>,
+}
+
 impl WindowViewportStore {
     pub fn new() -> Self {
         Self::default()
@@ -134,16 +143,67 @@ impl WindowViewportStore {
         self.states.entry(window_id).or_default()
     }
 
-    pub fn sync_from_windows(&mut self, windows: &[CoreWindowInfo]) {
+    pub fn sync_from_windows(&mut self, windows: &[CoreWindowInfo]) -> ViewportSyncSummary {
+        self.sync_from_windows_with_invalidations(windows, &BTreeSet::new())
+    }
+
+    pub fn sync_from_windows_with_invalidations(
+        &mut self,
+        windows: &[CoreWindowInfo],
+        invalidated_windows: &BTreeSet<i32>,
+    ) -> ViewportSyncSummary {
         let live_ids = windows
             .iter()
             .map(|window| window.id)
             .collect::<BTreeSet<_>>();
-        self.states
-            .retain(|window_id, _| live_ids.contains(window_id));
+
+        let state_ids_before = self.states.keys().copied().collect::<BTreeSet<_>>();
+        let pruned_window_ids = state_ids_before
+            .difference(&live_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let invalidated_missing_window_ids = invalidated_windows
+            .difference(&live_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let reevaluated_window_ids = invalidated_windows
+            .intersection(&live_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        self.states.retain(|window_id, _| {
+            let is_live = live_ids.contains(window_id);
+            if !is_live {
+                log::debug!(
+                    "[viewport] prune closed window state: window_id={}",
+                    window_id
+                );
+            }
+            is_live
+        });
+
+        let mut synced_window_ids = BTreeSet::new();
         for window in windows {
             self.get_mut_or_default(window.id)
                 .sync_from_core_window(window);
+            synced_window_ids.insert(window.id);
+        }
+
+        log::debug!(
+            "[viewport] live window sync summary: live={:?}, synced={:?}, pruned={:?}, reevaluated={:?}, invalidated_missing={:?}",
+            live_ids,
+            synced_window_ids,
+            pruned_window_ids,
+            reevaluated_window_ids,
+            invalidated_missing_window_ids
+        );
+
+        ViewportSyncSummary {
+            live_window_ids: live_ids,
+            synced_window_ids,
+            pruned_window_ids,
+            reevaluated_window_ids,
+            invalidated_missing_window_ids,
         }
     }
 
@@ -154,6 +214,8 @@ impl WindowViewportStore {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{ViewportState, WindowViewportStore};
     use vim_core_rs::CoreWindowInfo;
 
@@ -328,5 +390,91 @@ mod tests {
 
         assert!(store.get(1).is_none(), "closed window should be pruned");
         assert_eq!(store.get(2).expect("window 2").top_line(), 2);
+    }
+
+    #[test]
+    fn window_viewport_store_reports_live_sync_and_missing_invalidations() {
+        let mut store = WindowViewportStore::new();
+        store.sync_from_windows(&[
+            CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 40,
+                height: 10,
+                topline: 1,
+                botline: 10,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 0,
+                cursor_col: 0,
+                is_active: true,
+            },
+            CoreWindowInfo {
+                id: 9,
+                buf_id: 1,
+                row: 0,
+                col: 40,
+                width: 40,
+                height: 10,
+                topline: 1,
+                botline: 10,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 0,
+                cursor_col: 0,
+                is_active: false,
+            },
+        ]);
+
+        let invalidated_windows = BTreeSet::from([2, 9]);
+        let summary = store.sync_from_windows_with_invalidations(
+            &[
+                CoreWindowInfo {
+                    id: 1,
+                    buf_id: 1,
+                    row: 0,
+                    col: 0,
+                    width: 80,
+                    height: 10,
+                    topline: 4,
+                    botline: 13,
+                    leftcol: 2,
+                    skipcol: 0,
+                    cursor_row: 3,
+                    cursor_col: 0,
+                    is_active: true,
+                },
+                CoreWindowInfo {
+                    id: 2,
+                    buf_id: 2,
+                    row: 10,
+                    col: 0,
+                    width: 80,
+                    height: 8,
+                    topline: 7,
+                    botline: 14,
+                    leftcol: 0,
+                    skipcol: 1,
+                    cursor_row: 6,
+                    cursor_col: 0,
+                    is_active: false,
+                },
+            ],
+            &invalidated_windows,
+        );
+
+        assert_eq!(summary.live_window_ids, BTreeSet::from([1, 2]));
+        assert_eq!(summary.synced_window_ids, BTreeSet::from([1, 2]));
+        assert_eq!(summary.pruned_window_ids, BTreeSet::from([9]));
+        assert_eq!(summary.reevaluated_window_ids, BTreeSet::from([2]));
+        assert_eq!(summary.invalidated_missing_window_ids, BTreeSet::from([9]));
+
+        assert!(store.get(9).is_none(), "closed window should be pruned");
+        assert!(
+            store.get(2).is_some(),
+            "live invalidated window should sync"
+        );
     }
 }

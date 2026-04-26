@@ -93,6 +93,13 @@ Run the public surface guard suite with its pinned acceptance command.
 gtimeout 120 cargo test public_surface_guard -- --test-threads=1
 ```
 
+Run the structural refresh and redraw acceptance suites with this pinned
+headless command.
+
+```bash
+gtimeout 30s cargo test --test structural_refresh_contract && gtimeout 30s cargo test --test core_outcome_contract && gtimeout 30s cargo test --test tui_render_coordinator && gtimeout 30s cargo test --test integration_terminal && gtimeout 30s cargo test --test public_surface_guard
+```
+
 ## Why serial execution matters
 
 `saya` uses a single-session guard because `vim-core-rs` permits only one live

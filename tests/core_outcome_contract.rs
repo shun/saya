@@ -507,6 +507,71 @@ fn reducer_tracks_prompt_lifecycle_and_structural_redraw_escalation() {
 }
 
 #[test]
+fn reducer_coalesces_redraw_metadata_without_dropping_structural_invalidations() {
+    let folded = fold_normalized_outcomes(
+        NormalizedOutcomeBatch::new(vec![
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::RedrawRequested {
+                full: false,
+                clear_before_draw: false,
+                trace: trace(1, OutcomeOrigin::TransactionEvent, "CoreEvent::Redraw"),
+            }),
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::BufferAdded {
+                buf_id: 3,
+                trace: trace(2, OutcomeOrigin::TransactionEvent, "CoreEvent::BufferAdded"),
+            }),
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::RedrawRequested {
+                full: true,
+                clear_before_draw: false,
+                trace: trace(3, OutcomeOrigin::TransactionEvent, "CoreEvent::Redraw"),
+            }),
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::WindowCreated {
+                win_id: 5,
+                trace: trace(
+                    4,
+                    OutcomeOrigin::TransactionEvent,
+                    "CoreEvent::WindowCreated",
+                ),
+            }),
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::RedrawRequested {
+                full: false,
+                clear_before_draw: true,
+                trace: trace(5, OutcomeOrigin::TransactionEvent, "CoreEvent::Redraw"),
+            }),
+            NormalizedCoreOutcome::Structural(NormalizedStructuralOutcome::LayoutChanged {
+                trace: trace(
+                    6,
+                    OutcomeOrigin::TransactionEvent,
+                    "CoreEvent::LayoutChanged",
+                ),
+            }),
+        ]),
+        ApplicationOutcomeState::default(),
+    );
+
+    assert_eq!(folded.effects.structural.invalidate_buffers, vec![3]);
+    assert_eq!(folded.effects.structural.invalidate_windows, vec![5]);
+    assert!(folded.effects.structural.layout_dirty);
+
+    let redraw =
+        folded.effects.structural.redraw.expect(
+            "redraw requests and structural invalidations should fold into one redraw effect",
+        );
+    assert!(redraw.full, "full intent must use strongest OR merge");
+    assert!(
+        redraw.clear_before_draw,
+        "clear-before-draw intent must use strongest OR merge"
+    );
+    assert!(
+        redraw.required_by_structure_change,
+        "structural invalidations must keep required redraw metadata"
+    );
+    assert_eq!(
+        redraw.coalesced_count, 6,
+        "diagnostic count must expose all redraw-producing inputs folded into this effect"
+    );
+}
+
+#[test]
 fn reducer_keeps_active_prompt_when_response_correlation_mismatches() {
     let requested = fold_normalized_outcomes(
         NormalizedOutcomeBatch::new(vec![NormalizedCoreOutcome::Prompt(

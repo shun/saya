@@ -4,7 +4,7 @@
 //! 抽出し、ScreenModel として TuiRenderer に渡す。
 //! 描画側は ScreenModel だけを入力とし、CoreSnapshot に直接依存しない。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use unicode_width::UnicodeWidthChar;
@@ -80,6 +80,44 @@ pub struct WorkspaceScreenModel {
 }
 
 impl WorkspaceScreenModel {
+    pub fn projection_summary(&self) -> WorkspaceProjectionSummary {
+        let window_ids = self
+            .panes
+            .iter()
+            .map(|pane| pane.window_id)
+            .collect::<Vec<_>>();
+        let pane_geometry = self
+            .panes
+            .iter()
+            .map(|pane| PaneProjectionGeometry {
+                window_id: pane.window_id,
+                rect: pane.rect,
+            })
+            .collect::<Vec<_>>();
+        let visible_buffer_ids = self
+            .panes
+            .iter()
+            .map(|pane| pane.buffer_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        log::debug!(
+            "[screen_model] workspace projection summary built: windows={}, active_window_id={}, pane_geometry={}, visible_buffers={}",
+            window_ids.len(),
+            self.active_window_id,
+            pane_geometry.len(),
+            visible_buffer_ids.len(),
+        );
+
+        WorkspaceProjectionSummary {
+            window_ids,
+            active_window_id: self.active_window_id,
+            pane_geometry,
+            visible_buffer_ids,
+        }
+    }
+
     pub fn visible_message_text(&self) -> Option<&str> {
         self.message_line.visible_text()
     }
@@ -91,6 +129,20 @@ impl WorkspaceScreenModel {
     pub fn suppressed_message_sources(&self) -> Vec<MessageLineSource> {
         self.message_line.suppressed_sources()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceProjectionSummary {
+    pub window_ids: Vec<i32>,
+    pub active_window_id: i32,
+    pub pane_geometry: Vec<PaneProjectionGeometry>,
+    pub visible_buffer_ids: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneProjectionGeometry {
+    pub window_id: i32,
+    pub rect: PaneRect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -448,7 +500,9 @@ pub fn project_workspace(
         prompt_line: input
             .notification_prompt
             .and_then(|prompt| prompt.input_prompt.clone()),
-        pager_prompt: input.notification_prompt.and_then(|prompt| prompt.pager_prompt),
+        pager_prompt: input
+            .notification_prompt
+            .and_then(|prompt| prompt.pager_prompt),
         suppressed_prompt_hints: input
             .notification_prompt
             .map(|prompt| prompt.suppressed_prompt_hints.clone())
@@ -1132,10 +1186,11 @@ fn map_window_rect(
 mod tests {
     use std::path::PathBuf;
 
-    use vim_core_rs::CoreMode;
+    use vim_core_rs::{CoreInputRequestKind, CoreMode};
 
     use super::*;
     use crate::core_bridge::CoreBridge;
+    use crate::core_notification_prompt::InputPromptStatus;
     use crate::search_capability::SearchCapabilityContract;
     use crate::search_query::{
         SearchMatch, SearchMatchKind, SearchQueryMode, SearchVisibleRows, SearchVisibleState,
@@ -2362,5 +2417,136 @@ mod tests {
         let model = project_workspace(&input).expect("workspace projection should succeed");
         assert_eq!(model.visible_message_text(), Some("shared text"));
         assert_eq!(model.command_line, None);
+    }
+
+    #[test]
+    fn workspace_projection_summary_reports_windows_active_pane_geometry_and_visible_buffers() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("alpha\nbeta\ngamma\ndelta\n").expect("core bridge");
+        bridge
+            .apply_ex_command(":split")
+            .expect("split should succeed");
+        let snapshot = bridge.snapshot();
+        let active_window_id = snapshot
+            .active_window_id()
+            .expect("split snapshot should have an active window");
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        })
+        .expect("workspace projection should succeed before summary is built");
+
+        let summary = model.projection_summary();
+        let expected_window_ids = model
+            .panes
+            .iter()
+            .map(|pane| pane.window_id)
+            .collect::<Vec<_>>();
+        let expected_geometry = model
+            .panes
+            .iter()
+            .map(|pane| PaneProjectionGeometry {
+                window_id: pane.window_id,
+                rect: pane.rect,
+            })
+            .collect::<Vec<_>>();
+        let expected_visible_buffers = model
+            .panes
+            .iter()
+            .map(|pane| pane.buffer_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        assert_eq!(summary.window_ids, expected_window_ids);
+        assert_eq!(summary.active_window_id, active_window_id);
+        assert_eq!(summary.pane_geometry, expected_geometry);
+        assert_eq!(summary.visible_buffer_ids, expected_visible_buffers);
+    }
+
+    #[test]
+    fn projection_summary_ignores_message_prompt_and_rollback_lifecycle_state() {
+        let pane = ScreenModel {
+            window_id: 11,
+            buffer_id: 21,
+            rect: PaneRect {
+                x: 1,
+                y: 2,
+                width: 30,
+                height: 10,
+            },
+            file_name: "summary.txt".to_string(),
+            mode_label: "NORMAL".to_string(),
+            dirty: false,
+            lines: vec!["alpha".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![],
+            message_line: None,
+            command_cursor_col: None,
+            is_active: true,
+        };
+        let base = WorkspaceScreenModel {
+            panes: vec![pane.clone()],
+            active_window_id: 11,
+            message_line: WorkspaceMessageLineState::default(),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
+            command_line: None,
+        };
+        let with_prompt_and_messages = WorkspaceScreenModel {
+            panes: vec![pane],
+            active_window_id: 11,
+            message_line: WorkspaceMessageLineState {
+                visible: Some(MessageLineCandidate::legacy(
+                    MessageLineSource::CoreNotification,
+                    "visible message",
+                )),
+                suppressed: vec![MessageLineCandidate::legacy(
+                    MessageLineSource::TransientInfo,
+                    "hidden message",
+                )],
+            },
+            prompt_line: Some(InputPromptView {
+                prompt: "prompt".to_string(),
+                input: "typed".to_string(),
+                correlation_id: 42,
+                input_kind: CoreInputRequestKind::CommandLine,
+                status: InputPromptStatus::Active,
+            }),
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: Some(BellIndication { count: 1 }),
+            command_line: Some(CommandLineModel {
+                text: ":write".to_string(),
+                cursor_col: 6,
+            }),
+        };
+
+        assert_eq!(
+            base.projection_summary(),
+            with_prompt_and_messages.projection_summary(),
+            "projection summary は構造診断用なので message/prompt/rollback lifecycle を判断材料にしない"
+        );
     }
 }

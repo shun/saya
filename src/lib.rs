@@ -28,6 +28,7 @@ pub mod search_query;
 pub mod search_refresh;
 pub mod session_guard;
 pub mod startup_runtime;
+pub mod structural_refresh;
 pub mod swapfile;
 pub mod terminal_capability;
 pub mod terminal_io_broker;
