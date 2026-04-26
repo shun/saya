@@ -739,6 +739,14 @@ pub fn handle_prompt_key(
                 );
                 PromptInputAction::Consumed
             }
+            _ => {
+                log::debug!(
+                    "[core_notification_prompt] prompt non-text key consumed locally: correlation_id={}, key={:?}",
+                    active_prompt.correlation_id,
+                    key
+                );
+                PromptInputAction::Consumed
+            }
         },
     }
 }

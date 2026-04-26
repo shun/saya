@@ -14,6 +14,8 @@ pub struct TerminalSession<'a, B: TerminalBackend> {
     backend: &'a mut B,
     raw_mode_enabled: bool,
     alternate_screen_enabled: bool,
+    mouse_capture_enabled: bool,
+    bracketed_paste_enabled: bool,
     restored: bool,
     latest_size: Option<TerminalSize>,
     redraw_requested: bool,
@@ -26,6 +28,14 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
 
     pub fn is_alternate_screen_enabled(&self) -> bool {
         self.alternate_screen_enabled
+    }
+
+    pub fn is_mouse_capture_enabled(&self) -> bool {
+        self.mouse_capture_enabled
+    }
+
+    pub fn is_bracketed_paste_enabled(&self) -> bool {
+        self.bracketed_paste_enabled
     }
 
     pub fn latest_size(&self) -> Option<TerminalSize> {
@@ -64,38 +74,74 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
 
         log::debug!("[terminal] restoring terminal lifecycle");
 
+        let disable_bracketed_paste_error = if self.bracketed_paste_enabled {
+            log::debug!("[terminal] disabling bracketed paste");
+            self.backend.disable_bracketed_paste().err().map(|error| {
+                log::debug!("[terminal] disable bracketed paste failed: {}", error);
+                error.to_string()
+            })
+        } else {
+            None
+        };
+
+        let disable_mouse_capture_error = if self.mouse_capture_enabled {
+            log::debug!("[terminal] disabling mouse capture");
+            self.backend.disable_mouse_capture().err().map(|error| {
+                log::debug!("[terminal] disable mouse capture failed: {}", error);
+                error.to_string()
+            })
+        } else {
+            None
+        };
+
         let leave_alternate_screen_error = if self.alternate_screen_enabled {
-            self.backend
-                .leave_alternate_screen()
-                .err()
-                .map(|error| error.to_string())
+            log::debug!("[terminal] leaving alternate screen");
+            self.backend.leave_alternate_screen().err().map(|error| {
+                log::debug!("[terminal] leave alternate screen failed: {}", error);
+                error.to_string()
+            })
         } else {
             None
         };
 
         let disable_raw_mode_error = if self.raw_mode_enabled {
-            self.backend
-                .disable_raw_mode()
-                .err()
-                .map(|error| error.to_string())
+            log::debug!("[terminal] disabling raw mode");
+            self.backend.disable_raw_mode().err().map(|error| {
+                log::debug!("[terminal] disable raw mode failed: {}", error);
+                error.to_string()
+            })
         } else {
             None
         };
 
+        self.bracketed_paste_enabled = false;
+        self.mouse_capture_enabled = false;
         self.alternate_screen_enabled = false;
         self.raw_mode_enabled = false;
         self.restored = true;
 
-        match (leave_alternate_screen_error, disable_raw_mode_error) {
-            (None, None) => {
+        match (
+            disable_bracketed_paste_error,
+            disable_mouse_capture_error,
+            leave_alternate_screen_error,
+            disable_raw_mode_error,
+        ) {
+            (None, None, None, None) => {
                 log::debug!("[terminal] terminal lifecycle restored");
                 Ok(())
             }
-            (leave_alternate_screen, disable_raw_mode) => {
+            (
+                disable_bracketed_paste,
+                disable_mouse_capture,
+                leave_alternate_screen,
+                disable_raw_mode,
+            ) => {
                 log::debug!(
-                    "[terminal] terminal restore failed: leave_alternate_screen={leave_alternate_screen:?}, disable_raw_mode={disable_raw_mode:?}"
+                    "[terminal] terminal restore failed: disable_bracketed_paste={disable_bracketed_paste:?}, disable_mouse_capture={disable_mouse_capture:?}, leave_alternate_screen={leave_alternate_screen:?}, disable_raw_mode={disable_raw_mode:?}"
                 );
                 Err(TerminalRestoreError {
+                    disable_bracketed_paste,
+                    disable_mouse_capture,
                     leave_alternate_screen,
                     disable_raw_mode,
                 })
@@ -116,10 +162,14 @@ impl<B: TerminalBackend> Drop for TerminalSession<'_, B> {
 pub enum TerminalStartError {
     RawModeFailed { message: String },
     AlternateScreenFailed { message: String },
+    MouseCaptureFailed { message: String },
+    BracketedPasteFailed { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalRestoreError {
+    pub disable_bracketed_paste: Option<String>,
+    pub disable_mouse_capture: Option<String>,
     pub leave_alternate_screen: Option<String>,
     pub disable_raw_mode: Option<String>,
 }
@@ -127,6 +177,10 @@ pub struct TerminalRestoreError {
 pub trait TerminalBackend {
     fn enable_raw_mode(&mut self) -> io::Result<()>;
     fn enter_alternate_screen(&mut self) -> io::Result<()>;
+    fn enable_mouse_capture(&mut self) -> io::Result<()>;
+    fn enable_bracketed_paste(&mut self) -> io::Result<()>;
+    fn disable_bracketed_paste(&mut self) -> io::Result<()>;
+    fn disable_mouse_capture(&mut self) -> io::Result<()>;
     fn leave_alternate_screen(&mut self) -> io::Result<()>;
     fn disable_raw_mode(&mut self) -> io::Result<()>;
 }
@@ -156,10 +210,66 @@ impl TerminalLifecycle {
 
         log::debug!("[terminal] alternate screen entered");
 
+        if let Err(error) = backend.enable_mouse_capture() {
+            log::debug!(
+                "[terminal] mouse capture failed, rolling back alternate screen and raw mode: {}",
+                error
+            );
+            if let Err(rollback_error) = backend.leave_alternate_screen() {
+                log::debug!(
+                    "[terminal] rollback leave alternate screen failed after mouse capture failure: {}",
+                    rollback_error
+                );
+            }
+            if let Err(rollback_error) = backend.disable_raw_mode() {
+                log::debug!(
+                    "[terminal] rollback disable raw mode failed after mouse capture failure: {}",
+                    rollback_error
+                );
+            }
+            return Err(TerminalStartError::MouseCaptureFailed {
+                message: error.to_string(),
+            });
+        }
+
+        log::debug!("[terminal] mouse capture enabled");
+
+        if let Err(error) = backend.enable_bracketed_paste() {
+            log::debug!(
+                "[terminal] bracketed paste failed, rolling back mouse capture, alternate screen, and raw mode: {}",
+                error
+            );
+            if let Err(rollback_error) = backend.disable_mouse_capture() {
+                log::debug!(
+                    "[terminal] rollback disable mouse capture failed after bracketed paste failure: {}",
+                    rollback_error
+                );
+            }
+            if let Err(rollback_error) = backend.leave_alternate_screen() {
+                log::debug!(
+                    "[terminal] rollback leave alternate screen failed after bracketed paste failure: {}",
+                    rollback_error
+                );
+            }
+            if let Err(rollback_error) = backend.disable_raw_mode() {
+                log::debug!(
+                    "[terminal] rollback disable raw mode failed after bracketed paste failure: {}",
+                    rollback_error
+                );
+            }
+            return Err(TerminalStartError::BracketedPasteFailed {
+                message: error.to_string(),
+            });
+        }
+
+        log::debug!("[terminal] bracketed paste enabled");
+
         Ok(TerminalSession {
             backend,
             raw_mode_enabled: true,
             alternate_screen_enabled: true,
+            mouse_capture_enabled: true,
+            bracketed_paste_enabled: true,
             restored: false,
             latest_size: None,
             redraw_requested: false,
@@ -176,6 +286,10 @@ mod tests {
     struct RecordingBackend {
         calls: Vec<&'static str>,
         fail_on_enter_alternate_screen: bool,
+        fail_on_enable_mouse_capture: bool,
+        fail_on_enable_bracketed_paste: bool,
+        fail_on_disable_bracketed_paste: bool,
+        fail_on_disable_mouse_capture: bool,
         fail_on_leave_alternate_screen: bool,
         fail_on_disable_raw_mode: bool,
     }
@@ -190,6 +304,42 @@ mod tests {
             self.calls.push("enter_alternate_screen");
             if self.fail_on_enter_alternate_screen {
                 Err(io::Error::other("alternate screen failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.calls.push("enable_mouse_capture");
+            if self.fail_on_enable_mouse_capture {
+                Err(io::Error::other("mouse capture failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.calls.push("enable_bracketed_paste");
+            if self.fail_on_enable_bracketed_paste {
+                Err(io::Error::other("bracketed paste failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.calls.push("disable_bracketed_paste");
+            if self.fail_on_disable_bracketed_paste {
+                Err(io::Error::other("disable bracketed paste failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            self.calls.push("disable_mouse_capture");
+            if self.fail_on_disable_mouse_capture {
+                Err(io::Error::other("disable mouse capture failed"))
             } else {
                 Ok(())
             }
@@ -229,6 +379,10 @@ mod tests {
             vec![
                 "enable_raw_mode",
                 "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
                 "leave_alternate_screen",
                 "disable_raw_mode",
             ]
@@ -260,6 +414,60 @@ mod tests {
     }
 
     #[test]
+    fn start_edit_mode_rolls_back_alternate_screen_and_raw_mode_if_mouse_capture_fails() {
+        let mut backend = RecordingBackend {
+            fail_on_enable_mouse_capture: true,
+            ..RecordingBackend::default()
+        };
+
+        let result = TerminalLifecycle::start(&mut backend);
+
+        assert!(matches!(
+            result,
+            Err(TerminalStartError::MouseCaptureFailed { .. })
+        ));
+        drop(result);
+        assert_eq!(
+            backend.calls,
+            vec![
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
+    fn start_edit_mode_rolls_back_extended_input_if_bracketed_paste_fails() {
+        let mut backend = RecordingBackend {
+            fail_on_enable_bracketed_paste: true,
+            ..RecordingBackend::default()
+        };
+
+        let result = TerminalLifecycle::start(&mut backend);
+
+        assert!(matches!(
+            result,
+            Err(TerminalStartError::BracketedPasteFailed { .. })
+        ));
+        drop(result);
+        assert_eq!(
+            backend.calls,
+            vec![
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
     fn restore_leaves_alternate_screen_before_disabling_raw_mode() {
         let mut backend = RecordingBackend::default();
 
@@ -272,6 +480,10 @@ mod tests {
             vec![
                 "enable_raw_mode",
                 "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
                 "leave_alternate_screen",
                 "disable_raw_mode",
             ]
@@ -351,6 +563,10 @@ mod tests {
             vec![
                 "enable_raw_mode",
                 "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
                 "leave_alternate_screen",
                 "disable_raw_mode",
             ]
@@ -370,6 +586,8 @@ mod tests {
         assert_eq!(
             restore_error,
             TerminalRestoreError {
+                disable_bracketed_paste: None,
+                disable_mouse_capture: None,
                 leave_alternate_screen: Some("leave alternate screen failed".to_string()),
                 disable_raw_mode: None,
             }
@@ -379,6 +597,47 @@ mod tests {
             vec![
                 "enable_raw_mode",
                 "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
+    fn restore_attempts_all_cleanup_steps_when_extended_input_disable_fails() {
+        let mut backend = RecordingBackend {
+            fail_on_disable_bracketed_paste: true,
+            fail_on_disable_mouse_capture: true,
+            fail_on_leave_alternate_screen: true,
+            fail_on_disable_raw_mode: true,
+            ..RecordingBackend::default()
+        };
+
+        let session = TerminalLifecycle::start(&mut backend).expect("terminal start");
+        let restore_error = session.restore().expect_err("restore should fail");
+
+        assert_eq!(
+            restore_error,
+            TerminalRestoreError {
+                disable_bracketed_paste: Some("disable bracketed paste failed".to_string()),
+                disable_mouse_capture: Some("disable mouse capture failed".to_string()),
+                leave_alternate_screen: Some("leave alternate screen failed".to_string()),
+                disable_raw_mode: Some("disable raw mode failed".to_string()),
+            }
+        );
+        assert_eq!(
+            backend.calls,
+            vec![
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
                 "leave_alternate_screen",
                 "disable_raw_mode",
             ]

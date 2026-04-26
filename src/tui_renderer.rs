@@ -2,7 +2,7 @@
 use crate::screen_model::{CommandLineModel, PaneRect};
 use crate::screen_model::{ScreenModel, WorkspaceScreenModel};
 use crate::terminal_lifecycle::TerminalBackend;
-use crossterm::{execute, terminal};
+use crossterm::{event, execute, terminal};
 use ratatui::Terminal;
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span, Text};
@@ -19,6 +19,22 @@ impl TerminalBackend for CrosstermBackendImpl {
 
     fn enter_alternate_screen(&mut self) -> io::Result<()> {
         execute!(io::stdout(), terminal::EnterAlternateScreen)
+    }
+
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), event::EnableMouseCapture)
+    }
+
+    fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), event::EnableBracketedPaste)
+    }
+
+    fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), event::DisableBracketedPaste)
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), event::DisableMouseCapture)
     }
 
     fn leave_alternate_screen(&mut self) -> io::Result<()> {

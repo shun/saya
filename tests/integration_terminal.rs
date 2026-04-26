@@ -18,7 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use saya::bootstrap::{launch_test_lock, prepare_launch};
 use saya::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
 use saya::core_notification_prompt::{
@@ -68,6 +71,26 @@ impl TerminalBackend for DummyBackend {
         Ok(())
     }
 
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        self.calls.push("enable_mouse_capture");
+        Ok(())
+    }
+
+    fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+        self.calls.push("enable_bracketed_paste");
+        Ok(())
+    }
+
+    fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+        self.calls.push("disable_bracketed_paste");
+        Ok(())
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        self.calls.push("disable_mouse_capture");
+        Ok(())
+    }
+
     fn leave_alternate_screen(&mut self) -> io::Result<()> {
         self.calls.push("leave_alternate_screen");
         Ok(())
@@ -98,6 +121,10 @@ fn terminal_lifecycle_start_and_restore() {
         vec![
             "enable_raw_mode",
             "enter_alternate_screen",
+            "enable_mouse_capture",
+            "enable_bracketed_paste",
+            "disable_bracketed_paste",
+            "disable_mouse_capture",
             "leave_alternate_screen",
             "disable_raw_mode",
         ]
@@ -260,6 +287,24 @@ fn ctrl_char_key_event(ch: char) -> Event {
         modifiers: KeyModifiers::CONTROL,
         kind: KeyEventKind::Press,
         state: KeyEventState::NONE,
+    })
+}
+
+fn key_event_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> Event {
+    Event::Key(KeyEvent {
+        code,
+        modifiers,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    })
+}
+
+fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
     })
 }
 
@@ -757,6 +802,51 @@ async fn dispatch_terminal_key_events_through_user_path(
         .expect("input loop thread should stop after terminal key integration");
 }
 
+async fn collect_terminal_events_through_user_path(
+    terminal_events: Vec<Event>,
+    expected_forwarded_events: usize,
+) -> Vec<UiEvent> {
+    let (mut coordinator, sender) = EventLoopCoordinator::with_capacity(16);
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = stop_requested.clone();
+    let event_count = terminal_events.len();
+    let mut source = MockTerminalEventSource::new(
+        std::iter::repeat_with(|| Ok(true))
+            .take(event_count)
+            .chain([Ok(false), Ok(false)])
+            .collect(),
+        terminal_events.into_iter().map(Ok).collect(),
+    );
+
+    let input_thread = thread::spawn(move || {
+        run_terminal_input_loop(&mut source, sender, stop_for_thread);
+    });
+
+    let mut forwarded = Vec::new();
+    while forwarded.len() < expected_forwarded_events {
+        let action = coordinator.next_action().await;
+        assert_eq!(action, LoopAction::NeedRedraw);
+        forwarded.extend(coordinator.drain_pending());
+    }
+
+    stop_requested.store(true, Ordering::Relaxed);
+    input_thread
+        .join()
+        .expect("input loop thread should stop after collection");
+
+    forwarded
+}
+
+fn intent_text_from_input_event(event: UiEvent) -> Option<String> {
+    match event {
+        UiEvent::Input(key) => match resolve_intent(&key) {
+            EditorIntent::EditKey(key_text) => Some(key_text),
+            EditorIntent::Save | EditorIntent::Quit { .. } => None,
+        },
+        other => panic!("expected input event, got {:?}", other),
+    }
+}
+
 #[test]
 fn presentation_related_test_files_use_presentation_prefix_instead_of_wave6_prefix() {
     let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -984,7 +1074,10 @@ async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
             UiEvent::Resize { rows, .. } => {
                 body_height = usize::from(rows.saturating_sub(2).max(1));
             }
-            UiEvent::Redraw | UiEvent::Shutdown(_) => unreachable!(),
+            UiEvent::Redraw
+            | UiEvent::Shutdown(_)
+            | UiEvent::MouseClick { .. }
+            | UiEvent::PastedText(_) => unreachable!(),
         }
     }
 
@@ -1009,9 +1102,11 @@ async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
 
 #[test]
 fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
-    let event_loop_source =
-        std::fs::read_to_string("src/event_loop.rs").expect("event loop source is readable");
-    let main_source = std::fs::read_to_string("src/main.rs").expect("main source is readable");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let event_loop_source = std::fs::read_to_string(manifest_dir.join("src/event_loop.rs"))
+        .expect("event loop source is readable");
+    let main_source =
+        std::fs::read_to_string(manifest_dir.join("src/main.rs")).expect("main source is readable");
 
     assert!(
         !event_loop_source.contains("RedrawPlan"),
@@ -1362,6 +1457,157 @@ async fn ctrl_w_reposition_commands_work_when_prefix_and_target_arrive_as_separa
         assert_workspace_tracks_snapshot(&snapshot, &session_state);
         assert_active_window_matches_direction(&snapshot, command.to_ascii_lowercase());
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn extended_keyboard_terminal_events_resolve_to_editor_intent_texts_end_to_end() {
+    let events = vec![
+        key_event_with_modifiers(KeyCode::F(1), KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Up, KeyModifiers::SHIFT),
+        key_event_with_modifiers(KeyCode::Left, KeyModifiers::CONTROL),
+        key_event_with_modifiers(KeyCode::Char('x'), KeyModifiers::ALT),
+        key_event_with_modifiers(KeyCode::F(13), KeyModifiers::NONE),
+        key_event_with_modifiers(
+            KeyCode::Char('z'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        ),
+        key_event_with_modifiers(KeyCode::Char('a'), KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        key_event_with_modifiers(KeyCode::Tab, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::BackTab, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Left, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Right, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Up, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Down, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Home, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::End, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::PageUp, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::PageDown, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Delete, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Insert, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Esc, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Enter, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Backspace, KeyModifiers::NONE),
+    ];
+
+    let forwarded = collect_terminal_events_through_user_path(events, 21).await;
+    let edit_texts = forwarded
+        .into_iter()
+        .filter_map(intent_text_from_input_event)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        edit_texts,
+        vec![
+            "\x1bOP",
+            "\x1b[1;2A",
+            "\x1b[1;5D",
+            "\x1bx",
+            "a",
+            "\u{17}",
+            "\t",
+            "\x1b[Z",
+            "\x1b[D",
+            "\x1b[C",
+            "\x1b[A",
+            "\x1b[B",
+            "\x1b[H",
+            "\x1b[F",
+            "\x1b[5~",
+            "\x1b[6~",
+            "\x1b[3~",
+            "\x1b[2~",
+            "\x1b",
+            "\r",
+            "\x08",
+        ],
+        "extended keys should resolve to vim-core-rs bridge strings and unsupported keys should be ignored"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mouse_paste_and_terminal_lifecycle_integrate_through_ui_events() {
+    let forwarded = collect_terminal_events_through_user_path(
+        vec![
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 3),
+            Event::Paste("ab\nあ".to_string()),
+            mouse_event(MouseEventKind::Down(MouseButton::Right), 4, 5),
+            mouse_event(MouseEventKind::Down(MouseButton::Middle), 4, 5),
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 5),
+            mouse_event(MouseEventKind::ScrollDown, 4, 5),
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 5),
+            Event::Paste(String::new()),
+        ],
+        2,
+    )
+    .await;
+
+    assert_eq!(
+        forwarded,
+        vec![
+            UiEvent::MouseClick { column: 2, row: 3 },
+            UiEvent::PastedText("ab\nあ".to_string()),
+        ],
+        "only left click and non-empty paste should cross the input/event-loop boundary"
+    );
+
+    let mut dispatched_to_bridge = Vec::new();
+    for event in forwarded {
+        match event {
+            UiEvent::MouseClick { column, row } => {
+                let sgr_column = column.saturating_add(1);
+                let sgr_row = row.saturating_add(1);
+                dispatched_to_bridge.push(format!("\x1b[<0;{sgr_column};{sgr_row}M"));
+            }
+            UiEvent::PastedText(text) => {
+                dispatched_to_bridge.extend(text.chars().map(|ch| ch.to_string()));
+            }
+            other => panic!("unexpected event in mouse/paste integration: {:?}", other),
+        }
+    }
+    assert_eq!(
+        dispatched_to_bridge,
+        vec!["\x1b[<0;3;4M", "a", "b", "\n", "あ"],
+        "mouse click should become one-based SGR and paste should preserve character order"
+    );
+
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
+    outcome.core_bridge.dispatch_key("i").unwrap();
+    for unit in ["a", "b", "\n", "あ"] {
+        outcome
+            .core_bridge
+            .dispatch_key(unit)
+            .expect("paste dispatch unit should be accepted by core bridge");
+    }
+    let snapshot = outcome.core_bridge.snapshot();
+    assert!(
+        snapshot.text.contains("ab\nあ"),
+        "paste dispatch units should reach core in order: {:?}",
+        snapshot.text
+    );
+
+    let mut backend = DummyBackend::default();
+    let session = TerminalLifecycle::start(&mut backend).expect("Terminal start");
+    assert!(session.is_mouse_capture_enabled());
+    assert!(session.is_bracketed_paste_enabled());
+    session.restore().expect("Terminal restore");
+    assert_eq!(
+        backend.calls,
+        vec![
+            "enable_raw_mode",
+            "enter_alternate_screen",
+            "enable_mouse_capture",
+            "enable_bracketed_paste",
+            "disable_bracketed_paste",
+            "disable_mouse_capture",
+            "leave_alternate_screen",
+            "disable_raw_mode",
+        ],
+        "lifecycle should enable and disable extended input in a headless backend"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

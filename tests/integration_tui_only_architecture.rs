@@ -12,6 +12,9 @@ use std::io;
 use saya::app_startup::{prepare_launch_and_start_terminal, prepare_tui_startup_context};
 use saya::architecture_compliance::ArchitectureComplianceGuard;
 use saya::cli::LaunchRequest;
+use saya::core_notification_prompt::{
+    MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
+};
 use saya::event_loop::EventLoopCoordinator;
 use saya::input_loop::TerminalEventSource;
 use saya::optional_graphics::{
@@ -148,6 +151,26 @@ async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_inter
             Ok(())
         }
 
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.calls.push("enable_mouse_capture");
+            Ok(())
+        }
+
+        fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.calls.push("enable_bracketed_paste");
+            Ok(())
+        }
+
+        fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.calls.push("disable_bracketed_paste");
+            Ok(())
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            self.calls.push("disable_mouse_capture");
+            Ok(())
+        }
+
         fn leave_alternate_screen(&mut self) -> io::Result<()> {
             self.calls.push("leave_alternate_screen");
             Ok(())
@@ -215,6 +238,10 @@ async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_inter
         vec![
             "enable_raw_mode",
             "enter_alternate_screen",
+            "enable_mouse_capture",
+            "enable_bracketed_paste",
+            "disable_bracketed_paste",
+            "disable_mouse_capture",
             "leave_alternate_screen",
             "disable_raw_mode",
         ]
@@ -240,6 +267,26 @@ fn prepare_tui_startup_context_composes_policy_probe_and_runtime_owner_before_ev
 
         fn enter_alternate_screen(&mut self) -> io::Result<()> {
             self.calls.push("enter_alternate_screen");
+            Ok(())
+        }
+
+        fn enable_mouse_capture(&mut self) -> io::Result<()> {
+            self.calls.push("enable_mouse_capture");
+            Ok(())
+        }
+
+        fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.calls.push("enable_bracketed_paste");
+            Ok(())
+        }
+
+        fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+            self.calls.push("disable_bracketed_paste");
+            Ok(())
+        }
+
+        fn disable_mouse_capture(&mut self) -> io::Result<()> {
+            self.calls.push("disable_mouse_capture");
             Ok(())
         }
 
@@ -351,7 +398,14 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             is_active: true,
         }],
         active_window_id: 7,
-        global_message_line: Some("existing warning".to_string()),
+        message_line: resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
+            MessageLineSource::SystemWarning,
+            "existing warning",
+        )]),
+        prompt_line: None,
+        pager_prompt: None,
+        suppressed_prompt_hints: vec![],
+        bell: None,
         command_line: Some(CommandLineModel {
             text: ":write".to_string(),
             cursor_col: 2,
@@ -381,7 +435,7 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
     let presentation = projector.project(&workspace, &runtime_intents, &capabilities);
 
     assert_eq!(
-        presentation.global_message_line.as_deref(),
+        presentation.visible_message_text(),
         Some("existing warning")
     );
     assert_eq!(
@@ -468,7 +522,11 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             is_active: true,
         }],
         active_window_id: 1,
-        global_message_line: None,
+        message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+        prompt_line: None,
+        pager_prompt: None,
+        suppressed_prompt_hints: vec![],
+        bell: None,
         command_line: None,
     };
     let projector = PresentationEffectProjector::default();
@@ -576,7 +634,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
         vec![OverlayRenderResult::FallbackToText]
     );
     assert_eq!(
-        graphics.rendered_workspace.global_message_line.as_deref(),
+        graphics.rendered_workspace.visible_message_text(),
         Some("preview unavailable")
     );
     assert!(writer.writes.is_empty());

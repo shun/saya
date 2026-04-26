@@ -158,6 +158,26 @@ impl TerminalBackend for RecordingTerminalBackend {
         Ok(())
     }
 
+    fn enable_mouse_capture(&mut self) -> io::Result<()> {
+        self.calls.push("enable_mouse_capture");
+        Ok(())
+    }
+
+    fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+        self.calls.push("enable_bracketed_paste");
+        Ok(())
+    }
+
+    fn disable_bracketed_paste(&mut self) -> io::Result<()> {
+        self.calls.push("disable_bracketed_paste");
+        Ok(())
+    }
+
+    fn disable_mouse_capture(&mut self) -> io::Result<()> {
+        self.calls.push("disable_mouse_capture");
+        Ok(())
+    }
+
     fn leave_alternate_screen(&mut self) -> io::Result<()> {
         self.calls.push("leave_alternate_screen");
         Ok(())

@@ -13,7 +13,7 @@ path = "src/main.rs"
 vim-core-rs = { path = "/Users/skudo/ghq/github.com/shun/saya_ws/vim-core-rs" }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "rt-multi-thread"] }
 ratatui = "0.29.0"
-crossterm = { version = "0.28.1", features = ["event-stream"] }
+crossterm = { version = "0.28.1", features = ["event-stream", "bracketed-paste"] }
 futures = "0.3"
 log = "0.4.29"
 unicode-width = "0.2.0"

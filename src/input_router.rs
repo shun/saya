@@ -4,18 +4,63 @@
 //! 後続の event loop が入力元に依存しない設計を実現する。
 
 /// 入力元に依存しないキー入力の抽象表現。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavigationKey {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+}
+
+/// 入力元に依存しないキー入力の抽象表現。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyInput {
     /// 印字可能な文字入力
     Char(char),
     /// Ctrl + 文字の組み合わせ
     Ctrl(char),
+    /// Tab キー
+    Tab,
+    /// Shift+Tab キー
+    BackTab,
+    /// 左矢印キー
+    Left,
+    /// 右矢印キー
+    Right,
+    /// 上矢印キー
+    Up,
+    /// 下矢印キー
+    Down,
+    /// Home キー
+    Home,
+    /// End キー
+    End,
+    /// PageUp キー
+    PageUp,
+    /// PageDown キー
+    PageDown,
+    /// Delete キー
+    Delete,
+    /// Insert キー
+    Insert,
     /// Escape キー
     Escape,
     /// Enter キー
     Enter,
     /// Backspace キー
     Backspace,
+    /// F1-F12 ファンクションキー
+    F(u8),
+    /// Alt + 文字の組み合わせ
+    Alt(char),
+    /// Shift + navigation key
+    ShiftedNav(NavigationKey),
+    /// Ctrl + navigation key
+    CtrlNav(NavigationKey),
 }
 
 /// エディタが処理すべき意図の分類。
@@ -61,9 +106,61 @@ fn key_input_to_vim_key(key: &KeyInput) -> String {
             let ctrl_code = (*ch as u8) & 0x1f;
             String::from(ctrl_code as char)
         }
+        KeyInput::Tab => "\t".to_string(),
+        KeyInput::BackTab => "\x1b[Z".to_string(),
+        KeyInput::Left => "\x1b[D".to_string(),
+        KeyInput::Right => "\x1b[C".to_string(),
+        KeyInput::Up => "\x1b[A".to_string(),
+        KeyInput::Down => "\x1b[B".to_string(),
+        KeyInput::Home => "\x1b[H".to_string(),
+        KeyInput::End => "\x1b[F".to_string(),
+        KeyInput::PageUp => "\x1b[5~".to_string(),
+        KeyInput::PageDown => "\x1b[6~".to_string(),
+        KeyInput::Delete => "\x1b[3~".to_string(),
+        KeyInput::Insert => "\x1b[2~".to_string(),
         KeyInput::Escape => "\x1b".to_string(),
         KeyInput::Enter => "\r".to_string(),
         KeyInput::Backspace => "\x08".to_string(),
+        KeyInput::F(number) => function_key_sequence(*number).to_string(),
+        KeyInput::Alt(ch) => format!("\x1b{ch}"),
+        KeyInput::ShiftedNav(nav) => modified_navigation_sequence(*nav, 2).to_string(),
+        KeyInput::CtrlNav(nav) => modified_navigation_sequence(*nav, 5).to_string(),
+    }
+}
+
+fn function_key_sequence(number: u8) -> &'static str {
+    match number {
+        1 => "\x1bOP",
+        2 => "\x1bOQ",
+        3 => "\x1bOR",
+        4 => "\x1bOS",
+        5 => "\x1b[15~",
+        6 => "\x1b[17~",
+        7 => "\x1b[18~",
+        8 => "\x1b[19~",
+        9 => "\x1b[20~",
+        10 => "\x1b[21~",
+        11 => "\x1b[23~",
+        12 => "\x1b[24~",
+        _ => "",
+    }
+}
+
+fn modified_navigation_sequence(nav: NavigationKey, modifier: u8) -> &'static str {
+    match (nav, modifier) {
+        (NavigationKey::Up, 2) => "\x1b[1;2A",
+        (NavigationKey::Down, 2) => "\x1b[1;2B",
+        (NavigationKey::Right, 2) => "\x1b[1;2C",
+        (NavigationKey::Left, 2) => "\x1b[1;2D",
+        (NavigationKey::Home, 2) => "\x1b[1;2H",
+        (NavigationKey::End, 2) => "\x1b[1;2F",
+        (NavigationKey::PageUp, 2) => "\x1b[5;2~",
+        (NavigationKey::PageDown, 2) => "\x1b[6;2~",
+        (NavigationKey::Up, 5) => "\x1b[1;5A",
+        (NavigationKey::Down, 5) => "\x1b[1;5B",
+        (NavigationKey::Right, 5) => "\x1b[1;5C",
+        (NavigationKey::Left, 5) => "\x1b[1;5D",
+        _ => "",
     }
 }
 
@@ -152,6 +249,88 @@ mod tests {
                 ch
             );
         }
+    }
+
+    #[test]
+    fn tab_and_navigation_keys_resolve_to_vim_special_keys() {
+        let cases = [
+            (KeyInput::Tab, "\t"),
+            (KeyInput::BackTab, "\x1b[Z"),
+            (KeyInput::Left, "\x1b[D"),
+            (KeyInput::Right, "\x1b[C"),
+            (KeyInput::Up, "\x1b[A"),
+            (KeyInput::Down, "\x1b[B"),
+            (KeyInput::Home, "\x1b[H"),
+            (KeyInput::End, "\x1b[F"),
+            (KeyInput::PageUp, "\x1b[5~"),
+            (KeyInput::PageDown, "\x1b[6~"),
+            (KeyInput::Delete, "\x1b[3~"),
+            (KeyInput::Insert, "\x1b[2~"),
+        ];
+
+        for (key, expected) in cases {
+            let intent = resolve_intent(&key);
+            assert_eq!(
+                intent,
+                EditorIntent::EditKey(expected.to_string()),
+                "{key:?} は Vim 互換の special key として扱われること",
+            );
+        }
+    }
+
+    #[test]
+    fn function_keys_resolve_to_vim_ansi_sequences() {
+        let cases = [
+            (1, "\x1bOP"),
+            (2, "\x1bOQ"),
+            (3, "\x1bOR"),
+            (4, "\x1bOS"),
+            (5, "\x1b[15~"),
+            (6, "\x1b[17~"),
+            (7, "\x1b[18~"),
+            (8, "\x1b[19~"),
+            (9, "\x1b[20~"),
+            (10, "\x1b[21~"),
+            (11, "\x1b[23~"),
+            (12, "\x1b[24~"),
+        ];
+
+        for (number, expected) in cases {
+            let intent = resolve_intent(&KeyInput::F(number));
+            assert_eq!(intent, EditorIntent::EditKey(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn modified_navigation_resolves_to_vim_csi_modifier_sequences() {
+        let cases = [
+            (KeyInput::ShiftedNav(NavigationKey::Up), "\x1b[1;2A"),
+            (KeyInput::ShiftedNav(NavigationKey::Down), "\x1b[1;2B"),
+            (KeyInput::ShiftedNav(NavigationKey::Right), "\x1b[1;2C"),
+            (KeyInput::ShiftedNav(NavigationKey::Left), "\x1b[1;2D"),
+            (KeyInput::ShiftedNav(NavigationKey::Home), "\x1b[1;2H"),
+            (KeyInput::ShiftedNav(NavigationKey::End), "\x1b[1;2F"),
+            (KeyInput::ShiftedNav(NavigationKey::PageUp), "\x1b[5;2~"),
+            (KeyInput::ShiftedNav(NavigationKey::PageDown), "\x1b[6;2~"),
+            (KeyInput::CtrlNav(NavigationKey::Up), "\x1b[1;5A"),
+            (KeyInput::CtrlNav(NavigationKey::Down), "\x1b[1;5B"),
+            (KeyInput::CtrlNav(NavigationKey::Right), "\x1b[1;5C"),
+            (KeyInput::CtrlNav(NavigationKey::Left), "\x1b[1;5D"),
+        ];
+
+        for (key, expected) in cases {
+            let intent = resolve_intent(&key);
+            assert_eq!(intent, EditorIntent::EditKey(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn alt_character_resolves_to_escape_prefixed_edit_key() {
+        let ascii = resolve_intent(&KeyInput::Alt('x'));
+        let multibyte = resolve_intent(&KeyInput::Alt('あ'));
+
+        assert_eq!(ascii, EditorIntent::EditKey("\x1bx".to_string()));
+        assert_eq!(multibyte, EditorIntent::EditKey("\x1bあ".to_string()));
     }
 
     #[test]

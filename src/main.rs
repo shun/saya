@@ -128,6 +128,7 @@ async fn main() {
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_buffer = String::new();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
+    let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
 
     let mut startup_runtime_redraw = false;
     let startup_shutdown_reason = dispatch_buffer_open_with_runtime(
@@ -180,6 +181,7 @@ async fn main() {
             if let Some(message) = initial_render_failure {
                 transient_msg = Some(message);
             }
+            last_workspace_model = Some(render_output.rendered_workspace.clone());
             trace_workspace_render_pipeline(
                 "initial",
                 &outcome.core_bridge.snapshot().text,
@@ -460,6 +462,89 @@ async fn main() {
                         terminal_broker.record_resize(TerminalSize { columns, rows });
                         need_redraw = true;
                     }
+                    UiEvent::Redraw => {
+                        log::debug!("[main] explicit redraw event received in drain");
+                        need_redraw = true;
+                    }
+                    UiEvent::MouseClick { column, row } => {
+                        log::debug!(
+                            "[main] processing mouse click event at terminal coordinates: column={}, row={}",
+                            column,
+                            row
+                        );
+                        if let Some(sequence) =
+                            mouse_click_to_sgr_sequence(last_workspace_model.as_ref(), column, row)
+                        {
+                            log::debug!(
+                                "[main] dispatching mouse click as SGR sequence: column={}, row={}, sequence={:?}",
+                                column,
+                                row,
+                                sequence
+                            );
+                            let _ = outcome.core_bridge.dispatch_key(&sequence);
+                            consume_core_outcomes_from_core(
+                                &mut outcome.core_bridge,
+                                &mut outcome_accumulator,
+                                &mut need_redraw,
+                            );
+
+                            if let Some(reason) = process_pending_host_actions_with_runtime(
+                                &mut outcome,
+                                &mut outcome_accumulator,
+                                &mut session_state,
+                                &mut transient_msg,
+                                &mut system_warning,
+                                runtime_session.as_mut(),
+                                &mut need_redraw,
+                                &mut runtime_presentation_intents,
+                            )
+                            .await
+                            {
+                                break 'main reason;
+                            }
+
+                            session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+                        } else {
+                            log::debug!(
+                                "[main] ignoring mouse click outside editor body: column={}, row={}",
+                                column,
+                                row
+                            );
+                        }
+                        need_redraw = true;
+                    }
+                    UiEvent::PastedText(text) => {
+                        log::debug!(
+                            "[main] dispatching pasted text to core bridge: chars={}",
+                            text.chars().count()
+                        );
+                        for unit in pasted_text_to_dispatch_units(&text) {
+                            let _ = outcome.core_bridge.dispatch_key(&unit);
+                        }
+                        consume_core_outcomes_from_core(
+                            &mut outcome.core_bridge,
+                            &mut outcome_accumulator,
+                            &mut need_redraw,
+                        );
+
+                        if let Some(reason) = process_pending_host_actions_with_runtime(
+                            &mut outcome,
+                            &mut outcome_accumulator,
+                            &mut session_state,
+                            &mut transient_msg,
+                            &mut system_warning,
+                            runtime_session.as_mut(),
+                            &mut need_redraw,
+                            &mut runtime_presentation_intents,
+                        )
+                        .await
+                        {
+                            break 'main reason;
+                        }
+
+                        session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+                        need_redraw = true;
+                    }
                     UiEvent::Shutdown(reason) => {
                         log::debug!(
                             "[main] explicit shutdown event received in drain: reason={:?}",
@@ -467,7 +552,6 @@ async fn main() {
                         );
                         break 'main reason;
                     }
-                    _ => {}
                 }
             }
 
@@ -517,6 +601,7 @@ async fn main() {
                         if let Some(message) = redraw_failure {
                             transient_msg = Some(message);
                         }
+                        last_workspace_model = Some(render_output.rendered_workspace.clone());
                         trace_workspace_render_pipeline(
                             "redraw",
                             &outcome.core_bridge.snapshot().text,
@@ -1920,6 +2005,35 @@ fn sync_core_screen_size(outcome: &mut saya::bootstrap::BootstrapOutcome) {
     }
 }
 
+fn mouse_click_to_sgr_sequence(
+    workspace_model: Option<&WorkspaceScreenModel>,
+    column: u16,
+    row: u16,
+) -> Option<String> {
+    let workspace_model = workspace_model?;
+    let inside_editor_body = workspace_model.panes.iter().any(|pane| {
+        let body_height = pane.rect.height.saturating_sub(1).max(1);
+        let column_offset = column.saturating_sub(pane.rect.x);
+        let row_offset = row.saturating_sub(pane.rect.y);
+        column >= pane.rect.x
+            && row >= pane.rect.y
+            && column_offset < pane.rect.width
+            && row_offset < body_height
+    });
+
+    if inside_editor_body {
+        let sgr_column = column.saturating_add(1);
+        let sgr_row = row.saturating_add(1);
+        Some(format!("\x1b[<0;{sgr_column};{sgr_row}M"))
+    } else {
+        None
+    }
+}
+
+fn pasted_text_to_dispatch_units(text: &str) -> Vec<String> {
+    text.chars().map(|ch| ch.to_string()).collect()
+}
+
 fn buffer_line_count(text: &str) -> usize {
     text.lines().count().max(1)
 }
@@ -2126,6 +2240,97 @@ mod tests {
             .expect("time went backwards")
             .as_nanos();
         std::env::temp_dir().join(format!("saya-main-test-{name}-{nanos}"))
+    }
+
+    fn main_test_workspace() -> WorkspaceScreenModel {
+        WorkspaceScreenModel {
+            panes: vec![saya::screen_model::ScreenModel {
+                window_id: 1,
+                buffer_id: 1,
+                rect: saya::screen_model::PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 20,
+                    height: 3,
+                },
+                file_name: "alpha.txt".to_string(),
+                mode_label: "NORMAL".to_string(),
+                dirty: false,
+                lines: vec!["alpha".to_string()],
+                cursor_row: 0,
+                cursor_col: 0,
+                visual_selection: None,
+                search_overlays: vec![],
+                message_line: None,
+                command_cursor_col: None,
+                is_active: true,
+            }],
+            active_window_id: 1,
+            message_line: saya::core_notification_prompt::resolve_workspace_message_line(Vec::<
+                saya::core_notification_prompt::MessageLineCandidate,
+            >::new(
+            )),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
+            command_line: None,
+        }
+    }
+
+    #[test]
+    fn editor_area_mouse_click_builds_one_based_sgr_sequence() {
+        let workspace = main_test_workspace();
+
+        let sequence = mouse_click_to_sgr_sequence(Some(&workspace), 0, 0);
+
+        assert_eq!(sequence.as_deref(), Some("\x1b[<0;1;1M"));
+    }
+
+    #[test]
+    fn mouse_click_outside_editor_body_does_not_dispatch() {
+        let workspace = main_test_workspace();
+
+        let status_row = mouse_click_to_sgr_sequence(Some(&workspace), 0, 2);
+        let command_row = mouse_click_to_sgr_sequence(Some(&workspace), 0, 3);
+        let no_workspace = mouse_click_to_sgr_sequence(None, 0, 0);
+
+        assert_eq!(status_row, None);
+        assert_eq!(command_row, None);
+        assert_eq!(no_workspace, None);
+    }
+
+    #[test]
+    fn mouse_click_sgr_coordinates_saturate_at_u16_max() {
+        let workspace = WorkspaceScreenModel {
+            panes: vec![saya::screen_model::ScreenModel {
+                rect: saya::screen_model::PaneRect {
+                    x: u16::MAX,
+                    y: u16::MAX,
+                    width: 1,
+                    height: 1,
+                },
+                ..main_test_workspace().panes.remove(0)
+            }],
+            ..main_test_workspace()
+        };
+
+        let sequence = mouse_click_to_sgr_sequence(Some(&workspace), u16::MAX, u16::MAX);
+
+        assert_eq!(sequence.as_deref(), Some("\x1b[<0;65535;65535M"));
+    }
+
+    #[test]
+    fn pasted_text_dispatch_units_preserve_character_order_without_reinterpretation() {
+        let units = pasted_text_to_dispatch_units("ab\n\r\nあ\x1b");
+
+        assert_eq!(
+            units,
+            vec!["a", "b", "\n", "\r", "\n", "あ", "\x1b"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

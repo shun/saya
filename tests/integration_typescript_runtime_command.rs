@@ -90,6 +90,26 @@ impl TerminalBackend for DummyTerminalBackend {
         Ok(())
     }
 
+    fn enable_mouse_capture(&mut self) -> std::io::Result<()> {
+        self.calls.push("enable_mouse_capture");
+        Ok(())
+    }
+
+    fn enable_bracketed_paste(&mut self) -> std::io::Result<()> {
+        self.calls.push("enable_bracketed_paste");
+        Ok(())
+    }
+
+    fn disable_bracketed_paste(&mut self) -> std::io::Result<()> {
+        self.calls.push("disable_bracketed_paste");
+        Ok(())
+    }
+
+    fn disable_mouse_capture(&mut self) -> std::io::Result<()> {
+        self.calls.push("disable_mouse_capture");
+        Ok(())
+    }
+
     fn leave_alternate_screen(&mut self) -> std::io::Result<()> {
         self.calls.push("leave_alternate_screen");
         Ok(())
@@ -184,6 +204,10 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
         vec![
             "enable_raw_mode",
             "enter_alternate_screen",
+            "enable_mouse_capture",
+            "enable_bracketed_paste",
+            "disable_bracketed_paste",
+            "disable_mouse_capture",
             "leave_alternate_screen",
             "disable_raw_mode",
         ]
@@ -270,6 +294,10 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
         vec![
             "enable_raw_mode",
             "enter_alternate_screen",
+            "enable_mouse_capture",
+            "enable_bracketed_paste",
+            "disable_bracketed_paste",
+            "disable_mouse_capture",
             "leave_alternate_screen",
             "disable_raw_mode",
         ]

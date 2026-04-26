@@ -217,6 +217,8 @@ impl<B: TerminalBackend> Drop for TerminalIoBroker<'_, B> {
 
 fn terminal_transport_error(error: std::io::Error) -> TerminalIoBrokerError {
     TerminalIoBrokerError::TerminalRestore(TerminalRestoreError {
+        disable_bracketed_paste: None,
+        disable_mouse_capture: None,
         leave_alternate_screen: None,
         disable_raw_mode: Some(error.to_string()),
     })

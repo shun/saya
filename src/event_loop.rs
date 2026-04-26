@@ -18,6 +18,10 @@ pub enum UiEvent {
     Resize { columns: u16, rows: u16 },
     /// 終了要求
     Shutdown(ShutdownReason),
+    /// 左クリック入力
+    MouseClick { column: u16, row: u16 },
+    /// ブラケットペースト入力
+    PastedText(String),
 }
 
 /// 終了要求の理由。
@@ -123,6 +127,23 @@ impl EventLoopCoordinator {
                     "[event_loop] resize event processed: columns={}, rows={}",
                     columns,
                     rows
+                );
+                self.redraw_pending = true;
+                LoopAction::NeedRedraw
+            }
+            UiEvent::MouseClick { column, row } => {
+                log::debug!(
+                    "[event_loop] mouse click event processed: column={}, row={}",
+                    column,
+                    row
+                );
+                self.redraw_pending = true;
+                LoopAction::NeedRedraw
+            }
+            UiEvent::PastedText(text) => {
+                log::debug!(
+                    "[event_loop] pasted text event processed: chars={}",
+                    text.chars().count()
                 );
                 self.redraw_pending = true;
                 LoopAction::NeedRedraw
@@ -369,6 +390,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mouse_click_event_dispatches_through_coordinator() {
+        let (mut coordinator, sender) = EventLoopCoordinator::new();
+
+        sender
+            .send(UiEvent::MouseClick { column: 3, row: 4 })
+            .await
+            .expect("send should succeed");
+
+        let action = coordinator.next_action().await;
+        assert_eq!(
+            action,
+            LoopAction::NeedRedraw,
+            "マウスクリックイベントは NeedRedraw を返すこと"
+        );
+    }
+
+    #[tokio::test]
+    async fn pasted_text_event_dispatches_through_coordinator() {
+        let (mut coordinator, sender) = EventLoopCoordinator::new();
+
+        sender
+            .send(UiEvent::PastedText("ab".to_string()))
+            .await
+            .expect("send should succeed");
+
+        let action = coordinator.next_action().await;
+        assert_eq!(
+            action,
+            LoopAction::NeedRedraw,
+            "ペーストイベントは NeedRedraw を返すこと"
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_event_returns_exit_action() {
         let (mut coordinator, sender) = EventLoopCoordinator::new();
 
@@ -556,6 +611,36 @@ mod tests {
             !coordinator.is_redraw_pending(),
             "take 後は redraw_pending が解除されること"
         );
+    }
+
+    #[tokio::test]
+    async fn drain_pending_keeps_mouse_click_and_pasted_text_events() {
+        let (mut coordinator, sender) = EventLoopCoordinator::new();
+
+        sender.send(UiEvent::Redraw).await.unwrap();
+        sender
+            .send(UiEvent::MouseClick { column: 1, row: 2 })
+            .await
+            .unwrap();
+        sender
+            .send(UiEvent::PastedText("xy".to_string()))
+            .await
+            .unwrap();
+
+        let action = coordinator.next_action().await;
+        assert_eq!(action, LoopAction::NeedRedraw);
+
+        let drained = coordinator.drain_pending();
+
+        assert_eq!(
+            drained,
+            vec![
+                UiEvent::MouseClick { column: 1, row: 2 },
+                UiEvent::PastedText("xy".to_string()),
+            ],
+            "Redraw 以外の非キーイベントは drain 後も保持されること"
+        );
+        assert!(coordinator.is_redraw_pending());
     }
 
     #[tokio::test]
