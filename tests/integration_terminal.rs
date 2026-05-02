@@ -34,8 +34,8 @@ use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::optional_graphics::OptionalGraphicsAdapter;
 use saya::overlay_asset_store::OverlayAssetStore;
 use saya::screen_model::{
-    PaneRect, ProjectionInput, ScreenModel, WorkspaceProjectionError, WorkspaceProjectionInput,
-    WorkspaceScreenModel, project, project_workspace,
+    PaneRect, ProjectionInput, ScreenCursorStyle, ScreenModel, WorkspaceProjectionError,
+    WorkspaceProjectionInput, WorkspaceScreenModel, project, project_workspace,
 };
 use saya::search_query::{SearchVisibleQuery, SearchVisibleState};
 use saya::terminal_capability::{
@@ -655,6 +655,7 @@ fn headless_workspace(
             },
             file_name: format!("headless-{buffer_id}.txt"),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec![line.to_string()],
             cursor_row: 0,
@@ -693,6 +694,7 @@ fn headless_split_workspace() -> WorkspaceScreenModel {
             },
             file_name: "headless-10.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["alpha".to_string()],
             cursor_row: 0,

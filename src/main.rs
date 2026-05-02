@@ -2412,6 +2412,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use saya::screen_model::ScreenCursorStyle;
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -2434,6 +2435,7 @@ mod tests {
                 },
                 file_name: "alpha.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string()],
                 cursor_row: 0,
@@ -2882,6 +2884,7 @@ mod tests {
                 },
                 file_name: "alpha.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string()],
                 cursor_row: 0,

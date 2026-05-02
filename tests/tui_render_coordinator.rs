@@ -6,7 +6,9 @@ use saya::core_notification_prompt::{
 use saya::core_outcome::{RedrawEffect, StructuralEffectSet};
 use saya::optional_graphics::{OptionalGraphicsAdapter, RecordingOverlayWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
-use saya::screen_model::{PaneRect, ScreenModel, WorkspaceProjectionError, WorkspaceScreenModel};
+use saya::screen_model::{
+    PaneRect, ScreenCursorStyle, ScreenModel, WorkspaceProjectionError, WorkspaceScreenModel,
+};
 use saya::structural_refresh::{
     ProjectionFailureDiagnostic, ProjectionStatus, RedrawPlan, RedrawPlanSource, StructuralRefresh,
     ViewportRefreshStatus,
@@ -44,6 +46,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             },
             file_name: format!("buffer-{buffer_id}.txt"),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec![line.to_string()],
             cursor_row: 0,
@@ -65,6 +68,88 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
         bell: None,
         command_line: None,
     }
+}
+
+#[test]
+fn render_workspace_applies_active_cursor_style_to_writer() {
+    let capabilities = capabilities_without_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut workspace = workspace(1, 101, "insert projection", "message");
+    workspace.panes[0].cursor_style = ScreenCursorStyle::SteadyBar;
+    let mut writer = RecordingOverlayWriter::default();
+
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("render should apply cursor style");
+
+    assert_eq!(writer.cursor_styles, vec![ScreenCursorStyle::SteadyBar]);
+}
+
+#[test]
+fn render_workspace_prefers_command_line_cursor_style() {
+    let capabilities = capabilities_without_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut workspace = workspace(1, 101, "normal projection", "message");
+    workspace.panes[0].cursor_style = ScreenCursorStyle::Block;
+    workspace.command_line = Some(saya::screen_model::CommandLineModel {
+        text: ":write".to_string(),
+        cursor_col: 6,
+    });
+    let mut writer = RecordingOverlayWriter::default();
+
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("render should apply command line cursor style");
+
+    assert_eq!(writer.cursor_styles, vec![ScreenCursorStyle::SteadyBar]);
+}
+
+#[test]
+fn projection_failure_rollback_applies_retained_cursor_style() {
+    let capabilities = capabilities_without_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut first_valid = workspace(1, 101, "replace projection", "message");
+    first_valid.panes[0].cursor_style = ScreenCursorStyle::UnderScore;
+
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(first_valid),
+            &capabilities,
+            &[],
+            None,
+        )
+        .expect("first render should succeed");
+
+    let mut writer = RecordingOverlayWriter::default();
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Err(WorkspaceProjectionError::ActiveWindowMissing),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("rollback render should apply retained style");
+
+    assert_eq!(writer.cursor_styles, vec![ScreenCursorStyle::UnderScore]);
 }
 
 fn workspace_without_message(window_id: i32, buffer_id: i32, line: &str) -> WorkspaceScreenModel {

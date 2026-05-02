@@ -1,8 +1,8 @@
 #[cfg(test)]
 use crate::screen_model::{CommandLineModel, PaneRect};
-use crate::screen_model::{ScreenModel, WorkspaceScreenModel};
+use crate::screen_model::{ScreenCursorStyle, ScreenModel, WorkspaceScreenModel};
 use crate::terminal_lifecycle::TerminalBackend;
-use crossterm::{event, execute, terminal};
+use crossterm::{cursor, event, execute, terminal};
 use ratatui::Terminal;
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span, Text};
@@ -27,6 +27,19 @@ impl TerminalBackend for CrosstermBackendImpl {
 
     fn enable_bracketed_paste(&mut self) -> io::Result<()> {
         execute!(io::stdout(), event::EnableBracketedPaste)
+    }
+
+    fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> io::Result<()> {
+        let crossterm_style = match style {
+            ScreenCursorStyle::Block => cursor::SetCursorStyle::SteadyBlock,
+            ScreenCursorStyle::SteadyBar => cursor::SetCursorStyle::SteadyBar,
+            ScreenCursorStyle::UnderScore => cursor::SetCursorStyle::SteadyUnderScore,
+        };
+        execute!(io::stdout(), crossterm_style)
+    }
+
+    fn reset_cursor_style(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), cursor::SetCursorStyle::DefaultUserShape)
     }
 
     fn disable_bracketed_paste(&mut self) -> io::Result<()> {
@@ -639,6 +652,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: true,
             lines: vec!["hello".to_string()],
             cursor_row: 0,
@@ -719,6 +733,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["abcdef".to_string()],
             cursor_row: 0,
@@ -796,6 +811,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "VISUAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["abcdef".to_string()],
             cursor_row: 0,
@@ -852,6 +868,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["xあx".to_string()],
             cursor_row: 0,
@@ -898,6 +915,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "V-LINE".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec![" 1 alpha".to_string(), " 2 beta".to_string()],
             cursor_row: 1,
@@ -1025,6 +1043,7 @@ mod tests {
                     },
                     file_name: "left.txt".to_string(),
                     mode_label: "NORMAL".to_string(),
+                    cursor_style: ScreenCursorStyle::Block,
                     dirty: false,
                     lines: vec!["left".to_string()],
                     cursor_row: 0,
@@ -1046,6 +1065,7 @@ mod tests {
                     },
                     file_name: "right.txt".to_string(),
                     mode_label: "NORMAL".to_string(),
+                    cursor_style: ScreenCursorStyle::Block,
                     dirty: false,
                     lines: vec!["right".to_string()],
                     cursor_row: 1,
@@ -1090,6 +1110,7 @@ mod tests {
                 },
                 file_name: "alpha.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
                 cursor_row: 2,
@@ -1138,6 +1159,7 @@ mod tests {
                 },
                 file_name: "alpha.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string(), "beta".to_string()],
                 cursor_row: 0,

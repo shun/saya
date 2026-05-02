@@ -33,6 +33,8 @@ pub struct ScreenModel {
     pub file_name: String,
     /// 現在のモードラベル（例: "NORMAL", "INSERT"）
     pub mode_label: String,
+    /// 表示用カーソル形状。
+    pub cursor_style: ScreenCursorStyle,
     /// バッファが変更済みかどうか
     pub dirty: bool,
     /// 表示用の行データ
@@ -52,6 +54,13 @@ pub struct ScreenModel {
 }
 
 pub type PaneScreenModel = ScreenModel;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenCursorStyle {
+    Block,
+    SteadyBar,
+    UnderScore,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PaneRect {
@@ -80,6 +89,28 @@ pub struct WorkspaceScreenModel {
 }
 
 impl WorkspaceScreenModel {
+    pub fn active_cursor_style(&self) -> ScreenCursorStyle {
+        if self.command_line.is_some() {
+            log::debug!(
+                "[screen_model] active cursor style resolved from command line overlay: style={:?}",
+                ScreenCursorStyle::SteadyBar
+            );
+            return ScreenCursorStyle::SteadyBar;
+        }
+
+        let style = self
+            .panes
+            .iter()
+            .find(|pane| pane.window_id == self.active_window_id)
+            .map(|pane| pane.cursor_style)
+            .unwrap_or(ScreenCursorStyle::Block);
+        log::debug!(
+            "[screen_model] active cursor style resolved from active pane: active_window_id={}, style={style:?}",
+            self.active_window_id
+        );
+        style
+    }
+
     pub fn projection_summary(&self) -> WorkspaceProjectionSummary {
         let window_ids = self
             .panes
@@ -351,6 +382,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
 
     let file_name = resolve_file_name(input.snapshot, input.session_state);
     let mode_label = mode_to_label(input.snapshot.mode);
+    let cursor_style = mode_to_cursor_style(input.snapshot.mode);
     let dirty = input.snapshot.dirty;
     let rendered_lines = apply_list_projection(
         split_text_to_lines(&input.snapshot.text, input.session_state.tab_size()),
@@ -382,9 +414,10 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let message_line = message_state.as_ref().map(|state| state.text.clone());
 
     log::debug!(
-        "[screen_model] projected: file_name={:?}, mode_label={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, message_state_kind={:?}, message_line={:?}",
+        "[screen_model] projected: file_name={:?}, mode_label={:?}, cursor_style={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, message_state_kind={:?}, message_line={:?}",
         file_name,
         mode_label,
+        cursor_style,
         dirty,
         lines.len(),
         cursor_row,
@@ -400,6 +433,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         rect: input.rect,
         file_name,
         mode_label,
+        cursor_style,
         dirty,
         lines,
         cursor_row,
@@ -725,6 +759,23 @@ fn mode_to_label(mode: CoreMode) -> String {
     };
     log::debug!("[screen_model] mode {:?} -> label {:?}", mode, label);
     label.to_string()
+}
+
+fn mode_to_cursor_style(mode: CoreMode) -> ScreenCursorStyle {
+    let style = match mode {
+        CoreMode::Normal
+        | CoreMode::Visual
+        | CoreMode::VisualLine
+        | CoreMode::VisualBlock
+        | CoreMode::Select
+        | CoreMode::SelectLine
+        | CoreMode::SelectBlock
+        | CoreMode::OperatorPending => ScreenCursorStyle::Block,
+        CoreMode::Insert | CoreMode::CommandLine => ScreenCursorStyle::SteadyBar,
+        CoreMode::Replace => ScreenCursorStyle::UnderScore,
+    };
+    log::debug!("[screen_model] mode {:?} -> cursor style {:?}", mode, style);
+    style
 }
 
 /// テキストを行に分割する。
@@ -1331,6 +1382,83 @@ mod tests {
         assert_eq!(
             model.mode_label, "INSERT",
             "インサートモードのラベルが INSERT であること"
+        );
+    }
+
+    #[test]
+    fn projects_cursor_style_from_core_mode() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("text\n").expect("core bridge");
+        let base_snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+
+        let cases = [
+            (CoreMode::Normal, ScreenCursorStyle::Block),
+            (CoreMode::Insert, ScreenCursorStyle::SteadyBar),
+            (CoreMode::Replace, ScreenCursorStyle::UnderScore),
+            (CoreMode::Visual, ScreenCursorStyle::Block),
+            (CoreMode::CommandLine, ScreenCursorStyle::SteadyBar),
+        ];
+
+        for (mode, expected_style) in cases {
+            let mut snapshot = base_snapshot.clone();
+            snapshot.mode = mode;
+            let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+            assert_eq!(
+                model.cursor_style, expected_style,
+                "mode {mode:?} should project cursor style {expected_style:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_cursor_style_prefers_command_line_overlay() {
+        let pane = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 4,
+            },
+            file_name: "sample.txt".to_string(),
+            mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
+            dirty: false,
+            lines: vec!["alpha".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![],
+            message_line: None,
+            command_cursor_col: None,
+            is_active: true,
+        };
+        let mut workspace = WorkspaceScreenModel {
+            panes: vec![pane],
+            active_window_id: 1,
+            message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
+            command_line: None,
+        };
+
+        assert_eq!(workspace.active_cursor_style(), ScreenCursorStyle::Block);
+
+        workspace.command_line = Some(CommandLineModel {
+            text: ":write".to_string(),
+            cursor_col: 6,
+        });
+
+        assert_eq!(
+            workspace.active_cursor_style(),
+            ScreenCursorStyle::SteadyBar
         );
     }
 
@@ -1953,6 +2081,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["hello".to_string()],
             cursor_row: 0,
@@ -2553,6 +2682,7 @@ mod tests {
             },
             file_name: "summary.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["alpha".to_string()],
             cursor_row: 0,

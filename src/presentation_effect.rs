@@ -156,7 +156,7 @@ mod tests {
     use crate::core_notification_prompt::{
         MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
     };
-    use crate::screen_model::{PaneRect, ScreenModel};
+    use crate::screen_model::{PaneRect, ScreenCursorStyle, ScreenModel};
     use crate::terminal_capability::{
         InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
         TerminalCapabilityProbeService, TerminalSessionKind,
@@ -175,6 +175,7 @@ mod tests {
                 },
                 file_name: "sample.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string()],
                 cursor_row: 0,

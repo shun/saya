@@ -1,5 +1,6 @@
 use crate::event_loop::EventSender;
 use crate::input_loop::{TerminalEventSource, run_terminal_input_loop};
+use crate::screen_model::ScreenCursorStyle;
 use crate::terminal_capability::{TerminalCapabilityProbeService, TerminalCapabilityProfile};
 use crate::terminal_lifecycle::{
     TerminalBackend, TerminalRestoreError, TerminalSession, TerminalSize, TerminalStartError,
@@ -188,6 +189,35 @@ impl<'a, B: TerminalBackend> TerminalIoBroker<'a, B> {
         Ok(())
     }
 
+    pub fn set_cursor_style(
+        &mut self,
+        style: ScreenCursorStyle,
+    ) -> Result<(), TerminalIoBrokerError> {
+        if self.phase != TerminalIoPhase::Interactive {
+            return Err(TerminalIoBrokerError::InvalidPhaseTransition {
+                phase: self.phase,
+                attempted: "cursor style",
+            });
+        }
+        let Some(session) = self.session.as_mut() else {
+            return Err(TerminalIoBrokerError::InvalidPhaseTransition {
+                phase: self.phase,
+                attempted: "cursor style without session",
+            });
+        };
+        session.set_cursor_style(style).map_err(|error| {
+            TerminalIoBrokerError::TerminalRestore(TerminalRestoreError {
+                reset_cursor_style: Some(error.to_string()),
+                disable_bracketed_paste: None,
+                disable_mouse_capture: None,
+                leave_alternate_screen: None,
+                disable_raw_mode: None,
+            })
+        })?;
+        log::debug!("[terminal_io_broker] applied cursor style: style={style:?}");
+        Ok(())
+    }
+
     pub fn latest_size(&self) -> Option<TerminalSize> {
         self.session.as_ref().and_then(TerminalSession::latest_size)
     }
@@ -236,6 +266,7 @@ impl<B: TerminalBackend> Drop for TerminalIoBroker<'_, B> {
 
 fn terminal_transport_error(error: std::io::Error) -> TerminalIoBrokerError {
     TerminalIoBrokerError::TerminalRestore(TerminalRestoreError {
+        reset_cursor_style: None,
         disable_bracketed_paste: None,
         disable_mouse_capture: None,
         leave_alternate_screen: None,

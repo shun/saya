@@ -1,12 +1,13 @@
 use crate::overlay_asset_store::OverlayAssetSnapshot;
 use crate::presentation_effect::{OverlayTarget, PresentationOverlayIntent};
-use crate::screen_model::WorkspaceScreenModel;
+use crate::screen_model::{ScreenCursorStyle, WorkspaceScreenModel};
 use crate::terminal_capability::{InlineGraphicsProtocol, TerminalCapabilityProfile};
 use crate::terminal_io_broker::TerminalIoBroker;
 use crate::terminal_lifecycle::TerminalBackend;
 
 pub trait OverlayTerminalWriter {
     fn write_overlay_bytes(&mut self, bytes: &[u8]) -> Result<(), String>;
+    fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> Result<(), String>;
 
     fn write_bell(&mut self, count: usize) -> Result<(), String> {
         if count == 0 {
@@ -19,11 +20,17 @@ pub trait OverlayTerminalWriter {
 #[derive(Debug, Default)]
 pub struct RecordingOverlayWriter {
     pub writes: Vec<Vec<u8>>,
+    pub cursor_styles: Vec<ScreenCursorStyle>,
 }
 
 impl OverlayTerminalWriter for RecordingOverlayWriter {
     fn write_overlay_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.writes.push(bytes.to_vec());
+        Ok(())
+    }
+
+    fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> Result<(), String> {
+        self.cursor_styles.push(style);
         Ok(())
     }
 }
@@ -35,6 +42,10 @@ impl<B: TerminalBackend> OverlayTerminalWriter for TerminalIoBroker<'_, B> {
 
     fn write_bell(&mut self, count: usize) -> Result<(), String> {
         TerminalIoBroker::write_bell(self, count).map_err(|error| error.to_string())
+    }
+
+    fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> Result<(), String> {
+        TerminalIoBroker::set_cursor_style(self, style).map_err(|error| error.to_string())
     }
 }
 
@@ -198,7 +209,7 @@ mod tests {
     use crate::core_notification_prompt::{MessageLineCandidate, resolve_workspace_message_line};
     use crate::overlay_asset_store::{OverlayAssetMedia, OverlayAssetRef};
     use crate::presentation_effect::{OverlayContentKey, OverlayTarget, PresentationOverlayIntent};
-    use crate::screen_model::{PaneRect, ScreenModel};
+    use crate::screen_model::{PaneRect, ScreenCursorStyle, ScreenModel};
     use crate::terminal_capability::{
         InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
         TerminalCapabilityProbeService, TerminalSessionKind,
@@ -237,6 +248,7 @@ mod tests {
                 },
                 file_name: "sample".to_string(),
                 mode_label: "NORMAL".to_string(),
+                cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string()],
                 cursor_row: 0,

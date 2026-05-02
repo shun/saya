@@ -273,6 +273,16 @@ impl TuiRenderCoordinator {
         let mut overlay_results = Vec::new();
         let mut active_assets = Vec::<OverlayAssetRef>::new();
 
+        if let Some(writer) = overlay_writer.as_deref_mut() {
+            let cursor_style = rendered_workspace.active_cursor_style();
+            writer
+                .set_cursor_style(cursor_style)
+                .map_err(|message| RenderFrameError::TerminalIo { message })?;
+            log::debug!(
+                "[tui_render_coordinator] applied cursor style before rendering: style={cursor_style:?}"
+            );
+        }
+
         if let Some(bell) = rendered_workspace.bell
             && let Some(writer) = overlay_writer.as_deref_mut()
         {
@@ -404,7 +414,7 @@ mod tests {
     use crate::core_notification_prompt::{
         BellIndication, MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
     };
-    use crate::screen_model::{PaneRect, ScreenModel, WorkspaceProjectionError};
+    use crate::screen_model::{PaneRect, ScreenCursorStyle, ScreenModel, WorkspaceProjectionError};
     use crate::terminal_capability::{
         InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
         TerminalCapabilityProbeService, TerminalSessionKind,
@@ -436,6 +446,7 @@ mod tests {
                 },
                 file_name: "sample.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string()],
                 cursor_row: 0,

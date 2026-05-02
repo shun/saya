@@ -1,3 +1,4 @@
+use crate::screen_model::ScreenCursorStyle;
 use std::io;
 
 #[derive(Debug, Default)]
@@ -16,6 +17,7 @@ pub struct TerminalSession<'a, B: TerminalBackend> {
     alternate_screen_enabled: bool,
     mouse_capture_enabled: bool,
     bracketed_paste_enabled: bool,
+    cursor_style_changed: bool,
     restored: bool,
     latest_size: Option<TerminalSize>,
     redraw_requested: bool,
@@ -62,6 +64,13 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
         self.redraw_requested = true;
     }
 
+    pub fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> io::Result<()> {
+        log::debug!("[terminal] applying cursor style: style={style:?}");
+        self.backend.set_cursor_style(style)?;
+        self.cursor_style_changed = true;
+        Ok(())
+    }
+
     pub fn restore(mut self) -> Result<(), TerminalRestoreError> {
         self.restore_inner()
     }
@@ -73,6 +82,16 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
         }
 
         log::debug!("[terminal] restoring terminal lifecycle");
+
+        let reset_cursor_style_error = if self.cursor_style_changed {
+            log::debug!("[terminal] resetting cursor style");
+            self.backend.reset_cursor_style().err().map(|error| {
+                log::debug!("[terminal] reset cursor style failed: {}", error);
+                error.to_string()
+            })
+        } else {
+            None
+        };
 
         let disable_bracketed_paste_error = if self.bracketed_paste_enabled {
             log::debug!("[terminal] disabling bracketed paste");
@@ -115,6 +134,7 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
         };
 
         self.bracketed_paste_enabled = false;
+        self.cursor_style_changed = false;
         self.mouse_capture_enabled = false;
         self.alternate_screen_enabled = false;
         self.raw_mode_enabled = false;
@@ -125,8 +145,9 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
             disable_mouse_capture_error,
             leave_alternate_screen_error,
             disable_raw_mode_error,
+            reset_cursor_style_error,
         ) {
-            (None, None, None, None) => {
+            (None, None, None, None, None) => {
                 log::debug!("[terminal] terminal lifecycle restored");
                 Ok(())
             }
@@ -135,11 +156,13 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
                 disable_mouse_capture,
                 leave_alternate_screen,
                 disable_raw_mode,
+                reset_cursor_style,
             ) => {
                 log::debug!(
-                    "[terminal] terminal restore failed: disable_bracketed_paste={disable_bracketed_paste:?}, disable_mouse_capture={disable_mouse_capture:?}, leave_alternate_screen={leave_alternate_screen:?}, disable_raw_mode={disable_raw_mode:?}"
+                    "[terminal] terminal restore failed: reset_cursor_style={reset_cursor_style:?}, disable_bracketed_paste={disable_bracketed_paste:?}, disable_mouse_capture={disable_mouse_capture:?}, leave_alternate_screen={leave_alternate_screen:?}, disable_raw_mode={disable_raw_mode:?}"
                 );
                 Err(TerminalRestoreError {
+                    reset_cursor_style,
                     disable_bracketed_paste,
                     disable_mouse_capture,
                     leave_alternate_screen,
@@ -168,6 +191,7 @@ pub enum TerminalStartError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalRestoreError {
+    pub reset_cursor_style: Option<String>,
     pub disable_bracketed_paste: Option<String>,
     pub disable_mouse_capture: Option<String>,
     pub leave_alternate_screen: Option<String>,
@@ -179,6 +203,12 @@ pub trait TerminalBackend {
     fn enter_alternate_screen(&mut self) -> io::Result<()>;
     fn enable_mouse_capture(&mut self) -> io::Result<()>;
     fn enable_bracketed_paste(&mut self) -> io::Result<()>;
+    fn set_cursor_style(&mut self, _style: ScreenCursorStyle) -> io::Result<()> {
+        Ok(())
+    }
+    fn reset_cursor_style(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     fn disable_bracketed_paste(&mut self) -> io::Result<()>;
     fn disable_mouse_capture(&mut self) -> io::Result<()>;
     fn leave_alternate_screen(&mut self) -> io::Result<()>;
@@ -270,6 +300,7 @@ impl TerminalLifecycle {
             alternate_screen_enabled: true,
             mouse_capture_enabled: true,
             bracketed_paste_enabled: true,
+            cursor_style_changed: false,
             restored: false,
             latest_size: None,
             redraw_requested: false,
@@ -292,6 +323,7 @@ mod tests {
         fail_on_disable_mouse_capture: bool,
         fail_on_leave_alternate_screen: bool,
         fail_on_disable_raw_mode: bool,
+        fail_on_reset_cursor_style: bool,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -322,6 +354,24 @@ mod tests {
             self.calls.push("enable_bracketed_paste");
             if self.fail_on_enable_bracketed_paste {
                 Err(io::Error::other("bracketed paste failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> io::Result<()> {
+            self.calls.push(match style {
+                ScreenCursorStyle::Block => "set_cursor_style_block",
+                ScreenCursorStyle::SteadyBar => "set_cursor_style_steady_bar",
+                ScreenCursorStyle::UnderScore => "set_cursor_style_underscore",
+            });
+            Ok(())
+        }
+
+        fn reset_cursor_style(&mut self) -> io::Result<()> {
+            self.calls.push("reset_cursor_style");
+            if self.fail_on_reset_cursor_style {
+                Err(io::Error::other("reset cursor style failed"))
             } else {
                 Ok(())
             }
@@ -491,6 +541,34 @@ mod tests {
     }
 
     #[test]
+    fn restore_resets_cursor_style_before_cleanup_steps() {
+        let mut backend = RecordingBackend::default();
+
+        let mut session = TerminalLifecycle::start(&mut backend).expect("terminal start");
+        session
+            .set_cursor_style(ScreenCursorStyle::SteadyBar)
+            .expect("cursor style should apply");
+        let restore_result = session.restore();
+
+        assert!(restore_result.is_ok());
+        assert_eq!(
+            backend.calls,
+            vec![
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "set_cursor_style_steady_bar",
+                "reset_cursor_style",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
     fn record_resize_updates_latest_size_and_requests_redraw() {
         let mut backend = RecordingBackend::default();
 
@@ -586,6 +664,7 @@ mod tests {
         assert_eq!(
             restore_error,
             TerminalRestoreError {
+                reset_cursor_style: None,
                 disable_bracketed_paste: None,
                 disable_mouse_capture: None,
                 leave_alternate_screen: Some("leave alternate screen failed".to_string()),
@@ -623,6 +702,7 @@ mod tests {
         assert_eq!(
             restore_error,
             TerminalRestoreError {
+                reset_cursor_style: None,
                 disable_bracketed_paste: Some("disable bracketed paste failed".to_string()),
                 disable_mouse_capture: Some("disable mouse capture failed".to_string()),
                 leave_alternate_screen: Some("leave alternate screen failed".to_string()),

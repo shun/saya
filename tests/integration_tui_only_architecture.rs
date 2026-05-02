@@ -27,7 +27,9 @@ use saya::presentation_effect::{
     OverlayContentKey, OverlayTarget, PresentationEffectProjector,
     PresentationEffectProjectorService, RuntimePresentationIntent,
 };
-use saya::screen_model::{CommandLineModel, PaneRect, ScreenModel, WorkspaceScreenModel};
+use saya::screen_model::{
+    CommandLineModel, PaneRect, ScreenCursorStyle, ScreenModel, WorkspaceScreenModel,
+};
 use saya::terminal_capability::{
     CapabilityDegradationReason, InlineGraphicsProbeResult, TerminalCapabilityObservation,
     TerminalCapabilityProbe, TerminalCapabilityProbeService, TerminalSessionKind,
@@ -387,6 +389,7 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             },
             file_name: "main.rs".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["fn main() {}".to_string()],
             cursor_row: 0,
@@ -511,6 +514,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             },
             file_name: "sample.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["alpha".to_string(), "beta".to_string()],
             cursor_row: 1,
