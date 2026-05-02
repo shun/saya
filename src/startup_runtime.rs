@@ -14,8 +14,28 @@ pub use crate::config_runtime::{
 
 const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.tabSize",
+    "saya.options.tabstop",
+    "saya.options.expandtab",
+    "saya.options.shiftwidth",
+    "saya.options.softtabstop",
+    "saya.options.autoindent",
+    "saya.options.smartindent",
+    "saya.options.ignorecase",
+    "saya.options.smartcase",
+    "saya.options.scrolloff",
+    "saya.options.sidescrolloff",
+    "saya.options.wrap",
     "saya.options.lineNumbers",
+    "saya.options.number",
+    "saya.options.relativenumber",
+    "saya.options.cursorline",
     "saya.options.numberWidth",
+    "saya.options.numberwidth",
+    "saya.options.laststatus",
+    "saya.options.list",
+    "saya.options.listchars",
+    "saya.options.foldmethod",
+    "saya.options.foldlevel",
     "saya.keymap.set",
     "saya.commands.register",
     "saya.commands.execute",
@@ -34,6 +54,9 @@ const {
     op_collect_startup_tab_size,
     op_collect_startup_line_numbers,
     op_collect_startup_number_width,
+    op_collect_startup_bool_option,
+    op_collect_startup_number_option,
+    op_collect_startup_string_option,
     op_collect_startup_keymap,
     op_collect_startup_command,
     op_collect_startup_event,
@@ -42,8 +65,28 @@ const {
 globalThis.saya = {
     options: {
         tabSize: 8,
+        tabstop: 8,
+        expandtab: false,
+        shiftwidth: 8,
+        softtabstop: 0,
+        autoindent: false,
+        smartindent: false,
+        ignorecase: false,
+        smartcase: false,
+        scrolloff: 0,
+        sidescrolloff: 0,
+        wrap: true,
         lineNumbers: false,
+        number: false,
+        relativenumber: false,
+        cursorline: false,
         numberWidth: 4,
+        numberwidth: 4,
+        laststatus: 2,
+        list: false,
+        listchars: "tab:>-,trail:-",
+        foldmethod: "manual",
+        foldlevel: 0,
     },
     keymap: {
         set(mode, lhs, action) {
@@ -85,6 +128,45 @@ globalThis.saya = {
         },
     },
 };
+
+function defineNumberOption(propertyName, runtimeName, defaultValue) {
+    Object.defineProperty(globalThis.saya.options, propertyName, {
+        configurable: true,
+        enumerable: true,
+        get() {
+            return defaultValue;
+        },
+        set(value) {
+            op_collect_startup_number_option(runtimeName, value);
+        },
+    });
+}
+
+function defineBoolOption(propertyName, runtimeName, defaultValue) {
+    Object.defineProperty(globalThis.saya.options, propertyName, {
+        configurable: true,
+        enumerable: true,
+        get() {
+            return defaultValue;
+        },
+        set(value) {
+            op_collect_startup_bool_option(runtimeName, Boolean(value));
+        },
+    });
+}
+
+function defineStringOption(propertyName, runtimeName, defaultValue) {
+    Object.defineProperty(globalThis.saya.options, propertyName, {
+        configurable: true,
+        enumerable: true,
+        get() {
+            return defaultValue;
+        },
+        set(value) {
+            op_collect_startup_string_option(runtimeName, String(value));
+        },
+    });
+}
 
 Object.defineProperty(globalThis.saya.options, "tabSize", {
     configurable: true,
@@ -163,6 +245,39 @@ Object.defineProperty(globalThis.saya.options, "nuw", {
     },
 });
 
+defineBoolOption("expandtab", "expandtab", false);
+defineBoolOption("et", "expandtab", false);
+defineNumberOption("shiftwidth", "shiftwidth", 8);
+defineNumberOption("sw", "shiftwidth", 8);
+defineNumberOption("softtabstop", "softtabstop", 0);
+defineNumberOption("sts", "softtabstop", 0);
+defineBoolOption("autoindent", "autoindent", false);
+defineBoolOption("ai", "autoindent", false);
+defineBoolOption("smartindent", "smartindent", false);
+defineBoolOption("si", "smartindent", false);
+defineBoolOption("ignorecase", "ignorecase", false);
+defineBoolOption("ic", "ignorecase", false);
+defineBoolOption("smartcase", "smartcase", false);
+defineBoolOption("scs", "smartcase", false);
+defineNumberOption("scrolloff", "scrolloff", 0);
+defineNumberOption("so", "scrolloff", 0);
+defineNumberOption("sidescrolloff", "sidescrolloff", 0);
+defineNumberOption("siso", "sidescrolloff", 0);
+defineBoolOption("wrap", "wrap", true);
+defineBoolOption("relativenumber", "relativenumber", false);
+defineBoolOption("rnu", "relativenumber", false);
+defineBoolOption("cursorline", "cursorline", false);
+defineBoolOption("cul", "cursorline", false);
+defineNumberOption("laststatus", "laststatus", 2);
+defineNumberOption("ls", "laststatus", 2);
+defineBoolOption("list", "list", false);
+defineStringOption("listchars", "listchars", "tab:>-,trail:-");
+defineStringOption("lcs", "listchars", "tab:>-,trail:-");
+defineStringOption("foldmethod", "foldmethod", "manual");
+defineStringOption("fdm", "foldmethod", "manual");
+defineNumberOption("foldlevel", "foldlevel", 0);
+defineNumberOption("fdl", "foldlevel", 0);
+
 Object.freeze(globalThis.saya.options);
 Object.freeze(globalThis.saya.keymap);
 Object.freeze(globalThis.saya.commands);
@@ -189,8 +304,28 @@ declare global {
 
     interface SayaStartupOptionsSurface {
         tabSize: number;
+        tabstop: number;
+        expandtab: boolean;
+        shiftwidth: number;
+        softtabstop: number;
+        autoindent: boolean;
+        smartindent: boolean;
+        ignorecase: boolean;
+        smartcase: boolean;
+        scrolloff: number;
+        sidescrolloff: number;
+        wrap: boolean;
         lineNumbers: boolean;
+        number: boolean;
+        relativenumber: boolean;
+        cursorline: boolean;
         numberWidth: number;
+        numberwidth: number;
+        laststatus: number;
+        list: boolean;
+        listchars: string;
+        foldmethod: string;
+        foldlevel: number;
     }
 
     interface SayaStartupKeymapSurface {
@@ -288,6 +423,79 @@ fn op_collect_startup_number_width(
 }
 
 #[op2(fast)]
+fn op_collect_startup_bool_option(
+    state: &mut OpState,
+    #[string] name: String,
+    value: bool,
+) -> Result<(), JsErrorBox> {
+    collect_startup_option(
+        state,
+        &name,
+        SayaOptionValue::Boolean(value),
+        "boolean startup option",
+    )
+}
+
+#[op2(fast)]
+fn op_collect_startup_number_option(
+    state: &mut OpState,
+    #[string] name: String,
+    #[number] value: i64,
+) -> Result<(), JsErrorBox> {
+    collect_startup_option(
+        state,
+        &name,
+        SayaOptionValue::Number(value),
+        "number startup option",
+    )
+}
+
+#[op2(fast)]
+fn op_collect_startup_string_option(
+    state: &mut OpState,
+    #[string] name: String,
+    #[string] value: String,
+) -> Result<(), JsErrorBox> {
+    collect_startup_option(
+        state,
+        &name,
+        SayaOptionValue::String(value),
+        "string startup option",
+    )
+}
+
+fn collect_startup_option(
+    state: &mut OpState,
+    name: &str,
+    value: SayaOptionValue,
+    label: &str,
+) -> Result<(), JsErrorBox> {
+    let definition = crate::option_registry::SayaOptionRegistry::resolve(name)
+        .filter(|definition| definition.startup_public)
+        .ok_or_else(|| JsErrorBox::generic(format!("unsupported startup option: {name}")))?;
+    if definition.value_type != value.option_type() {
+        return Err(JsErrorBox::generic(format!(
+            "startup option type mismatch: option={}, expected={:?}, actual={:?}",
+            definition.name,
+            definition.value_type,
+            value.option_type()
+        )));
+    }
+    log::debug!(
+        "[startup_runtime] collect {label}: name={}, value={:?}",
+        definition.name,
+        value
+    );
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::Option {
+            name: definition.name,
+            value,
+        });
+    Ok(())
+}
+
+#[op2(fast)]
 fn op_collect_startup_keymap(
     state: &mut OpState,
     #[string] mode: String,
@@ -372,6 +580,9 @@ deno_core::extension!(
         op_collect_startup_tab_size,
         op_collect_startup_line_numbers,
         op_collect_startup_number_width,
+        op_collect_startup_bool_option,
+        op_collect_startup_number_option,
+        op_collect_startup_string_option,
         op_collect_startup_keymap,
         op_collect_startup_command,
         op_collect_startup_event

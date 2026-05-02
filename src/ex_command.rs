@@ -1,4 +1,5 @@
 use crate::editor_session::EditorSessionState;
+use crate::option_registry::{ParsedSayaSet, SayaOptionOwner, SayaOptionRegistry, SayaOptionValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchOptionCommand {
@@ -16,6 +17,7 @@ pub enum ExCommandRoute {
     SearchOption(SearchOptionCommand),
     PresentationLocal,
     CoreOwned,
+    UnsupportedPlanned,
 }
 
 pub fn apply_local_ex_command(
@@ -30,6 +32,15 @@ pub fn apply_local_ex_command(
             search_option
         );
         return None;
+    }
+
+    if let Ok(parsed) = SayaOptionRegistry::parse_set_command(&normalized) {
+        log::debug!(
+            "[ex_command] applying registry-driven local option command: command={:?}, parsed={:?}",
+            command,
+            parsed
+        );
+        return apply_parsed_presentation_option(session_state, parsed);
     }
 
     if let Some(message) = apply_number_width_command(session_state, &normalized, command) {
@@ -76,6 +87,36 @@ pub fn route_ex_command(command: &str) -> ExCommandRoute {
             search_option
         );
         return ExCommandRoute::SearchOption(search_option);
+    }
+
+    if let Ok(parsed) = SayaOptionRegistry::parse_set_command(&normalized) {
+        return match parsed.definition.owner {
+            SayaOptionOwner::PresentationOwned => {
+                log::debug!(
+                    "[ex_command] routing set command to presentation option pipeline: command={:?}, option={}",
+                    command,
+                    parsed.definition.name
+                );
+                ExCommandRoute::PresentationLocal
+            }
+            SayaOptionOwner::CoreOwned => {
+                log::debug!(
+                    "[ex_command] routing set command to core-owned option pipeline: command={:?}, option={}",
+                    command,
+                    parsed.definition.name
+                );
+                ExCommandRoute::CoreOwned
+            }
+            SayaOptionOwner::HostOwned | SayaOptionOwner::UnsupportedPlanned => {
+                log::debug!(
+                    "[ex_command] routing set command to unsupported planned option pipeline: command={:?}, option={}, owner={:?}",
+                    command,
+                    parsed.definition.name,
+                    parsed.definition.owner
+                );
+                ExCommandRoute::UnsupportedPlanned
+            }
+        };
     }
 
     if is_presentation_local_command_normalized(&normalized) {
@@ -142,6 +183,108 @@ fn apply_number_width_command(
         session_state.number_width()
     );
     Some(format!("numberwidth={}", session_state.number_width()))
+}
+
+fn apply_parsed_presentation_option(
+    session_state: &mut EditorSessionState,
+    parsed: ParsedSayaSet,
+) -> Option<String> {
+    if parsed.definition.owner != SayaOptionOwner::PresentationOwned {
+        return None;
+    }
+    let current = current_presentation_value(session_state, parsed.definition.name)?;
+    let is_query = matches!(
+        parsed.operation,
+        crate::option_registry::SayaSetOperation::Query
+    );
+    let value = match &parsed.operation {
+        crate::option_registry::SayaSetOperation::Assign(value) => value.clone(),
+        crate::option_registry::SayaSetOperation::Toggle => match current {
+            SayaOptionValue::Boolean(value) => SayaOptionValue::Boolean(!value),
+            _ => return None,
+        },
+        crate::option_registry::SayaSetOperation::Invert => match current {
+            SayaOptionValue::Boolean(value) => SayaOptionValue::Boolean(!value),
+            _ => return None,
+        },
+        crate::option_registry::SayaSetOperation::Query => current,
+    };
+    let name = parsed.definition.name;
+    if !is_query {
+        if let Err(message) = session_state.apply_presentation_option(name, value.clone()) {
+            log::debug!(
+                "[ex_command] presentation option application failed: option={}, value={:?}, error={}",
+                name,
+                value,
+                message
+            );
+            return Some(message);
+        }
+    }
+    let rendered_value = current_presentation_value(session_state, name).unwrap_or(value);
+    let rendered = render_option_message(name.canonical(), &rendered_value);
+    Some(rendered)
+}
+
+fn current_presentation_value(
+    session_state: &EditorSessionState,
+    name: crate::option_registry::SayaOptionName,
+) -> Option<SayaOptionValue> {
+    Some(match name {
+        crate::option_registry::SayaOptionName::LineNumbers => {
+            SayaOptionValue::Boolean(session_state.line_numbers())
+        }
+        crate::option_registry::SayaOptionName::NumberWidth => {
+            SayaOptionValue::Number(i64::from(session_state.number_width()))
+        }
+        crate::option_registry::SayaOptionName::RelativeNumber => {
+            SayaOptionValue::Boolean(session_state.relative_number())
+        }
+        crate::option_registry::SayaOptionName::CursorLine => {
+            SayaOptionValue::Boolean(session_state.cursorline())
+        }
+        crate::option_registry::SayaOptionName::ScrollOff => {
+            SayaOptionValue::Number(i64::from(session_state.scrolloff()))
+        }
+        crate::option_registry::SayaOptionName::SidescrollOff => {
+            SayaOptionValue::Number(i64::from(session_state.sidescrolloff()))
+        }
+        crate::option_registry::SayaOptionName::Wrap => {
+            SayaOptionValue::Boolean(session_state.wrap())
+        }
+        crate::option_registry::SayaOptionName::LastStatus => {
+            SayaOptionValue::Number(i64::from(session_state.laststatus()))
+        }
+        crate::option_registry::SayaOptionName::List => {
+            SayaOptionValue::Boolean(session_state.list())
+        }
+        crate::option_registry::SayaOptionName::ListChars => {
+            SayaOptionValue::String(session_state.listchars().to_string())
+        }
+        crate::option_registry::SayaOptionName::FoldMethod => {
+            SayaOptionValue::String(session_state.foldmethod().to_string())
+        }
+        crate::option_registry::SayaOptionName::FoldLevel => {
+            SayaOptionValue::Number(i64::from(session_state.foldlevel()))
+        }
+        _ => return None,
+    })
+}
+
+fn render_option_message(name: &str, value: &SayaOptionValue) -> String {
+    if name == "number" {
+        return match value {
+            SayaOptionValue::Boolean(true) => "line numbers: on".to_string(),
+            SayaOptionValue::Boolean(false) => "line numbers: off".to_string(),
+            _ => format!("{name}={value:?}"),
+        };
+    }
+    match value {
+        SayaOptionValue::Boolean(true) => format!("{name}: on"),
+        SayaOptionValue::Boolean(false) => format!("{name}: off"),
+        SayaOptionValue::Number(value) => format!("{name}={value}"),
+        SayaOptionValue::String(value) => format!("{name}={value}"),
+    }
 }
 
 fn normalize_command(command: &str) -> Option<String> {

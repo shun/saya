@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+pub use crate::option_registry::{SayaOptionName, SayaOptionValue};
+
 /// 設定評価から得られるコマンド。
 ///
 /// TypeScript 設定から得る不変コマンドで、session 初期化前に確定する。
@@ -25,11 +27,28 @@ pub enum ConfigCommand {
 }
 
 /// 設定可能なオプション名（限定 API）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigOptionName {
+    AutoIndent,
+    CursorLine,
+    ExpandTab,
+    FoldLevel,
+    FoldMethod,
+    IgnoreCase,
+    LastStatus,
+    List,
+    ListChars,
+    RelativeNumber,
+    ScrollOff,
+    ShiftWidth,
+    SidescrollOff,
+    SmartCase,
+    SmartIndent,
+    SoftTabStop,
     TabSize,
     LineNumbers,
     NumberWidth,
+    Wrap,
 }
 
 /// オプション値の型。
@@ -37,6 +56,7 @@ pub enum ConfigOptionName {
 pub enum ConfigOptionValue {
     Number(i64),
     Boolean(bool),
+    String(String),
 }
 
 /// キーマッピング対象のモード。
@@ -120,21 +140,6 @@ pub enum StartupRegistryEntry {
     },
 }
 
-/// startup option の正式名称。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SayaOptionName {
-    TabSize,
-    LineNumbers,
-    NumberWidth,
-}
-
-/// startup option の値。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SayaOptionValue {
-    Number(i64),
-    Boolean(bool),
-}
-
 /// startup keymap のモード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SayaKeyMode {
@@ -153,9 +158,34 @@ pub enum SayaKeymapAction {
 impl From<SayaOptionName> for ConfigOptionName {
     fn from(value: SayaOptionName) -> Self {
         match value {
+            SayaOptionName::AutoIndent => Self::AutoIndent,
+            SayaOptionName::CursorLine => Self::CursorLine,
+            SayaOptionName::ExpandTab => Self::ExpandTab,
+            SayaOptionName::FoldLevel => Self::FoldLevel,
+            SayaOptionName::FoldMethod => Self::FoldMethod,
+            SayaOptionName::IgnoreCase => Self::IgnoreCase,
+            SayaOptionName::LastStatus => Self::LastStatus,
+            SayaOptionName::List => Self::List,
+            SayaOptionName::ListChars => Self::ListChars,
+            SayaOptionName::RelativeNumber => Self::RelativeNumber,
+            SayaOptionName::ScrollOff => Self::ScrollOff,
+            SayaOptionName::ShiftWidth => Self::ShiftWidth,
+            SayaOptionName::SidescrollOff => Self::SidescrollOff,
+            SayaOptionName::SmartCase => Self::SmartCase,
+            SayaOptionName::SmartIndent => Self::SmartIndent,
+            SayaOptionName::SoftTabStop => Self::SoftTabStop,
             SayaOptionName::TabSize => Self::TabSize,
             SayaOptionName::LineNumbers => Self::LineNumbers,
             SayaOptionName::NumberWidth => Self::NumberWidth,
+            SayaOptionName::Wrap => Self::Wrap,
+            SayaOptionName::Backup
+            | SayaOptionName::Clipboard
+            | SayaOptionName::FileEncoding
+            | SayaOptionName::FileFormat
+            | SayaOptionName::Undofile
+            | SayaOptionName::WriteBackup => {
+                unreachable!("host I/O options must not be converted into startup config commands")
+            }
         }
     }
 }
@@ -165,6 +195,7 @@ impl From<SayaOptionValue> for ConfigOptionValue {
         match value {
             SayaOptionValue::Number(number) => Self::Number(number),
             SayaOptionValue::Boolean(boolean) => Self::Boolean(boolean),
+            SayaOptionValue::String(value) => Self::String(value),
         }
     }
 }
@@ -571,14 +602,11 @@ fn registry_from_commands(commands: &[ConfigCommand]) -> StartupRegistry {
     for command in commands {
         match command {
             ConfigCommand::SetOption { name, value } => {
-                let option_name = match name {
-                    ConfigOptionName::TabSize => SayaOptionName::TabSize,
-                    ConfigOptionName::LineNumbers => SayaOptionName::LineNumbers,
-                    ConfigOptionName::NumberWidth => SayaOptionName::NumberWidth,
-                };
+                let option_name = saya_option_name_from_config_name(*name);
                 let option_value = match value {
                     ConfigOptionValue::Number(number) => SayaOptionValue::Number(*number),
                     ConfigOptionValue::Boolean(boolean) => SayaOptionValue::Boolean(*boolean),
+                    ConfigOptionValue::String(value) => SayaOptionValue::String(value.clone()),
                 };
                 registry.push(StartupRegistryEntry::Option {
                     name: option_name,
@@ -657,10 +685,21 @@ fn parse_option_statement(
     })?;
     let rhs = rhs.trim().trim_end_matches(';').trim();
 
-    let value = match rhs {
-        "true" => SayaOptionValue::Boolean(true),
-        "false" => SayaOptionValue::Boolean(false),
-        _ => rhs
+    let definition = crate::option_registry::SayaOptionRegistry::resolve(lhs.trim())
+        .expect("normalized startup option should resolve");
+    let value = match definition.value_type {
+        crate::option_registry::SayaOptionType::Boolean => match rhs {
+            "true" => SayaOptionValue::Boolean(true),
+            "false" => SayaOptionValue::Boolean(false),
+            _ => {
+                return Err(CapabilityParseError::EvalFailed(format!(
+                    "option {} の値が不正です: {}",
+                    lhs.trim(),
+                    rhs
+                )));
+            }
+        },
+        crate::option_registry::SayaOptionType::Number => rhs
             .parse::<i64>()
             .map(SayaOptionValue::Number)
             .map_err(|_| {
@@ -670,6 +709,9 @@ fn parse_option_statement(
                     rhs
                 ))
             })?,
+        crate::option_registry::SayaOptionType::String => {
+            SayaOptionValue::String(parse_string_literal(rhs).unwrap_or_else(|| rhs.to_string()))
+        }
     };
 
     log::debug!(
@@ -822,11 +864,33 @@ fn parse_key_mode(value: &str) -> Result<SayaKeyMode, CapabilityParseError> {
 }
 
 fn normalize_option_name(value: &str) -> Option<SayaOptionName> {
-    match value {
-        "tabSize" | "tabstop" => Some(SayaOptionName::TabSize),
-        "lineNumbers" | "number" => Some(SayaOptionName::LineNumbers),
-        "numberWidth" | "numberwidth" | "nuw" => Some(SayaOptionName::NumberWidth),
-        _ => None,
+    crate::option_registry::SayaOptionRegistry::resolve(value)
+        .filter(|definition| definition.startup_public)
+        .map(|definition| definition.name)
+}
+
+fn saya_option_name_from_config_name(name: ConfigOptionName) -> SayaOptionName {
+    match name {
+        ConfigOptionName::AutoIndent => SayaOptionName::AutoIndent,
+        ConfigOptionName::CursorLine => SayaOptionName::CursorLine,
+        ConfigOptionName::ExpandTab => SayaOptionName::ExpandTab,
+        ConfigOptionName::FoldLevel => SayaOptionName::FoldLevel,
+        ConfigOptionName::FoldMethod => SayaOptionName::FoldMethod,
+        ConfigOptionName::IgnoreCase => SayaOptionName::IgnoreCase,
+        ConfigOptionName::LastStatus => SayaOptionName::LastStatus,
+        ConfigOptionName::List => SayaOptionName::List,
+        ConfigOptionName::ListChars => SayaOptionName::ListChars,
+        ConfigOptionName::RelativeNumber => SayaOptionName::RelativeNumber,
+        ConfigOptionName::ScrollOff => SayaOptionName::ScrollOff,
+        ConfigOptionName::ShiftWidth => SayaOptionName::ShiftWidth,
+        ConfigOptionName::SidescrollOff => SayaOptionName::SidescrollOff,
+        ConfigOptionName::SmartCase => SayaOptionName::SmartCase,
+        ConfigOptionName::SmartIndent => SayaOptionName::SmartIndent,
+        ConfigOptionName::SoftTabStop => SayaOptionName::SoftTabStop,
+        ConfigOptionName::TabSize => SayaOptionName::TabSize,
+        ConfigOptionName::LineNumbers => SayaOptionName::LineNumbers,
+        ConfigOptionName::NumberWidth => SayaOptionName::NumberWidth,
+        ConfigOptionName::Wrap => SayaOptionName::Wrap,
     }
 }
 
@@ -1235,8 +1299,25 @@ pub fn apply_config_commands(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigApplyState {
     pub tab_size: i64,
+    pub expandtab: bool,
+    pub shiftwidth: i64,
+    pub softtabstop: i64,
+    pub autoindent: bool,
+    pub smartindent: bool,
+    pub ignorecase: bool,
+    pub smartcase: bool,
+    pub scrolloff: i64,
+    pub sidescrolloff: i64,
+    pub wrap: bool,
     pub line_numbers: bool,
+    pub relative_number: bool,
+    pub cursorline: bool,
     pub number_width: i64,
+    pub laststatus: i64,
+    pub list: bool,
+    pub listchars: String,
+    pub foldmethod: String,
+    pub foldlevel: i64,
     pub key_mappings: Vec<AppliedKeyMapping>,
 }
 
@@ -1254,8 +1335,25 @@ impl ConfigApplyState {
         log::debug!("[config_runtime] creating default config apply state");
         Self {
             tab_size: 8,
+            expandtab: false,
+            shiftwidth: 8,
+            softtabstop: 0,
+            autoindent: false,
+            smartindent: false,
+            ignorecase: false,
+            smartcase: false,
+            scrolloff: 0,
+            sidescrolloff: 0,
+            wrap: true,
             line_numbers: false,
+            relative_number: false,
+            cursorline: false,
             number_width: 4,
+            laststatus: 2,
+            list: false,
+            listchars: "tab:>-,trail:-".to_string(),
+            foldmethod: "manual".to_string(),
+            foldlevel: 0,
             key_mappings: Vec::new(),
         }
     }
@@ -1288,6 +1386,96 @@ fn apply_single_command(
 ) -> Result<(), String> {
     match command {
         ConfigCommand::SetOption { name, value } => match (name, value) {
+            (ConfigOptionName::ExpandTab, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting expandtab: {} -> {}",
+                    state.expandtab,
+                    b
+                );
+                state.expandtab = *b;
+                Ok(())
+            }
+            (ConfigOptionName::ShiftWidth, ConfigOptionValue::Number(n)) => {
+                validate_number_range("shiftwidth", *n, 0, 32)?;
+                log::debug!(
+                    "[config_runtime] setting shiftwidth: {} -> {}",
+                    state.shiftwidth,
+                    n
+                );
+                state.shiftwidth = *n;
+                Ok(())
+            }
+            (ConfigOptionName::SoftTabStop, ConfigOptionValue::Number(n)) => {
+                validate_number_range("softtabstop", *n, -1, 32)?;
+                log::debug!(
+                    "[config_runtime] setting softtabstop: {} -> {}",
+                    state.softtabstop,
+                    n
+                );
+                state.softtabstop = *n;
+                Ok(())
+            }
+            (ConfigOptionName::AutoIndent, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting autoindent: {} -> {}",
+                    state.autoindent,
+                    b
+                );
+                state.autoindent = *b;
+                Ok(())
+            }
+            (ConfigOptionName::SmartIndent, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting smartindent: {} -> {}",
+                    state.smartindent,
+                    b
+                );
+                state.smartindent = *b;
+                Ok(())
+            }
+            (ConfigOptionName::IgnoreCase, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting ignorecase: {} -> {}",
+                    state.ignorecase,
+                    b
+                );
+                state.ignorecase = *b;
+                Ok(())
+            }
+            (ConfigOptionName::SmartCase, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting smartcase: {} -> {}",
+                    state.smartcase,
+                    b
+                );
+                state.smartcase = *b;
+                Ok(())
+            }
+            (ConfigOptionName::ScrollOff, ConfigOptionValue::Number(n)) => {
+                validate_number_range("scrolloff", *n, 0, 999)?;
+                log::debug!(
+                    "[config_runtime] setting scrolloff: {} -> {}",
+                    state.scrolloff,
+                    n
+                );
+                state.scrolloff = *n;
+                Ok(())
+            }
+            (ConfigOptionName::SidescrollOff, ConfigOptionValue::Number(n)) => {
+                validate_number_range("sidescrolloff", *n, 0, 999)?;
+                log::debug!(
+                    "[config_runtime] setting sidescrolloff: {} -> {}",
+                    state.sidescrolloff,
+                    n
+                );
+                state.sidescrolloff = *n;
+                Ok(())
+            }
+            (ConfigOptionName::Wrap, ConfigOptionValue::Boolean(b)) => {
+                log::debug!("[config_runtime] setting wrap: {} -> {}", state.wrap, b);
+                state.wrap = *b;
+                Ok(())
+            }
             (ConfigOptionName::TabSize, ConfigOptionValue::Number(n)) => {
                 if *n < 1 || *n > 32 {
                     return Err(format!(
@@ -1312,6 +1500,24 @@ fn apply_single_command(
                 state.line_numbers = *b;
                 Ok(())
             }
+            (ConfigOptionName::RelativeNumber, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting relativenumber: {} -> {}",
+                    state.relative_number,
+                    b
+                );
+                state.relative_number = *b;
+                Ok(())
+            }
+            (ConfigOptionName::CursorLine, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting cursorline: {} -> {}",
+                    state.cursorline,
+                    b
+                );
+                state.cursorline = *b;
+                Ok(())
+            }
             (ConfigOptionName::NumberWidth, ConfigOptionValue::Number(n)) => {
                 if *n < 1 || *n > 32 {
                     return Err(format!(
@@ -1325,6 +1531,49 @@ fn apply_single_command(
                     n
                 );
                 state.number_width = *n;
+                Ok(())
+            }
+            (ConfigOptionName::LastStatus, ConfigOptionValue::Number(n)) => {
+                validate_number_range("laststatus", *n, 0, 3)?;
+                log::debug!(
+                    "[config_runtime] setting laststatus: {} -> {}",
+                    state.laststatus,
+                    n
+                );
+                state.laststatus = *n;
+                Ok(())
+            }
+            (ConfigOptionName::List, ConfigOptionValue::Boolean(b)) => {
+                log::debug!("[config_runtime] setting list: {} -> {}", state.list, b);
+                state.list = *b;
+                Ok(())
+            }
+            (ConfigOptionName::ListChars, ConfigOptionValue::String(s)) => {
+                log::debug!(
+                    "[config_runtime] setting listchars: {:?} -> {:?}",
+                    state.listchars,
+                    s
+                );
+                state.listchars = s.clone();
+                Ok(())
+            }
+            (ConfigOptionName::FoldMethod, ConfigOptionValue::String(s)) => {
+                log::debug!(
+                    "[config_runtime] setting foldmethod: {:?} -> {:?}",
+                    state.foldmethod,
+                    s
+                );
+                state.foldmethod = s.clone();
+                Ok(())
+            }
+            (ConfigOptionName::FoldLevel, ConfigOptionValue::Number(n)) => {
+                validate_number_range("foldlevel", *n, 0, 99)?;
+                log::debug!(
+                    "[config_runtime] setting foldlevel: {} -> {}",
+                    state.foldlevel,
+                    n
+                );
+                state.foldlevel = *n;
                 Ok(())
             }
             (name, value) => Err(format!(
@@ -1353,6 +1602,15 @@ fn apply_single_command(
             Ok(())
         }
     }
+}
+
+fn validate_number_range(name: &str, value: i64, min: i64, max: i64) -> Result<(), String> {
+    if value < min || value > max {
+        return Err(format!(
+            "{name} の値は {min}〜{max} の範囲で指定してください: {value}"
+        ));
+    }
+    Ok(())
 }
 
 /// 設定の全フローを実行する統合関数。

@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use crate::host_io::SaveRequest;
+use crate::option_registry::{SayaOptionName, SayaOptionValue};
 
 /// 保存要求の生成に失敗した理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +38,16 @@ pub struct EditorSessionState {
     line_numbers: bool,
     /// 行番号欄の最小幅
     number_width: u16,
+    relative_number: bool,
+    cursorline: bool,
+    scrolloff: u16,
+    sidescrolloff: u16,
+    wrap: bool,
+    laststatus: u8,
+    list: bool,
+    listchars: String,
+    foldmethod: String,
+    foldlevel: u16,
     /// read-only 起動かどうか
     read_only: bool,
     /// 現在 dirty 状態かどうか
@@ -103,6 +114,16 @@ impl EditorSessionState {
             tab_size,
             line_numbers,
             number_width,
+            relative_number: false,
+            cursorline: false,
+            scrolloff: 0,
+            sidescrolloff: 0,
+            wrap: true,
+            laststatus: 2,
+            list: false,
+            listchars: "tab:>-,trail:-".to_string(),
+            foldmethod: "manual".to_string(),
+            foldlevel: 0,
             read_only,
             dirty: false,
             last_save_error: None,
@@ -220,6 +241,46 @@ impl EditorSessionState {
         self.number_width
     }
 
+    pub fn relative_number(&self) -> bool {
+        self.relative_number
+    }
+
+    pub fn cursorline(&self) -> bool {
+        self.cursorline
+    }
+
+    pub fn scrolloff(&self) -> u16 {
+        self.scrolloff
+    }
+
+    pub fn sidescrolloff(&self) -> u16 {
+        self.sidescrolloff
+    }
+
+    pub fn wrap(&self) -> bool {
+        self.wrap
+    }
+
+    pub fn laststatus(&self) -> u8 {
+        self.laststatus
+    }
+
+    pub fn list(&self) -> bool {
+        self.list
+    }
+
+    pub fn listchars(&self) -> &str {
+        &self.listchars
+    }
+
+    pub fn foldmethod(&self) -> &str {
+        &self.foldmethod
+    }
+
+    pub fn foldlevel(&self) -> u16 {
+        self.foldlevel
+    }
+
     /// 行番号表示の有効/無効を更新する。
     pub fn set_line_numbers(&mut self, enabled: bool) {
         log::debug!(
@@ -239,6 +300,71 @@ impl EditorSessionState {
             width
         );
         self.number_width = width;
+    }
+
+    pub fn apply_presentation_option(
+        &mut self,
+        name: SayaOptionName,
+        value: SayaOptionValue,
+    ) -> Result<(), String> {
+        log::debug!(
+            "[editor_session] applying presentation option: name={}, value={:?}",
+            name,
+            value
+        );
+        match (name, value) {
+            (SayaOptionName::LineNumbers, SayaOptionValue::Boolean(value)) => {
+                self.set_line_numbers(value);
+                Ok(())
+            }
+            (SayaOptionName::RelativeNumber, SayaOptionValue::Boolean(value)) => {
+                self.relative_number = value;
+                Ok(())
+            }
+            (SayaOptionName::CursorLine, SayaOptionValue::Boolean(value)) => {
+                self.cursorline = value;
+                Ok(())
+            }
+            (SayaOptionName::ScrollOff, SayaOptionValue::Number(value)) => {
+                self.scrolloff = u16::try_from(value.max(0)).unwrap_or(u16::MAX);
+                Ok(())
+            }
+            (SayaOptionName::SidescrollOff, SayaOptionValue::Number(value)) => {
+                self.sidescrolloff = u16::try_from(value.max(0)).unwrap_or(u16::MAX);
+                Ok(())
+            }
+            (SayaOptionName::Wrap, SayaOptionValue::Boolean(value)) => {
+                self.wrap = value;
+                Ok(())
+            }
+            (SayaOptionName::NumberWidth, SayaOptionValue::Number(value)) => {
+                self.set_number_width(u16::try_from(value.max(1)).unwrap_or(u16::MAX));
+                Ok(())
+            }
+            (SayaOptionName::LastStatus, SayaOptionValue::Number(value)) => {
+                self.laststatus = u8::try_from(value.clamp(0, 3)).unwrap_or(2);
+                Ok(())
+            }
+            (SayaOptionName::List, SayaOptionValue::Boolean(value)) => {
+                self.list = value;
+                Ok(())
+            }
+            (SayaOptionName::ListChars, SayaOptionValue::String(value)) => {
+                self.listchars = value;
+                Ok(())
+            }
+            (SayaOptionName::FoldMethod, SayaOptionValue::String(value)) => {
+                self.foldmethod = value;
+                Ok(())
+            }
+            (SayaOptionName::FoldLevel, SayaOptionValue::Number(value)) => {
+                self.foldlevel = u16::try_from(value.max(0)).unwrap_or(u16::MAX);
+                Ok(())
+            }
+            (name, value) => Err(format!(
+                "presentation option type mismatch: name={name}, value={value:?}"
+            )),
+        }
     }
 
     pub fn read_only(&self) -> bool {

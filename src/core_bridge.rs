@@ -3,7 +3,7 @@ use std::path::Path;
 
 use vim_core_rs::{
     CoreCommandOutcome, CoreEvent, CoreHostAction, CoreInputResponse, CoreInputResponseError,
-    CoreMatchType, CoreMessageCategory, CoreMessageEvent, CoreMessageSeverity,
+    CoreMatchType, CoreMessageCategory, CoreMessageEvent, CoreMessageSeverity, CoreOptionScope,
     CoreSearchHighlightMode, CoreSearchQueryError, CoreSessionError, CoreSnapshot, CoreVfsResponse,
     JobStatus, VimCoreSession,
 };
@@ -15,6 +15,7 @@ use crate::core_outcome::{
     normalize_core_event, normalize_host_action,
 };
 use crate::core_prompt::{PromptResponseCommand, PromptResponseError, PromptResponseRejection};
+use crate::option_registry::{SayaOptionName, SayaOptionValue};
 use crate::search_capability::SearchCapabilityContract;
 use crate::search_query::{
     SearchMatch, SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery,
@@ -343,6 +344,42 @@ impl CoreBridge {
         self.queue_transaction_artifacts(&outcome);
         log::debug!("[core_bridge] ex command result: {:?}", outcome.outcome);
         Ok(outcome.outcome)
+    }
+
+    pub fn set_core_option(
+        &mut self,
+        name: SayaOptionName,
+        value: SayaOptionValue,
+    ) -> Result<(), CoreSessionError> {
+        log::debug!(
+            "[core_bridge] setting core-owned option through typed API: name={}, value={:?}",
+            name,
+            value
+        );
+        let result = match value {
+            SayaOptionValue::Boolean(value) => {
+                self.session
+                    .set_option_bool(name.canonical(), value, CoreOptionScope::Default)
+            }
+            SayaOptionValue::Number(value) => {
+                self.session
+                    .set_option_number(name.canonical(), value, CoreOptionScope::Default)
+            }
+            SayaOptionValue::String(value) => {
+                self.session
+                    .set_option_string(name.canonical(), &value, CoreOptionScope::Default)
+            }
+        };
+        result.map_err(|error| {
+            log::debug!(
+                "[core_bridge] core option update failed: name={}, error={:?}",
+                name,
+                error
+            );
+            CoreSessionError::CommandFailed(vim_core_rs::CoreCommandError::OperationFailed {
+                reason_code: 1,
+            })
+        })
     }
 
     /// buffer のテキスト内容を返す。保存要求の生成に使用する。
@@ -905,11 +942,11 @@ fn map_input_response_error(error: CoreInputResponseError) -> PromptResponseErro
         CoreInputResponseError::Command(error) => PromptResponseError::CoreRejected(
             PromptResponseRejection::CommandRejected(format!("{error:?}")),
         ),
-        CoreInputResponseError::EvalFailed => PromptResponseError::CoreRejected(
-            PromptResponseRejection::CommandRejected(
+        CoreInputResponseError::EvalFailed => {
+            PromptResponseError::CoreRejected(PromptResponseRejection::CommandRejected(
                 "core eval failed after input response".to_string(),
-            ),
-        ),
+            ))
+        }
     }
 }
 

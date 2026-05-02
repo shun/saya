@@ -320,6 +320,16 @@ async fn main() {
                                                     &mut need_redraw,
                                                 );
                                             }
+                                            ExCommandRoute::UnsupportedPlanned => {
+                                                log::debug!(
+                                                    "[main] set option command is registered but not implemented in host I/O yet: command={:?}",
+                                                    cmd
+                                                );
+                                                transient_msg = Some(
+                                                    "This option is planned but not supported yet"
+                                                        .to_string(),
+                                                );
+                                            }
                                         }
                                     } else if prompt == '/' {
                                         let _ = outcome

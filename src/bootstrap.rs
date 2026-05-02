@@ -13,6 +13,7 @@ use crate::config_runtime::{
 };
 use crate::core_bridge::CoreBridge;
 use crate::editor_session::EditorSessionState;
+use crate::option_registry::{SayaOptionName, SayaOptionValue};
 use crate::session_guard::{SessionGuard, SessionGuardError};
 use crate::startup_runtime::{
     StartupModulePrepareResult, collect_startup_registry, prepare_init_module,
@@ -77,8 +78,25 @@ pub struct StartupRegistrySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupOptionsSnapshot {
     pub tab_size: u16,
+    pub expandtab: bool,
+    pub shiftwidth: u16,
+    pub softtabstop: i16,
+    pub autoindent: bool,
+    pub smartindent: bool,
+    pub ignorecase: bool,
+    pub smartcase: bool,
+    pub scrolloff: u16,
+    pub sidescrolloff: u16,
+    pub wrap: bool,
     pub line_numbers: bool,
+    pub relative_number: bool,
+    pub cursorline: bool,
     pub number_width: u16,
+    pub laststatus: u8,
+    pub list: bool,
+    pub listchars: String,
+    pub foldmethod: String,
+    pub foldlevel: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,8 +138,25 @@ impl StartupRegistrySnapshot {
         Self {
             options: StartupOptionsSnapshot {
                 tab_size: normalize_tab_size(state.tab_size),
+                expandtab: state.expandtab,
+                shiftwidth: normalize_tab_size(state.shiftwidth),
+                softtabstop: normalize_i16(state.softtabstop),
+                autoindent: state.autoindent,
+                smartindent: state.smartindent,
+                ignorecase: state.ignorecase,
+                smartcase: state.smartcase,
+                scrolloff: normalize_u16(state.scrolloff),
+                sidescrolloff: normalize_u16(state.sidescrolloff),
+                wrap: state.wrap,
                 line_numbers: state.line_numbers,
+                relative_number: state.relative_number,
+                cursorline: state.cursorline,
                 number_width: normalize_number_width(state.number_width),
+                laststatus: normalize_u8(state.laststatus),
+                list: state.list,
+                listchars: state.listchars.clone(),
+                foldmethod: state.foldmethod.clone(),
+                foldlevel: normalize_u16(state.foldlevel),
             },
             keymaps: state
                 .key_mappings
@@ -141,13 +176,15 @@ impl BootstrapOutcome {
             self.initial_line_numbers,
             self.initial_number_width
         );
-        EditorSessionState::new_with_options(
+        let mut state = EditorSessionState::new_with_options(
             self.target_path.clone(),
             self.initial_tab_size,
             self.initial_line_numbers,
             self.initial_number_width,
             self.read_only,
-        )
+        );
+        apply_startup_presentation_to_session_state(&mut state, &self.startup_registry.options);
+        state
     }
 }
 
@@ -218,7 +255,6 @@ fn prepare_launch_with_guard<R: Read>(
     .expect("vim-core-rs session should initialize after preflight session guard acquisition");
 
     apply_initial_cursor(&mut core_bridge, &request.initial_cursor);
-    let initial_snapshot = core_bridge.snapshot();
 
     if let Some(target_path) = target_path.as_ref() {
         log::debug!(
@@ -230,6 +266,8 @@ fn prepare_launch_with_guard<R: Read>(
     let mut warnings = Vec::new();
     let loaded_config = load_config_with_fallback(request.config_source, &mut warnings);
     let bootstrap_state = resolve_bootstrap_state(&loaded_config);
+    apply_startup_core_options(&mut core_bridge, &bootstrap_state.startup_registry.options);
+    let initial_snapshot = core_bridge.snapshot();
     let initial_tab_size = bootstrap_state.startup_registry.options.tab_size;
     let initial_number_width = bootstrap_state.startup_registry.options.number_width;
 
@@ -564,8 +602,25 @@ fn startup_registry_from_registry(
     StartupRegistrySnapshot {
         options: StartupOptionsSnapshot {
             tab_size: normalize_tab_size(state.tab_size),
+            expandtab: state.expandtab,
+            shiftwidth: normalize_tab_size(state.shiftwidth),
+            softtabstop: normalize_i16(state.softtabstop),
+            autoindent: state.autoindent,
+            smartindent: state.smartindent,
+            ignorecase: state.ignorecase,
+            smartcase: state.smartcase,
+            scrolloff: normalize_u16(state.scrolloff),
+            sidescrolloff: normalize_u16(state.sidescrolloff),
+            wrap: state.wrap,
             line_numbers: state.line_numbers,
+            relative_number: state.relative_number,
+            cursorline: state.cursorline,
             number_width: normalize_number_width(state.number_width),
+            laststatus: normalize_u8(state.laststatus),
+            list: state.list,
+            listchars: state.listchars.clone(),
+            foldmethod: state.foldmethod.clone(),
+            foldlevel: normalize_u16(state.foldlevel),
         },
         keymaps,
     }
@@ -625,6 +680,109 @@ fn normalize_tab_size(tab_size: i64) -> u16 {
 
 fn normalize_number_width(number_width: i64) -> u16 {
     u16::try_from(number_width).unwrap_or(4).max(1)
+}
+
+fn normalize_u16(value: i64) -> u16 {
+    u16::try_from(value.max(0)).unwrap_or(u16::MAX)
+}
+
+fn normalize_i16(value: i64) -> i16 {
+    i16::try_from(value).unwrap_or(0)
+}
+
+fn normalize_u8(value: i64) -> u8 {
+    u8::try_from(value.max(0)).unwrap_or(u8::MAX)
+}
+
+fn apply_startup_presentation_to_session_state(
+    state: &mut EditorSessionState,
+    options: &StartupOptionsSnapshot,
+) {
+    let presentation_options = [
+        (
+            SayaOptionName::RelativeNumber,
+            SayaOptionValue::Boolean(options.relative_number),
+        ),
+        (
+            SayaOptionName::CursorLine,
+            SayaOptionValue::Boolean(options.cursorline),
+        ),
+        (
+            SayaOptionName::ScrollOff,
+            SayaOptionValue::Number(i64::from(options.scrolloff)),
+        ),
+        (
+            SayaOptionName::SidescrollOff,
+            SayaOptionValue::Number(i64::from(options.sidescrolloff)),
+        ),
+        (SayaOptionName::Wrap, SayaOptionValue::Boolean(options.wrap)),
+        (
+            SayaOptionName::LastStatus,
+            SayaOptionValue::Number(i64::from(options.laststatus)),
+        ),
+        (SayaOptionName::List, SayaOptionValue::Boolean(options.list)),
+        (
+            SayaOptionName::ListChars,
+            SayaOptionValue::String(options.listchars.clone()),
+        ),
+        (
+            SayaOptionName::FoldMethod,
+            SayaOptionValue::String(options.foldmethod.clone()),
+        ),
+        (
+            SayaOptionName::FoldLevel,
+            SayaOptionValue::Number(i64::from(options.foldlevel)),
+        ),
+    ];
+    for (name, value) in presentation_options {
+        let _ = state.apply_presentation_option(name, value);
+    }
+}
+
+fn apply_startup_core_options(core_bridge: &mut CoreBridge, options: &StartupOptionsSnapshot) {
+    let core_options = [
+        (
+            SayaOptionName::TabSize,
+            SayaOptionValue::Number(i64::from(options.tab_size)),
+        ),
+        (
+            SayaOptionName::ExpandTab,
+            SayaOptionValue::Boolean(options.expandtab),
+        ),
+        (
+            SayaOptionName::ShiftWidth,
+            SayaOptionValue::Number(i64::from(options.shiftwidth)),
+        ),
+        (
+            SayaOptionName::SoftTabStop,
+            SayaOptionValue::Number(i64::from(options.softtabstop)),
+        ),
+        (
+            SayaOptionName::AutoIndent,
+            SayaOptionValue::Boolean(options.autoindent),
+        ),
+        (
+            SayaOptionName::SmartIndent,
+            SayaOptionValue::Boolean(options.smartindent),
+        ),
+        (
+            SayaOptionName::IgnoreCase,
+            SayaOptionValue::Boolean(options.ignorecase),
+        ),
+        (
+            SayaOptionName::SmartCase,
+            SayaOptionValue::Boolean(options.smartcase),
+        ),
+    ];
+    for (name, value) in core_options {
+        if let Err(error) = core_bridge.set_core_option(name, value) {
+            log::debug!(
+                "[bootstrap] startup core option application failed and was ignored: name={}, error={:?}",
+                name,
+                error
+            );
+        }
+    }
 }
 
 fn map_session_guard_error(error: SessionGuardError) -> BootstrapError {
@@ -999,23 +1157,19 @@ mod tests {
 
     #[test]
     fn startup_registry_from_apply_state_preserves_keymap_order_and_duplicates() {
-        let state = ConfigApplyState {
-            tab_size: 8,
-            line_numbers: false,
-            number_width: 4,
-            key_mappings: vec![
-                AppliedKeyMapping {
-                    mode: ConfigKeyMode::Normal,
-                    lhs: "x".to_string(),
-                    rhs: "dd".to_string(),
-                },
-                AppliedKeyMapping {
-                    mode: ConfigKeyMode::Normal,
-                    lhs: "x".to_string(),
-                    rhs: "yy".to_string(),
-                },
-            ],
-        };
+        let mut state = ConfigApplyState::default_state();
+        state.key_mappings = vec![
+            AppliedKeyMapping {
+                mode: ConfigKeyMode::Normal,
+                lhs: "x".to_string(),
+                rhs: "dd".to_string(),
+            },
+            AppliedKeyMapping {
+                mode: ConfigKeyMode::Normal,
+                lhs: "x".to_string(),
+                rhs: "yy".to_string(),
+            },
+        ];
 
         let startup_registry = StartupRegistrySnapshot::from_apply_state(&state);
 

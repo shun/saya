@@ -352,10 +352,17 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let file_name = resolve_file_name(input.snapshot, input.session_state);
     let mode_label = mode_to_label(input.snapshot.mode);
     let dirty = input.snapshot.dirty;
-    let full_lines = apply_line_number_prefix(
+    let rendered_lines = apply_list_projection(
         split_text_to_lines(&input.snapshot.text, input.session_state.tab_size()),
-        input.session_state.line_numbers(),
+        input.session_state.list(),
+        input.session_state.listchars(),
+    );
+    let full_lines = apply_line_number_prefix(
+        rendered_lines,
+        input.session_state.line_numbers() || input.session_state.relative_number(),
+        input.session_state.relative_number(),
         input.session_state.number_width(),
+        input.cursor_row,
     );
     trace_projection_lines("full", &full_lines, 0);
     let lines = slice_visible_lines(&full_lines, input.viewport_top, input.body_height);
@@ -366,7 +373,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.cursor_row,
         input.cursor_col,
         input.session_state.tab_size(),
-        input.session_state.line_numbers(),
+        input.session_state.line_numbers() || input.session_state.relative_number(),
         input.session_state.number_width(),
     );
     let visual_selection = resolve_visual_selection(input);
@@ -629,7 +636,7 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
             start_row,
             selection.start_col,
             input.session_state.tab_size(),
-            input.session_state.line_numbers(),
+            input.session_state.line_numbers() || input.session_state.relative_number(),
             input.session_state.number_width(),
         )
     } else {
@@ -640,7 +647,7 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
             &input.snapshot.text,
             end_row,
             input.session_state.tab_size(),
-            input.session_state.line_numbers(),
+            input.session_state.line_numbers() || input.session_state.relative_number(),
             input.session_state.number_width(),
         )
     } else if end_row == selection.end_row {
@@ -649,7 +656,7 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
             end_row,
             selection.end_col,
             input.session_state.tab_size(),
-            input.session_state.line_numbers(),
+            input.session_state.line_numbers() || input.session_state.relative_number(),
             input.session_state.number_width(),
         )
     } else {
@@ -733,9 +740,11 @@ fn split_text_to_lines(text: &str, tab_size: u16) -> Vec<String> {
 fn apply_line_number_prefix(
     lines: Vec<String>,
     enabled: bool,
+    relative_number: bool,
     configured_width: u16,
+    cursor_row: usize,
 ) -> Vec<String> {
-    if !enabled {
+    if !enabled && !relative_number {
         return lines;
     }
 
@@ -743,10 +752,46 @@ fn apply_line_number_prefix(
     let numbered_lines = lines
         .into_iter()
         .enumerate()
-        .map(|(index, line)| format!("{:>width$} {}", index + 1, line, width = width))
+        .map(|(index, line)| {
+            let number = if relative_number && index != cursor_row {
+                index.abs_diff(cursor_row)
+            } else {
+                index + 1
+            };
+            format!("{:>width$} {}", number, line, width = width)
+        })
         .collect();
     log::debug!("[screen_model] applied line number prefix");
     numbered_lines
+}
+
+fn apply_list_projection(lines: Vec<String>, enabled: bool, listchars: &str) -> Vec<String> {
+    if !enabled {
+        return lines;
+    }
+    let trail = parse_listchars_trail(listchars).unwrap_or('-');
+    lines
+        .into_iter()
+        .map(|line| render_list_line(&line, trail))
+        .collect()
+}
+
+fn render_list_line(line: &str, trail: char) -> String {
+    let trimmed_len = line.trim_end_matches(' ').len();
+    let mut rendered = String::with_capacity(line.len());
+    rendered.push_str(&line[..trimmed_len]);
+    rendered.extend(std::iter::repeat_n(
+        trail,
+        line.len().saturating_sub(trimmed_len),
+    ));
+    rendered
+}
+
+fn parse_listchars_trail(listchars: &str) -> Option<char> {
+    listchars.split(',').find_map(|part| {
+        part.strip_prefix("trail:")
+            .and_then(|value| value.chars().next())
+    })
 }
 
 /// vim-core-rs のバイト列ベースカーソル位置を terminal の表示セル列へ変換する。
@@ -1126,13 +1171,13 @@ fn resolve_search_overlay_display_bounds(
             search_match.start_row - 1,
             search_match.start_col,
             input.session_state.tab_size(),
-            input.session_state.line_numbers(),
+            input.session_state.line_numbers() || input.session_state.relative_number(),
             input.session_state.number_width(),
         )
     } else {
         line_number_offset(
             &input.snapshot.text,
-            input.session_state.line_numbers(),
+            input.session_state.line_numbers() || input.session_state.relative_number(),
             input.session_state.number_width(),
         )
     };
@@ -1142,7 +1187,7 @@ fn resolve_search_overlay_display_bounds(
             search_match.end_row - 1,
             search_match.end_col,
             input.session_state.tab_size(),
-            input.session_state.line_numbers(),
+            input.session_state.line_numbers() || input.session_state.relative_number(),
             input.session_state.number_width(),
         )
     } else {
@@ -1150,7 +1195,7 @@ fn resolve_search_overlay_display_bounds(
             &input.snapshot.text,
             row - 1,
             input.session_state.tab_size(),
-            input.session_state.line_numbers(),
+            input.session_state.line_numbers() || input.session_state.relative_number(),
             input.session_state.number_width(),
         )
     };
