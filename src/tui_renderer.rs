@@ -501,6 +501,7 @@ fn render_line(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenderOverlayKind {
+    Syntax(Option<&'static str>),
     VisualSelection,
     Search(crate::search_query::SearchMatchKind),
 }
@@ -514,6 +515,19 @@ struct RenderOverlayRange {
 
 fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<RenderOverlayRange> {
     let mut overlays = Vec::new();
+
+    overlays.extend(
+        model
+            .syntax_chunks
+            .iter()
+            .filter(|chunk| chunk.row == row)
+            .filter(|chunk| chunk.end_col_exclusive > chunk.start_col)
+            .map(|chunk| RenderOverlayRange {
+                start_col: usize::from(chunk.start_col),
+                end_col_exclusive: usize::from(chunk.end_col_exclusive),
+                kind: RenderOverlayKind::Syntax(syntax_family(chunk.name.as_deref())),
+            }),
+    );
 
     if let Some(selection) = model.visual_selection {
         if row >= selection.start_row && row <= selection.end_row {
@@ -603,10 +617,11 @@ fn render_layered_line(
 
 fn overlay_kind_rank(kind: RenderOverlayKind) -> usize {
     match kind {
-        RenderOverlayKind::VisualSelection => 3,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => 2,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => 1,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => 0,
+        RenderOverlayKind::Syntax(_) => 0,
+        RenderOverlayKind::VisualSelection => 4,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => 3,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => 2,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => 1,
     }
 }
 
@@ -615,6 +630,7 @@ fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) ->
         return Style::default();
     }
     match kind {
+        RenderOverlayKind::Syntax(family) => style_for_syntax_family(family, text_mode),
         RenderOverlayKind::VisualSelection => Style::default().add_modifier(Modifier::REVERSED),
         RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => {
             Style::default()
@@ -628,6 +644,47 @@ fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) ->
         RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => {
             Style::default().fg(Color::Black).bg(Color::Yellow)
         }
+    }
+}
+
+fn syntax_family(name: Option<&str>) -> Option<&'static str> {
+    let name = name?;
+    if name.contains("Comment") || name.contains("Todo") {
+        Some("comment")
+    } else if name.contains("String") || name.contains("Character") {
+        Some("string")
+    } else if name.contains("Number")
+        || name.contains("Float")
+        || name.contains("Boolean")
+        || name.contains("Constant")
+    {
+        Some("constant")
+    } else if name.contains("Statement")
+        || name.contains("Keyword")
+        || name.contains("Conditional")
+        || name.contains("Repeat")
+        || name.contains("Operator")
+    {
+        Some("statement")
+    } else if name.contains("Type") || name.contains("Identifier") || name.contains("Function") {
+        Some("identifier")
+    } else {
+        Some("default")
+    }
+}
+
+fn style_for_syntax_family(family: Option<&'static str>, text_mode: RenderTextMode) -> Style {
+    if text_mode == RenderTextMode::Plain {
+        return Style::default();
+    }
+    match family {
+        Some("comment") => Style::default().fg(Color::DarkGray),
+        Some("string") => Style::default().fg(Color::Green),
+        Some("constant") => Style::default().fg(Color::Magenta),
+        Some("statement") => Style::default().fg(Color::Cyan),
+        Some("identifier") => Style::default().fg(Color::Yellow),
+        Some("default") | None => Style::default().fg(Color::White),
+        Some(_) => Style::default().fg(Color::White),
     }
 }
 
@@ -677,8 +734,8 @@ mod tests {
         resolve_workspace_message_line,
     };
     use crate::editor_session::EditorSessionState;
-    use crate::screen_model::ScreenSelection;
     use crate::screen_model::{ProjectionInput, ScreenSearchOverlay, project};
+    use crate::screen_model::{ScreenSelection, ScreenSyntaxChunk};
     use crate::search_query::SearchMatchKind;
     use crate::session_guard::test_lock as session_test_lock;
     use ratatui::backend::TestBackend;
@@ -710,6 +767,7 @@ mod tests {
                 end_col_exclusive: 1,
             }),
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: message_line.map(ToString::to_string),
             command_cursor_col: None,
             is_active: true,
@@ -804,6 +862,7 @@ mod tests {
                     kind: SearchMatchKind::Current,
                 },
             ],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -844,6 +903,54 @@ mod tests {
     }
 
     #[test]
+    fn syntax_chunks_style_spans_without_changing_line_text() {
+        let model = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 12,
+                height: 3,
+            },
+            file_name: "test.rs".to_string(),
+            mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
+            dirty: false,
+            lines: vec!["let value".to_string()],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![],
+            syntax_chunks: vec![ScreenSyntaxChunk {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 3,
+                syn_id: 7,
+                name: Some("Keyword".to_string()),
+            }],
+            message_line: None,
+            command_cursor_col: None,
+            is_active: true,
+        };
+
+        let text = render_buffer_text(&model, 12, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "let");
+        assert_eq!(line.spans[0].style, Style::default().fg(Color::Cyan));
+        assert_eq!(line.spans[1].content.as_ref(), " value");
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "let value   ",
+            "syntax styling must not alter rendered line text"
+        );
+    }
+
+    #[test]
     fn visual_selection_overrides_search_overlay_when_ranges_overlap() {
         let model = ScreenModel {
             window_id: 1,
@@ -874,6 +981,7 @@ mod tests {
                 end_col_exclusive: 6,
                 kind: SearchMatchKind::Regular,
             }],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -925,6 +1033,7 @@ mod tests {
                 end_col_exclusive: 3,
                 kind: SearchMatchKind::Regular,
             }],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -973,6 +1082,7 @@ mod tests {
                 end_col_exclusive: 7,
             }),
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1095,6 +1205,7 @@ mod tests {
                     cursor_col: 0,
                     visual_selection: None,
                     search_overlays: vec![],
+                    syntax_chunks: vec![],
                     message_line: None,
                     command_cursor_col: None,
                     is_active: false,
@@ -1117,6 +1228,7 @@ mod tests {
                     cursor_col: 2,
                     visual_selection: None,
                     search_overlays: vec![],
+                    syntax_chunks: vec![],
                     message_line: None,
                     command_cursor_col: None,
                     is_active: false,
@@ -1162,6 +1274,7 @@ mod tests {
                 cursor_col: 1,
                 visual_selection: None,
                 search_overlays: vec![],
+                syntax_chunks: vec![],
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,
@@ -1211,6 +1324,7 @@ mod tests {
                 cursor_col: 0,
                 visual_selection: None,
                 search_overlays: vec![],
+                syntax_chunks: vec![],
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,

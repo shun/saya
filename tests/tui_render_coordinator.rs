@@ -53,6 +53,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             cursor_col: 0,
             visual_selection: None,
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,

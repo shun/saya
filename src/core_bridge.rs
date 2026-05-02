@@ -2,10 +2,10 @@ use std::fmt;
 use std::path::Path;
 
 use vim_core_rs::{
-    CoreCommandOutcome, CoreEvent, CoreHostAction, CoreInputResponse, CoreInputResponseError,
-    CoreMatchType, CoreMessageCategory, CoreMessageEvent, CoreMessageSeverity, CoreOptionScope,
-    CoreSearchHighlightMode, CoreSearchQueryError, CoreSessionError, CoreSnapshot, CoreVfsResponse,
-    JobStatus, VimCoreSession,
+    CoreCommandError, CoreCommandOutcome, CoreEvent, CoreHostAction, CoreInputResponse,
+    CoreInputResponseError, CoreMatchType, CoreMessageCategory, CoreMessageEvent,
+    CoreMessageSeverity, CoreOptionScope, CoreSearchHighlightMode, CoreSearchQueryError,
+    CoreSessionError, CoreSnapshot, CoreSyntaxChunk, CoreVfsResponse, JobStatus, VimCoreSession,
 };
 
 use crate::core_outcome::{
@@ -647,6 +647,21 @@ impl CoreBridge {
             incsearch_active: core_state.incsearch_active,
             matches,
         })
+    }
+
+    pub fn get_line_syntax(
+        &self,
+        window_id: i32,
+        lnum: i64,
+    ) -> Result<Vec<CoreSyntaxChunk>, CoreCommandError> {
+        let chunks = self.session.get_line_syntax(window_id, lnum)?;
+        log::debug!(
+            "[core_bridge] resolved line syntax: window_id={}, lnum={}, chunks={}",
+            window_id,
+            lnum,
+            chunks.len()
+        );
+        Ok(chunks)
     }
 }
 

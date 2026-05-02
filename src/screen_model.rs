@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use unicode_width::UnicodeWidthChar;
-use vim_core_rs::{CoreMode, CoreSnapshot, CoreWindowInfo};
+use vim_core_rs::{CoreMode, CoreSnapshot, CoreSyntaxChunk, CoreWindowInfo};
 
 use crate::core_bridge::VisualSelection;
 use crate::core_notification_prompt::{
@@ -47,6 +47,8 @@ pub struct ScreenModel {
     pub visual_selection: Option<ScreenSelection>,
     /// 検索ハイライトの表示用 overlay
     pub search_overlays: Vec<ScreenSearchOverlay>,
+    /// 構文ハイライトの表示用 chunk（表示セル座標）
+    pub syntax_chunks: Vec<ScreenSyntaxChunk>,
     /// メッセージ欄に表示する通知（エラーやガイダンス）
     pub message_line: Option<String>,
     pub command_cursor_col: Option<u16>,
@@ -212,6 +214,15 @@ pub struct ScreenSearchOverlay {
     pub kind: SearchMatchKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenSyntaxChunk {
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col_exclusive: u16,
+    pub syn_id: i32,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenMessageKind {
     CommandPreview,
@@ -243,6 +254,7 @@ pub struct ProjectionInput<'a> {
     pub session_state: &'a EditorSessionState,
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_state: Option<&'a SearchVisibleState>,
+    pub syntax_lines: Option<&'a BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
     pub command_preview: Option<&'a str>,
     pub core_message: Option<&'a str>,
     pub system_warning: Option<&'a str>,
@@ -270,6 +282,7 @@ impl<'a> ProjectionInput<'a> {
             session_state,
             visual_selection: None,
             search_state: None,
+            syntax_lines: None,
             command_preview: None,
             core_message: None,
             system_warning: None,
@@ -304,6 +317,14 @@ impl<'a> ProjectionInput<'a> {
 
     pub fn with_search_state(mut self, search_state: Option<&'a SearchVisibleState>) -> Self {
         self.search_state = search_state;
+        self
+    }
+
+    pub fn with_syntax_lines(
+        mut self,
+        syntax_lines: Option<&'a BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
+    ) -> Self {
+        self.syntax_lines = syntax_lines;
         self
     }
 
@@ -343,6 +364,7 @@ pub struct WorkspaceProjectionInput<'a> {
     pub session_state: &'a EditorSessionState,
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_states: &'a BTreeMap<i32, SearchVisibleState>,
+    pub syntax_lines: &'a BTreeMap<i32, BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
     pub command_preview: Option<&'a str>,
     pub core_message: Option<&'a str>,
     pub notification_prompt: Option<&'a WorkspaceNotificationPromptView>,
@@ -410,11 +432,12 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     );
     let visual_selection = resolve_visual_selection(input);
     let search_overlays = project_search_overlays(input);
+    let syntax_chunks = project_syntax_chunks(input);
     let message_state = resolve_message_state(input);
     let message_line = message_state.as_ref().map(|state| state.text.clone());
 
     log::debug!(
-        "[screen_model] projected: file_name={:?}, mode_label={:?}, cursor_style={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, message_state_kind={:?}, message_line={:?}",
+        "[screen_model] projected: file_name={:?}, mode_label={:?}, cursor_style={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, syntax_chunks={}, message_state_kind={:?}, message_line={:?}",
         file_name,
         mode_label,
         cursor_style,
@@ -423,6 +446,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_row,
         cursor_col,
         search_overlays.len(),
+        syntax_chunks.len(),
         message_state.as_ref().map(|state| state.kind),
         message_line,
     );
@@ -440,6 +464,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_col,
         visual_selection,
         search_overlays,
+        syntax_chunks,
         message_line,
         command_cursor_col: None,
         is_active: input.is_active,
@@ -503,6 +528,7 @@ pub fn project_workspace(
                     None
                 })
                 .with_search_state(input.search_states.get(&window.id))
+                .with_syntax_lines(input.syntax_lines.get(&window.id))
                 .with_viewport(viewport_top, body_height);
             if is_active {
                 log::debug!(
@@ -1265,6 +1291,82 @@ fn resolve_search_overlay_display_bounds(
     Some((start_col, end_col_exclusive))
 }
 
+fn project_syntax_chunks(input: &ProjectionInput<'_>) -> Vec<ScreenSyntaxChunk> {
+    let Some(syntax_lines) = input.syntax_lines else {
+        log::debug!("[screen_model] no syntax lines provided");
+        return Vec::new();
+    };
+    if syntax_lines.is_empty() {
+        log::debug!("[screen_model] syntax lines are empty");
+        return Vec::new();
+    }
+
+    let viewport_bottom = input
+        .viewport_top
+        .saturating_add(input.body_height.max(1))
+        .saturating_sub(1);
+    let line_numbers = input.session_state.line_numbers() || input.session_state.relative_number();
+    let mut projected = Vec::new();
+
+    for (absolute_row, chunks) in syntax_lines {
+        if *absolute_row < input.viewport_top || *absolute_row > viewport_bottom {
+            continue;
+        }
+        let row =
+            u16::try_from(absolute_row.saturating_sub(input.viewport_top)).unwrap_or(u16::MAX);
+        for chunk in chunks {
+            if chunk.syn_id == 0 || chunk.end_col <= chunk.start_col {
+                continue;
+            }
+            let start_col = resolve_display_col_for_position(
+                &input.snapshot.text,
+                *absolute_row,
+                chunk.start_col,
+                input.session_state.tab_size(),
+                line_numbers,
+                input.session_state.number_width(),
+            );
+            let end_col_exclusive = resolve_display_col_for_position(
+                &input.snapshot.text,
+                *absolute_row,
+                chunk.end_col,
+                input.session_state.tab_size(),
+                line_numbers,
+                input.session_state.number_width(),
+            );
+            if end_col_exclusive <= start_col {
+                log::debug!(
+                    "[screen_model] ignoring syntax chunk with non-positive display width: window_id={}, row={}, syn_id={}, raw=({},{}), display=({},{})",
+                    input.window_id,
+                    absolute_row,
+                    chunk.syn_id,
+                    chunk.start_col,
+                    chunk.end_col,
+                    start_col,
+                    end_col_exclusive
+                );
+                continue;
+            }
+            projected.push(ScreenSyntaxChunk {
+                row,
+                start_col,
+                end_col_exclusive,
+                syn_id: chunk.syn_id,
+                name: chunk.name.clone(),
+            });
+        }
+    }
+
+    projected.sort_by_key(|chunk| (chunk.row, chunk.start_col, chunk.end_col_exclusive));
+    log::debug!(
+        "[screen_model] projected syntax chunks: window_id={}, chunks={}, rows={:?}",
+        input.window_id,
+        projected.len(),
+        projected.iter().map(|chunk| chunk.row).collect::<Vec<_>>()
+    );
+    projected
+}
+
 fn map_window_rect(
     window: &CoreWindowInfo,
     terminal_width: u16,
@@ -1296,7 +1398,7 @@ fn map_window_rect(
 mod tests {
     use std::path::PathBuf;
 
-    use vim_core_rs::{CoreInputRequestKind, CoreMode};
+    use vim_core_rs::{CoreInputRequestKind, CoreMode, CoreSyntaxChunk};
 
     use super::*;
     use crate::core_bridge::CoreBridge;
@@ -1434,6 +1536,7 @@ mod tests {
             cursor_col: 0,
             visual_selection: None,
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1570,6 +1673,48 @@ mod tests {
 
         assert_eq!(model.lines, vec!["line3", "line4"]);
         assert_eq!(model.cursor_row, 1, "viewport 内の相対行へ変換されること");
+    }
+
+    #[test]
+    fn projects_syntax_chunks_to_visible_display_columns_without_changing_line_text() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("fn\tmain\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers(None, 4, true);
+        let mut syntax_lines = BTreeMap::new();
+        syntax_lines.insert(
+            0,
+            vec![CoreSyntaxChunk {
+                start_col: 3,
+                end_col: 7,
+                syn_id: 11,
+                name: Some("Identifier".to_string()),
+            }],
+        );
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_syntax_lines(Some(&syntax_lines)),
+        );
+
+        assert_eq!(
+            model.lines,
+            vec!["   1 fn  main"],
+            "syntax projection must not change rendered text"
+        );
+        assert_eq!(
+            model.syntax_chunks,
+            vec![ScreenSyntaxChunk {
+                row: 0,
+                start_col: 9,
+                end_col_exclusive: 13,
+                syn_id: 11,
+                name: Some("Identifier".to_string()),
+            }]
+        );
     }
 
     #[test]
@@ -2088,6 +2233,7 @@ mod tests {
             cursor_col: 0,
             visual_selection: None,
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -2340,12 +2486,14 @@ mod tests {
         let session_state = EditorSessionState::new(None);
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
 
         let result = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
+            syntax_lines: &syntax_lines,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
@@ -2398,12 +2546,14 @@ mod tests {
         let session_state = EditorSessionState::new(None);
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
+            syntax_lines: &syntax_lines,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
@@ -2455,12 +2605,14 @@ mod tests {
         let session_state = EditorSessionState::new(None);
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
+            syntax_lines: &syntax_lines,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
@@ -2490,12 +2642,14 @@ mod tests {
         let session_state = EditorSessionState::new(None);
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
+            syntax_lines: &syntax_lines,
             command_preview: Some(":w"),
             core_message: None,
             notification_prompt: None,
@@ -2527,11 +2681,13 @@ mod tests {
         let session_state = EditorSessionState::new(None);
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
         let input = WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
+            syntax_lines: &syntax_lines,
             command_preview: Some(":%s/foo/bar"),
             core_message: Some("core note"),
             notification_prompt: None,
@@ -2576,11 +2732,13 @@ mod tests {
         let session_state = EditorSessionState::new(None);
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
         let input = WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
+            syntax_lines: &syntax_lines,
             command_preview: None,
             core_message: Some("shared text"),
             notification_prompt: None,
@@ -2624,12 +2782,14 @@ mod tests {
         let session_state = EditorSessionState::new(None);
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
+            syntax_lines: &syntax_lines,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
@@ -2689,6 +2849,7 @@ mod tests {
             cursor_col: 0,
             visual_selection: None,
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,

@@ -2203,6 +2203,8 @@ fn build_workspace_render_output(
         resolve_prompt_revision(command_line_prompt, command_line_buffer),
         resolve_search_mode_hint(command_line_prompt, command_line_buffer),
     )?;
+    let syntax_lines =
+        collect_workspace_syntax_lines(&outcome.core_bridge, &snapshot, viewport_store);
     let command_preview =
         command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
     let notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
@@ -2212,6 +2214,7 @@ fn build_workspace_render_output(
         session_state,
         visual_selection: visual_selection.as_ref(),
         search_states: &search_states,
+        syntax_lines: &syntax_lines,
         command_preview: command_preview.as_deref(),
         core_message: None,
         notification_prompt: notification_prompt.as_ref(),
@@ -2226,7 +2229,7 @@ fn build_workspace_render_output(
         Ok(workspace) => {
             let projection_summary = workspace.projection_summary();
             trace_redraw_diagnostic(format_args!(
-                "workspace render build succeeded: panes={}, active_window_id={}, visible_message={:?}, command_line_active={}, search_overlay_counts={:?}",
+                "workspace render build succeeded: panes={}, active_window_id={}, visible_message={:?}, command_line_active={}, search_overlay_counts={:?}, syntax_chunk_counts={:?}",
                 workspace.panes.len(),
                 workspace.active_window_id,
                 workspace.visible_message_text(),
@@ -2235,6 +2238,11 @@ fn build_workspace_render_output(
                     .panes
                     .iter()
                     .map(|pane| (pane.window_id, pane.search_overlays.len()))
+                    .collect::<Vec<_>>(),
+                workspace
+                    .panes
+                    .iter()
+                    .map(|pane| (pane.window_id, pane.syntax_chunks.len()))
                     .collect::<Vec<_>>()
             ));
             if let Some(refresh) = structural_refresh.as_deref_mut() {
@@ -2431,6 +2439,63 @@ fn collect_workspace_search_states(
     Ok(search_states)
 }
 
+fn collect_workspace_syntax_lines(
+    core_bridge: &saya::core_bridge::CoreBridge,
+    snapshot: &vim_core_rs::CoreSnapshot,
+    viewport_store: &WindowViewportStore,
+) -> BTreeMap<i32, BTreeMap<usize, Vec<vim_core_rs::CoreSyntaxChunk>>> {
+    let mut syntax_lines = BTreeMap::new();
+    let line_count = buffer_line_count(&snapshot.text);
+    for window in &snapshot.windows {
+        let body_height = window.height.saturating_sub(1).max(1);
+        let viewport_top = viewport_store
+            .get(window.id)
+            .map(|viewport| viewport.top_line())
+            .unwrap_or_else(|| window.topline.saturating_sub(1));
+        let viewport_bottom = viewport_top.saturating_add(body_height).saturating_sub(1);
+        let mut window_lines = BTreeMap::new();
+
+        for absolute_row in viewport_top..=viewport_bottom {
+            if absolute_row >= line_count {
+                break;
+            }
+            let lnum = i64::try_from(absolute_row.saturating_add(1)).unwrap_or(i64::MAX);
+            match core_bridge.get_line_syntax(window.id, lnum) {
+                Ok(chunks) if !chunks.is_empty() => {
+                    log::debug!(
+                        "[main] syntax chunks collected: window_id={}, row={}, lnum={}, chunks={}",
+                        window.id,
+                        absolute_row,
+                        lnum,
+                        chunks.len()
+                    );
+                    window_lines.insert(absolute_row, chunks);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::debug!(
+                        "[main] syntax chunk query skipped for line: window_id={}, row={}, lnum={}, error={:?}",
+                        window.id,
+                        absolute_row,
+                        lnum,
+                        error
+                    );
+                }
+            }
+        }
+
+        if !window_lines.is_empty() {
+            log::debug!(
+                "[main] syntax lines collected for window: window_id={}, visible_lines={}",
+                window.id,
+                window_lines.len()
+            );
+            syntax_lines.insert(window.id, window_lines);
+        }
+    }
+    syntax_lines
+}
+
 fn resolve_search_mode_hint(
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
@@ -2574,6 +2639,7 @@ mod tests {
                 cursor_col: 0,
                 visual_selection: None,
                 search_overlays: vec![],
+                syntax_chunks: vec![],
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,
@@ -3023,6 +3089,7 @@ mod tests {
                 cursor_col: 0,
                 visual_selection: None,
                 search_overlays: vec![],
+                syntax_chunks: vec![],
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,

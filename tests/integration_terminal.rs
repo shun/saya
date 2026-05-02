@@ -320,11 +320,13 @@ fn project_workspace_from_snapshot(
     let mut viewport_store = WindowViewportStore::new();
     viewport_store.sync_from_windows(&snapshot.windows);
     let search_states = BTreeMap::new();
+    let syntax_lines = BTreeMap::new();
     project_workspace(&WorkspaceProjectionInput {
         snapshot,
         session_state,
         visual_selection: None,
         search_states: &search_states,
+        syntax_lines: &syntax_lines,
         command_preview: None,
         core_message: None,
         notification_prompt: None,
@@ -662,6 +664,7 @@ fn headless_workspace(
             cursor_col: 0,
             visual_selection: None,
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -701,6 +704,7 @@ fn headless_split_workspace() -> WorkspaceScreenModel {
             cursor_col: 0,
             visual_selection: None,
             search_overlays: vec![],
+            syntax_chunks: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: false,
@@ -2013,11 +2017,13 @@ fn ctrl_w_close_on_last_window_keeps_layout_and_surfaces_message() {
     let mut viewport_store = WindowViewportStore::new();
     viewport_store.sync_from_windows(&after.windows);
     let search_states = BTreeMap::new();
+    let syntax_lines = BTreeMap::new();
     let workspace = project_workspace(&WorkspaceProjectionInput {
         snapshot: &after,
         session_state: &session_state,
         visual_selection: None,
         search_states: &search_states,
+        syntax_lines: &syntax_lines,
         command_preview: None,
         core_message: Some(latest_message.as_str()),
         notification_prompt: None,
@@ -2086,11 +2092,13 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
     let before_resize = outcome.core_bridge.snapshot();
     viewport_store.sync_from_windows(&before_resize.windows);
     let before_search_states = collect_search_states_for_snapshot(&mut outcome, &before_resize);
+    let before_syntax_lines = BTreeMap::new();
     let before_model = project_workspace(&WorkspaceProjectionInput {
         snapshot: &before_resize,
         session_state: &session_state,
         visual_selection: None,
         search_states: &before_search_states,
+        syntax_lines: &before_syntax_lines,
         command_preview: None,
         core_message: None,
         notification_prompt: None,
@@ -2108,11 +2116,13 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
     let after_resize = outcome.core_bridge.snapshot();
     viewport_store.sync_from_windows(&after_resize.windows);
     let after_search_states = collect_search_states_for_snapshot(&mut outcome, &after_resize);
+    let after_syntax_lines = BTreeMap::new();
     let after_model = project_workspace(&WorkspaceProjectionInput {
         snapshot: &after_resize,
         session_state: &session_state,
         visual_selection: None,
         search_states: &after_search_states,
+        syntax_lines: &after_syntax_lines,
         command_preview: None,
         core_message: None,
         notification_prompt: None,
