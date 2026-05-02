@@ -114,6 +114,15 @@ impl TuiRenderer {
             options.clear_before_draw,
             force_full_clear
         );
+        trace_redraw_diagnostic(format_args!(
+            "renderer frame requested: panes={}, active_window_id={}, initial_clear={}, full_redraw={}, clear_before_draw={}, force_full_clear={}",
+            model.panes.len(),
+            model.active_window_id,
+            self.needs_full_clear,
+            options.full_redraw,
+            options.clear_before_draw,
+            force_full_clear
+        ));
         draw_workspace_frame(&mut self.terminal, model, force_full_clear, text_mode)?;
         self.needs_full_clear = false;
         Ok(())
@@ -127,7 +136,14 @@ fn draw_workspace_frame<B: Backend>(
     text_mode: RenderTextMode,
 ) -> io::Result<()> {
     if force_full_clear {
+        trace_redraw_diagnostic(format_args!(
+            "renderer issuing terminal.clear before draw: force_full_clear=true"
+        ));
         terminal.clear()?;
+    } else {
+        trace_redraw_diagnostic(format_args!(
+            "renderer skipping terminal.clear before draw: force_full_clear=false"
+        ));
     }
     terminal.draw(|f| render_workspace(f, model, text_mode))?;
     Ok(())
@@ -135,6 +151,15 @@ fn draw_workspace_frame<B: Backend>(
 
 fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: RenderTextMode) {
     let size = f.area();
+    trace_redraw_diagnostic(format_args!(
+        "renderer applying workspace Clear widget: area=({}, {}, {}, {}), panes={}, active_window_id={}",
+        size.x,
+        size.y,
+        size.width,
+        size.height,
+        model.panes.len(),
+        model.active_window_id
+    ));
     f.render_widget(Clear, size);
     let layout = compute_workspace_layout(size, model);
 
@@ -334,6 +359,18 @@ fn render_pane(
         width: rect.width,
         height: 1,
     };
+    trace_redraw_diagnostic(format_args!(
+        "renderer applying pane Clear widget: window_id={}, active={}, rect=({}, {}, {}, {}), cursor=({},{}), search_overlays={}",
+        model.window_id,
+        is_active,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        model.cursor_row,
+        model.cursor_col,
+        model.search_overlays.len()
+    ));
     f.render_widget(Clear, rect);
     let buffer_content = Paragraph::new(render_buffer_text(model, body_rect.width, text_mode))
         .block(Block::default());
@@ -414,6 +451,14 @@ fn draw_editor_frame<B: Backend>(
         force_full_clear,
         RenderTextMode::StyledTrueColor,
     )
+}
+
+fn trace_redraw_diagnostic(args: std::fmt::Arguments<'_>) {
+    let message = args.to_string();
+    log::debug!("[redraw_diagnostic] {message}");
+    if std::env::var_os("SAYA_TRACE_REDRAW").is_some() {
+        eprintln!("[saya-trace][redraw] {message}");
+    }
 }
 
 fn render_buffer_text(model: &ScreenModel, width: u16, text_mode: RenderTextMode) -> Text<'static> {

@@ -10,7 +10,7 @@ use saya::core_notification_prompt::{
 };
 use saya::core_outcome::{
     ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
-    NormalizedOutcomeBatch, fold_normalized_outcomes,
+    NormalizedOutcomeBatch, StructuralEffectSet, fold_normalized_outcomes,
 };
 use saya::core_prompt::PromptResponseCommand;
 use saya::editor_session::{QuitDecision, SaveRequestError};
@@ -410,7 +410,24 @@ async fn main() {
                             let intent = resolve_intent(&key);
                             match intent {
                                 EditorIntent::EditKey(k) => {
-                                    let _ = outcome.core_bridge.dispatch_key(&k);
+                                    let before_snapshot = outcome.core_bridge.snapshot();
+                                    let need_redraw_before_dispatch = need_redraw;
+                                    let dispatch_result = outcome.core_bridge.dispatch_key(&k);
+                                    let after_snapshot = outcome.core_bridge.snapshot();
+                                    trace_redraw_diagnostic(format_args!(
+                                        "edit key dispatched: key={:?}, result={:?}, revision {}->{}, cursor ({},{}) -> ({},{}), mode {:?}->{:?}, need_redraw_before={}",
+                                        k,
+                                        dispatch_result,
+                                        before_snapshot.revision,
+                                        after_snapshot.revision,
+                                        before_snapshot.cursor_row,
+                                        before_snapshot.cursor_col,
+                                        after_snapshot.cursor_row,
+                                        after_snapshot.cursor_col,
+                                        before_snapshot.mode,
+                                        after_snapshot.mode,
+                                        need_redraw_before_dispatch
+                                    ));
                                     consume_core_outcomes_from_core(
                                         &mut outcome.core_bridge,
                                         &mut outcome_accumulator,
@@ -435,6 +452,14 @@ async fn main() {
 
                                     session_state
                                         .update_dirty(outcome.core_bridge.snapshot().dirty);
+                                    trace_redraw_diagnostic(format_args!(
+                                        "edit key host policy forcing redraw after dispatch: key={:?}, cursor=({},{}), revision={}, prior_need_redraw={}",
+                                        k,
+                                        after_snapshot.cursor_row,
+                                        after_snapshot.cursor_col,
+                                        after_snapshot.revision,
+                                        need_redraw
+                                    ));
                                     need_redraw = true;
                                 }
                                 EditorIntent::Save => {
@@ -1675,6 +1700,20 @@ fn consume_core_outcomes_from_core(
 ) {
     let batch = core_bridge.take_normalized_outcomes();
     if batch.is_empty() {
+        let neutral_refresh =
+            StructuralRefresh::from_folded_effects(&StructuralEffectSet::default());
+        trace_redraw_diagnostic(format_args!(
+            "normalized batch was empty; switching to neutral structural refresh: redraw_requested={}, full={}, clear_before_draw={}, source={:?}, coalesced_count={}, invalidated_buffers={:?}, invalidated_windows={:?}, layout_dirty={}",
+            neutral_refresh.redraw_plan.requested,
+            neutral_refresh.redraw_plan.full,
+            neutral_refresh.redraw_plan.clear_before_draw,
+            neutral_refresh.redraw_plan.source,
+            neutral_refresh.redraw_plan.coalesced_count,
+            neutral_refresh.invalidation.buffer_ids,
+            neutral_refresh.invalidation.window_ids,
+            neutral_refresh.invalidation.layout_dirty
+        ));
+        accumulator.last_structural_refresh = Some(neutral_refresh);
         return;
     }
 
@@ -1695,6 +1734,17 @@ fn consume_normalized_batch(
     accumulator.state = folded.state;
     accumulator.last_projection_frame = Some(projection_frame.clone());
     let structural_refresh = StructuralRefresh::from_folded_effects(&effects.structural);
+    trace_redraw_diagnostic(format_args!(
+        "normalized batch folded into structural refresh: redraw_requested={}, full={}, clear_before_draw={}, source={:?}, coalesced_count={}, invalidated_buffers={:?}, invalidated_windows={:?}, layout_dirty={}",
+        structural_refresh.redraw_plan.requested,
+        structural_refresh.redraw_plan.full,
+        structural_refresh.redraw_plan.clear_before_draw,
+        structural_refresh.redraw_plan.source,
+        structural_refresh.redraw_plan.coalesced_count,
+        structural_refresh.invalidation.buffer_ids,
+        structural_refresh.invalidation.window_ids,
+        structural_refresh.invalidation.layout_dirty
+    ));
     if structural_refresh.redraw_plan.requested {
         log::debug!(
             "[main] deriving redraw scheduling hint from structural RedrawPlan: full={}, clear_before_draw={}, source={:?}, coalesced_count={}",
@@ -2095,6 +2145,30 @@ fn build_workspace_render_output(
     terminal_height: u16,
 ) -> Result<WorkspaceScreenModel, WorkspaceRedrawError> {
     let snapshot = outcome.core_bridge.snapshot();
+    trace_redraw_diagnostic(format_args!(
+        "workspace render build started: revision={}, mode={:?}, cursor=({},{}), windows={}, command_prompt={:?}, command_buffer_len={}, structural_refresh_present={}",
+        snapshot.revision,
+        snapshot.mode,
+        snapshot.cursor_row,
+        snapshot.cursor_col,
+        snapshot.windows.len(),
+        command_line_prompt,
+        command_line_buffer.len(),
+        structural_refresh.is_some()
+    ));
+    if let Some(refresh) = structural_refresh.as_deref() {
+        trace_redraw_diagnostic(format_args!(
+            "workspace render using structural refresh: redraw_requested={}, full={}, clear_before_draw={}, source={:?}, coalesced_count={}, invalidated_buffers={:?}, invalidated_windows={:?}, layout_dirty={}",
+            refresh.redraw_plan.requested,
+            refresh.redraw_plan.full,
+            refresh.redraw_plan.clear_before_draw,
+            refresh.redraw_plan.source,
+            refresh.redraw_plan.coalesced_count,
+            refresh.invalidation.buffer_ids,
+            refresh.invalidation.window_ids,
+            refresh.invalidation.layout_dirty
+        ));
+    }
     let visual_selection = outcome.core_bridge.current_visual_selection();
     let invalidated_windows = structural_refresh
         .as_deref()
@@ -2151,6 +2225,18 @@ fn build_workspace_render_output(
     match projection_result {
         Ok(workspace) => {
             let projection_summary = workspace.projection_summary();
+            trace_redraw_diagnostic(format_args!(
+                "workspace render build succeeded: panes={}, active_window_id={}, visible_message={:?}, command_line_active={}, search_overlay_counts={:?}",
+                workspace.panes.len(),
+                workspace.active_window_id,
+                workspace.visible_message_text(),
+                workspace.command_line.is_some(),
+                workspace
+                    .panes
+                    .iter()
+                    .map(|pane| (pane.window_id, pane.search_overlays.len()))
+                    .collect::<Vec<_>>()
+            ));
             if let Some(refresh) = structural_refresh.as_deref_mut() {
                 *refresh = refresh.clone().with_projection_summary(projection_summary);
                 log::debug!(
@@ -2163,6 +2249,10 @@ fn build_workspace_render_output(
             Ok(workspace)
         }
         Err(error) => {
+            trace_redraw_diagnostic(format_args!(
+                "workspace render build failed: revision={}, cursor=({},{}), error={}",
+                snapshot.revision, snapshot.cursor_row, snapshot.cursor_col, error
+            ));
             if let Some(refresh) = structural_refresh.as_deref() {
                 let diagnostic =
                     refresh.projection_failure(error.to_string(), refresh.viewport_status);
@@ -2289,6 +2379,40 @@ fn collect_workspace_search_states(
                 search_mode_hint,
             },
         );
+        trace_redraw_diagnostic(format_args!(
+            "search refresh outcome: window_id={}, revision={}, viewport_top={}, viewport_height={}, cursor=({},{}), mode_hint={:?}, query_executed={}, cache_key={:?}, render_state_present={}, match_count={}, current_match={:?}",
+            window.id,
+            snapshot.revision,
+            viewport_top,
+            body_height,
+            window.cursor_row,
+            window.cursor_col,
+            search_mode_hint,
+            outcome.query_executed,
+            outcome.cache_key,
+            outcome.render_state.is_some(),
+            outcome
+                .render_state
+                .as_ref()
+                .map(|state| state.matches.len())
+                .unwrap_or_default(),
+            outcome.render_state.as_ref().and_then(|state| {
+                state
+                    .matches
+                    .iter()
+                    .find(|search_match| {
+                        search_match.kind == saya::search_query::SearchMatchKind::Current
+                    })
+                    .map(|search_match| {
+                        (
+                            search_match.start_row,
+                            search_match.start_col,
+                            search_match.end_row,
+                            search_match.end_col,
+                        )
+                    })
+            })
+        ));
         if let Some(error) = outcome.query_error {
             log::debug!(
                 "[main] workspace search refresh failed: window_id={}, error={:?}",
@@ -2327,6 +2451,14 @@ fn resolve_prompt_revision(
     prompt.hash(&mut hasher);
     command_line_buffer.hash(&mut hasher);
     Some(hasher.finish())
+}
+
+fn trace_redraw_diagnostic(args: std::fmt::Arguments<'_>) {
+    let message = args.to_string();
+    log::debug!("[redraw_diagnostic] {message}");
+    if std::env::var_os("SAYA_TRACE_REDRAW").is_some() {
+        eprintln!("[saya-trace][redraw] {message}");
+    }
 }
 
 fn format_cli_error(error: CliParseError) -> String {
@@ -3028,6 +3160,52 @@ mod tests {
         assert!(
             bridge.take_normalized_outcomes().is_empty(),
             "normalized outcomes should be drained after helper runs"
+        );
+    }
+
+    #[test]
+    fn consume_core_outcomes_replaces_stale_structural_refresh_on_empty_batch() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        assert!(
+            bridge.take_normalized_outcomes().is_empty(),
+            "new bridge should not start with pending normalized outcomes"
+        );
+        let stale_full_refresh =
+            StructuralRefresh::from_folded_effects(&saya::core_outcome::StructuralEffectSet {
+                redraw: Some(saya::core_outcome::RedrawEffect {
+                    full: true,
+                    clear_before_draw: true,
+                    required_by_structure_change: true,
+                    coalesced_count: 1,
+                }),
+                invalidate_buffers: vec![1],
+                invalidate_windows: vec![1],
+                layout_dirty: true,
+            });
+        let mut accumulator = MainOutcomeAccumulator {
+            last_structural_refresh: Some(stale_full_refresh),
+            ..MainOutcomeAccumulator::default()
+        };
+        let mut need_redraw = false;
+
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
+
+        assert!(
+            !need_redraw,
+            "empty batch should leave redraw scheduling to the caller policy"
+        );
+        let refresh = accumulator
+            .last_structural_refresh
+            .expect("empty batch should record a neutral structural refresh");
+        assert!(!refresh.redraw_plan.requested);
+        assert!(!refresh.redraw_plan.full);
+        assert!(!refresh.redraw_plan.clear_before_draw);
+        assert_eq!(
+            refresh.redraw_plan.source,
+            saya::structural_refresh::RedrawPlanSource::None
         );
     }
 
