@@ -19,6 +19,7 @@ use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command}
 use saya::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::input_loop::CrosstermEventSource;
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::markdown_structure::{MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey};
 use saya::optional_graphics::OptionalGraphicsAdapter;
 use saya::overlay_asset_store::OverlayAssetStore;
 use saya::presentation_effect::RuntimePresentationIntent;
@@ -50,6 +51,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 #[derive(Debug, Default)]
 struct MainOutcomeAccumulator {
@@ -127,6 +129,7 @@ async fn main() {
     let mut host_action_runtime = HostActionRuntime::default();
     let mut viewport_store = WindowViewportStore::new();
     let mut search_refresh_store = WindowSearchRefreshStore::new();
+    let mut markdown_metadata_cache = MarkdownMetadataCache::new();
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_buffer = String::new();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
@@ -162,6 +165,7 @@ async fn main() {
         &session_state,
         &mut viewport_store,
         &mut search_refresh_store,
+        &mut markdown_metadata_cache,
         command_line_prompt,
         &command_line_buffer,
         outcome_accumulator.last_projection_frame.as_ref(),
@@ -622,6 +626,7 @@ async fn main() {
                     &session_state,
                     &mut viewport_store,
                     &mut search_refresh_store,
+                    &mut markdown_metadata_cache,
                     command_line_prompt,
                     &command_line_buffer,
                     outcome_accumulator.last_projection_frame.as_ref(),
@@ -820,6 +825,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
     let mut system_warning = bootstrap_warning_message(&outcome.warnings);
     let mut viewport_store = WindowViewportStore::new();
     let mut search_refresh_store = WindowSearchRefreshStore::new();
+    let mut markdown_metadata_cache = MarkdownMetadataCache::new();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut outcome_accumulator = MainOutcomeAccumulator::default();
     let mut host_action_runtime = HostActionRuntime::default();
@@ -833,6 +839,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &session_state,
                 &mut viewport_store,
                 &mut search_refresh_store,
+                &mut markdown_metadata_cache,
                 None,
                 "",
                 None,
@@ -883,6 +890,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &session_state,
                 &mut viewport_store,
                 &mut search_refresh_store,
+                &mut markdown_metadata_cache,
                 None,
                 "",
                 None,
@@ -935,6 +943,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &session_state,
                 &mut viewport_store,
                 &mut search_refresh_store,
+                &mut markdown_metadata_cache,
                 None,
                 "",
                 None,
@@ -2135,6 +2144,7 @@ fn build_workspace_render_output(
     session_state: &saya::editor_session::EditorSessionState,
     viewport_store: &mut WindowViewportStore,
     search_refresh_store: &mut WindowSearchRefreshStore,
+    markdown_metadata_cache: &mut MarkdownMetadataCache,
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
     projection_frame: Option<&ProjectionFrame>,
@@ -2205,6 +2215,8 @@ fn build_workspace_render_output(
     )?;
     let syntax_lines =
         collect_workspace_syntax_lines(&outcome.core_bridge, &snapshot, viewport_store);
+    let markdown_document_maps =
+        collect_workspace_markdown_document_maps(markdown_metadata_cache, session_state, &snapshot);
     let command_preview =
         command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
     let notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
@@ -2215,6 +2227,7 @@ fn build_workspace_render_output(
         visual_selection: visual_selection.as_ref(),
         search_states: &search_states,
         syntax_lines: &syntax_lines,
+        markdown_document_maps: &markdown_document_maps,
         command_preview: command_preview.as_deref(),
         core_message: None,
         notification_prompt: notification_prompt.as_ref(),
@@ -2494,6 +2507,70 @@ fn collect_workspace_syntax_lines(
         }
     }
     syntax_lines
+}
+
+fn collect_workspace_markdown_document_maps(
+    markdown_metadata_cache: &mut MarkdownMetadataCache,
+    session_state: &saya::editor_session::EditorSessionState,
+    snapshot: &vim_core_rs::CoreSnapshot,
+) -> BTreeMap<i32, Arc<MarkdownDocumentMap>> {
+    if !is_markdown_target_path(session_state.target_path()) {
+        log::debug!(
+            "[main] skipping markdown metadata collection because target path is not markdown: target_path={:?}",
+            session_state.target_path()
+        );
+        return BTreeMap::new();
+    }
+
+    let Some(active_window_id) = snapshot.active_window_id() else {
+        log::debug!(
+            "[main] skipping markdown metadata collection because active window is missing"
+        );
+        return BTreeMap::new();
+    };
+    let Some(active_window) = snapshot.window(active_window_id) else {
+        log::debug!(
+            "[main] skipping markdown metadata collection because active window metadata is missing: window_id={}",
+            active_window_id
+        );
+        return BTreeMap::new();
+    };
+
+    let active_buffer_id = active_window.buf_id;
+    let outcome = markdown_metadata_cache.document_map(
+        MarkdownMetadataKey {
+            buffer_id: i64::from(active_buffer_id),
+            revision: snapshot.revision,
+        },
+        &snapshot.text,
+    );
+    let maps = snapshot
+        .windows
+        .iter()
+        .filter(|window| window.buf_id == active_buffer_id)
+        .map(|window| (window.id, Arc::clone(&outcome.document_map)))
+        .collect::<BTreeMap<_, _>>();
+    log::debug!(
+        "[main] collected workspace markdown metadata: active_window_id={}, buffer_id={}, revision={}, cache_status={:?}, mapped_windows={:?}",
+        active_window_id,
+        active_buffer_id,
+        snapshot.revision,
+        outcome.status,
+        maps.keys().copied().collect::<Vec<_>>()
+    );
+    maps
+}
+
+fn is_markdown_target_path(path: Option<&std::path::PathBuf>) -> bool {
+    path.and_then(|path| path.extension())
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "mdown"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn resolve_search_mode_hint(
@@ -3534,5 +3611,16 @@ mod tests {
         let version = render_version_text();
 
         assert_eq!(version, format!("sy {}", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn markdown_metadata_collection_is_limited_to_markdown_target_paths() {
+        assert!(is_markdown_target_path(Some(&PathBuf::from("notes.md"))));
+        assert!(is_markdown_target_path(Some(&PathBuf::from(
+            "notes.markdown"
+        ))));
+        assert!(is_markdown_target_path(Some(&PathBuf::from("notes.MDOWN"))));
+        assert!(!is_markdown_target_path(Some(&PathBuf::from("notes.txt"))));
+        assert!(!is_markdown_target_path(None));
     }
 }

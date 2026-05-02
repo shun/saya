@@ -466,9 +466,39 @@ fn render_buffer_text(model: &ScreenModel, width: u16, text_mode: RenderTextMode
         .lines
         .iter()
         .enumerate()
-        .map(|(index, line)| render_line(model, index, line, width, text_mode))
+        .map(|(index, line)| {
+            let projected_line = projected_display_line(model, index, line);
+            let display_line = projected_line.as_deref().unwrap_or(line);
+            render_line(model, index, display_line, width, text_mode)
+        })
         .collect::<Vec<_>>();
     Text::from(lines)
+}
+
+fn projected_display_line(model: &ScreenModel, index: usize, raw_line: &str) -> Option<String> {
+    if model.is_active && u16::try_from(index).ok() == Some(model.cursor_row) {
+        log::debug!(
+            "[tui_renderer] keeping active cursor row in raw markdown mode: window_id={}, row={}, raw={:?}",
+            model.window_id,
+            index,
+            raw_line
+        );
+        return None;
+    }
+
+    let projection = model.line_projections.get(index)?;
+    let gutter_prefix =
+        slice_line_by_display_columns(raw_line, 0, usize::from(projection.line_start_col));
+    let display_line = format!("{gutter_prefix}{}", projection.display_text);
+    log::debug!(
+        "[tui_renderer] using projected rich markdown line: window_id={}, row={}, raw={:?}, display={:?}, line_start_col={}",
+        model.window_id,
+        index,
+        projection.raw_text,
+        display_line,
+        projection.line_start_col
+    );
+    Some(display_line)
 }
 
 fn trace_renderer_line(model: &ScreenModel, width: u16) {
@@ -734,7 +764,9 @@ mod tests {
         resolve_workspace_message_line,
     };
     use crate::editor_session::EditorSessionState;
-    use crate::screen_model::{ProjectionInput, ScreenSearchOverlay, project};
+    use crate::screen_model::{
+        ProjectionInput, ScreenLineProjection, ScreenSearchOverlay, project,
+    };
     use crate::screen_model::{ScreenSelection, ScreenSyntaxChunk};
     use crate::search_query::SearchMatchKind;
     use crate::session_guard::test_lock as session_test_lock;
@@ -902,6 +934,130 @@ mod tests {
             line.spans[4].style,
             Style::default().fg(Color::Black).bg(Color::Yellow)
         );
+    }
+
+    #[test]
+    fn render_buffer_text_uses_line_projection_display_text_when_present() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["# Heading".to_string()];
+        model.is_active = false;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "# Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::Plain);
+        let rendered = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "Heading   ");
+    }
+
+    #[test]
+    fn render_buffer_text_applies_overlays_to_projected_display_text() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["# Heading".to_string()];
+        model.is_active = false;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "# Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.visual_selection = None;
+        model.search_overlays = vec![ScreenSearchOverlay {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 7,
+            kind: SearchMatchKind::Regular,
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "Heading");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+        assert_eq!(line.spans[1].content.as_ref(), "   ");
+    }
+
+    #[test]
+    fn render_buffer_text_keeps_line_number_gutter_with_projected_display_text() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["   1 # Heading".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "# Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 5,
+        }];
+
+        let text = render_buffer_text(&model, 14, RenderTextMode::Plain);
+        let rendered = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "   1 Heading  ");
+    }
+
+    #[test]
+    fn render_buffer_text_keeps_active_cursor_row_in_raw_markdown_text() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["# Heading".to_string()];
+        model.is_active = true;
+        model.cursor_row = 0;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "# Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::Plain);
+        let rendered = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "# Heading ");
+    }
+
+    #[test]
+    fn render_buffer_text_falls_back_to_lines_when_line_projections_are_empty() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["# Heading".to_string()];
+        model.line_projections = vec![];
+        model.visual_selection = None;
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::Plain);
+        let rendered = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "# Heading ");
     }
 
     #[test]

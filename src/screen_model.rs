@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
 use unicode_width::UnicodeWidthChar;
 use vim_core_rs::{CoreMode, CoreSnapshot, CoreSyntaxChunk, CoreWindowInfo};
@@ -505,6 +506,7 @@ pub struct WorkspaceProjectionInput<'a> {
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_states: &'a BTreeMap<i32, SearchVisibleState>,
     pub syntax_lines: &'a BTreeMap<i32, BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
+    pub markdown_document_maps: &'a BTreeMap<i32, Arc<MarkdownDocumentMap>>,
     pub command_preview: Option<&'a str>,
     pub core_message: Option<&'a str>,
     pub notification_prompt: Option<&'a WorkspaceNotificationPromptView>,
@@ -671,6 +673,9 @@ pub fn project_workspace(
                 })
                 .with_search_state(input.search_states.get(&window.id))
                 .with_syntax_lines(input.syntax_lines.get(&window.id))
+                .with_markdown_document_map(
+                    input.markdown_document_maps.get(&window.id).map(Arc::as_ref),
+                )
                 .with_viewport(viewport_top, body_height);
             if is_active {
                 log::debug!(
@@ -1645,10 +1650,23 @@ fn markdown_conceal_ranges_for_line(
                 }
             }
             MarkdownBlockKind::ListItem {
+                ordered,
                 checkbox: Some(state),
                 ..
             } if block.range.start.line == absolute_row => {
+                if let Some(range) = list_marker_range(raw_text, *ordered) {
+                    operations.push(range);
+                }
                 if let Some(range) = checkbox_marker_range(raw_text, *state) {
+                    operations.push(range);
+                }
+            }
+            MarkdownBlockKind::ListItem {
+                ordered,
+                checkbox: None,
+                ..
+            } if block.range.start.line == absolute_row => {
+                if let Some(range) = list_marker_range(raw_text, *ordered) {
                     operations.push(range);
                 }
             }
@@ -1755,6 +1773,22 @@ fn checkbox_marker_range(
         raw_start_col: marker_start,
         raw_end_col: marker_end,
         replacement: Some(marker.1),
+    })
+}
+
+fn list_marker_range(raw_text: &str, ordered: bool) -> Option<MarkdownProjectionOperation> {
+    if ordered {
+        return None;
+    }
+    let marker_start = raw_text
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))?;
+    let marker_end = marker_start.saturating_add(2);
+    let marker = raw_text.get(marker_start..marker_end)?;
+    matches!(marker, "- " | "+ " | "* ").then_some(MarkdownProjectionOperation {
+        raw_start_col: marker_start,
+        raw_end_col: marker_end,
+        replacement: Some("• "),
     })
 }
 
@@ -2322,7 +2356,7 @@ mod tests {
         let row = &model.line_projections[0];
 
         assert_eq!(row.raw_text, "- [x] done");
-        assert_eq!(row.display_text, "- ✅ done");
+        assert_eq!(row.display_text, "• ✅ done");
         assert_eq!(row.logical_to_display_col(2), 2);
         assert_eq!(row.logical_to_display_col(5), 4);
         assert_eq!(row.display_to_logical_col(2), Some(2));
@@ -2333,6 +2367,37 @@ mod tests {
                 ScreenDisplaySpanKind::MarkdownReplacement { ref text } if text == "✅"
             )),
             "checkbox marker should be represented as an explicit replacement span"
+        );
+    }
+
+    #[test]
+    fn markdown_projection_replaces_unordered_list_marker_with_bullet() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "- item\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+        let row = &model.line_projections[0];
+
+        assert_eq!(row.raw_text, "- item");
+        assert_eq!(row.display_text, "• item");
+        assert_eq!(row.logical_to_display_col(0), 0);
+        assert_eq!(row.logical_to_display_col(2), 2);
+        assert!(
+            row.spans.iter().any(|span| matches!(
+                span.kind,
+                ScreenDisplaySpanKind::MarkdownReplacement { ref text } if text == "• "
+            )),
+            "unordered list marker should be represented as an explicit replacement span"
         );
     }
 
@@ -3136,6 +3201,7 @@ mod tests {
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
         let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
 
         let result = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
@@ -3143,6 +3209,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
@@ -3196,6 +3263,7 @@ mod tests {
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
         let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
@@ -3203,6 +3271,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
@@ -3255,6 +3324,7 @@ mod tests {
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
         let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
@@ -3262,6 +3332,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
@@ -3281,6 +3352,93 @@ mod tests {
     }
 
     #[test]
+    fn workspace_projection_passes_markdown_maps_into_pane_line_projections() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let window_id = snapshot.windows[0].id;
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+        let mut markdown_document_maps = BTreeMap::new();
+        markdown_document_maps.insert(window_id, Arc::new(MarkdownDocumentMap::parse(source)));
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        })
+        .expect("workspace projection should succeed");
+
+        let pane = model
+            .panes
+            .iter()
+            .find(|pane| pane.window_id == window_id)
+            .expect("pane should exist");
+        assert_eq!(pane.line_projections[0].raw_text, "# Title");
+        assert_eq!(
+            pane.line_projections[0].display_text, "Title",
+            "workspace projection should pass the per-window markdown map into pane projection"
+        );
+    }
+
+    #[test]
+    fn workspace_projection_without_markdown_map_keeps_raw_display_projection() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        })
+        .expect("workspace projection should succeed");
+
+        assert_eq!(model.panes[0].line_projections[0].raw_text, "# Title");
+        assert_eq!(
+            model.panes[0].line_projections[0].display_text, "# Title",
+            "without a markdown map, display projection should remain raw text"
+        );
+    }
+
+    #[test]
     fn workspace_projection_reserves_only_one_row_for_command_line_without_message() {
         let _lock = session_test_lock()
             .lock()
@@ -3292,6 +3450,7 @@ mod tests {
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
         let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
@@ -3299,6 +3458,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
             command_preview: Some(":w"),
             core_message: None,
             notification_prompt: None,
@@ -3331,12 +3491,14 @@ mod tests {
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
         let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
         let input = WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
             command_preview: Some(":%s/foo/bar"),
             core_message: Some("core note"),
             notification_prompt: None,
@@ -3382,12 +3544,14 @@ mod tests {
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
         let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
         let input = WorkspaceProjectionInput {
             snapshot: &snapshot,
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
             command_preview: None,
             core_message: Some("shared text"),
             notification_prompt: None,
@@ -3432,6 +3596,7 @@ mod tests {
         let viewport_store = WindowViewportStore::new();
         let search_states = BTreeMap::new();
         let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
@@ -3439,6 +3604,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
             command_preview: None,
             core_message: None,
             notification_prompt: None,
