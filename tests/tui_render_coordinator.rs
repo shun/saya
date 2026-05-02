@@ -49,6 +49,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec![line.to_string()],
+            line_projections: vec![],
             cursor_row: 0,
             cursor_col: 0,
             visual_selection: None,

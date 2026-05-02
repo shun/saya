@@ -449,6 +449,7 @@ mod tests {
                 cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string()],
+                line_projections: vec![],
                 cursor_row: 0,
                 cursor_col: 0,
                 visual_selection: None,

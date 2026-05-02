@@ -17,6 +17,9 @@ use crate::core_notification_prompt::{
     resolve_workspace_message_line,
 };
 use crate::editor_session::EditorSessionState;
+use crate::markdown_structure::{
+    MarkdownBlockKind, MarkdownCheckboxState, MarkdownDocumentMap, MarkdownInlineKind,
+};
 use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
 use crate::viewport::WindowViewportStore;
 
@@ -39,6 +42,8 @@ pub struct ScreenModel {
     pub dirty: bool,
     /// 表示用の行データ
     pub lines: Vec<String>,
+    /// raw buffer line と display line の対応表。
+    pub line_projections: Vec<ScreenLineProjection>,
     /// カーソル行（0-indexed）
     pub cursor_row: u16,
     /// カーソル列（0-indexed）
@@ -223,6 +228,131 @@ pub struct ScreenSyntaxChunk {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenLineProjection {
+    pub absolute_row: usize,
+    pub raw_text: String,
+    pub display_text: String,
+    pub spans: Vec<ScreenDisplaySpan>,
+    pub cells: Vec<ScreenCellMapping>,
+    pub line_start_col: u16,
+}
+
+impl ScreenLineProjection {
+    pub fn logical_to_display_col(&self, raw_col: usize) -> u16 {
+        let raw_col = clamp_to_char_boundary(&self.raw_text, raw_col.min(self.raw_text.len()));
+        if raw_col == 0 {
+            return self.line_start_col;
+        }
+
+        if let Some(span) = self.spans.iter().find(|span| {
+            matches!(
+                span.kind,
+                ScreenDisplaySpanKind::ConcealedMarkdownMarker
+                    | ScreenDisplaySpanKind::MarkdownReplacement { .. }
+            ) && raw_col >= span.raw_start_col
+                && raw_col < span.raw_end_col
+        }) {
+            log::debug!(
+                "[screen_model] markdown logical->display concealed/replacement: row={}, raw_col={}, display_col={}",
+                self.absolute_row,
+                raw_col,
+                span.display_start_col
+            );
+            return span.display_start_col;
+        }
+
+        if let Some(cell) = self.cells.iter().find(|cell| cell.raw_start_col == raw_col) {
+            log::debug!(
+                "[screen_model] markdown logical->display cell start: row={}, raw_col={}, display_col={}",
+                self.absolute_row,
+                raw_col,
+                cell.display_col
+            );
+            return cell.display_col;
+        }
+
+        let display_col = self
+            .cells
+            .iter()
+            .filter(|cell| cell.raw_end_col <= raw_col)
+            .map(|cell| cell.display_end_col_exclusive)
+            .last()
+            .or_else(|| {
+                self.spans
+                    .iter()
+                    .filter(|span| span.raw_end_col <= raw_col)
+                    .map(|span| span.display_end_col_exclusive)
+                    .last()
+            })
+            .unwrap_or(self.line_start_col);
+        log::debug!(
+            "[screen_model] markdown logical->display: row={}, raw_col={}, display_col={}",
+            self.absolute_row,
+            raw_col,
+            display_col
+        );
+        display_col
+    }
+
+    pub fn display_to_logical_col(&self, display_col: u16) -> Option<usize> {
+        if display_col < self.line_start_col {
+            return None;
+        }
+
+        if let Some(cell) = self.cells.iter().find(|cell| {
+            display_col >= cell.display_col && display_col < cell.display_end_col_exclusive
+        }) {
+            log::debug!(
+                "[screen_model] markdown display->logical cell hit: row={}, display_col={}, raw_col={}",
+                self.absolute_row,
+                display_col,
+                cell.raw_start_col
+            );
+            return Some(cell.raw_start_col);
+        }
+
+        let raw_col = self
+            .spans
+            .iter()
+            .filter(|span| span.display_end_col_exclusive <= display_col)
+            .map(|span| span.raw_end_col)
+            .last()
+            .unwrap_or(0);
+        log::debug!(
+            "[screen_model] markdown display->logical line end: row={}, display_col={}, raw_col={}",
+            self.absolute_row,
+            display_col,
+            raw_col
+        );
+        Some(raw_col)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenDisplaySpan {
+    pub raw_start_col: usize,
+    pub raw_end_col: usize,
+    pub display_start_col: u16,
+    pub display_end_col_exclusive: u16,
+    pub kind: ScreenDisplaySpanKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenDisplaySpanKind {
+    RawText,
+    ConcealedMarkdownMarker,
+    MarkdownReplacement { text: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenCellMapping {
+    pub display_col: u16,
+    pub display_end_col_exclusive: u16,
+    pub raw_start_col: usize,
+    pub raw_end_col: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenMessageKind {
     CommandPreview,
@@ -255,6 +385,7 @@ pub struct ProjectionInput<'a> {
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_state: Option<&'a SearchVisibleState>,
     pub syntax_lines: Option<&'a BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
+    pub markdown_document_map: Option<&'a MarkdownDocumentMap>,
     pub command_preview: Option<&'a str>,
     pub core_message: Option<&'a str>,
     pub system_warning: Option<&'a str>,
@@ -283,6 +414,7 @@ impl<'a> ProjectionInput<'a> {
             visual_selection: None,
             search_state: None,
             syntax_lines: None,
+            markdown_document_map: None,
             command_preview: None,
             core_message: None,
             system_warning: None,
@@ -325,6 +457,14 @@ impl<'a> ProjectionInput<'a> {
         syntax_lines: Option<&'a BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
     ) -> Self {
         self.syntax_lines = syntax_lines;
+        self
+    }
+
+    pub fn with_markdown_document_map(
+        mut self,
+        markdown_document_map: Option<&'a MarkdownDocumentMap>,
+    ) -> Self {
+        self.markdown_document_map = markdown_document_map;
         self
     }
 
@@ -420,6 +560,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     );
     trace_projection_lines("full", &full_lines, 0);
     let lines = slice_visible_lines(&full_lines, input.viewport_top, input.body_height);
+    let line_projections = project_markdown_line_projections(input);
     trace_projection_lines("visible", &lines, input.viewport_top);
     let cursor_row = resolve_cursor_row(input.cursor_row, input.viewport_top, input.body_height);
     let cursor_col = resolve_cursor_col(
@@ -460,6 +601,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_style,
         dirty,
         lines,
+        line_projections,
         cursor_row,
         cursor_col,
         visual_selection,
@@ -1367,6 +1509,362 @@ fn project_syntax_chunks(input: &ProjectionInput<'_>) -> Vec<ScreenSyntaxChunk> 
     projected
 }
 
+fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenLineProjection> {
+    let raw_lines = input.snapshot.text.split('\n').collect::<Vec<_>>();
+    let line_number_enabled =
+        input.session_state.line_numbers() || input.session_state.relative_number();
+    let number_width = line_number_width(raw_lines.len(), input.session_state.number_width());
+    let line_start_col = if line_number_enabled {
+        u16::try_from(number_width + 1).unwrap_or(u16::MAX)
+    } else {
+        0
+    };
+    let viewport_start = input.viewport_top.min(raw_lines.len());
+    let viewport_end = viewport_start
+        .saturating_add(input.body_height.max(1))
+        .min(raw_lines.len());
+
+    let projections = (viewport_start..viewport_end)
+        .map(|absolute_row| {
+            let raw_text = raw_lines.get(absolute_row).copied().unwrap_or("");
+            project_markdown_line_projection(
+                absolute_row,
+                raw_text,
+                input.markdown_document_map,
+                usize::from(input.session_state.tab_size().max(1)),
+                line_start_col,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    log::debug!(
+        "[screen_model] markdown line projections built: window_id={}, visible_rows={}, viewport_top={}, line_start_col={}, markdown_metadata_present={}",
+        input.window_id,
+        projections.len(),
+        input.viewport_top,
+        line_start_col,
+        input.markdown_document_map.is_some()
+    );
+
+    projections
+}
+
+fn project_markdown_line_projection(
+    absolute_row: usize,
+    raw_text: &str,
+    markdown_document_map: Option<&MarkdownDocumentMap>,
+    tab_size: usize,
+    line_start_col: u16,
+) -> ScreenLineProjection {
+    let conceal_ranges = markdown_document_map
+        .map(|map| markdown_conceal_ranges_for_line(map, absolute_row, raw_text))
+        .unwrap_or_default();
+    let mut display_text = String::new();
+    let mut spans = Vec::new();
+    let mut cells = Vec::new();
+    let mut display_col = usize::from(line_start_col);
+    let mut raw_col = 0usize;
+
+    for operation in conceal_ranges {
+        if operation.raw_start_col > raw_col {
+            append_raw_projection_segment(
+                absolute_row,
+                raw_text,
+                raw_col,
+                operation.raw_start_col,
+                tab_size,
+                &mut display_col,
+                &mut display_text,
+                &mut spans,
+                &mut cells,
+            );
+        }
+        append_replacement_projection_segment(
+            absolute_row,
+            raw_text,
+            operation,
+            &mut display_col,
+            &mut display_text,
+            &mut spans,
+            &mut cells,
+        );
+        raw_col = raw_col.max(operation.raw_end_col);
+    }
+
+    if raw_col < raw_text.len() {
+        append_raw_projection_segment(
+            absolute_row,
+            raw_text,
+            raw_col,
+            raw_text.len(),
+            tab_size,
+            &mut display_col,
+            &mut display_text,
+            &mut spans,
+            &mut cells,
+        );
+    }
+
+    log::debug!(
+        "[screen_model] markdown line projection built: row={}, raw_len={}, display_width={}, spans={}, cells={}",
+        absolute_row,
+        raw_text.len(),
+        display_col.saturating_sub(usize::from(line_start_col)),
+        spans.len(),
+        cells.len()
+    );
+
+    ScreenLineProjection {
+        absolute_row,
+        raw_text: raw_text.to_string(),
+        display_text,
+        spans,
+        cells,
+        line_start_col,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkdownProjectionOperation {
+    raw_start_col: usize,
+    raw_end_col: usize,
+    replacement: Option<&'static str>,
+}
+
+fn markdown_conceal_ranges_for_line(
+    map: &MarkdownDocumentMap,
+    absolute_row: usize,
+    raw_text: &str,
+) -> Vec<MarkdownProjectionOperation> {
+    let mut operations = Vec::new();
+    for block in &map.blocks {
+        match &block.kind {
+            MarkdownBlockKind::Heading { level } if block.range.start.line == absolute_row => {
+                if let Some(operation) = heading_marker_range(raw_text, *level) {
+                    operations.push(operation);
+                }
+            }
+            MarkdownBlockKind::ListItem {
+                checkbox: Some(state),
+                ..
+            } if block.range.start.line == absolute_row => {
+                if let Some(range) = checkbox_marker_range(raw_text, *state) {
+                    operations.push(range);
+                }
+            }
+            _ => {}
+        }
+    }
+    for inline in &map.inlines {
+        match &inline.kind {
+            MarkdownInlineKind::EmphasisMarker { .. }
+                if inline.range.start.line == absolute_row =>
+            {
+                operations.push(MarkdownProjectionOperation {
+                    raw_start_col: inline.range.start.column,
+                    raw_end_col: inline.range.end.column,
+                    replacement: None,
+                });
+            }
+            MarkdownInlineKind::InlineCode if inline.range.start.line == absolute_row => {
+                operations.push(MarkdownProjectionOperation {
+                    raw_start_col: inline.range.start.column,
+                    raw_end_col: inline.range.start.column + 1,
+                    replacement: None,
+                });
+                operations.push(MarkdownProjectionOperation {
+                    raw_start_col: inline.range.end.column.saturating_sub(1),
+                    raw_end_col: inline.range.end.column,
+                    replacement: None,
+                });
+            }
+            MarkdownInlineKind::Link { text, destination }
+                if inline.range.start.line == absolute_row =>
+            {
+                operations.push(MarkdownProjectionOperation {
+                    raw_start_col: inline.range.start.column,
+                    raw_end_col: text.start.column,
+                    replacement: None,
+                });
+                operations.push(MarkdownProjectionOperation {
+                    raw_start_col: text.end.column,
+                    raw_end_col: destination.end.column.saturating_add(1),
+                    replacement: None,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    operations.sort_by_key(|operation| (operation.raw_start_col, operation.raw_end_col));
+    let mut normalized = Vec::new();
+    for operation in operations {
+        if operation.raw_end_col <= operation.raw_start_col {
+            continue;
+        }
+        if normalized
+            .last()
+            .is_some_and(|last: &MarkdownProjectionOperation| {
+                last.raw_end_col > operation.raw_start_col
+            })
+        {
+            log::debug!(
+                "[screen_model] skipping overlapping markdown projection operation: row={}, raw=({}, {})",
+                absolute_row,
+                operation.raw_start_col,
+                operation.raw_end_col
+            );
+            continue;
+        }
+        normalized.push(operation);
+    }
+    normalized
+}
+
+fn heading_marker_range(raw_text: &str, level: u8) -> Option<MarkdownProjectionOperation> {
+    let marker_start = raw_text
+        .char_indices()
+        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))?;
+    let marker_end = marker_start
+        .saturating_add(usize::from(level))
+        .saturating_add(1);
+    (marker_end <= raw_text.len()).then_some(MarkdownProjectionOperation {
+        raw_start_col: marker_start,
+        raw_end_col: marker_end,
+        replacement: None,
+    })
+}
+
+fn checkbox_marker_range(
+    raw_text: &str,
+    state: MarkdownCheckboxState,
+) -> Option<MarkdownProjectionOperation> {
+    let marker = match state {
+        MarkdownCheckboxState::Checked => raw_text
+            .find("[x]")
+            .or_else(|| raw_text.find("[X]"))
+            .map(|start| (start, "✅")),
+        MarkdownCheckboxState::Unchecked => raw_text.find("[ ]").map(|start| (start, "☐")),
+    }?;
+    let marker_start = marker.0;
+    let marker_end = marker_start.saturating_add(3);
+    if marker_end > raw_text.len() {
+        return None;
+    }
+    Some(MarkdownProjectionOperation {
+        raw_start_col: marker_start,
+        raw_end_col: marker_end,
+        replacement: Some(marker.1),
+    })
+}
+
+fn append_raw_projection_segment(
+    absolute_row: usize,
+    raw_text: &str,
+    raw_start_col: usize,
+    raw_end_col: usize,
+    tab_size: usize,
+    display_col: &mut usize,
+    display_text: &mut String,
+    spans: &mut Vec<ScreenDisplaySpan>,
+    cells: &mut Vec<ScreenCellMapping>,
+) {
+    let raw_start_col = clamp_to_char_boundary(raw_text, raw_start_col.min(raw_text.len()));
+    let raw_end_col = clamp_to_char_boundary(raw_text, raw_end_col.min(raw_text.len()));
+    if raw_end_col <= raw_start_col {
+        return;
+    }
+    let display_start_col = *display_col;
+    let mut raw_col = raw_start_col;
+    for ch in raw_text[raw_start_col..raw_end_col].chars() {
+        let next_raw_col = raw_col + ch.len_utf8();
+        let rendered = if ch == '\t' {
+            let width = next_tab_stop(*display_col, tab_size).saturating_sub(*display_col);
+            " ".repeat(width)
+        } else {
+            ch.to_string()
+        };
+        let width = display_width(&rendered, tab_size);
+        display_text.push_str(&rendered);
+        cells.push(ScreenCellMapping {
+            display_col: u16::try_from(*display_col).unwrap_or(u16::MAX),
+            display_end_col_exclusive: u16::try_from(display_col.saturating_add(width))
+                .unwrap_or(u16::MAX),
+            raw_start_col: raw_col,
+            raw_end_col: next_raw_col,
+        });
+        *display_col = display_col.saturating_add(width);
+        raw_col = next_raw_col;
+    }
+    spans.push(ScreenDisplaySpan {
+        raw_start_col,
+        raw_end_col,
+        display_start_col: u16::try_from(display_start_col).unwrap_or(u16::MAX),
+        display_end_col_exclusive: u16::try_from(*display_col).unwrap_or(u16::MAX),
+        kind: ScreenDisplaySpanKind::RawText,
+    });
+    log::debug!(
+        "[screen_model] markdown raw segment projected: row={}, raw=({},{}), display=({}, {})",
+        absolute_row,
+        raw_start_col,
+        raw_end_col,
+        display_start_col,
+        *display_col
+    );
+}
+
+fn append_replacement_projection_segment(
+    absolute_row: usize,
+    raw_text: &str,
+    operation: MarkdownProjectionOperation,
+    display_col: &mut usize,
+    display_text: &mut String,
+    spans: &mut Vec<ScreenDisplaySpan>,
+    cells: &mut Vec<ScreenCellMapping>,
+) {
+    let raw_start_col =
+        clamp_to_char_boundary(raw_text, operation.raw_start_col.min(raw_text.len()));
+    let raw_end_col = clamp_to_char_boundary(raw_text, operation.raw_end_col.min(raw_text.len()));
+    let display_start_col = *display_col;
+    if let Some(replacement) = operation.replacement {
+        display_text.push_str(replacement);
+        let width = display_width(replacement, 1);
+        *display_col = display_col.saturating_add(width);
+        cells.push(ScreenCellMapping {
+            display_col: u16::try_from(display_start_col).unwrap_or(u16::MAX),
+            display_end_col_exclusive: u16::try_from(*display_col).unwrap_or(u16::MAX),
+            raw_start_col,
+            raw_end_col,
+        });
+        spans.push(ScreenDisplaySpan {
+            raw_start_col,
+            raw_end_col,
+            display_start_col: u16::try_from(display_start_col).unwrap_or(u16::MAX),
+            display_end_col_exclusive: u16::try_from(*display_col).unwrap_or(u16::MAX),
+            kind: ScreenDisplaySpanKind::MarkdownReplacement {
+                text: replacement.to_string(),
+            },
+        });
+    } else {
+        spans.push(ScreenDisplaySpan {
+            raw_start_col,
+            raw_end_col,
+            display_start_col: u16::try_from(display_start_col).unwrap_or(u16::MAX),
+            display_end_col_exclusive: u16::try_from(display_start_col).unwrap_or(u16::MAX),
+            kind: ScreenDisplaySpanKind::ConcealedMarkdownMarker,
+        });
+    }
+    log::debug!(
+        "[screen_model] markdown conceal/replacement segment projected: row={}, raw=({},{}), display=({},{}), replacement={:?}",
+        absolute_row,
+        raw_start_col,
+        raw_end_col,
+        display_start_col,
+        *display_col,
+        operation.replacement
+    );
+}
+
 fn map_window_rect(
     window: &CoreWindowInfo,
     terminal_width: u16,
@@ -1532,6 +2030,7 @@ mod tests {
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["alpha".to_string()],
+            line_projections: vec![],
             cursor_row: 0,
             cursor_col: 0,
             visual_selection: None,
@@ -1714,6 +2213,155 @@ mod tests {
                 syn_id: 11,
                 name: Some("Identifier".to_string()),
             }]
+        );
+    }
+
+    #[test]
+    fn markdown_projection_preserves_raw_offsets_for_multibyte_and_concealed_markers() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# あ*強*\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+        let row = &model.line_projections[0];
+
+        assert_eq!(row.raw_text, "# あ*強*");
+        assert_eq!(row.display_text, "あ強");
+        assert_eq!(row.logical_to_display_col(0), 0);
+        assert_eq!(row.logical_to_display_col(2), 0);
+        assert_eq!(row.logical_to_display_col(5), 2);
+        assert_eq!(row.logical_to_display_col(9), 4);
+        assert_eq!(row.display_to_logical_col(0), Some(2));
+        assert_eq!(row.display_to_logical_col(2), Some(6));
+        assert_eq!(
+            snapshot.text, source,
+            "Markdown projection must not mutate the raw buffer text"
+        );
+    }
+
+    #[test]
+    fn markdown_projection_maps_tabs_from_raw_byte_to_display_cells() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# a\tb\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size(None, 4);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+        let row = &model.line_projections[0];
+
+        assert_eq!(row.raw_text, "# a\tb");
+        assert_eq!(row.display_text, "a   b");
+        assert_eq!(row.logical_to_display_col(3), 1);
+        assert_eq!(row.logical_to_display_col(4), 4);
+        assert_eq!(row.display_to_logical_col(1), Some(3));
+        assert_eq!(row.display_to_logical_col(3), Some(3));
+        assert_eq!(row.display_to_logical_col(4), Some(4));
+    }
+
+    #[test]
+    fn markdown_projection_keeps_line_number_gutter_outside_raw_mapping() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+        let row = &model.line_projections[0];
+
+        assert_eq!(model.lines[0], "   1 # Title");
+        assert_eq!(row.line_start_col, 5);
+        assert_eq!(row.display_text, "Title");
+        assert_eq!(row.logical_to_display_col(2), 5);
+        assert_eq!(row.display_to_logical_col(4), None);
+        assert_eq!(row.display_to_logical_col(5), Some(2));
+    }
+
+    #[test]
+    fn markdown_projection_replaces_checkbox_marker_with_wide_display_glyph() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "- [x] done\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+        let row = &model.line_projections[0];
+
+        assert_eq!(row.raw_text, "- [x] done");
+        assert_eq!(row.display_text, "- ✅ done");
+        assert_eq!(row.logical_to_display_col(2), 2);
+        assert_eq!(row.logical_to_display_col(5), 4);
+        assert_eq!(row.display_to_logical_col(2), Some(2));
+        assert_eq!(row.display_to_logical_col(3), Some(2));
+        assert!(
+            row.spans.iter().any(|span| matches!(
+                span.kind,
+                ScreenDisplaySpanKind::MarkdownReplacement { ref text } if text == "✅"
+            )),
+            "checkbox marker should be represented as an explicit replacement span"
+        );
+    }
+
+    #[test]
+    fn markdown_projection_respects_viewport_absolute_rows() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "alpha\n# Beta\n*gamma*\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map))
+                .with_viewport(1, 2),
+        );
+
+        assert_eq!(model.lines, vec!["# Beta", "*gamma*"]);
+        assert_eq!(
+            model
+                .line_projections
+                .iter()
+                .map(|row| (row.absolute_row, row.display_text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Beta"), (2, "gamma")]
         );
     }
 
@@ -2229,6 +2877,7 @@ mod tests {
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["hello".to_string()],
+            line_projections: vec![],
             cursor_row: 0,
             cursor_col: 0,
             visual_selection: None,
@@ -2845,6 +3494,7 @@ mod tests {
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["alpha".to_string()],
+            line_projections: vec![],
             cursor_row: 0,
             cursor_col: 0,
             visual_selection: None,
