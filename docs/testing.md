@@ -59,11 +59,24 @@ suite for core editor behavior.
   and jumplist semantics in `vim-core-rs`.
 - Do not add exhaustive undo-tree coverage here. Keep detailed undo-tree
   semantics in `vim-core-rs`.
-- Do not add exhaustive search, syntax, or pop-up menu extraction coverage
-  here. Keep detailed search, syntax, and pop-up menu extraction semantics in
-  `vim-core-rs`.
+- Do not add exhaustive search, syntax, highlight, conceal, or pop-up menu
+  extraction coverage here. Keep detailed search, syntax, highlight, conceal,
+  and pop-up menu extraction semantics in `vim-core-rs`.
 - Do not add detailed VFS protocol or job protocol contract suites here when
   `vim-core-rs` already owns them.
+
+Syntax, highlight, and conceal tests in `saya` must stay at the presentation
+boundary. They can prove that public data from `vim-core-rs`, such as
+`CoreSyntaxChunk` values, is collected for visible rows, projected into display
+cells, layered with search or visual overlays, and rendered without mutating
+buffer text. They must not prove Vim-compatible extraction semantics,
+`:highlight` attribute resolution, or `matchadd()` conceal behavior.
+
+Markdown WYSIWYG tests are different from Vim syntax and conceal extraction
+tests. The Markdown document map is host-side presentation metadata used by
+`saya` to decide rich display, raw block expansion, and display-space
+projection. These tests belong here only while they verify the CLI presentation
+path and preserve the raw buffer owned by `vim-core-rs`.
 
 ## Useful commands
 

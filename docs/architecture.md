@@ -61,11 +61,25 @@ save and quit policy, and viewport projection. It turns core snapshots into a
 screen model and mediates between core host actions and repository-local host
 logic.
 
+This layer also owns presentation metadata that is specific to `saya`. The
+Markdown WYSIWYG path is the current example: `main.rs` builds
+`MarkdownDocumentMap` values outside the draw loop, `screen_model.rs` projects
+raw buffer text into display text and display-space mappings, and
+`tui_renderer.rs` renders the projected screen model. This path must not mutate
+buffer text or re-implement Vim motion.
+
+Syntax, highlight, and conceal have a different boundary. `vim-core-rs` owns
+the extraction semantics and public core data. `saya` can collect visible
+`CoreSyntaxChunk` values, project them into display cells, and render them, but
+it must not define Vim-compatible syntax extraction, `:highlight` tables,
+resolved highlight attributes, or `matchadd()` conceal parity.
+
 This layer includes these key modules.
 
 - `bootstrap.rs`
 - `event_loop.rs`
 - `editor_session.rs`
+- `markdown_structure.rs`
 - `screen_model.rs`
 - `tui_renderer.rs`
 - `host_io.rs`

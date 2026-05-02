@@ -22,6 +22,9 @@ The current repository already implements these behaviors.
 - Tab-size projection and line-number projection
 - Visible syntax chunk projection and TUI styling from `vim-core-rs`
   `get_line_syntax()` data
+- Markdown presentation metadata, parser caching, logical-to-display projection,
+  inactive rich rendering, active-block raw expansion, and headless regression
+  coverage for the WYSIWYG editing path
 - Terminal lifecycle management, input routing, and event-loop coordination
 - Startup TypeScript evaluation through `deno_core`
 - Normalized startup registries for options, keymaps, commands, and events
@@ -45,7 +48,13 @@ documentation and code review.
 
 - `vim-core-rs` remains the editing-semantics source of truth
 - `vim-core-rs` owns syntax, highlight, and conceal extraction semantics;
-  `saya` only projects and renders the public extracted data
+  `saya` only projects and renders the public extracted data from
+  `get_line_syntax()` and related public core surfaces
+- Markdown WYSIWYG metadata is presentation metadata owned by `saya`; it must
+  not become a Vim syntax, highlight, or conceal compatibility layer
+- `saya` must not own `:highlight` definition tables, resolved highlight
+  attributes, `matchadd()` conceal parity, or upstream Vim syntax/conceal
+  compatibility suites
 - `saya` remains the host application layer around that editing core
 - Public TypeScript APIs remain under the `saya` namespace
 - Filesystem and network capabilities remain out of the public MVP API
