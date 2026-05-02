@@ -818,6 +818,25 @@ mod tests {
         }
     }
 
+    fn projection(raw_text: &str, display_text: &str, line_start_col: u16) -> ScreenLineProjection {
+        ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: raw_text.to_string(),
+            display_text: display_text.to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col,
+        }
+    }
+
+    fn rendered_text_line(text: &Text<'_>, index: usize) -> String {
+        text.lines[index]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
     #[test]
     fn status_line_does_not_embed_message_line() {
         let model = screen_model_with_message(Some("保存しました"));
@@ -1060,6 +1079,31 @@ mod tests {
     }
 
     #[test]
+    fn render_buffer_text_does_not_reinterpret_projection_for_active_or_inactive_rows() {
+        let mut active_model = screen_model_with_message(None);
+        active_model.lines = vec!["# Active".to_string()];
+        active_model.is_active = true;
+        active_model.cursor_row = 0;
+        active_model.visual_selection = None;
+        active_model.line_projections = vec![projection("# Active", "Active", 0)];
+
+        let active_text = render_buffer_text(&active_model, 10, RenderTextMode::Plain);
+
+        assert_eq!(rendered_text_line(&active_text, 0), "Active    ");
+
+        let mut inactive_model = screen_model_with_message(None);
+        inactive_model.lines = vec!["# Inactive".to_string()];
+        inactive_model.is_active = false;
+        inactive_model.cursor_row = 0;
+        inactive_model.visual_selection = None;
+        inactive_model.line_projections = vec![projection("# Inactive", "# Inactive", 0)];
+
+        let inactive_text = render_buffer_text(&inactive_model, 12, RenderTextMode::Plain);
+
+        assert_eq!(rendered_text_line(&inactive_text, 0), "# Inactive  ");
+    }
+
+    #[test]
     fn render_buffer_text_renders_raw_block_rows_from_projection_display_text() {
         let mut model = screen_model_with_message(None);
         model.lines = vec![
@@ -1152,6 +1196,59 @@ mod tests {
             Style::default().fg(Color::Black).bg(Color::Yellow)
         );
         assert_eq!(line.spans[2].content.as_ref(), "  ");
+    }
+
+    #[test]
+    fn render_buffer_text_applies_gutter_and_overlays_in_projected_display_space() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["   1 # Heading".to_string()];
+        model.is_active = false;
+        model.cursor_row = 0;
+        model.visual_selection = Some(ScreenSelection {
+            start_row: 0,
+            start_col: 9,
+            line_start_col: 5,
+            end_row: 0,
+            end_col_exclusive: 11,
+        });
+        model.search_overlays = vec![ScreenSearchOverlay {
+            row: 0,
+            start_col: 6,
+            end_col_exclusive: 8,
+            kind: SearchMatchKind::Regular,
+        }];
+        model.syntax_chunks = vec![ScreenSyntaxChunk {
+            row: 0,
+            start_col: 5,
+            end_col_exclusive: 12,
+            syn_id: 7,
+            name: Some("Keyword".to_string()),
+        }];
+        model.line_projections = vec![projection("# Heading", "Heading", 5)];
+
+        let text = render_buffer_text(&model, 14, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans.len(), 7);
+        assert_eq!(line.spans[0].content.as_ref(), "   1 ");
+        assert_eq!(line.spans[0].style, Style::default());
+        assert_eq!(line.spans[1].content.as_ref(), "H");
+        assert_eq!(line.spans[1].style, Style::default().fg(Color::Cyan));
+        assert_eq!(line.spans[2].content.as_ref(), "ea");
+        assert_eq!(
+            line.spans[2].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+        assert_eq!(line.spans[3].content.as_ref(), "d");
+        assert_eq!(line.spans[3].style, Style::default().fg(Color::Cyan));
+        assert_eq!(line.spans[4].content.as_ref(), "in");
+        assert_eq!(
+            line.spans[4].style,
+            Style::default().add_modifier(Modifier::REVERSED)
+        );
+        assert_eq!(line.spans[5].content.as_ref(), "g");
+        assert_eq!(line.spans[5].style, Style::default().fg(Color::Cyan));
+        assert_eq!(line.spans[6].content.as_ref(), "  ");
     }
 
     #[test]
@@ -1398,6 +1495,40 @@ mod tests {
         assert!(
             !first_row.contains("seconds ago"),
             "短い行への再描画で古い suffix が残らないこと: {:?}",
+            first_row
+        );
+    }
+
+    #[test]
+    fn redraw_clears_stale_tail_when_projected_display_becomes_shorter() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 4)).expect("test terminal should initialize");
+        let mut long_model = screen_model_with_message(None);
+        long_model.lines = vec!["# Long projected tail".to_string()];
+        long_model.line_projections = vec![projection(
+            "# Long projected tail",
+            "Long projected tail",
+            0,
+        )];
+        long_model.visual_selection = None;
+        long_model.dirty = false;
+
+        let mut short_model = screen_model_with_message(None);
+        short_model.lines = vec!["# Short".to_string()];
+        short_model.line_projections = vec![projection("# Short", "Short", 0)];
+        short_model.visual_selection = None;
+        short_model.dirty = false;
+
+        draw_editor_frame(&mut terminal, &long_model, true).expect("first draw should succeed");
+        draw_editor_frame(&mut terminal, &short_model, false)
+            .expect("short projected redraw should succeed");
+
+        let rendered = terminal.backend().buffer().content();
+        let first_row: String = rendered.iter().take(40).map(|cell| cell.symbol()).collect();
+
+        assert!(
+            !first_row.contains("projected tail"),
+            "shorter projected redraw must clear stale suffix: {:?}",
             first_row
         );
     }

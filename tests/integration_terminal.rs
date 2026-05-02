@@ -31,6 +31,7 @@ use saya::editor_session::EditorSessionState;
 use saya::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
 use saya::input_loop::{TerminalEventSource, run_terminal_input_loop};
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::markdown_structure::MarkdownDocumentMap;
 use saya::optional_graphics::OptionalGraphicsAdapter;
 use saya::overlay_asset_store::OverlayAssetStore;
 use saya::screen_model::{
@@ -340,6 +341,48 @@ fn project_workspace_from_snapshot(
     })
 }
 
+fn project_markdown_workspace_from_snapshot(
+    snapshot: &vim_core_rs::CoreSnapshot,
+    session_state: &EditorSessionState,
+    markdown_source: &str,
+) -> Result<saya::screen_model::WorkspaceScreenModel, saya::screen_model::WorkspaceProjectionError>
+{
+    let mut viewport_store = WindowViewportStore::new();
+    viewport_store.sync_from_windows(&snapshot.windows);
+    let search_states = BTreeMap::new();
+    let syntax_lines = BTreeMap::new();
+    let markdown_map = Arc::new(MarkdownDocumentMap::parse(markdown_source));
+    let markdown_document_maps = snapshot
+        .active_window_id()
+        .and_then(|active_window_id| snapshot.window(active_window_id))
+        .map(|active_window| {
+            snapshot
+                .windows
+                .iter()
+                .filter(|window| window.buf_id == active_window.buf_id)
+                .map(|window| (window.id, Arc::clone(&markdown_map)))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    project_workspace(&WorkspaceProjectionInput {
+        snapshot,
+        session_state,
+        visual_selection: None,
+        search_states: &search_states,
+        syntax_lines: &syntax_lines,
+        markdown_document_maps: &markdown_document_maps,
+        command_preview: None,
+        core_message: None,
+        notification_prompt: None,
+        system_warning: None,
+        transient_info: None,
+        viewport_store: &viewport_store,
+        terminal_width: 80,
+        terminal_height: 24,
+    })
+}
+
 fn collect_search_states_for_snapshot(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     snapshot: &vim_core_rs::CoreSnapshot,
@@ -641,6 +684,121 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
     );
 }
 
+#[test]
+fn markdown_wysiwyg_cursor_blocks_survive_workspace_projection_and_headless_render() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("markdown-wysiwyg").with_extension("md");
+    let markdown_source = "# Title\n- [x] done\n| A | B |\n|---|---|\n| *x* | y |\n*tail*\n";
+    std::fs::write(&target_path, markdown_source).expect("Markdown test file should be written");
+
+    let mut outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("Markdown launch should succeed");
+    let session_state = EditorSessionState::new(outcome.target_path.clone());
+    let capabilities = plain_terminal_capabilities();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+
+    let initial_workspace = project_markdown_workspace_from_snapshot(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        markdown_source,
+    )
+    .expect("initial Markdown workspace projection should succeed");
+    let initial_render = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(initial_workspace),
+            &capabilities,
+            &[],
+            None,
+        )
+        .expect("initial Markdown workspace should render headlessly");
+    let initial_pane = initial_render
+        .rendered_workspace
+        .panes
+        .iter()
+        .find(|pane| pane.is_active)
+        .expect("initial active pane should exist");
+    assert_eq!(
+        initial_pane
+            .line_projections
+            .iter()
+            .map(|line| line.display_text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "# Title",
+            "• ✅ done",
+            "| A | B |",
+            "|---|---|",
+            "| x | y |",
+            "tail",
+            "",
+        ],
+        "the active heading block should stay raw while the rest of the document renders rich"
+    );
+
+    outcome
+        .core_bridge
+        .dispatch_key("jj")
+        .expect("normal-mode cursor movement should reach the table block");
+
+    let table_workspace = project_markdown_workspace_from_snapshot(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        markdown_source,
+    )
+    .expect("Markdown workspace projection after movement should succeed");
+    let table_render = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(table_workspace),
+            &capabilities,
+            &[],
+            None,
+        )
+        .expect("Markdown workspace after movement should render headlessly");
+    let table_pane = table_render
+        .rendered_workspace
+        .panes
+        .iter()
+        .find(|pane| pane.is_active)
+        .expect("active pane after movement should exist");
+
+    assert_eq!(
+        table_pane.cursor_row, 2,
+        "core cursor movement should drive which Markdown block expands raw"
+    );
+    assert_eq!(
+        table_pane
+            .line_projections
+            .iter()
+            .map(|line| line.display_text.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Title",
+            "• ✅ done",
+            "| A | B |",
+            "|---|---|",
+            "| *x* | y |",
+            "tail",
+            "",
+        ],
+        "moving into a table block should expand the whole block raw through workspace projection and render coordination"
+    );
+    assert_eq!(
+        outcome.core_bridge.snapshot().text,
+        markdown_source,
+        "WYSIWYG projection must not mutate the raw buffer owned by vim-core-rs"
+    );
+
+    std::fs::remove_file(&target_path).expect("Markdown test file should be removed");
+}
+
 fn headless_workspace(
     window_id: i32,
     buffer_id: i32,
@@ -721,6 +879,19 @@ fn headless_split_workspace() -> WorkspaceScreenModel {
         height: 4,
     };
     workspace
+}
+
+fn plain_terminal_capabilities() -> saya::terminal_capability::TerminalCapabilityProfile {
+    TerminalCapabilityProbe::new(
+        TerminalCapabilityObservation {
+            session_kind: TerminalSessionKind::Local,
+            basic_terminal_control: true,
+            styled_text: false,
+            truecolor: false,
+        },
+        InlineGraphicsProbeResult::Disabled,
+    )
+    .detect()
 }
 
 fn dispatch_ctrl_w(outcome: &mut saya::bootstrap::BootstrapOutcome, command: char) {

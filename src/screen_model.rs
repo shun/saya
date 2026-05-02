@@ -574,7 +574,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         input.session_state.number_width(),
     );
     let visual_selection = resolve_visual_selection(input);
-    let search_overlays = project_search_overlays(input);
+    let search_overlays = project_search_overlays(input, &line_projections);
     let syntax_chunks = project_syntax_chunks(input);
     let message_state = resolve_message_state(input);
     let message_line = message_state.as_ref().map(|state| state.text.clone());
@@ -1267,7 +1267,10 @@ fn resolve_message_text(message: Option<&str>) -> Option<String> {
     }
 }
 
-fn project_search_overlays(input: &ProjectionInput<'_>) -> Vec<ScreenSearchOverlay> {
+fn project_search_overlays(
+    input: &ProjectionInput<'_>,
+    line_projections: &[ScreenLineProjection],
+) -> Vec<ScreenSearchOverlay> {
     let Some(search_state) = input.search_state else {
         log::debug!("[screen_model] no search state provided");
         return Vec::new();
@@ -1321,6 +1324,7 @@ fn project_search_overlays(input: &ProjectionInput<'_>) -> Vec<ScreenSearchOverl
     for search_match in &search_state.matches {
         overlays.extend(project_search_match_overlays(
             input,
+            line_projections,
             search_match,
             start_row,
             end_row,
@@ -1355,6 +1359,7 @@ fn project_search_overlays(input: &ProjectionInput<'_>) -> Vec<ScreenSearchOverl
 
 fn project_search_match_overlays(
     input: &ProjectionInput<'_>,
+    line_projections: &[ScreenLineProjection],
     search_match: &crate::search_query::SearchMatch,
     visible_start_row: usize,
     visible_end_row: usize,
@@ -1368,7 +1373,7 @@ fn project_search_match_overlays(
     let mut overlays = Vec::new();
     for row in match_start_row..=match_end_row {
         let Some((start_col, end_col_exclusive)) =
-            resolve_search_overlay_display_bounds(input, search_match, row)
+            resolve_search_overlay_display_bounds(input, line_projections, search_match, row)
         else {
             continue;
         };
@@ -1386,41 +1391,68 @@ fn project_search_match_overlays(
 
 fn resolve_search_overlay_display_bounds(
     input: &ProjectionInput<'_>,
+    line_projections: &[ScreenLineProjection],
     search_match: &crate::search_query::SearchMatch,
     row: usize,
 ) -> Option<(u16, u16)> {
+    let absolute_row = row.saturating_sub(1);
+    let projection = input.markdown_document_map.and_then(|_| {
+        line_projections
+            .iter()
+            .find(|projection| projection.absolute_row == absolute_row)
+    });
     let start_col = if row == search_match.start_row {
-        resolve_display_col_for_position(
-            &input.snapshot.text,
-            search_match.start_row - 1,
-            search_match.start_col,
-            input.session_state.tab_size(),
-            input.session_state.line_numbers() || input.session_state.relative_number(),
-            input.session_state.number_width(),
+        projection.map_or_else(
+            || {
+                resolve_display_col_for_position(
+                    &input.snapshot.text,
+                    search_match.start_row - 1,
+                    search_match.start_col,
+                    input.session_state.tab_size(),
+                    input.session_state.line_numbers() || input.session_state.relative_number(),
+                    input.session_state.number_width(),
+                )
+            },
+            |projection| projection.logical_to_display_col(search_match.start_col),
         )
     } else {
-        line_number_offset(
-            &input.snapshot.text,
-            input.session_state.line_numbers() || input.session_state.relative_number(),
-            input.session_state.number_width(),
+        projection.map_or_else(
+            || {
+                line_number_offset(
+                    &input.snapshot.text,
+                    input.session_state.line_numbers() || input.session_state.relative_number(),
+                    input.session_state.number_width(),
+                )
+            },
+            |projection| projection.line_start_col,
         )
     };
     let end_col_exclusive = if row == search_match.end_row {
-        resolve_display_col_for_position(
-            &input.snapshot.text,
-            search_match.end_row - 1,
-            search_match.end_col,
-            input.session_state.tab_size(),
-            input.session_state.line_numbers() || input.session_state.relative_number(),
-            input.session_state.number_width(),
+        projection.map_or_else(
+            || {
+                resolve_display_col_for_position(
+                    &input.snapshot.text,
+                    search_match.end_row - 1,
+                    search_match.end_col,
+                    input.session_state.tab_size(),
+                    input.session_state.line_numbers() || input.session_state.relative_number(),
+                    input.session_state.number_width(),
+                )
+            },
+            |projection| projection.logical_to_display_col(search_match.end_col),
         )
     } else {
-        visible_line_end_col_exclusive(
-            &input.snapshot.text,
-            row - 1,
-            input.session_state.tab_size(),
-            input.session_state.line_numbers() || input.session_state.relative_number(),
-            input.session_state.number_width(),
+        projection.map_or_else(
+            || {
+                visible_line_end_col_exclusive(
+                    &input.snapshot.text,
+                    row - 1,
+                    input.session_state.tab_size(),
+                    input.session_state.line_numbers() || input.session_state.relative_number(),
+                    input.session_state.number_width(),
+                )
+            },
+            |projection| projection.logical_to_display_col(projection.raw_text.len()),
         )
     };
 
@@ -2643,6 +2675,43 @@ mod tests {
     }
 
     #[test]
+    fn active_markdown_projection_tracks_cursor_movement_between_raw_rows() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n*body*\n# After\n";
+        let mut bridge = CoreBridge::new(source).expect("core bridge");
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let initial_snapshot = bridge.snapshot();
+        assert_eq!(initial_snapshot.cursor_row, 0);
+        let initial_model = project(
+            &ProjectionInput::new(&initial_snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+
+        assert_eq!(initial_model.line_projections[0].display_text, "# Title");
+        assert_eq!(initial_model.line_projections[1].display_text, "body");
+        assert_eq!(initial_model.line_projections[2].display_text, "After");
+
+        bridge
+            .dispatch_key("j")
+            .expect("move cursor to inline Markdown row");
+        let moved_snapshot = bridge.snapshot();
+        assert_eq!(moved_snapshot.cursor_row, 1);
+        let moved_model = project(
+            &ProjectionInput::new(&moved_snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+
+        assert_eq!(moved_model.line_projections[0].display_text, "Title");
+        assert_eq!(moved_model.line_projections[1].display_text, "*body*");
+        assert_eq!(moved_model.line_projections[2].display_text, "After");
+    }
+
+    #[test]
     fn inactive_markdown_projection_keeps_all_rows_rich_even_at_cursor_block() {
         let _lock = session_test_lock()
             .lock()
@@ -2662,6 +2731,28 @@ mod tests {
 
         assert_eq!(model.line_projections[0].display_text, "Title");
         assert_eq!(model.line_projections[1].display_text, "body");
+    }
+
+    #[test]
+    fn inactive_markdown_projection_keeps_list_item_rich_even_at_cursor_row() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "- [x] done\n# Next\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 0;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[0].display_text, "• ✅ done");
+        assert_eq!(model.line_projections[1].display_text, "Next");
     }
 
     #[test]
@@ -3254,6 +3345,65 @@ mod tests {
                 kind: SearchMatchKind::Current,
             }],
             "tab と全角文字と行番号オフセットを display-space に正しく投影すること"
+        );
+    }
+
+    #[test]
+    fn projects_search_overlay_against_markdown_rich_projection_with_gutter_offset() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let active_window_id = snapshot
+            .active_window_id()
+            .expect("active window should exist");
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let search_state = SearchVisibleState {
+            capability: SearchCapabilityContract::baseline_ready_contract(),
+            window_id: active_window_id,
+            visible_rows: SearchVisibleRows {
+                start_row: 1,
+                end_row: 1,
+            },
+            mode: SearchQueryMode::Hlsearch,
+            pattern: Some("Title".to_string()),
+            input_pattern: None,
+            hlsearch_enabled: true,
+            hlsearch_suspended: false,
+            incsearch_active: false,
+            matches: vec![SearchMatch {
+                kind: SearchMatchKind::Current,
+                start_row: 1,
+                start_col: 2,
+                end_row: 1,
+                end_col: 7,
+            }],
+        };
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map))
+            .with_search_state(Some(&search_state));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(model.lines[0], "   1 # Title");
+        assert_eq!(model.line_projections[0].line_start_col, 5);
+        assert_eq!(model.line_projections[0].display_text, "Title");
+        assert_eq!(
+            model.search_overlays,
+            vec![ScreenSearchOverlay {
+                row: 0,
+                start_col: 5,
+                end_col_exclusive: 10,
+                kind: SearchMatchKind::Current,
+            }],
+            "search overlays should use Markdown projection display-space, not raw marker columns"
         );
     }
 
