@@ -1,9 +1,9 @@
 use saya::core_outcome::{
-    ApplicationOutcomeState, NormalizedCoreOutcome, NormalizedDiagnosticOutcome,
-    NormalizedHostDirective, NormalizedNotification, NormalizedOutcomeBatch, NormalizedPrompt,
-    NormalizedStructuralOutcome, OutcomeOrigin, OutcomeTrace, PromptInputTransition,
-    PromptResponseDisposition, PromptSessionStatus, core_event_raw_kind, core_host_action_raw_kind,
-    fold_normalized_outcomes, normalize_core_event, normalize_host_action,
+    ApplicationOutcomeState, NormalizedCoreOutcome, NormalizedHostDirective,
+    NormalizedNotification, NormalizedOutcomeBatch, NormalizedPrompt, NormalizedStructuralOutcome,
+    OutcomeOrigin, OutcomeTrace, PromptInputTransition, PromptResponseDisposition,
+    PromptSessionStatus, core_event_raw_kind, core_host_action_raw_kind, fold_normalized_outcomes,
+    normalize_core_event, normalize_host_action,
 };
 use vim_core_rs::{
     CoreEvent, CoreHostAction, CoreInputRequestKind, CoreJobStartRequest, CoreMessageCategory,
@@ -133,8 +133,15 @@ fn normalized_catalog_represents_scoped_outcomes_with_trace() {
                 "CoreEvent::LayoutChanged",
             ),
         }),
-        NormalizedCoreOutcome::Diagnostic(NormalizedDiagnosticOutcome::JobOutOfScope {
-            raw_kind: "CoreHostAction::JobStart",
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStart {
+            request: CoreJobStartRequest {
+                job_id: 14,
+                argv: vec!["true".to_string()],
+                cwd: None,
+                vfd_in: 41,
+                vfd_out: 42,
+                vfd_err: 43,
+            },
             trace: trace(
                 14,
                 OutcomeOrigin::TransactionHostAction,
@@ -154,11 +161,11 @@ fn normalized_catalog_represents_scoped_outcomes_with_trace() {
 
     assert_eq!(batch.outcomes().len(), 15);
     assert!(
-        batch
-            .outcomes()
-            .iter()
-            .any(|outcome| matches!(outcome, NormalizedCoreOutcome::Diagnostic(_))),
-        "job outcomes must stay observable as diagnostics"
+        batch.outcomes().iter().any(|outcome| matches!(
+            outcome,
+            NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStart { .. })
+        )),
+        "job outcomes must stay observable as host directives"
     );
     assert!(
         batch
@@ -256,10 +263,18 @@ fn mapping_functions_cover_scoped_host_actions_without_silent_drop() {
         normalized[5],
         NormalizedCoreOutcome::Notification(NormalizedNotification::Bell { .. })
     ));
-    assert!(normalized[6..].iter().all(|outcome| matches!(
-        outcome,
-        NormalizedCoreOutcome::Diagnostic(NormalizedDiagnosticOutcome::JobOutOfScope { .. })
-    )));
+    assert!(matches!(
+        normalized[6],
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStart { .. })
+    ));
+    assert!(matches!(
+        normalized[7],
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobWrite { .. })
+    ));
+    assert!(matches!(
+        normalized[8],
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStop { .. })
+    ));
 }
 
 #[test]

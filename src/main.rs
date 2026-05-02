@@ -3,6 +3,7 @@ use saya::app_startup::{
 };
 use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
+use saya::core_host_actions::HostActionRuntime;
 use saya::core_notification_prompt::{
     NotificationPromptProjectionState, ProjectionFrame, PromptInputAction, handle_prompt_key,
     record_prompt_response_error,
@@ -123,6 +124,7 @@ async fn main() {
     let mut system_warning: Option<String> = bootstrap_warning_message(&outcome.warnings);
     let mut transient_msg: Option<String> = runtime_init_message;
     let mut outcome_accumulator = MainOutcomeAccumulator::default();
+    let mut host_action_runtime = HostActionRuntime::default();
     let mut viewport_store = WindowViewportStore::new();
     let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut command_line_prompt: Option<char> = None;
@@ -245,6 +247,7 @@ async fn main() {
                                     &mut session_state,
                                     &mut transient_msg,
                                     &mut system_warning,
+                                    &mut host_action_runtime,
                                     runtime_session.as_mut(),
                                     &mut need_redraw,
                                     &mut runtime_presentation_intents,
@@ -372,6 +375,7 @@ async fn main() {
                                 &mut session_state,
                                 &mut transient_msg,
                                 &mut system_warning,
+                                &mut host_action_runtime,
                                 runtime_session.as_mut(),
                                 &mut need_redraw,
                                 &mut runtime_presentation_intents,
@@ -409,6 +413,7 @@ async fn main() {
                                         &mut session_state,
                                         &mut transient_msg,
                                         &mut system_warning,
+                                        &mut host_action_runtime,
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
@@ -494,6 +499,7 @@ async fn main() {
                                 &mut session_state,
                                 &mut transient_msg,
                                 &mut system_warning,
+                                &mut host_action_runtime,
                                 runtime_session.as_mut(),
                                 &mut need_redraw,
                                 &mut runtime_presentation_intents,
@@ -533,6 +539,7 @@ async fn main() {
                             &mut session_state,
                             &mut transient_msg,
                             &mut system_warning,
+                            &mut host_action_runtime,
                             runtime_session.as_mut(),
                             &mut need_redraw,
                             &mut runtime_presentation_intents,
@@ -666,6 +673,7 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     let mut system_warning: Option<String> = None;
     let mut need_redraw = false;
     let mut outcome_accumulator = MainOutcomeAccumulator::default();
+    let mut host_action_runtime = HostActionRuntime::default();
 
     eprintln!(
         "[main][smoke] projected startup ui: first_line={:?}, message_line={:?}, file_name={}, mode={}, dirty={}, line_numbers={}, number_width={}",
@@ -725,6 +733,7 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
+        &mut host_action_runtime,
     )
     .ok_or_else(|| {
         format!(
@@ -778,6 +787,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
     let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut outcome_accumulator = MainOutcomeAccumulator::default();
+    let mut host_action_runtime = HostActionRuntime::default();
     sync_core_screen_size(&mut outcome);
 
     let (terminal_width, terminal_height) = current_terminal_size();
@@ -959,6 +969,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
+        &mut host_action_runtime,
         None,
         &mut save_redraw,
         &mut runtime_presentation_intents,
@@ -999,6 +1010,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
+        &mut host_action_runtime,
         None,
         &mut quit_redraw,
         &mut runtime_presentation_intents,
@@ -1029,6 +1041,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         &mut session_state,
         &mut transient_msg,
         &mut system_warning,
+        &mut host_action_runtime,
         None,
         &mut force_quit_redraw,
         &mut runtime_presentation_intents,
@@ -1063,44 +1076,95 @@ async fn process_pending_host_actions_with_runtime(
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     system_warning: &mut Option<String>,
+    host_action_runtime: &mut HostActionRuntime,
     mut runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
 ) -> Option<ShutdownReason> {
-    let current_revision = outcome.core_bridge.snapshot().revision;
     let mut shutdown_reason = None;
-    let directives = std::mem::take(&mut outcome_accumulator.host_directives);
-    for directive in prioritize_save_family_host_directives(directives, current_revision) {
-        match directive {
-            NormalizedHostDirective::Write { path, .. } => {
-                if let Some(reason) = handle_write_host_action_with_runtime(
-                    outcome,
-                    session_state,
-                    Some(path.as_str()),
-                    transient_msg,
-                    runtime_session.as_deref_mut(),
-                    need_redraw,
-                    runtime_presentation_intents,
-                )
-                .await
-                {
-                    merge_shutdown_reason(&mut shutdown_reason, Some(reason));
+    loop {
+        if let Err(error) = host_action_runtime.drain_job_events(&mut outcome.core_bridge) {
+            log::debug!("[main] failed to drain job events: {:?}", error);
+        }
+        consume_core_outcomes_from_core(&mut outcome.core_bridge, outcome_accumulator, need_redraw);
+
+        let current_revision = outcome.core_bridge.snapshot().revision;
+        let directives = std::mem::take(&mut outcome_accumulator.host_directives);
+        if directives.is_empty() {
+            break;
+        }
+
+        for directive in prioritize_save_family_host_directives(directives, current_revision) {
+            match directive {
+                NormalizedHostDirective::Write { path, .. } => {
+                    if let Some(reason) = handle_write_host_action_with_runtime(
+                        outcome,
+                        session_state,
+                        Some(path.as_str()),
+                        transient_msg,
+                        runtime_session.as_deref_mut(),
+                        need_redraw,
+                        runtime_presentation_intents,
+                    )
+                    .await
+                    {
+                        merge_shutdown_reason(&mut shutdown_reason, Some(reason));
+                    }
                 }
-            }
-            NormalizedHostDirective::Quit { force, .. } => {
-                let decision = session_state.evaluate_quit(force);
-                if let Some(reason) =
-                    shutdown_reason_from_quit_decision(decision, force, system_warning)
-                {
-                    merge_shutdown_reason(&mut shutdown_reason, Some(reason));
+                NormalizedHostDirective::Quit { force, .. } => {
+                    let decision = session_state.evaluate_quit(force);
+                    if let Some(reason) =
+                        shutdown_reason_from_quit_decision(decision, force, system_warning)
+                    {
+                        merge_shutdown_reason(&mut shutdown_reason, Some(reason));
+                    }
                 }
-            }
-            NormalizedHostDirective::VfsRequest { request, trace } => {
-                log::debug!(
-                    "[main] retaining unsupported normalized VFS directive for future host I/O: sequence={}, request={:?}",
-                    trace.sequence,
-                    request
-                );
+                NormalizedHostDirective::VfsRequest { request, trace } => {
+                    log::debug!(
+                        "[main] processing normalized VFS directive: sequence={}, request={:?}",
+                        trace.sequence,
+                        request
+                    );
+                    if let Err(error) =
+                        host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
+                    {
+                        log::debug!("[main] VFS directive failed: {:?}", error);
+                    }
+                }
+                NormalizedHostDirective::JobStart { request, trace } => {
+                    log::debug!(
+                        "[main] processing normalized job start directive: sequence={}, job_id={}, argv={:?}",
+                        trace.sequence,
+                        request.job_id,
+                        request.argv
+                    );
+                    if let Err(error) =
+                        host_action_runtime.start_job(&mut outcome.core_bridge, request)
+                    {
+                        log::debug!("[main] job start directive failed: {:?}", error);
+                    }
+                }
+                NormalizedHostDirective::JobWrite { vfd, data, trace } => {
+                    log::debug!(
+                        "[main] processing normalized job write directive: sequence={}, vfd={}, bytes={}",
+                        trace.sequence,
+                        vfd,
+                        data.len()
+                    );
+                    host_action_runtime.write_job(vfd, data);
+                }
+                NormalizedHostDirective::JobStop { job_id, trace } => {
+                    log::debug!(
+                        "[main] processing normalized job stop directive: sequence={}, job_id={}",
+                        trace.sequence,
+                        job_id
+                    );
+                    if let Err(error) =
+                        host_action_runtime.stop_job(&mut outcome.core_bridge, job_id)
+                    {
+                        log::debug!("[main] job stop directive failed: {:?}", error);
+                    }
+                }
             }
         }
     }
@@ -1171,34 +1235,99 @@ fn process_pending_host_actions_without_runtime(
     session_state: &mut saya::editor_session::EditorSessionState,
     transient_msg: &mut Option<String>,
     system_warning: &mut Option<String>,
+    host_action_runtime: &mut HostActionRuntime,
 ) -> Option<ShutdownReason> {
-    let current_revision = outcome.core_bridge.snapshot().revision;
-    let directives = std::mem::take(&mut outcome_accumulator.host_directives);
-    for directive in prioritize_save_family_host_directives(directives, current_revision) {
-        match directive {
-            NormalizedHostDirective::Write { path, .. } => {
-                let snapshot = outcome.core_bridge.snapshot();
-                let save_outcome = save_snapshot_result_with_path_override(
-                    &snapshot.text,
-                    session_state,
-                    Some(path.as_str()),
-                );
-                *transient_msg = save_outcome.transient_message;
-            }
-            NormalizedHostDirective::Quit { force, .. } => {
-                let decision = session_state.evaluate_quit(force);
-                if let Some(reason) =
-                    shutdown_reason_from_quit_decision(decision, force, system_warning)
-                {
-                    return Some(reason);
+    loop {
+        if let Err(error) = host_action_runtime.drain_job_events(&mut outcome.core_bridge) {
+            log::debug!(
+                "[main] failed to drain job events without runtime: {:?}",
+                error
+            );
+        }
+        let mut need_redraw = false;
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            outcome_accumulator,
+            &mut need_redraw,
+        );
+
+        let current_revision = outcome.core_bridge.snapshot().revision;
+        let directives = std::mem::take(&mut outcome_accumulator.host_directives);
+        if directives.is_empty() {
+            break;
+        }
+
+        for directive in prioritize_save_family_host_directives(directives, current_revision) {
+            match directive {
+                NormalizedHostDirective::Write { path, .. } => {
+                    let snapshot = outcome.core_bridge.snapshot();
+                    let save_outcome = save_snapshot_result_with_path_override(
+                        &snapshot.text,
+                        session_state,
+                        Some(path.as_str()),
+                    );
+                    *transient_msg = save_outcome.transient_message;
                 }
-            }
-            NormalizedHostDirective::VfsRequest { request, trace } => {
-                log::debug!(
-                    "[main] retaining unsupported normalized VFS directive without runtime: sequence={}, request={:?}",
-                    trace.sequence,
-                    request
-                );
+                NormalizedHostDirective::Quit { force, .. } => {
+                    let decision = session_state.evaluate_quit(force);
+                    if let Some(reason) =
+                        shutdown_reason_from_quit_decision(decision, force, system_warning)
+                    {
+                        return Some(reason);
+                    }
+                }
+                NormalizedHostDirective::VfsRequest { request, trace } => {
+                    log::debug!(
+                        "[main] processing normalized VFS directive without runtime: sequence={}, request={:?}",
+                        trace.sequence,
+                        request
+                    );
+                    if let Err(error) =
+                        host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
+                    {
+                        log::debug!("[main] VFS directive failed without runtime: {:?}", error);
+                    }
+                }
+                NormalizedHostDirective::JobStart { request, trace } => {
+                    log::debug!(
+                        "[main] processing normalized job start directive without runtime: sequence={}, job_id={}, argv={:?}",
+                        trace.sequence,
+                        request.job_id,
+                        request.argv
+                    );
+                    if let Err(error) =
+                        host_action_runtime.start_job(&mut outcome.core_bridge, request)
+                    {
+                        log::debug!(
+                            "[main] job start directive failed without runtime: {:?}",
+                            error
+                        );
+                    }
+                }
+                NormalizedHostDirective::JobWrite { vfd, data, trace } => {
+                    log::debug!(
+                        "[main] processing normalized job write directive without runtime: sequence={}, vfd={}, bytes={}",
+                        trace.sequence,
+                        vfd,
+                        data.len()
+                    );
+                    host_action_runtime.write_job(vfd, data);
+                }
+                NormalizedHostDirective::JobStop { job_id, trace } => {
+                    log::debug!(
+                        "[main] processing normalized job stop directive without runtime: sequence={}, job_id={}",
+                        trace.sequence,
+                        job_id
+                    );
+                    if let Err(error) =
+                        host_action_runtime.stop_job(&mut outcome.core_bridge, job_id)
+                    {
+                        log::debug!(
+                            "[main] job stop directive failed without runtime: {:?}",
+                            error
+                        );
+                    }
+                }
             }
         }
     }
@@ -1393,6 +1522,7 @@ fn execute_runtime_host_command_through_core(
         })?;
 
     let mut effect = RuntimeCommandEffect::default();
+    let mut host_action_runtime = HostActionRuntime::default();
     let folded = fold_normalized_outcomes(
         outcome.core_bridge.take_normalized_outcomes(),
         ApplicationOutcomeState::default(),
@@ -1443,10 +1573,49 @@ fn execute_runtime_host_command_through_core(
             }
             NormalizedHostDirective::VfsRequest { request, trace } => {
                 log::debug!(
-                    "[main] runtime host command retained unsupported normalized VFS directive: sequence={}, request={:?}",
+                    "[main] runtime host command processing normalized VFS directive: sequence={}, request={:?}",
                     trace.sequence,
                     request
                 );
+                if let Err(error) =
+                    host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
+                {
+                    log::debug!(
+                        "[main] runtime host command VFS directive failed: {:?}",
+                        error
+                    );
+                }
+            }
+            NormalizedHostDirective::JobStart { request, trace } => {
+                log::debug!(
+                    "[main] runtime host command processing job start directive: sequence={}, job_id={}, argv={:?}",
+                    trace.sequence,
+                    request.job_id,
+                    request.argv
+                );
+                if let Err(error) = host_action_runtime.start_job(&mut outcome.core_bridge, request)
+                {
+                    log::debug!("[main] runtime host command job start failed: {:?}", error);
+                }
+            }
+            NormalizedHostDirective::JobWrite { vfd, data, trace } => {
+                log::debug!(
+                    "[main] runtime host command processing job write directive: sequence={}, vfd={}, bytes={}",
+                    trace.sequence,
+                    vfd,
+                    data.len()
+                );
+                host_action_runtime.write_job(vfd, data);
+            }
+            NormalizedHostDirective::JobStop { job_id, trace } => {
+                log::debug!(
+                    "[main] runtime host command processing job stop directive: sequence={}, job_id={}",
+                    trace.sequence,
+                    job_id
+                );
+                if let Err(error) = host_action_runtime.stop_job(&mut outcome.core_bridge, job_id) {
+                    log::debug!("[main] runtime host command job stop failed: {:?}", error);
+                }
             }
         }
     }
@@ -2445,6 +2614,7 @@ mod tests {
         let mut transient_msg = None;
         let mut system_warning = None;
         let mut need_redraw = false;
+        let mut host_action_runtime = HostActionRuntime::default();
         consume_core_outcomes_from_core(
             &mut outcome.core_bridge,
             &mut outcome_accumulator,
@@ -2464,6 +2634,7 @@ mod tests {
             &mut session_state,
             &mut transient_msg,
             &mut system_warning,
+            &mut host_action_runtime,
         );
         let expected_error = session_state
             .last_save_error()
@@ -2921,6 +3092,59 @@ mod tests {
                 .last_transition()
                 .map(|transition| transition.kind),
             Some(saya::core_notification_prompt::PromptTransitionKind::Submitted)
+        );
+    }
+
+    #[test]
+    fn prompt_response_end_to_end_preserves_typed_input_value() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut accumulator = MainOutcomeAccumulator::default();
+        let mut need_redraw = false;
+
+        bridge
+            .apply_ex_command(":input Name")
+            .expect("input request should succeed");
+        consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
+
+        assert!(matches!(
+            saya::core_notification_prompt::handle_prompt_key(
+                &mut accumulator.projection,
+                &KeyInput::Char('a'),
+            ),
+            saya::core_notification_prompt::PromptInputAction::Consumed
+        ));
+        assert!(matches!(
+            saya::core_notification_prompt::handle_prompt_key(
+                &mut accumulator.projection,
+                &KeyInput::Char('b'),
+            ),
+            saya::core_notification_prompt::PromptInputAction::Consumed
+        ));
+        let action = saya::core_notification_prompt::handle_prompt_key(
+            &mut accumulator.projection,
+            &KeyInput::Enter,
+        );
+        let command = match action {
+            saya::core_notification_prompt::PromptInputAction::Submit(command) => command,
+            other => panic!("expected submit action, got {other:?}"),
+        };
+
+        dispatch_prompt_response_command(&mut bridge, &mut accumulator, command, &mut need_redraw);
+
+        assert!(accumulator.projection.prompt().active_input().is_none());
+        assert_eq!(
+            accumulator
+                .projection
+                .prompt()
+                .last_transition()
+                .map(|transition| (transition.kind, transition.input_len)),
+            Some((
+                saya::core_notification_prompt::PromptTransitionKind::Submitted,
+                2
+            ))
         );
     }
 

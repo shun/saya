@@ -273,6 +273,18 @@ impl TuiRenderCoordinator {
         let mut overlay_results = Vec::new();
         let mut active_assets = Vec::<OverlayAssetRef>::new();
 
+        if let Some(bell) = rendered_workspace.bell
+            && let Some(writer) = overlay_writer.as_deref_mut()
+        {
+            writer
+                .write_bell(bell.count)
+                .map_err(|message| RenderFrameError::TerminalIo { message })?;
+            log::debug!(
+                "[tui_render_coordinator] emitted terminal bell signal: count={}",
+                bell.count
+            );
+        }
+
         for overlay in &presentation.overlays {
             let asset_ref = match self.asset_store.materialize(&overlay.content_key) {
                 Ok(asset_ref) => asset_ref,

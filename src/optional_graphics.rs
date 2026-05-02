@@ -7,6 +7,13 @@ use crate::terminal_lifecycle::TerminalBackend;
 
 pub trait OverlayTerminalWriter {
     fn write_overlay_bytes(&mut self, bytes: &[u8]) -> Result<(), String>;
+
+    fn write_bell(&mut self, count: usize) -> Result<(), String> {
+        if count == 0 {
+            return Ok(());
+        }
+        self.write_overlay_bytes(&vec![b'\x07'; count])
+    }
 }
 
 #[derive(Debug, Default)]
@@ -24,6 +31,10 @@ impl OverlayTerminalWriter for RecordingOverlayWriter {
 impl<B: TerminalBackend> OverlayTerminalWriter for TerminalIoBroker<'_, B> {
     fn write_overlay_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         TerminalIoBroker::write_overlay_bytes(self, bytes).map_err(|error| error.to_string())
+    }
+
+    fn write_bell(&mut self, count: usize) -> Result<(), String> {
+        TerminalIoBroker::write_bell(self, count).map_err(|error| error.to_string())
     }
 }
 

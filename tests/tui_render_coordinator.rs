@@ -1,10 +1,10 @@
 use std::fs;
 
 use saya::core_notification_prompt::{
-    MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
+    BellIndication, MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
 };
 use saya::core_outcome::{RedrawEffect, StructuralEffectSet};
-use saya::optional_graphics::OptionalGraphicsAdapter;
+use saya::optional_graphics::{OptionalGraphicsAdapter, RecordingOverlayWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
 use saya::screen_model::{PaneRect, ScreenModel, WorkspaceProjectionError, WorkspaceScreenModel};
 use saya::structural_refresh::{
@@ -444,5 +444,32 @@ fn renderer_option_contract_is_no_longer_source_only_future_guard() {
     assert!(
         renderer_source.contains("clear_before_draw"),
         "task 4 requires renderer to honor core-derived clear-before-draw"
+    );
+}
+
+#[test]
+fn render_workspace_emits_terminal_bell_signal_and_keeps_visible_marker() {
+    let capabilities = capabilities_without_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut workspace = workspace(1, 1, "alpha", "saved");
+    workspace.bell = Some(BellIndication { count: 2 });
+    let mut writer = RecordingOverlayWriter::default();
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("workspace render should succeed");
+
+    assert_eq!(writer.writes, vec![vec![b'\x07', b'\x07']]);
+    assert_eq!(
+        outcome.rendered_workspace.bell.map(|bell| bell.count),
+        Some(2)
     );
 }

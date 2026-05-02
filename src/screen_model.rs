@@ -422,8 +422,11 @@ pub fn project_workspace(
         .unwrap_or(u16::MAX),
     });
     let workspace_message_line = resolve_workspace_message_line_state(input);
-    let reserved_rows = u16::from(workspace_message_line.visible_text().is_some())
-        + u16::from(command_line.is_some());
+    let reserved_rows = if command_line.is_some() {
+        0
+    } else {
+        u16::from(workspace_message_line.visible_text().is_some())
+    };
     let workspace_height = input.terminal_height.saturating_sub(reserved_rows).max(1);
     let pane_window_ids = input
         .snapshot
@@ -493,10 +496,21 @@ pub fn project_workspace(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let model_message_line = if command_line.is_some()
+        && workspace_message_line.visible_source() == Some(MessageLineSource::CommandPreview)
+    {
+        WorkspaceMessageLineState {
+            visible: None,
+            suppressed: workspace_message_line.suppressed.clone(),
+        }
+    } else {
+        workspace_message_line
+    };
+
     Ok(WorkspaceScreenModel {
         panes,
         active_window_id,
-        message_line: workspace_message_line,
+        message_line: model_message_line,
         prompt_line: input
             .notification_prompt
             .and_then(|prompt| prompt.input_prompt.clone()),
@@ -2374,7 +2388,7 @@ mod tests {
             model.command_line.as_ref().map(|line| line.text.as_str()),
             Some(":%s/foo/bar")
         );
-        assert_eq!(model.visible_message_text(), Some(":%s/foo/bar"));
+        assert_eq!(model.visible_message_text(), None);
     }
 
     #[test]

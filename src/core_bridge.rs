@@ -4,7 +4,8 @@ use std::path::Path;
 use vim_core_rs::{
     CoreCommandOutcome, CoreEvent, CoreHostAction, CoreInputResponse, CoreInputResponseError,
     CoreMatchType, CoreMessageCategory, CoreMessageEvent, CoreMessageSeverity,
-    CoreSearchHighlightMode, CoreSearchQueryError, CoreSessionError, CoreSnapshot, VimCoreSession,
+    CoreSearchHighlightMode, CoreSearchQueryError, CoreSessionError, CoreSnapshot, CoreVfsResponse,
+    JobStatus, VimCoreSession,
 };
 
 use crate::core_outcome::{
@@ -235,6 +236,55 @@ impl CoreBridge {
             outcomes.len()
         );
         Ok(NormalizedOutcomeBatch::new(outcomes))
+    }
+
+    pub fn submit_vfs_response(
+        &mut self,
+        response: CoreVfsResponse,
+    ) -> Result<CoreCommandOutcome, CoreSessionError> {
+        log::debug!("[core_bridge] submitting VFS response: {:?}", response);
+        let outcome = self
+            .session
+            .submit_vfs_response(response)
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.drain_pending_host_actions_from_session();
+        self.drain_pending_events_from_session();
+        log::debug!("[core_bridge] VFS response result: {:?}", outcome);
+        Ok(outcome)
+    }
+
+    pub fn inject_vfd_data(&mut self, vfd: i32, data: &[u8]) -> Result<(), CoreSessionError> {
+        log::debug!(
+            "[core_bridge] injecting VFD data into core: vfd={}, bytes={}",
+            vfd,
+            data.len()
+        );
+        self.session
+            .inject_vfd_data(vfd, data)
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.drain_pending_host_actions_from_session();
+        self.drain_pending_events_from_session();
+        Ok(())
+    }
+
+    pub fn notify_job_status(
+        &mut self,
+        job_id: i32,
+        status: JobStatus,
+        exit_code: i32,
+    ) -> Result<(), CoreSessionError> {
+        log::debug!(
+            "[core_bridge] notifying job status: job_id={}, status={:?}, exit_code={}",
+            job_id,
+            status,
+            exit_code
+        );
+        self.session
+            .notify_job_status(job_id, status, exit_code)
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.drain_pending_host_actions_from_session();
+        self.drain_pending_events_from_session();
+        Ok(())
     }
 
     /// キー入力を vim-core-rs セッションに適用する。
@@ -854,6 +904,11 @@ fn map_input_response_error(error: CoreInputResponseError) -> PromptResponseErro
         }
         CoreInputResponseError::Command(error) => PromptResponseError::CoreRejected(
             PromptResponseRejection::CommandRejected(format!("{error:?}")),
+        ),
+        CoreInputResponseError::EvalFailed => PromptResponseError::CoreRejected(
+            PromptResponseRejection::CommandRejected(
+                "core eval failed after input response".to_string(),
+            ),
         ),
     }
 }

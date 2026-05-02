@@ -169,6 +169,25 @@ impl<'a, B: TerminalBackend> TerminalIoBroker<'a, B> {
         Ok(())
     }
 
+    pub fn write_bell(&mut self, count: usize) -> Result<(), TerminalIoBrokerError> {
+        if self.phase != TerminalIoPhase::Interactive {
+            return Err(TerminalIoBrokerError::InvalidPhaseTransition {
+                phase: self.phase,
+                attempted: "terminal bell",
+            });
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let mut stdout = std::io::stdout();
+        stdout
+            .write_all(&vec![b'\x07'; count])
+            .map_err(terminal_transport_error)?;
+        stdout.flush().map_err(terminal_transport_error)?;
+        log::debug!("[terminal_io_broker] wrote terminal bell signal: count={count}");
+        Ok(())
+    }
+
     pub fn latest_size(&self) -> Option<TerminalSize> {
         self.session.as_ref().and_then(TerminalSession::latest_size)
     }

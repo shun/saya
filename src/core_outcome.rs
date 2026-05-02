@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use vim_core_rs::{
-    CoreEvent, CoreHostAction, CoreInputRequestKind, CoreMessageCategory, CoreMessageEvent,
-    CorePagerPromptKind, CoreVfsRequest,
+    CoreEvent, CoreHostAction, CoreInputRequestKind, CoreJobStartRequest, CoreMessageCategory,
+    CoreMessageEvent, CorePagerPromptKind, CoreVfsRequest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +59,19 @@ pub enum NormalizedHostDirective {
         request: CoreVfsRequest,
         trace: OutcomeTrace,
     },
+    JobStart {
+        request: CoreJobStartRequest,
+        trace: OutcomeTrace,
+    },
+    JobWrite {
+        vfd: i32,
+        data: Vec<u8>,
+        trace: OutcomeTrace,
+    },
+    JobStop {
+        job_id: i32,
+        trace: OutcomeTrace,
+    },
 }
 
 impl NormalizedHostDirective {
@@ -66,7 +79,10 @@ impl NormalizedHostDirective {
         match self {
             Self::Write { trace, .. }
             | Self::Quit { trace, .. }
-            | Self::VfsRequest { trace, .. } => trace,
+            | Self::VfsRequest { trace, .. }
+            | Self::JobStart { trace, .. }
+            | Self::JobWrite { trace, .. }
+            | Self::JobStop { trace, .. } => trace,
         }
     }
 }
@@ -158,10 +174,6 @@ impl NormalizedStructuralOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NormalizedDiagnosticOutcome {
-    JobOutOfScope {
-        raw_kind: &'static str,
-        trace: OutcomeTrace,
-    },
     Unknown {
         raw_kind: String,
         trace: OutcomeTrace,
@@ -250,21 +262,22 @@ pub fn normalize_host_action(
         CoreHostAction::Bell => {
             NormalizedCoreOutcome::Notification(NormalizedNotification::Bell { trace })
         }
-        CoreHostAction::JobStart(_) => {
-            NormalizedCoreOutcome::Diagnostic(NormalizedDiagnosticOutcome::JobOutOfScope {
-                raw_kind: "CoreHostAction::JobStart",
+        CoreHostAction::JobStart(request) => {
+            NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStart {
+                request: request.clone(),
                 trace,
             })
         }
-        CoreHostAction::JobWrite { .. } => {
-            NormalizedCoreOutcome::Diagnostic(NormalizedDiagnosticOutcome::JobOutOfScope {
-                raw_kind: "CoreHostAction::JobWrite",
+        CoreHostAction::JobWrite { vfd, data } => {
+            NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobWrite {
+                vfd: *vfd,
+                data: data.clone(),
                 trace,
             })
         }
-        CoreHostAction::JobStop { .. } => {
-            NormalizedCoreOutcome::Diagnostic(NormalizedDiagnosticOutcome::JobOutOfScope {
-                raw_kind: "CoreHostAction::JobStop",
+        CoreHostAction::JobStop { job_id } => {
+            NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStop {
+                job_id: *job_id,
                 trace,
             })
         }
@@ -320,13 +333,12 @@ pub fn normalize_core_event(event: &CoreEvent, trace: OutcomeTrace) -> Normalize
 impl NormalizedDiagnosticOutcome {
     pub fn trace(&self) -> &OutcomeTrace {
         match self {
-            Self::JobOutOfScope { trace, .. } | Self::Unknown { trace, .. } => trace,
+            Self::Unknown { trace, .. } => trace,
         }
     }
 
     pub fn raw_kind(&self) -> &str {
         match self {
-            Self::JobOutOfScope { raw_kind, .. } => raw_kind,
             Self::Unknown { raw_kind, .. } => raw_kind,
         }
     }
