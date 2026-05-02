@@ -20,6 +20,8 @@ The current repository already implements these behaviors.
 - Dirty-state tracking, mode display, and message projection in the TUI
 - Viewport-aware screen projection
 - Tab-size projection and line-number projection
+- Visible syntax chunk projection and TUI styling from `vim-core-rs`
+  `get_line_syntax()` data
 - Terminal lifecycle management, input routing, and event-loop coordination
 - Startup TypeScript evaluation through `deno_core`
 - Normalized startup registries for options, keymaps, commands, and events
@@ -42,6 +44,8 @@ Several repository-level constraints are intentional and must remain visible in
 documentation and code review.
 
 - `vim-core-rs` remains the editing-semantics source of truth
+- `vim-core-rs` owns syntax, highlight, and conceal extraction semantics;
+  `saya` only projects and renders the public extracted data
 - `saya` remains the host application layer around that editing core
 - Public TypeScript APIs remain under the `saya` namespace
 - Filesystem and network capabilities remain out of the public MVP API
