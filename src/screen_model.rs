@@ -1528,14 +1528,17 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
     let viewport_end = viewport_start
         .saturating_add(input.body_height.max(1))
         .min(raw_lines.len());
+    let raw_expansion = resolve_markdown_raw_expansion(input);
 
     let projections = (viewport_start..viewport_end)
         .map(|absolute_row| {
             let raw_text = raw_lines.get(absolute_row).copied().unwrap_or("");
+            let keep_raw = raw_expansion.contains_row(absolute_row);
             project_markdown_line_projection(
                 absolute_row,
                 raw_text,
                 input.markdown_document_map,
+                keep_raw,
                 usize::from(input.session_state.tab_size().max(1)),
                 line_start_col,
             )
@@ -1543,12 +1546,13 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
         .collect::<Vec<_>>();
 
     log::debug!(
-        "[screen_model] markdown line projections built: window_id={}, visible_rows={}, viewport_top={}, line_start_col={}, markdown_metadata_present={}",
+        "[screen_model] markdown line projections built: window_id={}, visible_rows={}, viewport_top={}, line_start_col={}, markdown_metadata_present={}, raw_expansion={:?}",
         input.window_id,
         projections.len(),
         input.viewport_top,
         line_start_col,
-        input.markdown_document_map.is_some()
+        input.markdown_document_map.is_some(),
+        raw_expansion
     );
 
     projections
@@ -1558,12 +1562,22 @@ fn project_markdown_line_projection(
     absolute_row: usize,
     raw_text: &str,
     markdown_document_map: Option<&MarkdownDocumentMap>,
+    keep_raw: bool,
     tab_size: usize,
     line_start_col: u16,
 ) -> ScreenLineProjection {
-    let conceal_ranges = markdown_document_map
-        .map(|map| markdown_conceal_ranges_for_line(map, absolute_row, raw_text))
-        .unwrap_or_default();
+    let conceal_ranges = if keep_raw {
+        log::debug!(
+            "[screen_model] markdown raw line selected: row={}, raw_len={}, reason=active_cursor_raw_expansion",
+            absolute_row,
+            raw_text.len()
+        );
+        Vec::new()
+    } else {
+        markdown_document_map
+            .map(|map| markdown_conceal_ranges_for_line(map, absolute_row, raw_text))
+            .unwrap_or_default()
+    };
     let mut display_text = String::new();
     let mut spans = Vec::new();
     let mut cells = Vec::new();
@@ -1626,6 +1640,85 @@ fn project_markdown_line_projection(
         spans,
         cells,
         line_start_col,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkdownRawExpansion {
+    None,
+    CursorBlock {
+        start_row: usize,
+        end_row: usize,
+        kind: MarkdownBlockKind,
+    },
+    CursorRow {
+        row: usize,
+    },
+}
+
+impl MarkdownRawExpansion {
+    fn contains_row(&self, row: usize) -> bool {
+        match self {
+            MarkdownRawExpansion::None => false,
+            MarkdownRawExpansion::CursorBlock {
+                start_row, end_row, ..
+            } => (*start_row..=*end_row).contains(&row),
+            MarkdownRawExpansion::CursorRow { row: cursor_row } => *cursor_row == row,
+        }
+    }
+}
+
+fn resolve_markdown_raw_expansion(input: &ProjectionInput<'_>) -> MarkdownRawExpansion {
+    let Some(map) = input.markdown_document_map else {
+        log::debug!(
+            "[screen_model] markdown raw expansion disabled: window_id={}, active={}, cursor_row={}, reason=no_markdown_metadata",
+            input.window_id,
+            input.is_active,
+            input.cursor_row
+        );
+        return MarkdownRawExpansion::None;
+    };
+
+    if !input.is_active {
+        log::debug!(
+            "[screen_model] markdown raw expansion disabled: window_id={}, active={}, cursor_row={}, block_count={}, reason=inactive_pane",
+            input.window_id,
+            input.is_active,
+            input.cursor_row,
+            map.blocks.len()
+        );
+        return MarkdownRawExpansion::None;
+    }
+
+    if let Some(block) = map
+        .blocks
+        .iter()
+        .find(|block| (block.range.start.line..=block.range.end.line).contains(&input.cursor_row))
+    {
+        let expansion = MarkdownRawExpansion::CursorBlock {
+            start_row: block.range.start.line,
+            end_row: block.range.end.line,
+            kind: block.kind.clone(),
+        };
+        log::debug!(
+            "[screen_model] markdown raw expansion resolved: window_id={}, cursor_row={}, start_row={}, end_row={}, kind={:?}, reason=cursor_inside_block",
+            input.window_id,
+            input.cursor_row,
+            block.range.start.line,
+            block.range.end.line,
+            block.kind
+        );
+        return expansion;
+    }
+
+    log::debug!(
+        "[screen_model] markdown raw expansion resolved: window_id={}, cursor_row={}, block_count={}, reason=no_block_contains_cursor_row_fallback_to_cursor_row",
+        input.window_id,
+        input.cursor_row,
+        map.blocks.len()
+    );
+    MarkdownRawExpansion::CursorRow {
+        row: input.cursor_row,
     }
 }
 
@@ -2261,11 +2354,11 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
         let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None)
-                .with_markdown_document_map(Some(&markdown_map)),
-        );
+        let model = project(&input);
         let row = &model.line_projections[0];
 
         assert_eq!(row.raw_text, "# あ*強*");
@@ -2293,11 +2386,11 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new_with_tab_size(None, 4);
         let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None)
-                .with_markdown_document_map(Some(&markdown_map)),
-        );
+        let model = project(&input);
         let row = &model.line_projections[0];
 
         assert_eq!(row.raw_text, "# a\tb");
@@ -2322,11 +2415,11 @@ mod tests {
             None, 8, true, 4,
         );
         let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None)
-                .with_markdown_document_map(Some(&markdown_map)),
-        );
+        let model = project(&input);
         let row = &model.line_projections[0];
 
         assert_eq!(model.lines[0], "   1 # Title");
@@ -2348,11 +2441,11 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
         let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None)
-                .with_markdown_document_map(Some(&markdown_map)),
-        );
+        let model = project(&input);
         let row = &model.line_projections[0];
 
         assert_eq!(row.raw_text, "- [x] done");
@@ -2381,11 +2474,11 @@ mod tests {
         let snapshot = bridge.snapshot();
         let session_state = EditorSessionState::new(None);
         let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None)
-                .with_markdown_document_map(Some(&markdown_map)),
-        );
+        let model = project(&input);
         let row = &model.line_projections[0];
 
         assert_eq!(row.raw_text, "- item");
@@ -2428,6 +2521,147 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(1, "Beta"), (2, "gamma")]
         );
+    }
+
+    #[test]
+    fn active_markdown_projection_keeps_cursor_heading_block_raw_and_other_rows_rich() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n*body*\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 0;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.cursor_row = 0;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[0].display_text, "# Title");
+        assert_eq!(model.line_projections[1].display_text, "body");
+        assert_eq!(
+            snapshot.text, source,
+            "raw block expansion must not mutate the raw buffer text"
+        );
+    }
+
+    #[test]
+    fn active_markdown_projection_keeps_cursor_list_block_raw() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "- [x] done\n# Next\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 0;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.cursor_row = 0;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[0].display_text, "- [x] done");
+        assert_eq!(model.line_projections[1].display_text, "Next");
+    }
+
+    #[test]
+    fn active_markdown_projection_keeps_entire_cursor_fenced_block_raw() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Before\n```rust\n*raw*\n```\n# After\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 2;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.cursor_row = 2;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[0].display_text, "Before");
+        assert_eq!(model.line_projections[1].display_text, "```rust");
+        assert_eq!(model.line_projections[2].display_text, "*raw*");
+        assert_eq!(model.line_projections[3].display_text, "```");
+        assert_eq!(model.line_projections[4].display_text, "After");
+    }
+
+    #[test]
+    fn active_markdown_projection_keeps_entire_cursor_table_block_raw() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "| A | B |\n|---|---|\n| *x* | y |\n# After\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 2;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.cursor_row = 2;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[0].display_text, "| A | B |");
+        assert_eq!(model.line_projections[1].display_text, "|---|---|");
+        assert_eq!(model.line_projections[2].display_text, "| *x* | y |");
+        assert_eq!(model.line_projections[3].display_text, "After");
+    }
+
+    #[test]
+    fn active_markdown_projection_falls_back_to_cursor_row_raw_for_inline_only_markdown() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "*active*\n*rich*\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 0;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+
+        assert_eq!(model.line_projections[0].display_text, "*active*");
+        assert_eq!(model.line_projections[1].display_text, "rich");
+    }
+
+    #[test]
+    fn inactive_markdown_projection_keeps_all_rows_rich_even_at_cursor_block() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n*body*\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 0;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[0].display_text, "Title");
+        assert_eq!(model.line_projections[1].display_text, "body");
     }
 
     #[test]
@@ -3393,9 +3627,72 @@ mod tests {
             .expect("pane should exist");
         assert_eq!(pane.line_projections[0].raw_text, "# Title");
         assert_eq!(
-            pane.line_projections[0].display_text, "Title",
-            "workspace projection should pass the per-window markdown map into pane projection"
+            pane.line_projections[0].display_text, "# Title",
+            "workspace projection should pass the per-window markdown map and active cursor block should remain raw"
         );
+    }
+
+    #[test]
+    fn workspace_projection_keeps_active_markdown_raw_expansion_out_of_inactive_panes() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n*body*\n";
+        let mut bridge = CoreBridge::new(source).expect("core bridge");
+        bridge
+            .apply_ex_command(":split")
+            .expect("split should succeed");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 0;
+        let active_window_id = snapshot
+            .active_window_id()
+            .expect("split snapshot should have an active window");
+        for window in &mut snapshot.windows {
+            window.cursor_row = 0;
+        }
+        let session_state = EditorSessionState::new(None);
+        let viewport_store = WindowViewportStore::new();
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+        let markdown_map = Arc::new(MarkdownDocumentMap::parse(source));
+        let markdown_document_maps = snapshot
+            .windows
+            .iter()
+            .map(|window| (window.id, Arc::clone(&markdown_map)))
+            .collect::<BTreeMap<_, _>>();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 24,
+        })
+        .expect("workspace projection should succeed");
+
+        let active_pane = model
+            .panes
+            .iter()
+            .find(|pane| pane.window_id == active_window_id)
+            .expect("active pane should exist");
+        let inactive_pane = model
+            .panes
+            .iter()
+            .find(|pane| pane.window_id != active_window_id)
+            .expect("inactive pane should exist");
+
+        assert_eq!(active_pane.line_projections[0].display_text, "# Title");
+        assert_eq!(inactive_pane.line_projections[0].display_text, "Title");
     }
 
     #[test]

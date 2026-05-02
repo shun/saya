@@ -476,22 +476,12 @@ fn render_buffer_text(model: &ScreenModel, width: u16, text_mode: RenderTextMode
 }
 
 fn projected_display_line(model: &ScreenModel, index: usize, raw_line: &str) -> Option<String> {
-    if model.is_active && u16::try_from(index).ok() == Some(model.cursor_row) {
-        log::debug!(
-            "[tui_renderer] keeping active cursor row in raw markdown mode: window_id={}, row={}, raw={:?}",
-            model.window_id,
-            index,
-            raw_line
-        );
-        return None;
-    }
-
     let projection = model.line_projections.get(index)?;
     let gutter_prefix =
         slice_line_by_display_columns(raw_line, 0, usize::from(projection.line_start_col));
     let display_line = format!("{gutter_prefix}{}", projection.display_text);
     log::debug!(
-        "[tui_renderer] using projected rich markdown line: window_id={}, row={}, raw={:?}, display={:?}, line_start_col={}",
+        "[tui_renderer] using projected markdown line: window_id={}, row={}, raw={:?}, display={:?}, line_start_col={}",
         model.window_id,
         index,
         projection.raw_text,
@@ -1018,7 +1008,33 @@ mod tests {
     }
 
     #[test]
-    fn render_buffer_text_keeps_active_cursor_row_in_raw_markdown_text() {
+    fn render_buffer_text_uses_raw_projection_display_text_on_active_cursor_row() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["# Heading".to_string()];
+        model.is_active = true;
+        model.cursor_row = 0;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "# Heading".to_string(),
+            display_text: "# Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::Plain);
+        let rendered = text.lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(rendered, "# Heading ");
+    }
+
+    #[test]
+    fn render_buffer_text_uses_projection_display_text_even_for_active_cursor_row() {
         let mut model = screen_model_with_message(None);
         model.lines = vec!["# Heading".to_string()];
         model.is_active = true;
@@ -1040,7 +1056,102 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
 
-        assert_eq!(rendered, "# Heading ");
+        assert_eq!(rendered, "Heading   ");
+    }
+
+    #[test]
+    fn render_buffer_text_renders_raw_block_rows_from_projection_display_text() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec![
+            "# Title".to_string(),
+            "- [x] done".to_string(),
+            "tail".to_string(),
+        ];
+        model.is_active = true;
+        model.cursor_row = 1;
+        model.visual_selection = None;
+        model.line_projections = vec![
+            ScreenLineProjection {
+                absolute_row: 0,
+                raw_text: "# Title".to_string(),
+                display_text: "# Title".to_string(),
+                spans: vec![],
+                cells: vec![],
+                line_start_col: 0,
+            },
+            ScreenLineProjection {
+                absolute_row: 1,
+                raw_text: "- [x] done".to_string(),
+                display_text: "- [x] done".to_string(),
+                spans: vec![],
+                cells: vec![],
+                line_start_col: 0,
+            },
+            ScreenLineProjection {
+                absolute_row: 2,
+                raw_text: "tail".to_string(),
+                display_text: "tail".to_string(),
+                spans: vec![],
+                cells: vec![],
+                line_start_col: 0,
+            },
+        ];
+
+        let text = render_buffer_text(&model, 12, RenderTextMode::Plain);
+        let rendered = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "# Title     ".to_string(),
+                "- [x] done  ".to_string(),
+                "tail        ".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_buffer_text_preserves_gutter_and_overlay_for_raw_projection_row() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["   1 # Heading".to_string()];
+        model.is_active = true;
+        model.cursor_row = 0;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "# Heading".to_string(),
+            display_text: "# Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 5,
+        }];
+        model.search_overlays = vec![ScreenSearchOverlay {
+            row: 0,
+            start_col: 5,
+            end_col_exclusive: 14,
+            kind: SearchMatchKind::Regular,
+        }];
+
+        let text = render_buffer_text(&model, 16, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "   1 ");
+        assert_eq!(line.spans[0].style, Style::default());
+        assert_eq!(line.spans[1].content.as_ref(), "# Heading");
+        assert_eq!(
+            line.spans[1].style,
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        );
+        assert_eq!(line.spans[2].content.as_ref(), "  ");
     }
 
     #[test]
