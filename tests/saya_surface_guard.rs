@@ -256,11 +256,12 @@ fn search_syntax_popup_behavior_remains_out_of_scope_for_saya() {
         .expect("testing docs should be readable from the repository root");
 
     assert!(
-        docs.contains("Do not add exhaustive search, syntax, or pop-up menu extraction coverage"),
+        docs.contains("Do not add exhaustive search, syntax, highlight, conceal, or pop-up menu"),
         "testing boundary should explicitly keep exhaustive search, syntax, and pop-up menu extraction coverage out of saya"
     );
     assert!(
-        docs.contains("search, syntax, and pop-up menu extraction semantics in"),
+        docs.contains("Keep detailed search, syntax, highlight, conceal,")
+            && docs.contains("and pop-up menu extraction semantics in `vim-core-rs`."),
         "testing boundary should keep search, syntax, and pop-up menu extraction ownership with vim-core-rs"
     );
 }

@@ -575,7 +575,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     );
     let visual_selection = resolve_visual_selection(input);
     let search_overlays = project_search_overlays(input, &line_projections);
-    let syntax_chunks = project_syntax_chunks(input);
+    let syntax_chunks = project_syntax_chunks(input, &line_projections);
     let message_state = resolve_message_state(input);
     let message_line = message_state.as_ref().map(|state| state.text.clone());
 
@@ -1470,7 +1470,10 @@ fn resolve_search_overlay_display_bounds(
     Some((start_col, end_col_exclusive))
 }
 
-fn project_syntax_chunks(input: &ProjectionInput<'_>) -> Vec<ScreenSyntaxChunk> {
+fn project_syntax_chunks(
+    input: &ProjectionInput<'_>,
+    line_projections: &[ScreenLineProjection],
+) -> Vec<ScreenSyntaxChunk> {
     let Some(syntax_lines) = input.syntax_lines else {
         log::debug!("[screen_model] no syntax lines provided");
         return Vec::new();
@@ -1497,21 +1500,36 @@ fn project_syntax_chunks(input: &ProjectionInput<'_>) -> Vec<ScreenSyntaxChunk> 
             if chunk.syn_id == 0 || chunk.end_col <= chunk.start_col {
                 continue;
             }
-            let start_col = resolve_display_col_for_position(
-                &input.snapshot.text,
-                *absolute_row,
-                chunk.start_col,
-                input.session_state.tab_size(),
-                line_numbers,
-                input.session_state.number_width(),
+            let markdown_projection = input.markdown_document_map.and_then(|_| {
+                line_projections
+                    .iter()
+                    .find(|projection| projection.absolute_row == *absolute_row)
+            });
+            let start_col = markdown_projection.map_or_else(
+                || {
+                    resolve_display_col_for_position(
+                        &input.snapshot.text,
+                        *absolute_row,
+                        chunk.start_col,
+                        input.session_state.tab_size(),
+                        line_numbers,
+                        input.session_state.number_width(),
+                    )
+                },
+                |projection| projection.logical_to_display_col(chunk.start_col),
             );
-            let end_col_exclusive = resolve_display_col_for_position(
-                &input.snapshot.text,
-                *absolute_row,
-                chunk.end_col,
-                input.session_state.tab_size(),
-                line_numbers,
-                input.session_state.number_width(),
+            let end_col_exclusive = markdown_projection.map_or_else(
+                || {
+                    resolve_display_col_for_position(
+                        &input.snapshot.text,
+                        *absolute_row,
+                        chunk.end_col,
+                        input.session_state.tab_size(),
+                        line_numbers,
+                        input.session_state.number_width(),
+                    )
+                },
+                |projection| projection.logical_to_display_col(chunk.end_col),
             );
             if end_col_exclusive <= start_col {
                 log::debug!(
@@ -2372,6 +2390,90 @@ mod tests {
                 syn_id: 11,
                 name: Some("Identifier".to_string()),
             }]
+        );
+    }
+
+    #[test]
+    fn projects_syntax_chunks_through_markdown_rich_display_mapping() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut syntax_lines = BTreeMap::new();
+        syntax_lines.insert(
+            0,
+            vec![CoreSyntaxChunk {
+                start_col: 2,
+                end_col: 7,
+                syn_id: 11,
+                name: Some("Title".to_string()),
+            }],
+        );
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map))
+            .with_syntax_lines(Some(&syntax_lines));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[0].display_text, "Title");
+        assert_eq!(
+            model.syntax_chunks,
+            vec![ScreenSyntaxChunk {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 5,
+                syn_id: 11,
+                name: Some("Title".to_string()),
+            }],
+            "syntax chunks should be projected through Markdown rich display-space"
+        );
+    }
+
+    #[test]
+    fn projects_syntax_chunks_against_raw_active_markdown_rows() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut syntax_lines = BTreeMap::new();
+        syntax_lines.insert(
+            0,
+            vec![CoreSyntaxChunk {
+                start_col: 2,
+                end_col: 7,
+                syn_id: 11,
+                name: Some("Title".to_string()),
+            }],
+        );
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map))
+                .with_syntax_lines(Some(&syntax_lines)),
+        );
+
+        assert_eq!(model.line_projections[0].display_text, "# Title");
+        assert_eq!(
+            model.syntax_chunks,
+            vec![ScreenSyntaxChunk {
+                row: 0,
+                start_col: 2,
+                end_col_exclusive: 7,
+                syn_id: 11,
+                name: Some("Title".to_string()),
+            }],
+            "active Markdown rows should keep syntax chunks aligned with raw text"
         );
     }
 
