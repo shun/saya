@@ -664,6 +664,19 @@ impl CoreBridge {
         Ok(chunks)
     }
 
+    pub fn is_syntax_enabled(&mut self) -> bool {
+        let enabled = self
+            .session
+            .eval_string("exists('g:syntax_on')")
+            .as_deref()
+            .is_some_and(|value| value.trim() == "1");
+        log::debug!(
+            "[core_bridge] resolved syntax enabled state from g:syntax_on: enabled={}",
+            enabled
+        );
+        enabled
+    }
+
     #[cfg(feature = "tree-sitter-syntax")]
     pub fn request_tree_sitter_syntax_preparation(
         &mut self,
@@ -1176,6 +1189,36 @@ mod tests {
         assert_eq!(snapshot.revision, 0);
         assert!(!snapshot.dirty);
         assert_eq!(snapshot.mode, CoreMode::Normal);
+    }
+
+    #[test]
+    fn syntax_enabled_tracks_vim_syntax_on_and_off() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("fn main() {}\n").expect("core bridge should initialize");
+
+        assert!(
+            !bridge.is_syntax_enabled(),
+            "syntax should start disabled until Vim :syntax on is executed"
+        );
+
+        bridge
+            .apply_ex_command("syntax on")
+            .expect("syntax on should be accepted by Vim core");
+        assert!(
+            bridge.is_syntax_enabled(),
+            "syntax on should enable syntax-dependent highlighting"
+        );
+
+        bridge
+            .apply_ex_command("syntax off")
+            .expect("syntax off should be accepted by Vim core");
+        assert!(
+            !bridge.is_syntax_enabled(),
+            "syntax off should disable syntax-dependent highlighting"
+        );
     }
 
     #[cfg(feature = "tree-sitter-syntax")]

@@ -2213,11 +2213,24 @@ fn build_workspace_render_output(
         resolve_prompt_revision(command_line_prompt, command_line_buffer),
         resolve_search_mode_hint(command_line_prompt, command_line_buffer),
     )?;
-    let syntax_lines =
-        collect_workspace_syntax_lines(&outcome.core_bridge, &snapshot, viewport_store);
+    let syntax_enabled = outcome.core_bridge.is_syntax_enabled();
+    let syntax_lines = if syntax_enabled {
+        collect_workspace_syntax_lines(&outcome.core_bridge, &snapshot, viewport_store)
+    } else {
+        trace_redraw_diagnostic(format_args!(
+            "workspace syntax collection skipped because :syntax is off"
+        ));
+        BTreeMap::new()
+    };
     #[cfg(feature = "tree-sitter-syntax")]
-    let tree_sitter_syntax =
-        collect_workspace_tree_sitter_syntax(&mut outcome.core_bridge, &snapshot, viewport_store);
+    let tree_sitter_syntax = if syntax_enabled {
+        collect_workspace_tree_sitter_syntax(&mut outcome.core_bridge, &snapshot, viewport_store)
+    } else {
+        trace_redraw_diagnostic(format_args!(
+            "workspace Tree-sitter syntax collection skipped because :syntax is off"
+        ));
+        BTreeMap::new()
+    };
     let markdown_document_maps =
         collect_workspace_markdown_document_maps(markdown_metadata_cache, session_state, &snapshot);
     let command_preview =
@@ -2921,6 +2934,92 @@ mod tests {
         let sequence = mouse_click_to_sgr_sequence(Some(&workspace), u16::MAX, u16::MAX);
 
         assert_eq!(sequence.as_deref(), Some("\x1b[<0;65535;65535M"));
+    }
+
+    #[cfg(feature = "tree-sitter-syntax")]
+    #[test]
+    fn workspace_render_collects_tree_sitter_highlight_only_when_vim_syntax_is_on() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("syntax-toggle-main").with_extension("rs");
+        std::fs::write(&target_path, "fn main() {}\n").expect("test source file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path.clone()),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        outcome.core_bridge.set_screen_size(24, 80);
+        let session_state = outcome.editor_session_state();
+        let mut viewport_store = WindowViewportStore::new();
+        let mut search_refresh_store = WindowSearchRefreshStore::default();
+        let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+
+        let syntax_off_workspace = build_workspace_render_output(
+            &mut outcome,
+            &session_state,
+            &mut viewport_store,
+            &mut search_refresh_store,
+            &mut markdown_metadata_cache,
+            None,
+            "",
+            None,
+            None,
+            None,
+            None,
+            80,
+            24,
+        )
+        .expect("syntax-off workspace should render");
+        assert!(
+            syntax_off_workspace
+                .panes
+                .iter()
+                .all(|pane| pane.syntax_chunks.is_empty()),
+            "syntax off should skip Vim and Tree-sitter highlight collection"
+        );
+
+        outcome
+            .core_bridge
+            .apply_ex_command("syntax on")
+            .expect("syntax on should enable highlight collection");
+        assert!(
+            outcome.core_bridge.is_syntax_enabled(),
+            "syntax on should be visible before workspace render"
+        );
+        let snapshot = outcome.core_bridge.snapshot();
+        assert!(
+            snapshot
+                .buffers
+                .iter()
+                .any(|buffer| buffer.name.ends_with(".rs")),
+            "Rust source buffer name should be available for Tree-sitter language resolution: {:?}",
+            snapshot.buffers
+        );
+        let syntax_on_workspace = build_workspace_render_output(
+            &mut outcome,
+            &session_state,
+            &mut viewport_store,
+            &mut search_refresh_store,
+            &mut markdown_metadata_cache,
+            None,
+            "",
+            None,
+            None,
+            None,
+            None,
+            80,
+            24,
+        )
+        .expect("syntax-on workspace should render");
+        assert!(
+            syntax_on_workspace
+                .panes
+                .iter()
+                .any(|pane| !pane.syntax_chunks.is_empty()),
+            "syntax on should allow Tree-sitter highlight chunks for Rust source"
+        );
     }
 
     #[test]
