@@ -117,6 +117,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
             saya.options.tabSize = 4;
             saya.options.lineNumbers = true;
             saya.options.numberWidth = 4;
+            saya.options.syntax = true;
             saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
             saya.commands.register("writeCurrent", () => {
                 saya.commands.execute("write");
@@ -138,6 +139,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
     assert_eq!(outcome.initial_tab_size, 4);
     assert!(outcome.initial_line_numbers);
     assert_eq!(outcome.initial_number_width, 4);
+    assert_eq!(outcome.startup_registry.options.syntax, true);
     assert_eq!(outcome.startup_registry.keymaps.len(), 1);
     assert_eq!(outcome.callback_registry.commands().len(), 1);
     assert_eq!(outcome.callback_registry.events().len(), 1);

@@ -45,6 +45,7 @@ pub enum ConfigOptionName {
     SmartCase,
     SmartIndent,
     SoftTabStop,
+    Syntax,
     TabSize,
     LineNumbers,
     NumberWidth,
@@ -174,6 +175,7 @@ impl From<SayaOptionName> for ConfigOptionName {
             SayaOptionName::SmartCase => Self::SmartCase,
             SayaOptionName::SmartIndent => Self::SmartIndent,
             SayaOptionName::SoftTabStop => Self::SoftTabStop,
+            SayaOptionName::Syntax => Self::Syntax,
             SayaOptionName::TabSize => Self::TabSize,
             SayaOptionName::LineNumbers => Self::LineNumbers,
             SayaOptionName::NumberWidth => Self::NumberWidth,
@@ -887,6 +889,7 @@ fn saya_option_name_from_config_name(name: ConfigOptionName) -> SayaOptionName {
         ConfigOptionName::SmartCase => SayaOptionName::SmartCase,
         ConfigOptionName::SmartIndent => SayaOptionName::SmartIndent,
         ConfigOptionName::SoftTabStop => SayaOptionName::SoftTabStop,
+        ConfigOptionName::Syntax => SayaOptionName::Syntax,
         ConfigOptionName::TabSize => SayaOptionName::TabSize,
         ConfigOptionName::LineNumbers => SayaOptionName::LineNumbers,
         ConfigOptionName::NumberWidth => SayaOptionName::NumberWidth,
@@ -1306,6 +1309,7 @@ pub struct ConfigApplyState {
     pub smartindent: bool,
     pub ignorecase: bool,
     pub smartcase: bool,
+    pub syntax: bool,
     pub scrolloff: i64,
     pub sidescrolloff: i64,
     pub wrap: bool,
@@ -1342,6 +1346,7 @@ impl ConfigApplyState {
             smartindent: false,
             ignorecase: false,
             smartcase: false,
+            syntax: false,
             scrolloff: 0,
             sidescrolloff: 0,
             wrap: true,
@@ -1449,6 +1454,15 @@ fn apply_single_command(
                     b
                 );
                 state.smartcase = *b;
+                Ok(())
+            }
+            (ConfigOptionName::Syntax, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting syntax startup core command flag: {} -> {}",
+                    state.syntax,
+                    b
+                );
+                state.syntax = *b;
                 Ok(())
             }
             (ConfigOptionName::ScrollOff, ConfigOptionValue::Number(n)) => {

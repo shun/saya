@@ -9,6 +9,7 @@ fn startup_public_api_type_declaration_covers_formal_configuration_surface() {
     assert!(declaration.contains("tabSize"));
     assert!(declaration.contains("lineNumbers"));
     assert!(declaration.contains("numberWidth"));
+    assert!(declaration.contains("syntax"));
     assert!(declaration.contains("keymap"));
     assert!(declaration.contains("commands"));
     assert!(declaration.contains("events"));

@@ -256,6 +256,25 @@ async fn startup_number_width_is_collected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_syntax_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.syntax = true;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Option {
+            name: StartupOptionName::Syntax,
+            value: StartupOptionValue::Boolean(true),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_option_aliases_are_normalized_to_formal_names() {
     let registry = collect_startup_registry(
         r#"

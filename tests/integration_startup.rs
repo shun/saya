@@ -512,6 +512,54 @@ fn startup_with_vim_style_u_option_loads_config_without_warning() {
     std::fs::remove_file(&config_path).expect("設定ファイルの削除");
 }
 
+#[test]
+fn startup_config_enables_syntax_from_typescript_option() {
+    let _lock = test_lock();
+    let target_path = unique_path("syntax-target.txt");
+    let config_path = unique_path("syntax-init.ts");
+    std::fs::write(&target_path, "fn main() {}\n").expect("対象ファイルの作成");
+    std::fs::write(&config_path, "saya.options.syntax = true;\n").expect("設定ファイルの作成");
+
+    let mut outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("syntax 設定付き起動が成功すること");
+
+    assert!(
+        outcome.core_bridge.is_syntax_enabled(),
+        "saya.options.syntax = true should apply :syntax on during startup"
+    );
+
+    std::fs::remove_file(&target_path).expect("対象ファイルの削除");
+    std::fs::remove_file(&config_path).expect("設定ファイルの削除");
+}
+
+#[test]
+fn startup_config_keeps_syntax_disabled_from_typescript_false_option() {
+    let _lock = test_lock();
+    let target_path = unique_path("syntax-disabled-target.txt");
+    let config_path = unique_path("syntax-disabled-init.ts");
+    std::fs::write(&target_path, "fn main() {}\n").expect("対象ファイルの作成");
+    std::fs::write(&config_path, "saya.options.syntax = false;\n").expect("設定ファイルの作成");
+
+    let mut outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("syntax=false 設定付き起動が成功すること");
+
+    assert!(
+        !outcome.core_bridge.is_syntax_enabled(),
+        "saya.options.syntax = false should apply :syntax off during startup"
+    );
+
+    std::fs::remove_file(&target_path).expect("対象ファイルの削除");
+    std::fs::remove_file(&config_path).expect("設定ファイルの削除");
+}
+
 /// 存在しない設定ファイルを指定した場合、warning 付きで既定値起動する。
 #[test]
 fn startup_with_missing_config_falls_back_with_warning() {

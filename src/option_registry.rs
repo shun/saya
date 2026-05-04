@@ -56,6 +56,7 @@ pub enum SayaOptionName {
     SmartCase,
     SmartIndent,
     SoftTabStop,
+    Syntax,
     TabSize,
     Undofile,
     Wrap,
@@ -87,6 +88,7 @@ impl SayaOptionName {
             Self::SmartCase => "smartcase",
             Self::SmartIndent => "smartindent",
             Self::SoftTabStop => "softtabstop",
+            Self::Syntax => "syntax",
             Self::TabSize => "tabstop",
             Self::Undofile => "undofile",
             Self::Wrap => "wrap",
@@ -452,6 +454,13 @@ const OPTION_DEFINITIONS: &[SayaOptionDefinition] = &[
         aliases: &["sts"],
     },
     SayaOptionDefinition {
+        name: SayaOptionName::Syntax,
+        value_type: SayaOptionType::Boolean,
+        owner: SayaOptionOwner::CoreOwned,
+        startup_public: true,
+        aliases: &[],
+    },
+    SayaOptionDefinition {
         name: SayaOptionName::TabSize,
         value_type: SayaOptionType::Number,
         owner: SayaOptionOwner::CoreOwned,
@@ -495,6 +504,12 @@ mod tests {
 
         let cursorline = SayaOptionRegistry::resolve("cul").expect("cursorline alias");
         assert_eq!(cursorline.owner, SayaOptionOwner::PresentationOwned);
+
+        let syntax = SayaOptionRegistry::resolve("syntax").expect("syntax option");
+        assert_eq!(syntax.name, SayaOptionName::Syntax);
+        assert_eq!(syntax.value_type, SayaOptionType::Boolean);
+        assert_eq!(syntax.owner, SayaOptionOwner::CoreOwned);
+        assert!(syntax.startup_public);
 
         let clipboard = SayaOptionRegistry::resolve("clipboard").expect("clipboard");
         assert_eq!(clipboard.owner, SayaOptionOwner::HostOwned);

@@ -85,6 +85,7 @@ pub struct StartupOptionsSnapshot {
     pub smartindent: bool,
     pub ignorecase: bool,
     pub smartcase: bool,
+    pub syntax: bool,
     pub scrolloff: u16,
     pub sidescrolloff: u16,
     pub wrap: bool,
@@ -145,6 +146,7 @@ impl StartupRegistrySnapshot {
                 smartindent: state.smartindent,
                 ignorecase: state.ignorecase,
                 smartcase: state.smartcase,
+                syntax: state.syntax,
                 scrolloff: normalize_u16(state.scrolloff),
                 sidescrolloff: normalize_u16(state.sidescrolloff),
                 wrap: state.wrap,
@@ -609,6 +611,7 @@ fn startup_registry_from_registry(
             smartindent: state.smartindent,
             ignorecase: state.ignorecase,
             smartcase: state.smartcase,
+            syntax: state.syntax,
             scrolloff: normalize_u16(state.scrolloff),
             sidescrolloff: normalize_u16(state.sidescrolloff),
             wrap: state.wrap,
@@ -782,6 +785,24 @@ fn apply_startup_core_options(core_bridge: &mut CoreBridge, options: &StartupOpt
                 error
             );
         }
+    }
+
+    let syntax_command = if options.syntax {
+        "syntax on"
+    } else {
+        "syntax off"
+    };
+    log::debug!(
+        "[bootstrap] applying startup syntax option through Vim core ex command: syntax={}, command={:?}",
+        options.syntax,
+        syntax_command
+    );
+    if let Err(error) = core_bridge.apply_ex_command(syntax_command) {
+        log::debug!(
+            "[bootstrap] startup syntax command application failed and was ignored: command={:?}, error={:?}",
+            syntax_command,
+            error
+        );
     }
 }
 

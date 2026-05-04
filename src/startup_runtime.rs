@@ -22,6 +22,7 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.smartindent",
     "saya.options.ignorecase",
     "saya.options.smartcase",
+    "saya.options.syntax",
     "saya.options.scrolloff",
     "saya.options.sidescrolloff",
     "saya.options.wrap",
@@ -73,6 +74,7 @@ globalThis.saya = {
         smartindent: false,
         ignorecase: false,
         smartcase: false,
+        syntax: false,
         scrolloff: 0,
         sidescrolloff: 0,
         wrap: true,
@@ -259,6 +261,7 @@ defineBoolOption("ignorecase", "ignorecase", false);
 defineBoolOption("ic", "ignorecase", false);
 defineBoolOption("smartcase", "smartcase", false);
 defineBoolOption("scs", "smartcase", false);
+defineBoolOption("syntax", "syntax", false);
 defineNumberOption("scrolloff", "scrolloff", 0);
 defineNumberOption("so", "scrolloff", 0);
 defineNumberOption("sidescrolloff", "sidescrolloff", 0);
@@ -312,6 +315,7 @@ declare global {
         smartindent: boolean;
         ignorecase: boolean;
         smartcase: boolean;
+        syntax: boolean;
         scrolloff: number;
         sidescrolloff: number;
         wrap: boolean;
