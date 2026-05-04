@@ -1,6 +1,19 @@
 use saya::command_line_history::{
     CommandLineHistories, CommandLineHistory, CommandLineHistoryDirection,
+    load_histories_from_path, save_histories_to_path,
 };
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+fn temp_history_path(test_name: &str) -> PathBuf {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "saya-command-history-{test_name}-{}-{unique}.json",
+        std::process::id()
+    ))
+}
 
 #[test]
 fn up_and_ctrl_p_recall_recent_commands_like_vim_command_line_history() {
@@ -67,5 +80,44 @@ fn command_and_search_histories_are_kept_separate_and_return_promptless_buffers(
     assert_eq!(
         histories.navigate('/', "", CommandLineHistoryDirection::Previous),
         Some("needle".to_string())
+    );
+}
+
+#[test]
+fn command_and_search_histories_round_trip_through_persistent_cache_file() {
+    let path = temp_history_path("round-trip");
+    let mut histories = CommandLineHistories::default();
+    histories.record(':', "write");
+    histories.record(':', "quit");
+    histories.record('/', "needle");
+
+    save_histories_to_path(&histories, &path).expect("history cache save should succeed");
+    let mut restored = load_histories_from_path(&path).expect("history cache load should succeed");
+
+    assert_eq!(
+        restored.navigate(':', "", CommandLineHistoryDirection::Previous),
+        Some("quit".to_string())
+    );
+    assert_eq!(
+        restored.navigate(':', "quit", CommandLineHistoryDirection::Previous),
+        Some("write".to_string())
+    );
+    assert_eq!(
+        restored.navigate('/', "", CommandLineHistoryDirection::Previous),
+        Some("needle".to_string())
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn loading_missing_history_cache_starts_with_empty_histories() {
+    let path = temp_history_path("missing");
+
+    let mut restored = load_histories_from_path(&path).expect("missing cache should be allowed");
+
+    assert_eq!(
+        restored.navigate(':', "", CommandLineHistoryDirection::Previous),
+        None
     );
 }

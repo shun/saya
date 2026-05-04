@@ -4,7 +4,9 @@ use saya::app_startup::{
 use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
 use saya::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
-use saya::command_line_history::{CommandLineHistories, history_direction_for_key};
+use saya::command_line_history::{
+    history_direction_for_key, load_histories_from_default_cache, save_histories_to_default_cache,
+};
 use saya::core_host_actions::HostActionRuntime;
 use saya::core_notification_prompt::{
     NotificationPromptProjectionState, ProjectionFrame, PromptInputAction, handle_prompt_key,
@@ -139,7 +141,7 @@ async fn main() {
     let mut markdown_metadata_cache = MarkdownMetadataCache::new();
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_edit = CommandLineEdit::default();
-    let mut command_line_histories = CommandLineHistories::default();
+    let mut command_line_histories = load_histories_from_default_cache();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
@@ -776,6 +778,7 @@ async fn main() {
         "[main] beginning unified shutdown: reason={:?}",
         shutdown_reason
     );
+    save_histories_to_default_cache(&command_line_histories);
     let mut shutdown_sequence = coordinator.begin_shutdown(shutdown_reason);
     shutdown_sequence.record_loop_stopped();
 

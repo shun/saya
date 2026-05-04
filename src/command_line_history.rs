@@ -1,4 +1,11 @@
+use crate::app_paths;
 use crate::input_router::KeyInput;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+const COMMAND_LINE_HISTORY_FILE_NAME: &str = "command-line-history.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandLineHistoryDirection {
@@ -18,6 +25,14 @@ pub struct CommandLineHistory {
 pub struct CommandLineHistories {
     ex_commands: CommandLineHistory,
     searches: CommandLineHistory,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistedCommandLineHistories {
+    #[serde(default)]
+    ex_commands: Vec<String>,
+    #[serde(default)]
+    searches: Vec<String>,
 }
 
 impl CommandLineHistories {
@@ -69,6 +84,108 @@ impl CommandLineHistories {
         self.ex_commands.reset_navigation();
         self.searches.reset_navigation();
     }
+
+    fn from_persisted(persisted: PersistedCommandLineHistories) -> Self {
+        let mut histories = Self::default();
+        for entry in persisted.ex_commands {
+            histories.ex_commands.record(&entry);
+        }
+        for entry in persisted.searches {
+            histories.searches.record(&entry);
+        }
+        histories.reset_navigation();
+        log::debug!(
+            "[command_line_history] restored histories from persisted entries: ex_count={}, search_count={}",
+            histories.ex_commands.entries.len(),
+            histories.searches.entries.len()
+        );
+        histories
+    }
+
+    fn to_persisted(&self) -> PersistedCommandLineHistories {
+        PersistedCommandLineHistories {
+            ex_commands: self.ex_commands.entries.clone(),
+            searches: self.searches.entries.clone(),
+        }
+    }
+}
+
+pub fn default_history_path() -> Option<PathBuf> {
+    app_paths::cache_dir().map(|dir| dir.join(COMMAND_LINE_HISTORY_FILE_NAME))
+}
+
+pub fn load_histories_from_default_cache() -> CommandLineHistories {
+    let Some(path) = default_history_path() else {
+        log::debug!("[command_line_history] cache path unavailable; starting with empty histories");
+        return CommandLineHistories::default();
+    };
+
+    match load_histories_from_path(&path) {
+        Ok(histories) => histories,
+        Err(error) => {
+            log::debug!(
+                "[command_line_history] failed to load cache; starting with empty histories: path={}, error={}",
+                path.display(),
+                error
+            );
+            CommandLineHistories::default()
+        }
+    }
+}
+
+pub fn save_histories_to_default_cache(histories: &CommandLineHistories) {
+    let Some(path) = default_history_path() else {
+        log::debug!("[command_line_history] cache path unavailable; skipped history save");
+        return;
+    };
+
+    if let Err(error) = save_histories_to_path(histories, &path) {
+        log::debug!(
+            "[command_line_history] failed to save cache: path={}, error={}",
+            path.display(),
+            error
+        );
+    }
+}
+
+pub fn load_histories_from_path(path: &Path) -> io::Result<CommandLineHistories> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            log::debug!(
+                "[command_line_history] cache file missing; starting empty: path={}",
+                path.display()
+            );
+            return Ok(CommandLineHistories::default());
+        }
+        Err(error) => return Err(error),
+    };
+
+    let persisted: PersistedCommandLineHistories =
+        serde_json::from_str(&content).map_err(io::Error::other)?;
+    log::debug!(
+        "[command_line_history] loaded cache file: path={}, bytes={}",
+        path.display(),
+        content.len()
+    );
+    Ok(CommandLineHistories::from_persisted(persisted))
+}
+
+pub fn save_histories_to_path(histories: &CommandLineHistories, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let encoded =
+        serde_json::to_string_pretty(&histories.to_persisted()).map_err(io::Error::other)?;
+    fs::write(path, encoded.as_bytes())?;
+    log::debug!(
+        "[command_line_history] saved cache file: path={}, bytes={}, ex_count={}, search_count={}",
+        path.display(),
+        encoded.len(),
+        histories.ex_commands.entries.len(),
+        histories.searches.entries.len()
+    );
+    Ok(())
 }
 
 impl CommandLineHistory {
