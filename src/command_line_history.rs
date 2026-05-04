@@ -148,6 +148,48 @@ pub fn save_histories_to_default_cache(histories: &CommandLineHistories) {
     }
 }
 
+pub fn record_history_and_save_to_default_cache(
+    histories: &mut CommandLineHistories,
+    prompt: char,
+    buffer: &str,
+) {
+    let Some(path) = default_history_path() else {
+        log::debug!(
+            "[command_line_history] cache path unavailable; recording in memory only: prompt={}, buffer_len={}",
+            prompt,
+            buffer.len()
+        );
+        histories.record(prompt, buffer);
+        return;
+    };
+
+    if let Err(error) = record_history_and_save_to_path(histories, prompt, buffer, &path) {
+        log::debug!(
+            "[command_line_history] failed to persist recorded history entry: path={}, prompt={}, buffer_len={}, error={}",
+            path.display(),
+            prompt,
+            buffer.len(),
+            error
+        );
+    }
+}
+
+pub fn record_history_and_save_to_path(
+    histories: &mut CommandLineHistories,
+    prompt: char,
+    buffer: &str,
+    path: &Path,
+) -> io::Result<()> {
+    log::debug!(
+        "[command_line_history] recording history entry before cache save: path={}, prompt={}, buffer_len={}",
+        path.display(),
+        prompt,
+        buffer.len()
+    );
+    histories.record(prompt, buffer);
+    save_histories_to_path(histories, path)
+}
+
 pub fn load_histories_from_path(path: &Path) -> io::Result<CommandLineHistories> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,

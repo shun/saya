@@ -5,7 +5,8 @@ use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
 use saya::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
 use saya::command_line_history::{
-    history_direction_for_key, load_histories_from_default_cache, save_histories_to_default_cache,
+    history_direction_for_key, load_histories_from_default_cache,
+    record_history_and_save_to_default_cache, save_histories_to_default_cache,
 };
 use saya::core_host_actions::HostActionRuntime;
 use saya::core_notification_prompt::{
@@ -333,8 +334,11 @@ async fn main() {
                                     if prompt == ':' {
                                         let cmd =
                                             format!("{}{}", prompt, command_line_edit.buffer());
-                                        command_line_histories
-                                            .record(prompt, command_line_edit.buffer());
+                                        record_history_and_save_to_default_cache(
+                                            &mut command_line_histories,
+                                            prompt,
+                                            command_line_edit.buffer(),
+                                        );
                                         command_line_prompt = None;
                                         command_line_edit.clear();
                                         match route_ex_command(&cmd) {
@@ -390,8 +394,11 @@ async fn main() {
                                             }
                                         }
                                     } else if prompt == '/' {
-                                        command_line_histories
-                                            .record(prompt, command_line_edit.buffer());
+                                        record_history_and_save_to_default_cache(
+                                            &mut command_line_histories,
+                                            prompt,
+                                            command_line_edit.buffer(),
+                                        );
                                         let _ = outcome
                                             .core_bridge
                                             .commit_search_input(command_line_edit.buffer());

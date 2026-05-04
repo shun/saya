@@ -1,6 +1,6 @@
 use saya::command_line_history::{
     CommandLineHistories, CommandLineHistory, CommandLineHistoryDirection,
-    load_histories_from_path, save_histories_to_path,
+    load_histories_from_path, record_history_and_save_to_path, save_histories_to_path,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -105,6 +105,27 @@ fn command_and_search_histories_round_trip_through_persistent_cache_file() {
     assert_eq!(
         restored.navigate('/', "", CommandLineHistoryDirection::Previous),
         Some("needle".to_string())
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn recording_command_history_immediately_persists_cache_file() {
+    let path = temp_history_path("record-save");
+    let mut histories = CommandLineHistories::default();
+
+    record_history_and_save_to_path(&mut histories, ':', "write", &path)
+        .expect("recorded command history should be saved immediately");
+
+    assert!(
+        path.exists(),
+        "history cache file should exist immediately after command record"
+    );
+    let mut restored = load_histories_from_path(&path).expect("saved command history loads");
+    assert_eq!(
+        restored.navigate(':', "", CommandLineHistoryDirection::Previous),
+        Some("write".to_string())
     );
 
     let _ = fs::remove_file(path);
