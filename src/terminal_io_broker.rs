@@ -153,6 +153,46 @@ impl<'a, B: TerminalBackend> TerminalIoBroker<'a, B> {
         }
     }
 
+    pub fn suspend_for_job_control(&mut self) -> Result<(), TerminalIoBrokerError> {
+        if self.phase != TerminalIoPhase::Interactive {
+            return Err(TerminalIoBrokerError::InvalidPhaseTransition {
+                phase: self.phase,
+                attempted: "job-control suspend",
+            });
+        }
+        let Some(session) = self.session.as_mut() else {
+            return Err(TerminalIoBrokerError::InvalidPhaseTransition {
+                phase: self.phase,
+                attempted: "job-control suspend without session",
+            });
+        };
+        session
+            .suspend_for_job_control()
+            .map_err(TerminalIoBrokerError::TerminalRestore)?;
+        log::debug!("[terminal_io_broker] terminal released for job-control suspend");
+        Ok(())
+    }
+
+    pub fn resume_after_job_control(&mut self) -> Result<(), TerminalIoBrokerError> {
+        if self.phase != TerminalIoPhase::Interactive {
+            return Err(TerminalIoBrokerError::InvalidPhaseTransition {
+                phase: self.phase,
+                attempted: "job-control resume",
+            });
+        }
+        let Some(session) = self.session.as_mut() else {
+            return Err(TerminalIoBrokerError::InvalidPhaseTransition {
+                phase: self.phase,
+                attempted: "job-control resume without session",
+            });
+        };
+        session
+            .resume_after_job_control()
+            .map_err(TerminalIoBrokerError::TerminalStart)?;
+        log::debug!("[terminal_io_broker] terminal reclaimed after job-control resume");
+        Ok(())
+    }
+
     pub fn write_overlay_bytes(&mut self, bytes: &[u8]) -> Result<(), TerminalIoBrokerError> {
         if self.phase != TerminalIoPhase::Interactive {
             return Err(TerminalIoBrokerError::InvalidPhaseTransition {

@@ -18,6 +18,7 @@ pub mod ex_command;
 pub mod host_io;
 pub mod input_loop;
 pub mod input_router;
+pub mod job_control;
 pub mod markdown_structure;
 pub mod option_registry;
 pub mod optional_graphics;

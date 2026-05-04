@@ -1262,7 +1262,9 @@ async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
             UiEvent::Redraw
             | UiEvent::Shutdown(_)
             | UiEvent::MouseClick { .. }
-            | UiEvent::PastedText(_) => unreachable!(),
+            | UiEvent::PastedText(_)
+            | UiEvent::TerminalSuspendRequested
+            | UiEvent::TerminalResumed { .. } => unreachable!(),
         }
     }
 

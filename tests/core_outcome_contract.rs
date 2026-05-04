@@ -56,6 +56,13 @@ fn normalized_catalog_represents_scoped_outcomes_with_trace() {
                 "CoreHostAction::Quit",
             ),
         }),
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Suspend {
+            trace: trace(
+                16,
+                OutcomeOrigin::TransactionHostAction,
+                "CoreHostAction::Suspend",
+            ),
+        }),
         NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::VfsRequest {
             request: CoreVfsRequest::Resolve {
                 request_id: 9,
@@ -159,7 +166,7 @@ fn normalized_catalog_represents_scoped_outcomes_with_trace() {
         }),
     ]);
 
-    assert_eq!(batch.outcomes().len(), 15);
+    assert_eq!(batch.outcomes().len(), 16);
     assert!(
         batch.outcomes().iter().any(|outcome| matches!(
             outcome,
@@ -202,6 +209,7 @@ fn mapping_functions_cover_scoped_host_actions_without_silent_drop() {
             correlation_id: 4,
         },
         CoreHostAction::Bell,
+        CoreHostAction::Suspend,
         CoreHostAction::JobStart(CoreJobStartRequest {
             job_id: 5,
             argv: vec!["make".to_string()],
@@ -265,14 +273,18 @@ fn mapping_functions_cover_scoped_host_actions_without_silent_drop() {
     ));
     assert!(matches!(
         normalized[6],
-        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStart { .. })
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Suspend { .. })
     ));
     assert!(matches!(
         normalized[7],
-        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobWrite { .. })
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStart { .. })
     ));
     assert!(matches!(
         normalized[8],
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobWrite { .. })
+    ));
+    assert!(matches!(
+        normalized[9],
         NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::JobStop { .. })
     ));
 }

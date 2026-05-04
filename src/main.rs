@@ -24,6 +24,9 @@ use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command}
 use saya::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::input_loop::CrosstermEventSource;
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::job_control::{
+    start_job_control_signal_watcher, suspend_current_process_for_job_control,
+};
 use saya::markdown_structure::{MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey};
 use saya::optional_graphics::{OptionalGraphicsAdapter, OverlayTerminalWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
@@ -42,8 +45,11 @@ use saya::screen_model::{
 };
 use saya::search_query::{SearchStateError, SearchVisibleState};
 use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
-use saya::structural_refresh::{StructuralRefresh, StructuralRefreshOutcome};
+use saya::structural_refresh::{
+    RedrawPlan, RedrawPlanSource, StructuralRefresh, StructuralRefreshOutcome,
+};
 use saya::terminal_capability::TerminalCapabilityProbe;
+use saya::terminal_lifecycle::TerminalBackend;
 use saya::terminal_lifecycle::TerminalSize;
 use saya::tui_render_coordinator::{RenderFrameError, TuiRenderCoordinator};
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
@@ -70,6 +76,7 @@ struct MainOutcomeAccumulator {
     projection: NotificationPromptProjectionState,
     last_projection_frame: Option<ProjectionFrame>,
     last_structural_refresh: Option<StructuralRefreshOutcome>,
+    suspend_requested: bool,
 }
 
 #[tokio::main]
@@ -146,6 +153,7 @@ async fn main() {
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
+    let mut terminal_display_redraw_plan: Option<RedrawPlan> = None;
 
     let mut startup_runtime_redraw = false;
     let startup_shutdown_reason = dispatch_buffer_open_with_runtime(
@@ -160,6 +168,13 @@ async fn main() {
 
     // イベントループ初期化
     let (mut coordinator, sender) = EventLoopCoordinator::new();
+    let job_control_watcher = match start_job_control_signal_watcher(sender.clone()) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            log::debug!("[main] job-control signal watcher unavailable: {}", error);
+            None
+        }
+    };
 
     log::debug!(
         "[main] terminal capability profile resolved before interactive input: {:?}",
@@ -596,6 +611,33 @@ async fn main() {
                         log::debug!("[main] explicit redraw event received in drain");
                         need_redraw = true;
                     }
+                    UiEvent::TerminalSuspendRequested => {
+                        log::debug!("[main] terminal suspend event received in drain");
+                        perform_job_control_suspend_cycle(
+                            &mut terminal_broker,
+                            &mut need_redraw,
+                            &mut terminal_display_redraw_plan,
+                        );
+                    }
+                    UiEvent::TerminalResumed { columns, rows } => {
+                        log::debug!(
+                            "[main] terminal resume event received in drain: columns={}, rows={}",
+                            columns,
+                            rows
+                        );
+                        if let Err(error) = terminal_broker.resume_after_job_control() {
+                            log::debug!("[main] terminal resume reclaim failed: {error}");
+                            transient_msg = Some(format!("Terminal resume failed: {error}"));
+                        }
+                        terminal_broker.record_resize(TerminalSize { columns, rows });
+                        terminal_display_redraw_plan =
+                            Some(terminal_display_invalidated_redraw_plan());
+                        trace_job_control_diagnostic(format_args!(
+                            "SIGCONT resume requested full terminal redraw: columns={}, rows={}",
+                            columns, rows
+                        ));
+                        need_redraw = true;
+                    }
                     UiEvent::MouseClick { column, row } => {
                         log::debug!(
                             "[main] processing mouse click event at terminal coordinates: column={}, row={}",
@@ -704,6 +746,16 @@ async fn main() {
                 need_redraw = true;
             }
 
+            if outcome_accumulator.suspend_requested {
+                log::debug!("[main] processing core-requested job-control suspend");
+                outcome_accumulator.suspend_requested = false;
+                perform_job_control_suspend_cycle(
+                    &mut terminal_broker,
+                    &mut need_redraw,
+                    &mut terminal_display_redraw_plan,
+                );
+            }
+
             if need_redraw {
                 let (terminal_width, terminal_height) = current_terminal_size();
                 if sync_core_screen_size_if_changed(
@@ -720,18 +772,24 @@ async fn main() {
                         &mut need_redraw,
                     );
                 }
-                match render_command_line_only_redraw_if_possible(
-                    &mut render_coordinator,
-                    Some(&mut terminal_broker),
-                    &mut last_workspace_model,
-                    outcome_accumulator.last_structural_refresh.as_ref(),
-                    command_line_prompt,
-                    command_line_edit.buffer(),
-                    command_line_edit.cursor_byte_index(),
-                    session_state.tab_size(),
-                ) {
-                    CommandLineOnlyRedraw::Rendered => continue 'main,
-                    CommandLineOnlyRedraw::NotApplicable | CommandLineOnlyRedraw::Fallback => {}
+                if terminal_display_redraw_plan.is_none() {
+                    match render_command_line_only_redraw_if_possible(
+                        &mut render_coordinator,
+                        Some(&mut terminal_broker),
+                        &mut last_workspace_model,
+                        outcome_accumulator.last_structural_refresh.as_ref(),
+                        command_line_prompt,
+                        command_line_edit.buffer(),
+                        command_line_edit.cursor_byte_index(),
+                        session_state.tab_size(),
+                    ) {
+                        CommandLineOnlyRedraw::Rendered => continue 'main,
+                        CommandLineOnlyRedraw::NotApplicable | CommandLineOnlyRedraw::Fallback => {}
+                    }
+                } else {
+                    trace_job_control_diagnostic(format_args!(
+                        "command-line-only redraw bypassed because terminal display was invalidated"
+                    ));
                 }
                 let redraw_result = build_workspace_render_output(
                     &mut outcome,
@@ -750,13 +808,26 @@ async fn main() {
                     terminal_height,
                 );
                 let redraw_failure = redraw_result.as_ref().err().map(ToString::to_string);
-                match render_coordinator.render_workspace_result_with_structural_refresh(
-                    redraw_result,
-                    &capability_profile,
-                    &runtime_presentation_intents,
-                    Some(&mut terminal_broker),
+                let redraw_plan = effective_workspace_redraw_plan(
                     outcome_accumulator.last_structural_refresh.as_ref(),
-                ) {
+                    terminal_display_redraw_plan.as_ref(),
+                );
+                trace_job_control_diagnostic(format_args!(
+                    "rendering resumed terminal with redraw plan: requested={}, full={}, clear_before_draw={}, source={:?}",
+                    redraw_plan.requested,
+                    redraw_plan.full,
+                    redraw_plan.clear_before_draw,
+                    redraw_plan.source
+                ));
+                match render_coordinator
+                    .render_workspace_result_with_structural_refresh_and_redraw_plan(
+                        redraw_result,
+                        &capability_profile,
+                        &runtime_presentation_intents,
+                        Some(&mut terminal_broker),
+                        outcome_accumulator.last_structural_refresh.as_ref(),
+                        redraw_plan,
+                    ) {
                     Ok(render_output) => {
                         if let Some(message) = redraw_failure {
                             transient_msg = Some(message);
@@ -768,6 +839,7 @@ async fn main() {
                             &outcome.core_bridge.snapshot().text,
                             &render_output.rendered_workspace,
                         );
+                        terminal_display_redraw_plan = None;
                     }
                     Err(error) => {
                         transient_msg = Some(error.to_string());
@@ -792,6 +864,7 @@ async fn main() {
     log::debug!("[main] requesting terminal broker shutdown");
     terminal_broker.request_shutdown();
     drop(sender);
+    drop(job_control_watcher);
 
     drop(render_coordinator);
     log::debug!("[main] dropping editor outcome for session cleanup");
@@ -1296,6 +1369,13 @@ async fn process_pending_host_actions_with_runtime(
                         merge_shutdown_reason(&mut shutdown_reason, Some(reason));
                     }
                 }
+                NormalizedHostDirective::Suspend { trace } => {
+                    log::debug!(
+                        "[main] processing normalized suspend directive: sequence={}",
+                        trace.sequence
+                    );
+                    outcome_accumulator.suspend_requested = true;
+                }
                 NormalizedHostDirective::VfsRequest { request, trace } => {
                     log::debug!(
                         "[main] processing normalized VFS directive: sequence={}, request={:?}",
@@ -1452,6 +1532,13 @@ fn process_pending_host_actions_without_runtime(
                     {
                         return Some(reason);
                     }
+                }
+                NormalizedHostDirective::Suspend { trace } => {
+                    log::debug!(
+                        "[main] processing normalized suspend directive without runtime: sequence={}",
+                        trace.sequence
+                    );
+                    outcome_accumulator.suspend_requested = true;
                 }
                 NormalizedHostDirective::VfsRequest { request, trace } => {
                     log::debug!(
@@ -1746,6 +1833,12 @@ fn execute_runtime_host_command_through_core(
                 merge_runtime_shutdown_intent(
                     &mut effect.shutdown_intent,
                     runtime_shutdown_intent_from_quit_decision(force, decision),
+                );
+            }
+            NormalizedHostDirective::Suspend { trace } => {
+                log::debug!(
+                    "[main] runtime host command observed suspend directive but cannot suspend outside interactive terminal loop: sequence={}",
+                    trace.sequence
                 );
             }
             NormalizedHostDirective::VfsRequest { request, trace } => {
@@ -2200,6 +2293,86 @@ fn normal_quit_warning_message() -> &'static str {
 
 fn current_terminal_size() -> (u16, u16) {
     crossterm::terminal::size().unwrap_or((80, 24))
+}
+
+fn perform_job_control_suspend_cycle<B: TerminalBackend>(
+    terminal_broker: &mut saya::terminal_io_broker::TerminalIoBroker<'_, B>,
+    need_redraw: &mut bool,
+    terminal_display_redraw_plan: &mut Option<RedrawPlan>,
+) {
+    log::debug!("[main] starting job-control suspend cycle");
+    trace_job_control_diagnostic(format_args!("starting job-control suspend cycle"));
+    if let Err(error) = terminal_broker.suspend_for_job_control() {
+        log::debug!("[main] terminal release before suspend failed: {error}");
+        trace_job_control_diagnostic(format_args!(
+            "terminal release before suspend failed: {error}"
+        ));
+        *need_redraw = true;
+        return;
+    }
+
+    if let Err(error) = suspend_current_process_for_job_control() {
+        log::debug!("[main] process suspend failed: {error}");
+        trace_job_control_diagnostic(format_args!("process suspend failed: {error}"));
+    }
+
+    if let Err(error) = terminal_broker.resume_after_job_control() {
+        log::debug!("[main] terminal reclaim after suspend failed: {error}");
+        trace_job_control_diagnostic(format_args!(
+            "terminal reclaim after suspend failed: {error}"
+        ));
+        *need_redraw = true;
+        return;
+    }
+
+    let (columns, rows) = current_terminal_size();
+    terminal_broker.record_resize(TerminalSize { columns, rows });
+    log::debug!(
+        "[main] completed job-control suspend cycle: columns={}, rows={}",
+        columns,
+        rows
+    );
+    *terminal_display_redraw_plan = Some(terminal_display_invalidated_redraw_plan());
+    trace_job_control_diagnostic(format_args!(
+        "completed job-control suspend cycle; full terminal redraw required: columns={}, rows={}",
+        columns, rows
+    ));
+    *need_redraw = true;
+}
+
+fn terminal_display_invalidated_redraw_plan() -> RedrawPlan {
+    RedrawPlan {
+        requested: true,
+        full: true,
+        clear_before_draw: true,
+        required_by_structure_change: false,
+        source: RedrawPlanSource::TerminalDisplayInvalidation,
+        coalesced_count: 0,
+    }
+}
+
+fn effective_workspace_redraw_plan(
+    structural_refresh: Option<&StructuralRefreshOutcome>,
+    terminal_display_redraw_plan: Option<&RedrawPlan>,
+) -> RedrawPlan {
+    let mut plan = structural_refresh
+        .map(|refresh| refresh.redraw_plan.clone())
+        .unwrap_or_default();
+    let Some(terminal_plan) = terminal_display_redraw_plan else {
+        return plan;
+    };
+
+    plan.requested |= terminal_plan.requested;
+    plan.full |= terminal_plan.full;
+    plan.clear_before_draw |= terminal_plan.clear_before_draw;
+    plan.required_by_structure_change |= terminal_plan.required_by_structure_change;
+    plan.coalesced_count += terminal_plan.coalesced_count;
+    plan.source = if terminal_plan.requested {
+        RedrawPlanSource::TerminalDisplayInvalidation
+    } else {
+        plan.source
+    };
+    plan
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -3098,6 +3271,14 @@ fn trace_redraw_diagnostic(args: std::fmt::Arguments<'_>) {
     log::debug!("[redraw_diagnostic] {message}");
     if std::env::var_os("SAYA_TRACE_REDRAW").is_some() {
         eprintln!("[saya-trace][redraw] {message}");
+    }
+}
+
+fn trace_job_control_diagnostic(args: std::fmt::Arguments<'_>) {
+    let message = args.to_string();
+    log::debug!("[job_control_diagnostic] {message}");
+    if std::env::var_os("SAYA_TRACE_JOB_CONTROL").is_some() {
+        eprintln!("[saya-trace][job-control] {message}");
     }
 }
 
@@ -4262,6 +4443,46 @@ mod tests {
         assert!(
             structural_refresh_is_idle(Some(refresh)),
             "a structural refresh that has already been rendered must not force the next command-line key into a full redraw"
+        );
+    }
+
+    #[test]
+    fn terminal_display_invalidation_forces_full_clear_redraw_without_core_changes() {
+        let redraw_plan = effective_workspace_redraw_plan(
+            None,
+            Some(&terminal_display_invalidated_redraw_plan()),
+        );
+
+        assert!(redraw_plan.requested);
+        assert!(redraw_plan.full);
+        assert!(redraw_plan.clear_before_draw);
+        assert_eq!(
+            redraw_plan.source,
+            saya::structural_refresh::RedrawPlanSource::TerminalDisplayInvalidation
+        );
+    }
+
+    #[test]
+    fn terminal_display_invalidation_overrides_idle_structural_refresh_for_resume() {
+        let idle_refresh =
+            StructuralRefresh::from_folded_effects(&saya::core_outcome::StructuralEffectSet {
+                redraw: None,
+                invalidate_buffers: vec![],
+                invalidate_windows: vec![],
+                layout_dirty: false,
+            });
+
+        let redraw_plan = effective_workspace_redraw_plan(
+            Some(&idle_refresh),
+            Some(&terminal_display_invalidated_redraw_plan()),
+        );
+
+        assert!(redraw_plan.requested);
+        assert!(redraw_plan.full);
+        assert!(redraw_plan.clear_before_draw);
+        assert_eq!(
+            redraw_plan.source,
+            saya::structural_refresh::RedrawPlanSource::TerminalDisplayInvalidation
         );
     }
 

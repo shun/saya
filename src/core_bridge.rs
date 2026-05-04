@@ -1119,6 +1119,13 @@ fn legacy_host_action_from_normalized(outcome: NormalizedCoreOutcome) -> Option<
                 issued_after_revision,
             })
         }
+        NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Suspend { trace }) => {
+            log::debug!(
+                "[core_bridge] projected legacy suspend host action: sequence={}",
+                trace.sequence
+            );
+            Some(CoreHostAction::Suspend)
+        }
         NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::VfsRequest {
             request,
             trace,

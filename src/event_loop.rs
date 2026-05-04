@@ -22,6 +22,10 @@ pub enum UiEvent {
     MouseClick { column: u16, row: u16 },
     /// ブラケットペースト入力
     PastedText(String),
+    /// job control による suspend 要求
+    TerminalSuspendRequested,
+    /// foreground 復帰後の terminal 再初期化要求
+    TerminalResumed { columns: u16, rows: u16 },
 }
 
 /// 終了要求の理由。
@@ -144,6 +148,19 @@ impl EventLoopCoordinator {
                 log::debug!(
                     "[event_loop] pasted text event processed: chars={}",
                     text.chars().count()
+                );
+                self.redraw_pending = true;
+                LoopAction::NeedRedraw
+            }
+            UiEvent::TerminalSuspendRequested => {
+                log::debug!("[event_loop] terminal suspend request processed");
+                LoopAction::Continue
+            }
+            UiEvent::TerminalResumed { columns, rows } => {
+                log::debug!(
+                    "[event_loop] terminal resume event processed: columns={}, rows={}",
+                    columns,
+                    rows
                 );
                 self.redraw_pending = true;
                 LoopAction::NeedRedraw
@@ -421,6 +438,55 @@ mod tests {
             LoopAction::NeedRedraw,
             "ペーストイベントは NeedRedraw を返すこと"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_resume_event_requests_redraw_and_preserves_size_payload() {
+        let (mut coordinator, sender) = EventLoopCoordinator::new();
+
+        sender
+            .send(UiEvent::TerminalResumed {
+                columns: 132,
+                rows: 43,
+            })
+            .await
+            .expect("send should succeed");
+
+        let action = coordinator.next_action().await;
+        assert_eq!(
+            action,
+            LoopAction::NeedRedraw,
+            "foreground 復帰は redraw を要求すること"
+        );
+        let drained = coordinator.drain_pending();
+        assert_eq!(
+            drained,
+            vec![UiEvent::TerminalResumed {
+                columns: 132,
+                rows: 43,
+            }],
+            "復帰時の terminal size は main loop へ渡すこと"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_suspend_request_is_preserved_without_preemptive_redraw() {
+        let (mut coordinator, sender) = EventLoopCoordinator::new();
+
+        sender
+            .send(UiEvent::TerminalSuspendRequested)
+            .await
+            .expect("send should succeed");
+
+        let action = coordinator.next_action().await;
+        assert_eq!(
+            action,
+            LoopAction::Continue,
+            "suspend 前は redraw ではなく terminal release を優先すること"
+        );
+        let drained = coordinator.drain_pending();
+        assert_eq!(drained, vec![UiEvent::TerminalSuspendRequested]);
+        assert!(!coordinator.take_redraw_pending());
     }
 
     #[tokio::test]

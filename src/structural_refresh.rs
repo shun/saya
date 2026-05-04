@@ -97,6 +97,7 @@ pub enum RedrawPlanSource {
     ExplicitCore,
     StructuralInvalidation,
     ExplicitAndStructural,
+    TerminalDisplayInvalidation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -141,6 +141,25 @@ impl TuiRenderCoordinator {
         let redraw_plan = structural_refresh
             .map(|refresh| refresh.redraw_plan.clone())
             .unwrap_or_default();
+        self.render_workspace_result_with_structural_refresh_and_redraw_plan(
+            render_result,
+            capabilities,
+            runtime_effects,
+            overlay_writer,
+            structural_refresh,
+            redraw_plan,
+        )
+    }
+
+    pub fn render_workspace_result_with_structural_refresh_and_redraw_plan<E: fmt::Display>(
+        &mut self,
+        render_result: Result<WorkspaceScreenModel, E>,
+        capabilities: &TerminalCapabilityProfile,
+        runtime_effects: &[RuntimePresentationIntent],
+        overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+        structural_refresh: Option<&StructuralRefreshOutcome>,
+        redraw_plan: RedrawPlan,
+    ) -> Result<TuiRenderOutcome, RenderFrameError> {
         self.render_workspace_result_with_context(
             render_result,
             capabilities,

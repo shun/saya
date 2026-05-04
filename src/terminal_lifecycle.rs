@@ -17,7 +17,8 @@ pub struct TerminalSession<'a, B: TerminalBackend> {
     alternate_screen_enabled: bool,
     mouse_capture_enabled: bool,
     bracketed_paste_enabled: bool,
-    cursor_style_changed: bool,
+    current_cursor_style: Option<ScreenCursorStyle>,
+    suspended: bool,
     restored: bool,
     latest_size: Option<TerminalSize>,
     redraw_requested: bool,
@@ -67,7 +68,109 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
     pub fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> io::Result<()> {
         log::debug!("[terminal] applying cursor style: style={style:?}");
         self.backend.set_cursor_style(style)?;
-        self.cursor_style_changed = true;
+        self.current_cursor_style = Some(style);
+        Ok(())
+    }
+
+    pub fn suspend_for_job_control(&mut self) -> Result<(), TerminalRestoreError> {
+        if self.restored {
+            log::debug!("[terminal] job-control suspend skipped: already restored");
+            return Ok(());
+        }
+        if self.suspended {
+            log::debug!("[terminal] job-control suspend skipped: already suspended");
+            return Ok(());
+        }
+
+        log::debug!("[terminal] releasing terminal for job-control suspend");
+        self.release_terminal_modes()?;
+        self.suspended = true;
+        Ok(())
+    }
+
+    pub fn resume_after_job_control(&mut self) -> Result<(), TerminalStartError> {
+        if self.restored {
+            log::debug!("[terminal] job-control resume rejected: session already restored");
+            return Err(TerminalStartError::RawModeFailed {
+                message: "terminal session already restored".to_string(),
+            });
+        }
+        if !self.suspended {
+            log::debug!(
+                "[terminal] job-control resume requested while terminal is already claimed"
+            );
+            self.redraw_requested = true;
+            return Ok(());
+        }
+
+        log::debug!("[terminal] reclaiming terminal after job-control resume");
+        self.backend
+            .enable_raw_mode()
+            .map_err(|error| TerminalStartError::RawModeFailed {
+                message: error.to_string(),
+            })?;
+        self.raw_mode_enabled = true;
+        log::debug!("[terminal] raw mode re-enabled after resume");
+
+        if let Err(error) = self.backend.enter_alternate_screen() {
+            log::debug!(
+                "[terminal] resume alternate screen failed, rolling back raw mode: {}",
+                error
+            );
+            let _ = self.backend.disable_raw_mode();
+            self.raw_mode_enabled = false;
+            return Err(TerminalStartError::AlternateScreenFailed {
+                message: error.to_string(),
+            });
+        }
+        self.alternate_screen_enabled = true;
+        log::debug!("[terminal] alternate screen re-entered after resume");
+
+        if let Err(error) = self.backend.enable_mouse_capture() {
+            log::debug!(
+                "[terminal] resume mouse capture failed, rolling back alternate screen and raw mode: {}",
+                error
+            );
+            let _ = self.backend.leave_alternate_screen();
+            let _ = self.backend.disable_raw_mode();
+            self.alternate_screen_enabled = false;
+            self.raw_mode_enabled = false;
+            return Err(TerminalStartError::MouseCaptureFailed {
+                message: error.to_string(),
+            });
+        }
+        self.mouse_capture_enabled = true;
+        log::debug!("[terminal] mouse capture re-enabled after resume");
+
+        if let Err(error) = self.backend.enable_bracketed_paste() {
+            log::debug!(
+                "[terminal] resume bracketed paste failed, rolling back terminal claim: {}",
+                error
+            );
+            let _ = self.backend.disable_mouse_capture();
+            let _ = self.backend.leave_alternate_screen();
+            let _ = self.backend.disable_raw_mode();
+            self.mouse_capture_enabled = false;
+            self.alternate_screen_enabled = false;
+            self.raw_mode_enabled = false;
+            return Err(TerminalStartError::BracketedPasteFailed {
+                message: error.to_string(),
+            });
+        }
+        self.bracketed_paste_enabled = true;
+        log::debug!("[terminal] bracketed paste re-enabled after resume");
+
+        if let Some(style) = self.current_cursor_style {
+            self.backend.set_cursor_style(style).map_err(|error| {
+                TerminalStartError::CursorStyleFailed {
+                    message: error.to_string(),
+                }
+            })?;
+            log::debug!("[terminal] cursor style re-applied after resume: style={style:?}");
+        }
+
+        self.suspended = false;
+        self.redraw_requested = true;
         Ok(())
     }
 
@@ -82,8 +185,14 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
         }
 
         log::debug!("[terminal] restoring terminal lifecycle");
+        self.release_terminal_modes()?;
+        self.restored = true;
+        log::debug!("[terminal] terminal lifecycle restored");
+        Ok(())
+    }
 
-        let reset_cursor_style_error = if self.cursor_style_changed {
+    fn release_terminal_modes(&mut self) -> Result<(), TerminalRestoreError> {
+        let reset_cursor_style_error = if self.current_cursor_style.is_some() {
             log::debug!("[terminal] resetting cursor style");
             self.backend.reset_cursor_style().err().map(|error| {
                 log::debug!("[terminal] reset cursor style failed: {}", error);
@@ -134,11 +243,9 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
         };
 
         self.bracketed_paste_enabled = false;
-        self.cursor_style_changed = false;
         self.mouse_capture_enabled = false;
         self.alternate_screen_enabled = false;
         self.raw_mode_enabled = false;
-        self.restored = true;
 
         match (
             disable_bracketed_paste_error,
@@ -147,10 +254,7 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
             disable_raw_mode_error,
             reset_cursor_style_error,
         ) {
-            (None, None, None, None, None) => {
-                log::debug!("[terminal] terminal lifecycle restored");
-                Ok(())
-            }
+            (None, None, None, None, None) => Ok(()),
             (
                 disable_bracketed_paste,
                 disable_mouse_capture,
@@ -187,6 +291,7 @@ pub enum TerminalStartError {
     AlternateScreenFailed { message: String },
     MouseCaptureFailed { message: String },
     BracketedPasteFailed { message: String },
+    CursorStyleFailed { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,7 +405,8 @@ impl TerminalLifecycle {
             alternate_screen_enabled: true,
             mouse_capture_enabled: true,
             bracketed_paste_enabled: true,
-            cursor_style_changed: false,
+            current_cursor_style: None,
+            suspended: false,
             restored: false,
             latest_size: None,
             redraw_requested: false,
@@ -554,6 +660,97 @@ mod tests {
         assert_eq!(
             backend.calls,
             vec![
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "set_cursor_style_steady_bar",
+                "reset_cursor_style",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
+    fn suspend_releases_terminal_without_marking_session_restored() {
+        let mut backend = RecordingBackend::default();
+
+        let mut session = TerminalLifecycle::start(&mut backend).expect("terminal start");
+        session
+            .suspend_for_job_control()
+            .expect("job-control suspend should release terminal");
+
+        assert!(!session.is_raw_mode_enabled());
+        assert!(!session.is_alternate_screen_enabled());
+
+        session
+            .resume_after_job_control()
+            .expect("resume should reclaim terminal");
+        assert!(session.is_raw_mode_enabled());
+        assert!(session.is_alternate_screen_enabled());
+        assert!(session.take_redraw_request());
+        session
+            .restore()
+            .expect("restore after resume should succeed");
+
+        assert_eq!(
+            backend.calls,
+            vec![
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_reapplies_cursor_style_and_requests_redraw() {
+        let mut backend = RecordingBackend::default();
+
+        let mut session = TerminalLifecycle::start(&mut backend).expect("terminal start");
+        session
+            .set_cursor_style(ScreenCursorStyle::SteadyBar)
+            .expect("cursor style should apply");
+        session
+            .suspend_for_job_control()
+            .expect("job-control suspend should release terminal");
+        session
+            .resume_after_job_control()
+            .expect("resume should reclaim terminal");
+
+        assert!(session.is_redraw_requested());
+        session
+            .restore()
+            .expect("restore after resume should succeed");
+        assert_eq!(
+            backend.calls,
+            vec![
+                "enable_raw_mode",
+                "enter_alternate_screen",
+                "enable_mouse_capture",
+                "enable_bracketed_paste",
+                "set_cursor_style_steady_bar",
+                "reset_cursor_style",
+                "disable_bracketed_paste",
+                "disable_mouse_capture",
+                "leave_alternate_screen",
+                "disable_raw_mode",
                 "enable_raw_mode",
                 "enter_alternate_screen",
                 "enable_mouse_capture",

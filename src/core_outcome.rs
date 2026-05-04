@@ -55,6 +55,9 @@ pub enum NormalizedHostDirective {
         issued_after_revision: u64,
         trace: OutcomeTrace,
     },
+    Suspend {
+        trace: OutcomeTrace,
+    },
     VfsRequest {
         request: CoreVfsRequest,
         trace: OutcomeTrace,
@@ -79,6 +82,7 @@ impl NormalizedHostDirective {
         match self {
             Self::Write { trace, .. }
             | Self::Quit { trace, .. }
+            | Self::Suspend { trace }
             | Self::VfsRequest { trace, .. }
             | Self::JobStart { trace, .. }
             | Self::JobWrite { trace, .. }
@@ -184,6 +188,7 @@ pub fn core_host_action_raw_kind(action: &CoreHostAction) -> &'static str {
     match action {
         CoreHostAction::Write { .. } => "CoreHostAction::Write",
         CoreHostAction::Quit { .. } => "CoreHostAction::Quit",
+        CoreHostAction::Suspend => "CoreHostAction::Suspend",
         CoreHostAction::VfsRequest(_) => "CoreHostAction::VfsRequest",
         CoreHostAction::Redraw { .. } => "CoreHostAction::Redraw",
         CoreHostAction::RequestInput { .. } => "CoreHostAction::RequestInput",
@@ -235,6 +240,9 @@ pub fn normalize_host_action(
             issued_after_revision: *issued_after_revision,
             trace,
         }),
+        CoreHostAction::Suspend => {
+            NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::Suspend { trace })
+        }
         CoreHostAction::VfsRequest(request) => {
             NormalizedCoreOutcome::HostDirective(NormalizedHostDirective::VfsRequest {
                 request: request.clone(),

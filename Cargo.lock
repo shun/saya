@@ -1436,6 +1436,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "signal-hook",
  "tokio",
  "unicode-width 0.2.0",
  "vim-core-rs",

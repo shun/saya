@@ -59,7 +59,9 @@ fn drain_host_actions_once(bridge: &mut CoreBridge, runtime: &mut CoreHostAction
             NormalizedHostDirective::JobStop { job_id, .. } => runtime
                 .stop_job(bridge, job_id)
                 .expect("job stop should be handled"),
-            NormalizedHostDirective::Write { .. } | NormalizedHostDirective::Quit { .. } => {}
+            NormalizedHostDirective::Write { .. }
+            | NormalizedHostDirective::Quit { .. }
+            | NormalizedHostDirective::Suspend { .. } => {}
         }
     }
     runtime
