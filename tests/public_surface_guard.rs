@@ -108,8 +108,8 @@ fn tree_sitter_syntax_feature_uses_stable_name_without_worker_compatibility_path
         .expect("Cargo manifest should be readable from the repository root");
 
     assert!(
-        manifest.contains("[features]\ndefault = []\ntree-sitter-syntax = ["),
-        "Cargo feature should expose the stable tree-sitter-syntax name"
+        manifest.contains("[features]\ndefault = [\"tree-sitter-syntax\"]\ntree-sitter-syntax = ["),
+        "default release builds should include the stable tree-sitter-syntax feature"
     );
     assert!(
         manifest.contains("\"vim-core-rs/tree-sitter-syntax\""),
