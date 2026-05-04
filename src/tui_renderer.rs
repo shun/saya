@@ -1,6 +1,9 @@
 #[cfg(test)]
 use crate::screen_model::{CommandLineModel, PaneRect};
-use crate::screen_model::{ScreenCursorStyle, ScreenModel, WorkspaceScreenModel};
+use crate::screen_model::{
+    ScreenCursorStyle, ScreenModel, ScreenSyntaxCategory, ScreenSyntaxModifier,
+    ScreenTreeSitterSyntax, WorkspaceScreenModel,
+};
 use crate::terminal_lifecycle::TerminalBackend;
 use crossterm::{cursor, event, execute, terminal};
 use ratatui::Terminal;
@@ -521,9 +524,23 @@ fn render_line(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenderOverlayKind {
-    Syntax(Option<&'static str>),
+    Syntax(RenderSyntaxStyle),
     VisualSelection,
     Search(crate::search_query::SearchMatchKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderSyntaxStyle {
+    vim_family: Option<&'static str>,
+    tree_sitter: Option<RenderTreeSitterSyntaxStyle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderTreeSitterSyntaxStyle {
+    category: ScreenSyntaxCategory,
+    definition: bool,
+    documentation: bool,
+    deprecated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,7 +562,7 @@ fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<Ren
             .map(|chunk| RenderOverlayRange {
                 start_col: usize::from(chunk.start_col),
                 end_col_exclusive: usize::from(chunk.end_col_exclusive),
-                kind: RenderOverlayKind::Syntax(syntax_family(chunk.name.as_deref())),
+                kind: RenderOverlayKind::Syntax(syntax_style(chunk)),
             }),
     );
 
@@ -650,7 +667,7 @@ fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) ->
         return Style::default();
     }
     match kind {
-        RenderOverlayKind::Syntax(family) => style_for_syntax_family(family, text_mode),
+        RenderOverlayKind::Syntax(style) => style_for_syntax(style, text_mode),
         RenderOverlayKind::VisualSelection => Style::default().add_modifier(Modifier::REVERSED),
         RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => {
             Style::default()
@@ -665,6 +682,70 @@ fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) ->
             Style::default().fg(Color::Black).bg(Color::Yellow)
         }
     }
+}
+
+fn syntax_style(chunk: &crate::screen_model::ScreenSyntaxChunk) -> RenderSyntaxStyle {
+    RenderSyntaxStyle {
+        vim_family: syntax_family(chunk.name.as_deref()),
+        tree_sitter: chunk.tree_sitter.as_ref().map(tree_sitter_syntax_style),
+    }
+}
+
+fn tree_sitter_syntax_style(syntax: &ScreenTreeSitterSyntax) -> RenderTreeSitterSyntaxStyle {
+    RenderTreeSitterSyntaxStyle {
+        category: syntax.category,
+        definition: syntax.modifiers.contains(&ScreenSyntaxModifier::Definition),
+        documentation: syntax
+            .modifiers
+            .contains(&ScreenSyntaxModifier::Documentation),
+        deprecated: syntax.modifiers.contains(&ScreenSyntaxModifier::Deprecated),
+    }
+}
+
+fn style_for_syntax(style: RenderSyntaxStyle, text_mode: RenderTextMode) -> Style {
+    if let Some(tree_sitter) = style.tree_sitter {
+        return style_for_tree_sitter_syntax(tree_sitter, text_mode);
+    }
+    style_for_syntax_family(style.vim_family, text_mode)
+}
+
+fn style_for_tree_sitter_syntax(
+    syntax: RenderTreeSitterSyntaxStyle,
+    text_mode: RenderTextMode,
+) -> Style {
+    if text_mode == RenderTextMode::Plain {
+        return Style::default();
+    }
+    let mut style = match syntax.category {
+        ScreenSyntaxCategory::Comment => Style::default().fg(Color::DarkGray),
+        ScreenSyntaxCategory::String => Style::default().fg(Color::Green),
+        ScreenSyntaxCategory::Constant | ScreenSyntaxCategory::Number => {
+            Style::default().fg(Color::Magenta)
+        }
+        ScreenSyntaxCategory::Keyword | ScreenSyntaxCategory::Operator => {
+            Style::default().fg(Color::Cyan)
+        }
+        ScreenSyntaxCategory::Function
+        | ScreenSyntaxCategory::Constructor
+        | ScreenSyntaxCategory::Type
+        | ScreenSyntaxCategory::Variable
+        | ScreenSyntaxCategory::Property
+        | ScreenSyntaxCategory::Attribute => Style::default().fg(Color::Yellow),
+        ScreenSyntaxCategory::Markup | ScreenSyntaxCategory::Tag | ScreenSyntaxCategory::Label => {
+            Style::default().fg(Color::Blue)
+        }
+        ScreenSyntaxCategory::Module
+        | ScreenSyntaxCategory::Punctuation
+        | ScreenSyntaxCategory::Text
+        | ScreenSyntaxCategory::Unknown => Style::default().fg(Color::White),
+    };
+    if syntax.definition || syntax.documentation {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if syntax.deprecated {
+        style = style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    style
 }
 
 fn syntax_family(name: Option<&str>) -> Option<&'static str> {
@@ -1223,6 +1304,7 @@ mod tests {
             end_col_exclusive: 12,
             syn_id: 7,
             name: Some("Keyword".to_string()),
+            tree_sitter: None,
         }];
         model.line_projections = vec![projection("# Heading", "Heading", 5)];
 
@@ -1295,6 +1377,7 @@ mod tests {
                 end_col_exclusive: 3,
                 syn_id: 7,
                 name: Some("Keyword".to_string()),
+                tree_sitter: None,
             }],
             message_line: None,
             command_cursor_col: None,
@@ -1315,6 +1398,62 @@ mod tests {
             "let value   ",
             "syntax styling must not alter rendered line text"
         );
+    }
+
+    #[test]
+    fn tree_sitter_syntax_styles_use_category_and_modifier_not_capture_name() {
+        use crate::screen_model::{
+            ScreenSyntaxCategory, ScreenSyntaxModifier, ScreenTreeSitterSyntax,
+        };
+
+        let model = ScreenModel {
+            window_id: 1,
+            buffer_id: 1,
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 12,
+                height: 3,
+            },
+            file_name: "test.rs".to_string(),
+            mode_label: "NORMAL".to_string(),
+            cursor_style: ScreenCursorStyle::Block,
+            dirty: false,
+            lines: vec!["fn value".to_string()],
+            line_projections: vec![],
+            cursor_row: 0,
+            cursor_col: 0,
+            visual_selection: None,
+            search_overlays: vec![],
+            syntax_chunks: vec![ScreenSyntaxChunk {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 2,
+                syn_id: 0,
+                name: Some("ignored.capture".to_string()),
+                tree_sitter: Some(ScreenTreeSitterSyntax {
+                    category: ScreenSyntaxCategory::Keyword,
+                    modifiers: vec![ScreenSyntaxModifier::Definition],
+                    capture_name: "ignored.capture".to_string(),
+                }),
+            }],
+            message_line: None,
+            command_cursor_col: None,
+            is_active: true,
+        };
+
+        let text = render_buffer_text(&model, 12, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "fn");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            "Tree-sitter styling must use normalized category/modifier data"
+        );
+        assert_eq!(line.spans[1].content.as_ref(), " value");
     }
 
     #[test]

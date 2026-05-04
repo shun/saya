@@ -2215,6 +2215,9 @@ fn build_workspace_render_output(
     )?;
     let syntax_lines =
         collect_workspace_syntax_lines(&outcome.core_bridge, &snapshot, viewport_store);
+    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    let tree_sitter_syntax =
+        collect_workspace_tree_sitter_syntax(&mut outcome.core_bridge, &snapshot, viewport_store);
     let markdown_document_maps =
         collect_workspace_markdown_document_maps(markdown_metadata_cache, session_state, &snapshot);
     let command_preview =
@@ -2227,6 +2230,8 @@ fn build_workspace_render_output(
         visual_selection: visual_selection.as_ref(),
         search_states: &search_states,
         syntax_lines: &syntax_lines,
+        #[cfg(feature = "experimental-tree-sitter-syntax")]
+        tree_sitter_syntax: &tree_sitter_syntax,
         markdown_document_maps: &markdown_document_maps,
         command_preview: command_preview.as_deref(),
         core_message: None,
@@ -2507,6 +2512,127 @@ fn collect_workspace_syntax_lines(
         }
     }
     syntax_lines
+}
+
+#[cfg(feature = "experimental-tree-sitter-syntax")]
+fn collect_workspace_tree_sitter_syntax(
+    core_bridge: &mut saya::core_bridge::CoreBridge,
+    snapshot: &vim_core_rs::CoreSnapshot,
+    viewport_store: &WindowViewportStore,
+) -> BTreeMap<i32, vim_core_rs::CoreTreeSitterRangeSyntax> {
+    let mut syntax_by_window = BTreeMap::new();
+    let line_count = buffer_line_count(&snapshot.text);
+    for window in &snapshot.windows {
+        let Some(buffer) = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id == window.buf_id)
+        else {
+            log::debug!(
+                "[main] Tree-sitter syntax skipped because window buffer is missing: window_id={}, buffer_id={}",
+                window.id,
+                window.buf_id
+            );
+            continue;
+        };
+        let body_height = window.height.saturating_sub(1).max(1);
+        let viewport_top = viewport_store
+            .get(window.id)
+            .map(|viewport| viewport.top_line())
+            .unwrap_or_else(|| window.topline.saturating_sub(1));
+        let viewport_bottom = viewport_top
+            .saturating_add(body_height)
+            .saturating_sub(1)
+            .min(line_count.saturating_sub(1));
+        if viewport_top > viewport_bottom {
+            log::debug!(
+                "[main] Tree-sitter syntax skipped because visible range is empty: window_id={}, viewport_top={}, viewport_bottom={}",
+                window.id,
+                viewport_top,
+                viewport_bottom
+            );
+            continue;
+        }
+        let range = vim_core_rs::CoreTextRange {
+            start: vim_core_rs::CoreTextPosition {
+                row: viewport_top,
+                col: 0,
+            },
+            end: vim_core_rs::CoreTextPosition {
+                row: viewport_bottom.saturating_add(1),
+                col: 0,
+            },
+        };
+        let request = vim_core_rs::CoreTreeSitterPreparationRequest {
+            buffer_id: buffer.id,
+            source_revision: Some(buffer.source_revision),
+            range,
+            vim_filetype: None,
+            buffer_name: (!buffer.name.is_empty()).then(|| buffer.name.clone()),
+            host_language_hint: None,
+            snapshot_policy: vim_core_rs::CoreTreeSitterSnapshotPolicy::default(),
+        };
+        let preparation = match core_bridge.request_tree_sitter_syntax_preparation(request) {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                log::debug!(
+                    "[main] Tree-sitter preparation request failed: window_id={}, buffer_id={}, source_revision={:?}, error={:?}",
+                    window.id,
+                    buffer.id,
+                    buffer.source_revision,
+                    error
+                );
+                continue;
+            }
+        };
+        while let Some(completed) = core_bridge.poll_tree_sitter_preparation() {
+            log::debug!(
+                "[main] Tree-sitter preparation poll drained: request_id={}, buffer_id={}, source_revision={:?}, status={:?}, chunks={}",
+                completed.request_id.value,
+                completed.syntax.buffer_id,
+                completed.syntax.source_revision,
+                completed.syntax.status,
+                completed.syntax.chunks.len()
+            );
+        }
+        let Some(syntax) =
+            core_bridge.query_tree_sitter_syntax_range(buffer.id, buffer.source_revision, range)
+        else {
+            log::debug!(
+                "[main] Tree-sitter syntax cache unavailable after preparation: window_id={}, request_id={}, buffer_id={}, source_revision={:?}, preparation_status={:?}",
+                window.id,
+                preparation.request_id.value,
+                buffer.id,
+                buffer.source_revision,
+                preparation.status
+            );
+            continue;
+        };
+        if syntax.source_revision != buffer.source_revision
+            || !matches!(syntax.status, vim_core_rs::CoreTreeSitterStatus::Prepared)
+        {
+            log::debug!(
+                "[main] Tree-sitter syntax not renderable as fresh highlight: window_id={}, buffer_id={}, syntax_revision={:?}, buffer_revision={:?}, status={:?}, budget_status={:?}",
+                window.id,
+                buffer.id,
+                syntax.source_revision,
+                buffer.source_revision,
+                syntax.status,
+                syntax.budget_status
+            );
+            continue;
+        }
+        log::debug!(
+            "[main] Tree-sitter syntax render data collected: window_id={}, buffer_id={}, source_revision={:?}, chunks={}, provenance={:?}",
+            window.id,
+            buffer.id,
+            syntax.source_revision,
+            syntax.chunks.len(),
+            syntax.provenance
+        );
+        syntax_by_window.insert(window.id, syntax);
+    }
+    syntax_by_window
 }
 
 fn collect_workspace_markdown_document_maps(

@@ -663,6 +663,77 @@ impl CoreBridge {
         );
         Ok(chunks)
     }
+
+    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    pub fn request_tree_sitter_syntax_preparation(
+        &mut self,
+        request: vim_core_rs::CoreTreeSitterPreparationRequest,
+    ) -> Result<vim_core_rs::CoreTreeSitterPreparation, CoreCommandError> {
+        log::debug!(
+            "[core_bridge] requesting Tree-sitter syntax preparation: buffer_id={}, source_revision={:?}, range=({:?}..{:?}), buffer_name={:?}",
+            request.buffer_id,
+            request.source_revision,
+            request.range.start,
+            request.range.end,
+            request.buffer_name
+        );
+        let preparation = self
+            .session
+            .request_tree_sitter_syntax_preparation(request)?;
+        log::debug!(
+            "[core_bridge] Tree-sitter syntax preparation accepted: request_id={}, buffer_id={}, source_revision={:?}, status={:?}",
+            preparation.request_id.value,
+            preparation.buffer_id,
+            preparation.source_revision,
+            preparation.status
+        );
+        Ok(preparation)
+    }
+
+    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    pub fn poll_tree_sitter_preparation(
+        &mut self,
+    ) -> Option<vim_core_rs::CoreTreeSitterPreparationResult> {
+        let result = self.session.poll_tree_sitter_preparation();
+        if let Some(result) = &result {
+            log::debug!(
+                "[core_bridge] Tree-sitter preparation completed: request_id={}, buffer_id={}, source_revision={:?}, status={:?}, chunks={}, embedded_regions={}",
+                result.request_id.value,
+                result.syntax.buffer_id,
+                result.syntax.source_revision,
+                result.syntax.status,
+                result.syntax.chunks.len(),
+                result.syntax.embedded_regions.len()
+            );
+        }
+        result
+    }
+
+    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    pub fn query_tree_sitter_syntax_range(
+        &self,
+        buffer_id: i32,
+        source_revision: vim_core_rs::CoreBufferRevision,
+        range: vim_core_rs::CoreTextRange,
+    ) -> Option<vim_core_rs::CoreTreeSitterRangeSyntax> {
+        let syntax = self
+            .session
+            .query_tree_sitter_syntax_range(buffer_id, source_revision, range);
+        log::debug!(
+            "[core_bridge] queried Tree-sitter syntax range: buffer_id={}, source_revision={:?}, range=({:?}..{:?}), found={}, status={:?}, chunks={}",
+            buffer_id,
+            source_revision,
+            range.start,
+            range.end,
+            syntax.is_some(),
+            syntax.as_ref().map(|syntax| &syntax.status),
+            syntax
+                .as_ref()
+                .map(|syntax| syntax.chunks.len())
+                .unwrap_or_default()
+        );
+        syntax
+    }
 }
 
 fn map_match_kind(match_type: CoreMatchType) -> SearchMatchKind {
@@ -1105,6 +1176,62 @@ mod tests {
         assert_eq!(snapshot.revision, 0);
         assert!(!snapshot.dirty);
         assert_eq!(snapshot.mode, CoreMode::Normal);
+    }
+
+    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[test]
+    fn tree_sitter_request_poll_and_query_reads_committed_cache_without_worker() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("fn main() {}\n").expect("core bridge should initialize");
+        let snapshot = bridge.snapshot();
+        let buffer = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.is_active)
+            .expect("active buffer should exist");
+        let range = vim_core_rs::CoreTextRange {
+            start: vim_core_rs::CoreTextPosition { row: 0, col: 0 },
+            end: vim_core_rs::CoreTextPosition { row: 1, col: 0 },
+        };
+
+        let preparation = bridge
+            .request_tree_sitter_syntax_preparation(vim_core_rs::CoreTreeSitterPreparationRequest {
+                buffer_id: buffer.id,
+                source_revision: Some(buffer.source_revision),
+                range,
+                vim_filetype: None,
+                buffer_name: Some("src/main.rs".to_string()),
+                host_language_hint: None,
+                snapshot_policy: vim_core_rs::CoreTreeSitterSnapshotPolicy::default(),
+            })
+            .expect("Tree-sitter preparation should be requested through vim-core-rs");
+        assert_eq!(preparation.source_revision, buffer.source_revision);
+
+        let completed = bridge
+            .poll_tree_sitter_preparation()
+            .expect("synchronous vim-core-rs MVP should complete preparation");
+        assert_eq!(completed.request_id, preparation.request_id);
+        assert_eq!(
+            completed.syntax.status,
+            vim_core_rs::CoreTreeSitterStatus::Prepared
+        );
+
+        let queried = bridge
+            .query_tree_sitter_syntax_range(buffer.id, buffer.source_revision, range)
+            .expect("committed Tree-sitter cache should be queryable");
+        assert_eq!(queried.source_revision, buffer.source_revision);
+        assert_eq!(queried.status, vim_core_rs::CoreTreeSitterStatus::Prepared);
+        assert!(
+            queried
+                .chunks
+                .iter()
+                .any(|chunk| chunk.category == vim_core_rs::CoreSyntaxCategory::Keyword),
+            "saya should consume normalized category data from vim-core-rs: {:?}",
+            queried.chunks
+        );
     }
 
     #[test]

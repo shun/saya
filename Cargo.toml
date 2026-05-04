@@ -5,6 +5,15 @@ edition = "2024"
 license = "Apache-2.0"
 readme = "README.md"
 
+[features]
+default = []
+experimental-tree-sitter-syntax = [
+    "vim-core-rs/experimental-tree-sitter",
+    "vim-core-rs/tree-sitter-markdown",
+    "vim-core-rs/tree-sitter-rust",
+    "vim-core-rs/tree-sitter-typescript",
+]
+
 [[bin]]
 name = "sy"
 path = "src/main.rs"
