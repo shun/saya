@@ -8,7 +8,7 @@ use crate::presentation_effect::{
     PresentationEffectProjector, PresentationEffectProjectorService, PresentationState,
     RuntimePresentationIntent, merge_presentation_message_line,
 };
-use crate::screen_model::WorkspaceScreenModel;
+use crate::screen_model::{CommandLineModel, ScreenCursorStyle, WorkspaceScreenModel};
 use crate::structural_refresh::{
     ProjectionFailureDiagnostic, RedrawPlan, StructuralRefreshOutcome,
 };
@@ -63,6 +63,7 @@ pub struct TuiRenderCoordinator {
     asset_store: OverlayAssetStore,
     graphics_adapter: OptionalGraphicsAdapter,
     last_successful_workspace: Option<WorkspaceScreenModel>,
+    last_applied_cursor_style: Option<ScreenCursorStyle>,
 }
 
 impl TuiRenderCoordinator {
@@ -77,6 +78,7 @@ impl TuiRenderCoordinator {
             asset_store,
             graphics_adapter,
             last_successful_workspace: None,
+            last_applied_cursor_style: None,
         }
     }
 
@@ -90,6 +92,7 @@ impl TuiRenderCoordinator {
             asset_store,
             graphics_adapter,
             last_successful_workspace: None,
+            last_applied_cursor_style: None,
         }
     }
 
@@ -236,6 +239,50 @@ impl TuiRenderCoordinator {
         );
     }
 
+    pub fn render_command_line_overlay(
+        &mut self,
+        command_line: &CommandLineModel,
+        mut overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+    ) -> Result<(), RenderFrameError> {
+        if let Some(writer) = overlay_writer.as_deref_mut() {
+            self.apply_cursor_style_if_changed(writer, ScreenCursorStyle::SteadyBar)?;
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer
+                .draw_command_line_overlay(command_line)
+                .map_err(|error| RenderFrameError::TerminalIo {
+                    message: error.to_string(),
+                })?;
+        }
+        log::debug!(
+            "[tui_render_coordinator] rendered command-line-only overlay: text_len={}, cursor_col={}",
+            command_line.text.len(),
+            command_line.cursor_col
+        );
+        Ok(())
+    }
+
+    fn apply_cursor_style_if_changed(
+        &mut self,
+        writer: &mut dyn OverlayTerminalWriter,
+        cursor_style: ScreenCursorStyle,
+    ) -> Result<(), RenderFrameError> {
+        if self.last_applied_cursor_style == Some(cursor_style) {
+            log::debug!(
+                "[tui_render_coordinator] skipped unchanged cursor style: style={cursor_style:?}"
+            );
+            return Ok(());
+        }
+        writer
+            .set_cursor_style(cursor_style)
+            .map_err(|message| RenderFrameError::TerminalIo { message })?;
+        self.last_applied_cursor_style = Some(cursor_style);
+        log::debug!(
+            "[tui_render_coordinator] applied cursor style before rendering: style={cursor_style:?}"
+        );
+        Ok(())
+    }
+
     fn render_workspace_with_presentation(
         &mut self,
         workspace: &WorkspaceScreenModel,
@@ -275,12 +322,7 @@ impl TuiRenderCoordinator {
 
         if let Some(writer) = overlay_writer.as_deref_mut() {
             let cursor_style = rendered_workspace.active_cursor_style();
-            writer
-                .set_cursor_style(cursor_style)
-                .map_err(|message| RenderFrameError::TerminalIo { message })?;
-            log::debug!(
-                "[tui_render_coordinator] applied cursor style before rendering: style={cursor_style:?}"
-            );
+            self.apply_cursor_style_if_changed(writer, cursor_style)?;
         }
 
         if let Some(bell) = rendered_workspace.bell

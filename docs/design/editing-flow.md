@@ -70,6 +70,24 @@ The projection currently handles these concerns.
 `tui_renderer.rs` consumes only `ScreenModel`, which keeps rendering detached
 from core and session internals.
 
+## Redraw and terminal-size policy
+
+The main loop owns redraw scheduling. Core-originated structural redraw effects
+must be folded before rendering, then treated as consumed after a successful
+draw. A rendered `RedrawPlan` must not stay active and force the next unrelated
+local input into a full workspace redraw.
+
+Command-line input is a local presentation concern while the prompt is active.
+For `:` command-line typing, the loop can reuse the last rendered workspace and
+update only the command-line overlay when no fresh structural invalidation is
+pending. That lightweight path must not rebuild the workspace projection or
+request a full renderer frame for each typed character.
+
+Terminal-size synchronization follows the same rule. The application must call
+`CoreBridge::set_screen_size(...)` only when the observed terminal size changes.
+Calling it on every redraw can create a core layout redraw that leaks into the
+next command-line keypress and causes visible full-screen clears.
+
 ## Next steps
 
 If you want to understand the TypeScript-specific execution model, continue

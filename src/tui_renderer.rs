@@ -1,16 +1,16 @@
 #[cfg(test)]
-use crate::screen_model::{CommandLineModel, PaneRect};
+use crate::screen_model::PaneRect;
 use crate::screen_model::{
-    ScreenCursorStyle, ScreenModel, ScreenSyntaxCategory, ScreenSyntaxModifier,
+    CommandLineModel, ScreenCursorStyle, ScreenModel, ScreenSyntaxCategory, ScreenSyntaxModifier,
     ScreenTreeSitterSyntax, WorkspaceScreenModel,
 };
 use crate::terminal_lifecycle::TerminalBackend;
-use crossterm::{cursor, event, execute, terminal};
+use crossterm::{cursor, event, execute, queue, style, terminal};
 use ratatui::Terminal;
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, Paragraph};
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use unicode_width::UnicodeWidthChar;
 
 pub struct CrosstermBackendImpl;
@@ -65,6 +65,7 @@ impl TerminalBackend for CrosstermBackendImpl {
 pub struct TuiRenderer {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     needs_full_clear: bool,
+    last_command_line_overlay: Option<CommandLineModel>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -87,6 +88,7 @@ impl TuiRenderer {
         Ok(Self {
             terminal,
             needs_full_clear: true,
+            last_command_line_overlay: None,
         })
     }
 
@@ -128,8 +130,106 @@ impl TuiRenderer {
         ));
         draw_workspace_frame(&mut self.terminal, model, force_full_clear, text_mode)?;
         self.needs_full_clear = false;
+        self.last_command_line_overlay = model.command_line.clone();
         Ok(())
     }
+
+    pub fn draw_command_line_overlay(&mut self, command_line: &CommandLineModel) -> io::Result<()> {
+        let area = self.terminal.size()?;
+        let row = area.height.saturating_sub(1);
+        let update =
+            command_line_overlay_update(self.last_command_line_overlay.as_ref(), command_line);
+        let start_col = update.start_col.min(area.width);
+        let cursor_col = update.cursor_col.min(area.width);
+        let backend = self.terminal.backend_mut();
+        if update.clear_current_line_first {
+            queue!(
+                backend,
+                cursor::MoveTo(0, row),
+                terminal::Clear(terminal::ClearType::CurrentLine)
+            )?;
+        }
+        queue!(
+            backend,
+            cursor::MoveTo(start_col, row),
+            style::Print(update.text.as_str())
+        )?;
+        if update.clear_after_text {
+            queue!(backend, terminal::Clear(terminal::ClearType::UntilNewLine))?;
+        }
+        queue!(backend, cursor::MoveTo(cursor_col, row))?;
+        Write::flush(backend)?;
+        self.last_command_line_overlay = Some(command_line.clone());
+        self.needs_full_clear = true;
+        log::debug!(
+            "[tui_renderer] drew command-line-only overlay and marked next frame for full clear: row={}, start_col={}, cursor_col={}, text_len={}, clear_current_line_first={}, clear_after_text={}",
+            row,
+            start_col,
+            cursor_col,
+            update.text.len(),
+            update.clear_current_line_first,
+            update.clear_after_text
+        );
+        trace_redraw_diagnostic(format_args!(
+            "renderer command-line-only overlay: row={}, start_col={}, cursor_col={}, text_len={}, clear_current_line_first={}, clear_after_text={}, next_full_clear=true",
+            row,
+            start_col,
+            cursor_col,
+            update.text.len(),
+            update.clear_current_line_first,
+            update.clear_after_text
+        ));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandLineOverlayUpdate {
+    start_col: u16,
+    cursor_col: u16,
+    text: String,
+    clear_current_line_first: bool,
+    clear_after_text: bool,
+}
+
+fn command_line_overlay_update(
+    previous: Option<&CommandLineModel>,
+    next: &CommandLineModel,
+) -> CommandLineOverlayUpdate {
+    let Some(previous) = previous else {
+        return CommandLineOverlayUpdate {
+            start_col: 0,
+            cursor_col: next.cursor_col,
+            text: next.text.clone(),
+            clear_current_line_first: true,
+            clear_after_text: false,
+        };
+    };
+
+    let prefix_end = common_prefix_byte_len(&previous.text, &next.text);
+    let prefix = &next.text[..prefix_end];
+    let suffix = &next.text[prefix_end..];
+    let previous_suffix = &previous.text[prefix_end..];
+    CommandLineOverlayUpdate {
+        start_col: u16::try_from(display_width(prefix)).unwrap_or(u16::MAX),
+        cursor_col: next.cursor_col,
+        text: suffix.to_string(),
+        clear_current_line_first: false,
+        clear_after_text: !previous_suffix.is_empty(),
+    }
+}
+
+fn common_prefix_byte_len(left: &str, right: &str) -> usize {
+    let mut prefix = 0usize;
+    for ((left_index, left_ch), (right_index, right_ch)) in
+        left.char_indices().zip(right.char_indices())
+    {
+        if left_ch != right_ch {
+            return left_index.min(right_index);
+        }
+        prefix = left_index + left_ch.len_utf8();
+    }
+    prefix.min(left.len()).min(right.len())
 }
 
 fn draw_workspace_frame<B: Backend>(
@@ -1903,6 +2003,77 @@ mod tests {
             rows.get(3).is_some_and(|row| row.contains(":w")),
             "最下段に command line を描画すること: {:?}",
             rows
+        );
+    }
+
+    #[test]
+    fn command_line_overlay_update_appends_without_clearing_current_line() {
+        let previous = CommandLineModel {
+            text: ":syntax o".to_string(),
+            cursor_col: 9,
+        };
+        let next = CommandLineModel {
+            text: ":syntax on".to_string(),
+            cursor_col: 10,
+        };
+
+        let update = command_line_overlay_update(Some(&previous), &next);
+
+        assert_eq!(
+            update,
+            CommandLineOverlayUpdate {
+                start_col: 9,
+                cursor_col: 10,
+                text: "n".to_string(),
+                clear_current_line_first: false,
+                clear_after_text: false,
+            }
+        );
+    }
+
+    #[test]
+    fn command_line_overlay_update_clears_tail_only_when_text_shrinks() {
+        let previous = CommandLineModel {
+            text: ":syntax on".to_string(),
+            cursor_col: 10,
+        };
+        let next = CommandLineModel {
+            text: ":syntax o".to_string(),
+            cursor_col: 9,
+        };
+
+        let update = command_line_overlay_update(Some(&previous), &next);
+
+        assert_eq!(
+            update,
+            CommandLineOverlayUpdate {
+                start_col: 9,
+                cursor_col: 9,
+                text: String::new(),
+                clear_current_line_first: false,
+                clear_after_text: true,
+            }
+        );
+    }
+
+    #[test]
+    fn command_line_overlay_update_clears_current_line_only_for_first_overlay() {
+        let next = CommandLineModel {
+            text: ":".to_string(),
+            cursor_col: 1,
+        };
+
+        let update = command_line_overlay_update(None, &next);
+
+        assert_eq!(
+            update,
+            CommandLineOverlayUpdate {
+                start_col: 0,
+                cursor_col: 1,
+                text: ":".to_string(),
+                clear_current_line_first: true,
+                clear_after_text: false,
+            }
         );
     }
 

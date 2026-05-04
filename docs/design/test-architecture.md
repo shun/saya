@@ -133,6 +133,9 @@ Use PTY tests for these kinds of behaviors.
 - Real process shutdown sequencing
 - Real stdin or stdout or stderr interaction at the executable boundary
 - Real command-line editing and screen refresh through the executable
+- Real terminal-control regressions where the byte stream matters, such as
+  accidental `ESC[2J` full-screen clears, `ESC[2K` line clears, cursor-style
+  rewrites, or flush patterns during command-line typing
 
 Do not use PTY tests for every editing permutation or runtime edge case that
 Layer 2 can already prove more deterministically.
@@ -150,6 +153,12 @@ Create a PTY runner with a narrow, reusable API.
 
 The PTY helper should normalize terminal size, environment variables, working
 directory, and timeout handling.
+
+The helper should also expose terminal transcript assertions. Redraw-sensitive
+tests need to count terminal-control sequences, not only visible text. For
+example, a command-line typing scenario can assert that `:syntax on` emits no
+`ESC[2J` full-screen clear while characters are being typed, while still
+allowing an initial full draw and the normal redraw after command submission.
 
 ## Migration plan
 

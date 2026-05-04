@@ -7,7 +7,8 @@ use saya::core_outcome::{RedrawEffect, StructuralEffectSet};
 use saya::optional_graphics::{OptionalGraphicsAdapter, RecordingOverlayWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
 use saya::screen_model::{
-    PaneRect, ScreenCursorStyle, ScreenModel, WorkspaceProjectionError, WorkspaceScreenModel,
+    CommandLineModel, PaneRect, ScreenCursorStyle, ScreenModel, WorkspaceProjectionError,
+    WorkspaceScreenModel,
 };
 use saya::structural_refresh::{
     ProjectionFailureDiagnostic, ProjectionStatus, RedrawPlan, RedrawPlanSource, StructuralRefresh,
@@ -118,6 +119,50 @@ fn render_workspace_prefers_command_line_cursor_style() {
             Some(&mut writer),
         )
         .expect("render should apply command line cursor style");
+
+    assert_eq!(writer.cursor_styles, vec![ScreenCursorStyle::SteadyBar]);
+}
+
+#[test]
+fn command_line_overlay_render_applies_command_cursor_style_without_workspace_render() {
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut writer = RecordingOverlayWriter::default();
+
+    coordinator
+        .render_command_line_overlay(
+            &CommandLineModel {
+                text: ":write".to_string(),
+                cursor_col: 6,
+            },
+            Some(&mut writer),
+        )
+        .expect("command-line-only overlay should render through the lightweight path");
+
+    assert_eq!(writer.cursor_styles, vec![ScreenCursorStyle::SteadyBar]);
+}
+
+#[test]
+fn repeated_command_line_overlay_does_not_rewrite_unchanged_cursor_style() {
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut writer = RecordingOverlayWriter::default();
+
+    for text in [":syntax o", ":syntax on"] {
+        coordinator
+            .render_command_line_overlay(
+                &CommandLineModel {
+                    text: text.to_string(),
+                    cursor_col: u16::try_from(text.len()).unwrap(),
+                },
+                Some(&mut writer),
+            )
+            .expect("command-line-only overlay should render");
+    }
 
     assert_eq!(writer.cursor_styles, vec![ScreenCursorStyle::SteadyBar]);
 }

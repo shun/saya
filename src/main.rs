@@ -20,7 +20,7 @@ use saya::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::input_loop::CrosstermEventSource;
 use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
 use saya::markdown_structure::{MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey};
-use saya::optional_graphics::OptionalGraphicsAdapter;
+use saya::optional_graphics::{OptionalGraphicsAdapter, OverlayTerminalWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
 use saya::presentation_effect::RuntimePresentationIntent;
 use saya::runtime_integration::{
@@ -32,15 +32,15 @@ use saya::saya_live_runtime::{
     RuntimeMode,
 };
 use saya::screen_model::{
-    ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput, WorkspaceScreenModel,
-    project, project_workspace,
+    CommandLineModel, ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput,
+    WorkspaceScreenModel, project, project_workspace,
 };
 use saya::search_query::{SearchStateError, SearchVisibleState};
 use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
 use saya::structural_refresh::{StructuralRefresh, StructuralRefreshOutcome};
 use saya::terminal_capability::TerminalCapabilityProbe;
 use saya::terminal_lifecycle::TerminalSize;
-use saya::tui_render_coordinator::TuiRenderCoordinator;
+use saya::tui_render_coordinator::{RenderFrameError, TuiRenderCoordinator};
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::WindowViewportStore;
 #[cfg(test)]
@@ -52,6 +52,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Default)]
 struct MainOutcomeAccumulator {
@@ -134,6 +139,7 @@ async fn main() {
     let mut command_line_buffer = String::new();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
+    let mut last_synced_terminal_size: Option<TerminalSize> = None;
 
     let mut startup_runtime_redraw = false;
     let startup_shutdown_reason = dispatch_buffer_open_with_runtime(
@@ -158,8 +164,21 @@ async fn main() {
         .expect("interactive input should start after the capability probe");
 
     // 初期描画
-    sync_core_screen_size(&mut outcome);
     let (terminal_width, terminal_height) = current_terminal_size();
+    if sync_core_screen_size_if_changed(
+        &mut outcome,
+        &mut last_synced_terminal_size,
+        TerminalSize {
+            columns: terminal_width,
+            rows: terminal_height,
+        },
+    ) {
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut startup_runtime_redraw,
+        );
+    }
     let initial_render = build_workspace_render_output(
         &mut outcome,
         &session_state,
@@ -188,6 +207,7 @@ async fn main() {
                 transient_msg = Some(message);
             }
             last_workspace_model = Some(render_output.rendered_workspace.clone());
+            mark_structural_refresh_rendered(&mut outcome_accumulator);
             trace_workspace_render_pipeline(
                 "initial",
                 &outcome.core_bridge.snapshot().text,
@@ -619,8 +639,33 @@ async fn main() {
             }
 
             if need_redraw {
-                sync_core_screen_size(&mut outcome);
                 let (terminal_width, terminal_height) = current_terminal_size();
+                if sync_core_screen_size_if_changed(
+                    &mut outcome,
+                    &mut last_synced_terminal_size,
+                    TerminalSize {
+                        columns: terminal_width,
+                        rows: terminal_height,
+                    },
+                ) {
+                    consume_core_outcomes_from_core(
+                        &mut outcome.core_bridge,
+                        &mut outcome_accumulator,
+                        &mut need_redraw,
+                    );
+                }
+                match render_command_line_only_redraw_if_possible(
+                    &mut render_coordinator,
+                    Some(&mut terminal_broker),
+                    &mut last_workspace_model,
+                    outcome_accumulator.last_structural_refresh.as_ref(),
+                    command_line_prompt,
+                    &command_line_buffer,
+                    session_state.tab_size(),
+                ) {
+                    CommandLineOnlyRedraw::Rendered => continue 'main,
+                    CommandLineOnlyRedraw::NotApplicable | CommandLineOnlyRedraw::Fallback => {}
+                }
                 let redraw_result = build_workspace_render_output(
                     &mut outcome,
                     &session_state,
@@ -649,6 +694,7 @@ async fn main() {
                             transient_msg = Some(message);
                         }
                         last_workspace_model = Some(render_output.rendered_workspace.clone());
+                        mark_structural_refresh_rendered(&mut outcome_accumulator);
                         trace_workspace_render_pipeline(
                             "redraw",
                             &outcome.core_bridge.snapshot().text,
@@ -829,9 +875,24 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut outcome_accumulator = MainOutcomeAccumulator::default();
     let mut host_action_runtime = HostActionRuntime::default();
-    sync_core_screen_size(&mut outcome);
 
     let (terminal_width, terminal_height) = current_terminal_size();
+    let mut last_synced_terminal_size = None;
+    if sync_core_screen_size_if_changed(
+        &mut outcome,
+        &mut last_synced_terminal_size,
+        TerminalSize {
+            columns: terminal_width,
+            rows: terminal_height,
+        },
+    ) {
+        let mut initial_need_redraw = false;
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut initial_need_redraw,
+        );
+    }
     let initial_render = render_coordinator
         .render_workspace_result(
             build_workspace_render_output(
@@ -1768,6 +1829,15 @@ fn consume_normalized_batch(
     apply_core_dispatch_effects(effects, &projection_frame, accumulator, need_redraw);
 }
 
+fn mark_structural_refresh_rendered(accumulator: &mut MainOutcomeAccumulator) {
+    let neutral_refresh = StructuralRefresh::from_folded_effects(&StructuralEffectSet::default());
+    trace_redraw_diagnostic(format_args!(
+        "structural refresh marked rendered; switching to neutral state: previous_present={}, redraw_requested=false",
+        accumulator.last_structural_refresh.is_some()
+    ));
+    accumulator.last_structural_refresh = Some(neutral_refresh);
+}
+
 fn apply_core_dispatch_effects(
     effects: ApplicationDispatchEffects,
     projection_frame: &ProjectionFrame,
@@ -2305,12 +2375,30 @@ fn build_workspace_render_output(
     }
 }
 
-fn sync_core_screen_size(outcome: &mut saya::bootstrap::BootstrapOutcome) {
-    if let Ok((cols, rows)) = crossterm::terminal::size() {
-        outcome
-            .core_bridge
-            .set_screen_size(i32::from(rows), i32::from(cols));
+fn sync_core_screen_size_if_changed(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    last_synced_terminal_size: &mut Option<TerminalSize>,
+    terminal_size: TerminalSize,
+) -> bool {
+    if *last_synced_terminal_size == Some(terminal_size) {
+        log::debug!(
+            "[main] skipping unchanged core screen size sync: rows={}, cols={}",
+            terminal_size.rows,
+            terminal_size.columns
+        );
+        return false;
     }
+
+    trace_redraw_diagnostic(format_args!(
+        "core screen size sync requested: previous={:?}, next={:?}",
+        last_synced_terminal_size, terminal_size
+    ));
+    outcome.core_bridge.set_screen_size(
+        i32::from(terminal_size.rows),
+        i32::from(terminal_size.columns),
+    );
+    *last_synced_terminal_size = Some(terminal_size);
+    true
 }
 
 fn mouse_click_to_sgr_sequence(
@@ -2754,12 +2842,186 @@ fn resolve_prompt_revision(
     Some(hasher.finish())
 }
 
+fn structural_refresh_is_idle(refresh: Option<&StructuralRefreshOutcome>) -> bool {
+    refresh.is_none_or(|refresh| {
+        !refresh.redraw_plan.requested
+            && !refresh.redraw_plan.full
+            && !refresh.redraw_plan.clear_before_draw
+            && !refresh.invalidation.has_any()
+    })
+}
+
+fn build_command_line_only_workspace(
+    last_workspace: Option<&WorkspaceScreenModel>,
+    command_line_prompt: Option<char>,
+    command_line_buffer: &str,
+    tab_size: u16,
+) -> Option<WorkspaceScreenModel> {
+    if command_line_prompt != Some(':') {
+        return None;
+    }
+    let last_workspace = last_workspace?;
+    let preview = format!(":{}", command_line_buffer);
+    let cursor_col =
+        u16::try_from(command_line_display_width(&preview, tab_size)).unwrap_or(u16::MAX);
+    log::debug!(
+        "[main] reusing last workspace for command-line-only redraw: prompt=:, buffer_len={}, cursor_col={}",
+        command_line_buffer.len(),
+        cursor_col
+    );
+
+    let mut workspace = last_workspace.clone();
+    workspace.command_line = Some(CommandLineModel {
+        text: preview,
+        cursor_col,
+    });
+    Some(workspace)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandLineOnlyRedraw {
+    Rendered,
+    NotApplicable,
+    Fallback,
+}
+
+fn render_command_line_only_redraw_if_possible(
+    render_coordinator: &mut TuiRenderCoordinator,
+    overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
+    last_workspace_model: &mut Option<WorkspaceScreenModel>,
+    structural_refresh: Option<&StructuralRefreshOutcome>,
+    command_line_prompt: Option<char>,
+    command_line_buffer: &str,
+    tab_size: u16,
+) -> CommandLineOnlyRedraw {
+    if !structural_refresh_is_idle(structural_refresh) {
+        return CommandLineOnlyRedraw::NotApplicable;
+    }
+    let Some(workspace) = build_command_line_only_workspace(
+        last_workspace_model.as_ref(),
+        command_line_prompt,
+        command_line_buffer,
+        tab_size,
+    ) else {
+        return CommandLineOnlyRedraw::NotApplicable;
+    };
+    let Some(command_line) = workspace.command_line.as_ref() else {
+        return CommandLineOnlyRedraw::NotApplicable;
+    };
+
+    trace_redraw_diagnostic(format_args!(
+        "workspace redraw skipped for command-line-only overlay: command_prompt={:?}, command_buffer_len={}",
+        command_line_prompt,
+        command_line_buffer.len()
+    ));
+    match render_coordinator.render_command_line_overlay(command_line, overlay_writer) {
+        Ok(()) => {
+            *last_workspace_model = Some(workspace);
+            CommandLineOnlyRedraw::Rendered
+        }
+        Err(error) => {
+            trace_command_line_overlay_fallback(&error);
+            log::debug!(
+                "[main] command-line-only overlay failed; falling back to full workspace render: error={:?}",
+                error
+            );
+            CommandLineOnlyRedraw::Fallback
+        }
+    }
+}
+
+fn trace_command_line_overlay_fallback(error: &RenderFrameError) {
+    trace_redraw_diagnostic(format_args!(
+        "command-line-only overlay fallback to workspace redraw: error={:?}",
+        error
+    ));
+}
+
+fn command_line_display_width(text: &str, tab_size: u16) -> usize {
+    let tab_size = usize::from(tab_size.max(1));
+    let mut display_col = 0usize;
+    for ch in text.chars() {
+        if ch == '\t' {
+            display_col = next_command_line_tab_stop(display_col, tab_size);
+        } else {
+            display_col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    display_col
+}
+
+fn next_command_line_tab_stop(display_col: usize, tab_size: usize) -> usize {
+    display_col + (tab_size - (display_col % tab_size)).min(tab_size)
+}
+
 fn trace_redraw_diagnostic(args: std::fmt::Arguments<'_>) {
     let message = args.to_string();
+    #[cfg(test)]
+    record_test_redraw_trace(&message);
     log::debug!("[redraw_diagnostic] {message}");
     if std::env::var_os("SAYA_TRACE_REDRAW").is_some() {
         eprintln!("[saya-trace][redraw] {message}");
     }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RedrawTraceCounts {
+    command_line_only_overlay: usize,
+    workspace_render_build_started: usize,
+    renderer_frame_requested: usize,
+    command_line_overlay_fallback: usize,
+}
+
+#[cfg(test)]
+static COMMAND_LINE_ONLY_OVERLAY_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static WORKSPACE_RENDER_BUILD_STARTED_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RENDERER_FRAME_REQUESTED_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static COMMAND_LINE_OVERLAY_FALLBACK_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn record_test_redraw_trace(message: &str) {
+    if message.contains("workspace redraw skipped for command-line-only overlay") {
+        COMMAND_LINE_ONLY_OVERLAY_TRACE_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    if message.contains("workspace render build started") {
+        WORKSPACE_RENDER_BUILD_STARTED_TRACE_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    if message.contains("renderer frame requested") {
+        RENDERER_FRAME_REQUESTED_TRACE_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+    if message.contains("command-line-only overlay fallback to workspace redraw") {
+        COMMAND_LINE_OVERLAY_FALLBACK_TRACE_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+fn reset_test_redraw_trace_counts() {
+    COMMAND_LINE_ONLY_OVERLAY_TRACE_COUNT.store(0, Ordering::SeqCst);
+    WORKSPACE_RENDER_BUILD_STARTED_TRACE_COUNT.store(0, Ordering::SeqCst);
+    RENDERER_FRAME_REQUESTED_TRACE_COUNT.store(0, Ordering::SeqCst);
+    COMMAND_LINE_OVERLAY_FALLBACK_TRACE_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn test_redraw_trace_counts() -> RedrawTraceCounts {
+    RedrawTraceCounts {
+        command_line_only_overlay: COMMAND_LINE_ONLY_OVERLAY_TRACE_COUNT.load(Ordering::SeqCst),
+        workspace_render_build_started: WORKSPACE_RENDER_BUILD_STARTED_TRACE_COUNT
+            .load(Ordering::SeqCst),
+        renderer_frame_requested: RENDERER_FRAME_REQUESTED_TRACE_COUNT.load(Ordering::SeqCst),
+        command_line_overlay_fallback: COMMAND_LINE_OVERLAY_FALLBACK_TRACE_COUNT
+            .load(Ordering::SeqCst),
+    }
+}
+
+#[cfg(test)]
+fn redraw_trace_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn format_cli_error(error: CliParseError) -> String {
@@ -2845,6 +3107,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use saya::optional_graphics::RecordingOverlayWriter;
     use saya::screen_model::ScreenCursorStyle;
 
     fn unique_path(name: &str) -> PathBuf {
@@ -3471,6 +3734,165 @@ mod tests {
     }
 
     #[test]
+    fn command_line_only_render_reuses_last_workspace_for_colon_prompt() {
+        let mut last_workspace = main_test_workspace();
+        last_workspace.panes[0].lines = vec!["keep full projection".to_string()];
+
+        let rendered =
+            build_command_line_only_workspace(Some(&last_workspace), Some(':'), "write", 4)
+                .expect("colon command preview should use command-line-only workspace");
+
+        assert_eq!(rendered.panes, last_workspace.panes);
+        assert_eq!(
+            rendered.command_line,
+            Some(saya::screen_model::CommandLineModel {
+                text: ":write".to_string(),
+                cursor_col: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn command_line_only_render_is_not_used_for_search_prompt() {
+        let last_workspace = main_test_workspace();
+
+        let rendered =
+            build_command_line_only_workspace(Some(&last_workspace), Some('/'), "pattern", 4);
+
+        assert_eq!(rendered, None);
+    }
+
+    #[test]
+    fn command_line_only_render_requires_existing_workspace() {
+        let rendered = build_command_line_only_workspace(None, Some(':'), "write", 4);
+
+        assert_eq!(rendered, None);
+    }
+
+    #[test]
+    fn colon_command_input_uses_overlay_without_workspace_redraw_traces() {
+        let _guard = redraw_trace_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reset_test_redraw_trace_counts();
+        let mut coordinator = TuiRenderCoordinator::new_for_tests(
+            OverlayAssetStore::default(),
+            OptionalGraphicsAdapter::default(),
+        );
+        let mut writer = RecordingOverlayWriter::default();
+        let mut last_workspace = Some(main_test_workspace());
+
+        for buffer in ["w", "wq"] {
+            let result = render_command_line_only_redraw_if_possible(
+                &mut coordinator,
+                Some(&mut writer),
+                &mut last_workspace,
+                None,
+                Some(':'),
+                buffer,
+                4,
+            );
+
+            assert_eq!(result, CommandLineOnlyRedraw::Rendered);
+        }
+
+        let counts = test_redraw_trace_counts();
+        assert_eq!(counts.command_line_only_overlay, 2);
+        assert_eq!(
+            counts.workspace_render_build_started, 0,
+            "colon command typing must not rebuild the workspace projection"
+        );
+        assert_eq!(
+            counts.renderer_frame_requested, 0,
+            "colon command typing must not request a full workspace frame"
+        );
+        assert_eq!(counts.command_line_overlay_fallback, 0);
+        assert_eq!(
+            last_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.command_line.as_ref())
+                .map(|command_line| command_line.text.as_str()),
+            Some(":wq")
+        );
+        assert_eq!(
+            writer.cursor_styles,
+            vec![ScreenCursorStyle::SteadyBar],
+            "unchanged command-line cursor style should be written only once"
+        );
+    }
+
+    #[test]
+    fn search_prompt_does_not_use_command_line_only_overlay_trace() {
+        let _guard = redraw_trace_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reset_test_redraw_trace_counts();
+        let mut coordinator = TuiRenderCoordinator::new_for_tests(
+            OverlayAssetStore::default(),
+            OptionalGraphicsAdapter::default(),
+        );
+        let mut writer = RecordingOverlayWriter::default();
+        let mut last_workspace = Some(main_test_workspace());
+
+        let result = render_command_line_only_redraw_if_possible(
+            &mut coordinator,
+            Some(&mut writer),
+            &mut last_workspace,
+            None,
+            Some('/'),
+            "word",
+            4,
+        );
+
+        assert_eq!(result, CommandLineOnlyRedraw::NotApplicable);
+        assert_eq!(test_redraw_trace_counts(), RedrawTraceCounts::default());
+        assert!(writer.cursor_styles.is_empty());
+    }
+
+    #[test]
+    fn command_line_overlay_failure_is_observable_before_workspace_fallback() {
+        let _guard = redraw_trace_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reset_test_redraw_trace_counts();
+        let mut coordinator = TuiRenderCoordinator::new_for_tests(
+            OverlayAssetStore::default(),
+            OptionalGraphicsAdapter::default(),
+        );
+        let mut writer = FailingOverlayWriter;
+        let mut last_workspace = Some(main_test_workspace());
+
+        let result = render_command_line_only_redraw_if_possible(
+            &mut coordinator,
+            Some(&mut writer),
+            &mut last_workspace,
+            None,
+            Some(':'),
+            "write",
+            4,
+        );
+
+        let counts = test_redraw_trace_counts();
+        assert_eq!(result, CommandLineOnlyRedraw::Fallback);
+        assert_eq!(counts.command_line_only_overlay, 1);
+        assert_eq!(counts.command_line_overlay_fallback, 1);
+        assert_eq!(counts.workspace_render_build_started, 0);
+        assert_eq!(counts.renderer_frame_requested, 0);
+    }
+
+    struct FailingOverlayWriter;
+
+    impl OverlayTerminalWriter for FailingOverlayWriter {
+        fn write_overlay_bytes(&mut self, _bytes: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn set_cursor_style(&mut self, _style: ScreenCursorStyle) -> Result<(), String> {
+            Err("forced cursor style failure".to_string())
+        }
+    }
+
+    #[test]
     fn latest_user_visible_message_returns_last_user_visible_message() {
         let messages = vec![
             CoreMessageEvent {
@@ -3527,6 +3949,105 @@ mod tests {
         assert_eq!(
             latest_user_visible_message(messages),
             Some("visible warning".to_string())
+        );
+    }
+
+    #[test]
+    fn core_screen_size_sync_does_not_enqueue_redraw_when_size_is_unchanged() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest::default())
+            .expect("launch should succeed");
+        let mut last_synced_terminal_size = None;
+        let terminal_size = TerminalSize {
+            columns: 80,
+            rows: 24,
+        };
+
+        assert!(sync_core_screen_size_if_changed(
+            &mut outcome,
+            &mut last_synced_terminal_size,
+            terminal_size,
+        ));
+        let first_batch = outcome.core_bridge.take_normalized_outcomes();
+        assert!(
+            !first_batch.is_empty(),
+            "first screen-size sync should expose the core layout redraw"
+        );
+
+        assert!(!sync_core_screen_size_if_changed(
+            &mut outcome,
+            &mut last_synced_terminal_size,
+            terminal_size,
+        ));
+        assert!(
+            outcome.core_bridge.take_normalized_outcomes().is_empty(),
+            "unchanged screen-size sync must not leave a stale redraw for the next keypress"
+        );
+    }
+
+    #[test]
+    fn core_screen_size_sync_updates_when_size_changes() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest::default())
+            .expect("launch should succeed");
+        let mut last_synced_terminal_size = Some(TerminalSize {
+            columns: 80,
+            rows: 24,
+        });
+
+        assert!(sync_core_screen_size_if_changed(
+            &mut outcome,
+            &mut last_synced_terminal_size,
+            TerminalSize {
+                columns: 100,
+                rows: 30,
+            },
+        ));
+        assert_eq!(
+            last_synced_terminal_size,
+            Some(TerminalSize {
+                columns: 100,
+                rows: 30,
+            })
+        );
+        assert!(
+            !outcome.core_bridge.take_normalized_outcomes().is_empty(),
+            "changed size should still request the necessary layout redraw"
+        );
+    }
+
+    #[test]
+    fn rendered_structural_refresh_no_longer_blocks_command_line_overlay() {
+        let mut accumulator = MainOutcomeAccumulator {
+            last_structural_refresh: Some(StructuralRefresh::from_folded_effects(
+                &saya::core_outcome::StructuralEffectSet {
+                    redraw: Some(saya::core_outcome::RedrawEffect {
+                        full: true,
+                        clear_before_draw: false,
+                        required_by_structure_change: true,
+                        coalesced_count: 1,
+                    }),
+                    invalidate_buffers: vec![],
+                    invalidate_windows: vec![],
+                    layout_dirty: true,
+                },
+            )),
+            ..MainOutcomeAccumulator::default()
+        };
+
+        mark_structural_refresh_rendered(&mut accumulator);
+
+        let refresh = accumulator
+            .last_structural_refresh
+            .as_ref()
+            .expect("rendered refresh should leave a neutral diagnostic state");
+        assert!(
+            structural_refresh_is_idle(Some(refresh)),
+            "a structural refresh that has already been rendered must not force the next command-line key into a full redraw"
         );
     }
 
