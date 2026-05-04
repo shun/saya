@@ -3,6 +3,8 @@ use saya::app_startup::{
 };
 use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
+use saya::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
+use saya::command_line_history::{CommandLineHistories, history_direction_for_key};
 use saya::core_host_actions::HostActionRuntime;
 use saya::core_notification_prompt::{
     NotificationPromptProjectionState, ProjectionFrame, PromptInputAction, handle_prompt_key,
@@ -136,7 +138,8 @@ async fn main() {
     let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut markdown_metadata_cache = MarkdownMetadataCache::new();
     let mut command_line_prompt: Option<char> = None;
-    let mut command_line_buffer = String::new();
+    let mut command_line_edit = CommandLineEdit::default();
+    let mut command_line_histories = CommandLineHistories::default();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
@@ -186,7 +189,8 @@ async fn main() {
         &mut search_refresh_store,
         &mut markdown_metadata_cache,
         command_line_prompt,
-        &command_line_buffer,
+        command_line_edit.buffer(),
+        command_line_edit.cursor_byte_index(),
         outcome_accumulator.last_projection_frame.as_ref(),
         outcome_accumulator.last_structural_refresh.as_mut(),
         system_warning.as_deref(),
@@ -286,6 +290,30 @@ async fn main() {
 
                         if !handled && let Some(prompt) = command_line_prompt {
                             match key {
+                                KeyInput::Up
+                                | KeyInput::Down
+                                | KeyInput::Ctrl('p')
+                                | KeyInput::Ctrl('P')
+                                | KeyInput::Ctrl('n')
+                                | KeyInput::Ctrl('N') => {
+                                    if let Some(direction) = history_direction_for_key(&key) {
+                                        if let Some(selected_buffer) = command_line_histories
+                                            .navigate(prompt, command_line_edit.buffer(), direction)
+                                        {
+                                            command_line_edit.set_buffer_to_end(selected_buffer);
+                                            if prompt == '/' {
+                                                let _ = outcome
+                                                    .core_bridge
+                                                    .sync_search_input(command_line_edit.buffer());
+                                                consume_core_outcomes_from_core(
+                                                    &mut outcome.core_bridge,
+                                                    &mut outcome_accumulator,
+                                                    &mut need_redraw,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                                 KeyInput::Escape => {
                                     if prompt == '/' {
                                         let _ = outcome.core_bridge.cancel_search_input();
@@ -296,13 +324,17 @@ async fn main() {
                                         );
                                     }
                                     command_line_prompt = None;
-                                    command_line_buffer.clear();
+                                    command_line_edit.clear();
+                                    command_line_histories.reset_navigation();
                                 }
                                 KeyInput::Enter => {
                                     if prompt == ':' {
-                                        let cmd = format!("{}{}", prompt, command_line_buffer);
+                                        let cmd =
+                                            format!("{}{}", prompt, command_line_edit.buffer());
+                                        command_line_histories
+                                            .record(prompt, command_line_edit.buffer());
                                         command_line_prompt = None;
-                                        command_line_buffer.clear();
+                                        command_line_edit.clear();
                                         match route_ex_command(&cmd) {
                                             ExCommandRoute::PresentationLocal => {
                                                 if let Some(message) =
@@ -356,41 +388,65 @@ async fn main() {
                                             }
                                         }
                                     } else if prompt == '/' {
+                                        command_line_histories
+                                            .record(prompt, command_line_edit.buffer());
                                         let _ = outcome
                                             .core_bridge
-                                            .commit_search_input(&command_line_buffer);
+                                            .commit_search_input(command_line_edit.buffer());
                                         consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
                                             &mut outcome_accumulator,
                                             &mut need_redraw,
                                         );
                                         command_line_prompt = None;
-                                        command_line_buffer.clear();
+                                        command_line_edit.clear();
                                     }
                                     session_state
                                         .update_dirty(outcome.core_bridge.snapshot().dirty);
                                 }
-                                KeyInput::Backspace => {
-                                    if prompt == '/' {
-                                        let _ = command_line_buffer.pop();
+                                KeyInput::Backspace | KeyInput::Delete => {
+                                    command_line_histories.reset_navigation();
+                                    let changed = command_line_edit.apply_action(
+                                        command_line_edit_action_for_key(&key).expect(
+                                            "backspace/delete must map to command-line edit action",
+                                        ),
+                                    );
+                                    if prompt == '/' && changed {
                                         let _ = outcome
                                             .core_bridge
-                                            .sync_search_input(&command_line_buffer);
+                                            .sync_search_input(command_line_edit.buffer());
                                         consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
                                             &mut outcome_accumulator,
                                             &mut need_redraw,
                                         );
-                                    } else if command_line_buffer.pop().is_none() {
+                                    } else if prompt == ':' && !changed {
                                         command_line_prompt = None;
                                     }
                                 }
+                                KeyInput::Left
+                                | KeyInput::Right
+                                | KeyInput::Home
+                                | KeyInput::End
+                                | KeyInput::Ctrl('b')
+                                | KeyInput::Ctrl('B')
+                                | KeyInput::Ctrl('f')
+                                | KeyInput::Ctrl('F')
+                                | KeyInput::Ctrl('a')
+                                | KeyInput::Ctrl('A')
+                                | KeyInput::Ctrl('e')
+                                | KeyInput::Ctrl('E') => {
+                                    if let Some(action) = command_line_edit_action_for_key(&key) {
+                                        command_line_edit.apply_action(action);
+                                    }
+                                }
                                 KeyInput::Char(c) => {
-                                    command_line_buffer.push(c);
+                                    command_line_histories.reset_navigation();
+                                    command_line_edit.insert_char(c);
                                     if prompt == '/' {
                                         let _ = outcome
                                             .core_bridge
-                                            .sync_search_input(&command_line_buffer);
+                                            .sync_search_input(command_line_edit.buffer());
                                         consume_core_outcomes_from_core(
                                             &mut outcome.core_bridge,
                                             &mut outcome_accumulator,
@@ -425,7 +481,8 @@ async fn main() {
                             if let KeyInput::Char(c) = key {
                                 command_line_prompt = Some(c);
                             }
-                            command_line_buffer.clear();
+                            command_line_edit.clear();
+                            command_line_histories.reset_navigation();
                             handled = true;
                             need_redraw = true;
                         }
@@ -631,10 +688,10 @@ async fn main() {
                 log::debug!(
                     "[main] clearing local command/search preview because core-owned prompt is active: prompt={:?}, buffer_len={}",
                     command_line_prompt,
-                    command_line_buffer.len()
+                    command_line_edit.buffer().len()
                 );
                 command_line_prompt = None;
-                command_line_buffer.clear();
+                command_line_edit.clear();
                 need_redraw = true;
             }
 
@@ -660,7 +717,8 @@ async fn main() {
                     &mut last_workspace_model,
                     outcome_accumulator.last_structural_refresh.as_ref(),
                     command_line_prompt,
-                    &command_line_buffer,
+                    command_line_edit.buffer(),
+                    command_line_edit.cursor_byte_index(),
                     session_state.tab_size(),
                 ) {
                     CommandLineOnlyRedraw::Rendered => continue 'main,
@@ -673,7 +731,8 @@ async fn main() {
                     &mut search_refresh_store,
                     &mut markdown_metadata_cache,
                     command_line_prompt,
-                    &command_line_buffer,
+                    command_line_edit.buffer(),
+                    command_line_edit.cursor_byte_index(),
                     outcome_accumulator.last_projection_frame.as_ref(),
                     outcome_accumulator.last_structural_refresh.as_mut(),
                     system_warning.as_deref(),
@@ -903,6 +962,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut markdown_metadata_cache,
                 None,
                 "",
+                0,
                 None,
                 None,
                 None,
@@ -954,6 +1014,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut markdown_metadata_cache,
                 None,
                 "",
+                0,
                 None,
                 None,
                 None,
@@ -1007,6 +1068,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut markdown_metadata_cache,
                 None,
                 "",
+                0,
                 None,
                 None,
                 None,
@@ -2217,6 +2279,7 @@ fn build_workspace_render_output(
     markdown_metadata_cache: &mut MarkdownMetadataCache,
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
+    command_line_cursor_byte_index: usize,
     projection_frame: Option<&ProjectionFrame>,
     mut structural_refresh: Option<&mut StructuralRefreshOutcome>,
     system_warning: Option<&str>,
@@ -2305,9 +2368,17 @@ fn build_workspace_render_output(
         collect_workspace_markdown_document_maps(markdown_metadata_cache, session_state, &snapshot);
     let command_preview =
         command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
+    let command_preview_cursor_col = command_line_prompt.map(|prompt| {
+        command_line_cursor_display_col(
+            prompt,
+            command_line_buffer,
+            command_line_cursor_byte_index,
+            session_state.tab_size(),
+        )
+    });
     let notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
 
-    let projection_result = project_workspace(&WorkspaceProjectionInput {
+    let mut projection_result = project_workspace(&WorkspaceProjectionInput {
         snapshot: &snapshot,
         session_state,
         visual_selection: visual_selection.as_ref(),
@@ -2325,6 +2396,12 @@ fn build_workspace_render_output(
         terminal_width,
         terminal_height,
     });
+    if let (Ok(workspace), Some(cursor_col)) =
+        (projection_result.as_mut(), command_preview_cursor_col)
+        && let Some(command_line) = workspace.command_line.as_mut()
+    {
+        command_line.cursor_col = cursor_col;
+    }
 
     match projection_result {
         Ok(workspace) => {
@@ -2877,6 +2954,7 @@ fn build_command_line_only_workspace(
     last_workspace: Option<&WorkspaceScreenModel>,
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
+    command_line_cursor_byte_index: usize,
     tab_size: u16,
 ) -> Option<WorkspaceScreenModel> {
     if command_line_prompt != Some(':') {
@@ -2884,8 +2962,12 @@ fn build_command_line_only_workspace(
     }
     let last_workspace = last_workspace?;
     let preview = format!(":{}", command_line_buffer);
-    let cursor_col =
-        u16::try_from(command_line_display_width(&preview, tab_size)).unwrap_or(u16::MAX);
+    let cursor_col = command_line_cursor_display_col(
+        ':',
+        command_line_buffer,
+        command_line_cursor_byte_index,
+        tab_size,
+    );
     log::debug!(
         "[main] reusing last workspace for command-line-only redraw: prompt=:, buffer_len={}, cursor_col={}",
         command_line_buffer.len(),
@@ -2914,6 +2996,7 @@ fn render_command_line_only_redraw_if_possible(
     structural_refresh: Option<&StructuralRefreshOutcome>,
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
+    command_line_cursor_byte_index: usize,
     tab_size: u16,
 ) -> CommandLineOnlyRedraw {
     if !structural_refresh_is_idle(structural_refresh) {
@@ -2923,6 +3006,7 @@ fn render_command_line_only_redraw_if_possible(
         last_workspace_model.as_ref(),
         command_line_prompt,
         command_line_buffer,
+        command_line_cursor_byte_index,
         tab_size,
     ) else {
         return CommandLineOnlyRedraw::NotApplicable;
@@ -2970,6 +3054,27 @@ fn command_line_display_width(text: &str, tab_size: u16) -> usize {
         }
     }
     display_col
+}
+
+fn command_line_cursor_display_col(
+    prompt: char,
+    command_line_buffer: &str,
+    cursor_byte_index: usize,
+    tab_size: u16,
+) -> u16 {
+    let cursor_byte_index = cursor_byte_index.min(command_line_buffer.len());
+    let cursor_byte_index =
+        clamp_to_command_line_char_boundary(command_line_buffer, cursor_byte_index);
+    let prefix = format!("{}{}", prompt, &command_line_buffer[..cursor_byte_index]);
+    u16::try_from(command_line_display_width(&prefix, tab_size)).unwrap_or(u16::MAX)
+}
+
+fn clamp_to_command_line_char_boundary(buffer: &str, cursor_byte_index: usize) -> usize {
+    let mut index = cursor_byte_index.min(buffer.len());
+    while index > 0 && !buffer.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn next_command_line_tab_stop(display_col: usize, tab_size: usize) -> usize {
@@ -3286,6 +3391,7 @@ mod tests {
             &mut markdown_metadata_cache,
             None,
             "",
+            0,
             None,
             None,
             None,
@@ -3329,6 +3435,7 @@ mod tests {
                 &mut markdown_metadata_cache,
                 None,
                 "",
+                0,
                 None,
                 None,
                 None,
@@ -3816,7 +3923,7 @@ mod tests {
         last_workspace.panes[0].lines = vec!["keep full projection".to_string()];
 
         let rendered =
-            build_command_line_only_workspace(Some(&last_workspace), Some(':'), "write", 4)
+            build_command_line_only_workspace(Some(&last_workspace), Some(':'), "write", 5, 4)
                 .expect("colon command preview should use command-line-only workspace");
 
         assert_eq!(rendered.panes, last_workspace.panes);
@@ -3830,18 +3937,35 @@ mod tests {
     }
 
     #[test]
+    fn command_line_only_render_uses_command_line_edit_cursor_position() {
+        let last_workspace = main_test_workspace();
+
+        let rendered =
+            build_command_line_only_workspace(Some(&last_workspace), Some(':'), "write", 1, 4)
+                .expect("colon command preview should use command-line-only workspace");
+
+        assert_eq!(
+            rendered.command_line,
+            Some(saya::screen_model::CommandLineModel {
+                text: ":write".to_string(),
+                cursor_col: 2,
+            })
+        );
+    }
+
+    #[test]
     fn command_line_only_render_is_not_used_for_search_prompt() {
         let last_workspace = main_test_workspace();
 
         let rendered =
-            build_command_line_only_workspace(Some(&last_workspace), Some('/'), "pattern", 4);
+            build_command_line_only_workspace(Some(&last_workspace), Some('/'), "pattern", 7, 4);
 
         assert_eq!(rendered, None);
     }
 
     #[test]
     fn command_line_only_render_requires_existing_workspace() {
-        let rendered = build_command_line_only_workspace(None, Some(':'), "write", 4);
+        let rendered = build_command_line_only_workspace(None, Some(':'), "write", 5, 4);
 
         assert_eq!(rendered, None);
     }
@@ -3867,6 +3991,7 @@ mod tests {
                 None,
                 Some(':'),
                 buffer,
+                buffer.len(),
                 4,
             );
 
@@ -3919,6 +4044,7 @@ mod tests {
             Some('/'),
             "word",
             4,
+            4,
         );
 
         assert_eq!(result, CommandLineOnlyRedraw::NotApplicable);
@@ -3946,6 +4072,7 @@ mod tests {
             None,
             Some(':'),
             "write",
+            5,
             4,
         );
 

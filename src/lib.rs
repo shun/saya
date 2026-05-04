@@ -4,6 +4,8 @@ pub mod architecture_compliance;
 pub mod bootstrap;
 pub mod callback_registry_seed;
 pub mod cli;
+pub mod command_line_editor;
+pub mod command_line_history;
 pub mod config_runtime;
 pub mod core_bridge;
 pub mod core_host_actions;
