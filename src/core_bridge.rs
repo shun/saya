@@ -664,7 +664,7 @@ impl CoreBridge {
         Ok(chunks)
     }
 
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     pub fn request_tree_sitter_syntax_preparation(
         &mut self,
         request: vim_core_rs::CoreTreeSitterPreparationRequest,
@@ -690,7 +690,7 @@ impl CoreBridge {
         Ok(preparation)
     }
 
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     pub fn poll_tree_sitter_preparation(
         &mut self,
     ) -> Option<vim_core_rs::CoreTreeSitterPreparationResult> {
@@ -709,7 +709,7 @@ impl CoreBridge {
         result
     }
 
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     pub fn query_tree_sitter_syntax_range(
         &self,
         buffer_id: i32,
@@ -1178,7 +1178,7 @@ mod tests {
         assert_eq!(snapshot.mode, CoreMode::Normal);
     }
 
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     #[test]
     fn tree_sitter_request_poll_and_query_reads_committed_cache_without_worker() {
         let _lock = session_test_lock()

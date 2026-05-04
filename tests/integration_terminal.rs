@@ -329,7 +329,7 @@ fn project_workspace_from_snapshot(
         visual_selection: None,
         search_states: &search_states,
         syntax_lines: &syntax_lines,
-        #[cfg(feature = "experimental-tree-sitter-syntax")]
+        #[cfg(feature = "tree-sitter-syntax")]
         tree_sitter_syntax: &BTreeMap::new(),
         markdown_document_maps: &markdown_document_maps,
         command_preview: None,
@@ -373,7 +373,7 @@ fn project_markdown_workspace_from_snapshot(
         visual_selection: None,
         search_states: &search_states,
         syntax_lines: &syntax_lines,
-        #[cfg(feature = "experimental-tree-sitter-syntax")]
+        #[cfg(feature = "tree-sitter-syntax")]
         tree_sitter_syntax: &BTreeMap::new(),
         markdown_document_maps: &markdown_document_maps,
         command_preview: None,
@@ -2204,7 +2204,7 @@ fn ctrl_w_close_on_last_window_keeps_layout_and_surfaces_message() {
         visual_selection: None,
         search_states: &search_states,
         syntax_lines: &syntax_lines,
-        #[cfg(feature = "experimental-tree-sitter-syntax")]
+        #[cfg(feature = "tree-sitter-syntax")]
         tree_sitter_syntax: &BTreeMap::new(),
         markdown_document_maps: &markdown_document_maps,
         command_preview: None,
@@ -2283,7 +2283,7 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
         visual_selection: None,
         search_states: &before_search_states,
         syntax_lines: &before_syntax_lines,
-        #[cfg(feature = "experimental-tree-sitter-syntax")]
+        #[cfg(feature = "tree-sitter-syntax")]
         tree_sitter_syntax: &BTreeMap::new(),
         markdown_document_maps: &before_markdown_document_maps,
         command_preview: None,
@@ -2311,7 +2311,7 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
         visual_selection: None,
         search_states: &after_search_states,
         syntax_lines: &after_syntax_lines,
-        #[cfg(feature = "experimental-tree-sitter-syntax")]
+        #[cfg(feature = "tree-sitter-syntax")]
         tree_sitter_syntax: &BTreeMap::new(),
         markdown_document_maps: &after_markdown_document_maps,
         command_preview: None,

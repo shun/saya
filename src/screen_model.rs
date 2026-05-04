@@ -429,7 +429,7 @@ pub struct ProjectionInput<'a> {
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_state: Option<&'a SearchVisibleState>,
     pub syntax_lines: Option<&'a BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     pub tree_sitter_syntax: Option<&'a vim_core_rs::CoreTreeSitterRangeSyntax>,
     pub markdown_document_map: Option<&'a MarkdownDocumentMap>,
     pub command_preview: Option<&'a str>,
@@ -460,7 +460,7 @@ impl<'a> ProjectionInput<'a> {
             visual_selection: None,
             search_state: None,
             syntax_lines: None,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: None,
             markdown_document_map: None,
             command_preview: None,
@@ -508,7 +508,7 @@ impl<'a> ProjectionInput<'a> {
         self
     }
 
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     pub fn with_tree_sitter_syntax(
         mut self,
         tree_sitter_syntax: Option<&'a vim_core_rs::CoreTreeSitterRangeSyntax>,
@@ -562,7 +562,7 @@ pub struct WorkspaceProjectionInput<'a> {
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_states: &'a BTreeMap<i32, SearchVisibleState>,
     pub syntax_lines: &'a BTreeMap<i32, BTreeMap<usize, Vec<CoreSyntaxChunk>>>,
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     pub tree_sitter_syntax: &'a BTreeMap<i32, vim_core_rs::CoreTreeSitterRangeSyntax>,
     pub markdown_document_maps: &'a BTreeMap<i32, Arc<MarkdownDocumentMap>>,
     pub command_preview: Option<&'a str>,
@@ -634,7 +634,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let visual_selection = resolve_visual_selection(input);
     let search_overlays = project_search_overlays(input, &line_projections);
     let mut syntax_chunks = project_syntax_chunks(input, &line_projections);
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     syntax_chunks.extend(project_tree_sitter_syntax_chunks(input, &line_projections));
     syntax_chunks.sort_by_key(|chunk| (chunk.row, chunk.start_col, chunk.end_col_exclusive));
     let message_state = resolve_message_state(input);
@@ -734,7 +734,7 @@ pub fn project_workspace(
                 })
                 .with_search_state(input.search_states.get(&window.id))
                 .with_syntax_lines(input.syntax_lines.get(&window.id));
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             let pane_input =
                 pane_input.with_tree_sitter_syntax(input.tree_sitter_syntax.get(&window.id));
             let mut pane_input = pane_input
@@ -1630,7 +1630,7 @@ fn project_syntax_chunks(
     projected
 }
 
-#[cfg(feature = "experimental-tree-sitter-syntax")]
+#[cfg(feature = "tree-sitter-syntax")]
 fn project_tree_sitter_syntax_chunks(
     input: &ProjectionInput<'_>,
     line_projections: &[ScreenLineProjection],
@@ -1663,24 +1663,45 @@ fn project_tree_sitter_syntax_chunks(
         );
         return Vec::new();
     };
-    if syntax.source_revision != buffer.source_revision
-        || !matches!(syntax.status, CoreTreeSitterStatus::Prepared)
-    {
-        log::debug!(
-            "[screen_model] ignoring non-fresh Tree-sitter syntax: window_id={}, buffer_id={}, syntax_revision={:?}, buffer_revision={:?}, status={:?}",
-            input.window_id,
-            input.buffer_id,
-            syntax.source_revision,
-            buffer.source_revision,
-            syntax.status
-        );
-        return Vec::new();
-    }
-
     let viewport_bottom = input
         .viewport_top
         .saturating_add(input.body_height.max(1))
         .saturating_sub(1);
+    let visible_range = vim_core_rs::CoreTextRange {
+        start: vim_core_rs::CoreTextPosition {
+            row: input.viewport_top,
+            col: 0,
+        },
+        end: vim_core_rs::CoreTextPosition {
+            row: viewport_bottom.saturating_add(1),
+            col: 0,
+        },
+    };
+    if syntax.source_revision != buffer.source_revision
+        || !matches!(syntax.status, CoreTreeSitterStatus::Prepared)
+        || syntax.has_error
+        || !syntax.error_ranges.is_empty()
+        || !matches!(
+            syntax.budget_status,
+            vim_core_rs::CoreTreeSitterBudgetStatus::WithinBudget
+        )
+        || !tree_sitter_coverage_contains_range(&syntax.covered_ranges, visible_range)
+    {
+        log::debug!(
+            "[screen_model] ignoring non-fresh Tree-sitter syntax: window_id={}, buffer_id={}, syntax_revision={:?}, buffer_revision={:?}, status={:?}, has_error={}, error_ranges={}, covered_ranges={}, budget_status={:?}",
+            input.window_id,
+            input.buffer_id,
+            syntax.source_revision,
+            buffer.source_revision,
+            syntax.status,
+            syntax.has_error,
+            syntax.error_ranges.len(),
+            syntax.covered_ranges.len(),
+            syntax.budget_status
+        );
+        return Vec::new();
+    }
+
     let line_numbers = input.session_state.line_numbers() || input.session_state.relative_number();
     let raw_lines = input.snapshot.text.split('\n').collect::<Vec<_>>();
     let mut projected = Vec::new();
@@ -1761,7 +1782,17 @@ fn project_tree_sitter_syntax_chunks(
     projected
 }
 
-#[cfg(feature = "experimental-tree-sitter-syntax")]
+#[cfg(feature = "tree-sitter-syntax")]
+fn tree_sitter_coverage_contains_range(
+    covered_ranges: &[vim_core_rs::CoreTextRange],
+    range: vim_core_rs::CoreTextRange,
+) -> bool {
+    covered_ranges
+        .iter()
+        .any(|covered| covered.start <= range.start && range.end <= covered.end)
+}
+
+#[cfg(feature = "tree-sitter-syntax")]
 fn project_tree_sitter_chunk_display_range(
     input: &ProjectionInput<'_>,
     line_projections: &[ScreenLineProjection],
@@ -1816,7 +1847,7 @@ fn project_tree_sitter_chunk_display_range(
     Some((start_col, end_col_exclusive))
 }
 
-#[cfg(feature = "experimental-tree-sitter-syntax")]
+#[cfg(feature = "tree-sitter-syntax")]
 fn map_tree_sitter_category(category: vim_core_rs::CoreSyntaxCategory) -> ScreenSyntaxCategory {
     match category {
         vim_core_rs::CoreSyntaxCategory::Attribute => ScreenSyntaxCategory::Attribute,
@@ -1841,7 +1872,7 @@ fn map_tree_sitter_category(category: vim_core_rs::CoreSyntaxCategory) -> Screen
     }
 }
 
-#[cfg(feature = "experimental-tree-sitter-syntax")]
+#[cfg(feature = "tree-sitter-syntax")]
 fn map_tree_sitter_modifier(modifier: vim_core_rs::CoreSyntaxModifier) -> ScreenSyntaxModifier {
     match modifier {
         vim_core_rs::CoreSyntaxModifier::Async => ScreenSyntaxModifier::Async,
@@ -2771,7 +2802,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     #[test]
     fn projects_prepared_tree_sitter_chunks_without_core_syntax_chunks() {
         use vim_core_rs::{
@@ -2792,6 +2823,13 @@ mod tests {
             .find(|buffer| buffer.is_active)
             .expect("active buffer");
         let session_state = EditorSessionState::new(None);
+        let covered_range = CoreTextRange {
+            start: CoreTextPosition { row: 0, col: 0 },
+            end: CoreTextPosition {
+                row: usize::MAX,
+                col: usize::MAX,
+            },
+        };
         let syntax = CoreTreeSitterRangeSyntax {
             buffer_id: active_buffer.id,
             source_revision: active_buffer.source_revision,
@@ -2804,7 +2842,7 @@ mod tests {
             },
             status: CoreTreeSitterStatus::Prepared,
             has_error: false,
-            covered_ranges: vec![],
+            covered_ranges: vec![covered_range],
             error_ranges: vec![],
             budget_status: CoreTreeSitterBudgetStatus::WithinBudget,
             chunks: vec![CoreTreeSitterChunk {
@@ -2842,7 +2880,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     #[test]
     fn skips_tree_sitter_chunks_when_result_is_not_fresh_prepared_data() {
         use vim_core_rs::{
@@ -2863,11 +2901,16 @@ mod tests {
             .find(|buffer| buffer.is_active)
             .expect("active buffer");
         let session_state = EditorSessionState::new(None);
-        let syntax = CoreTreeSitterRangeSyntax {
-            buffer_id: active_buffer.id,
-            source_revision: CoreBufferRevision {
-                value: active_buffer.source_revision.value.saturating_sub(1),
+        let covered_range = CoreTextRange {
+            start: CoreTextPosition { row: 0, col: 0 },
+            end: CoreTextPosition {
+                row: usize::MAX,
+                col: usize::MAX,
             },
+        };
+        let base_syntax = CoreTreeSitterRangeSyntax {
+            buffer_id: active_buffer.id,
+            source_revision: active_buffer.source_revision,
             provenance: CoreTreeSitterProvenance {
                 language_id: "rust".to_string(),
                 package_id: "tree-sitter-rust".to_string(),
@@ -2875,9 +2918,9 @@ mod tests {
                 parser_version: "14".to_string(),
                 query_version: "saya-test".to_string(),
             },
-            status: CoreTreeSitterStatus::Stale,
+            status: CoreTreeSitterStatus::Prepared,
             has_error: false,
-            covered_ranges: vec![],
+            covered_ranges: vec![covered_range],
             error_ranges: vec![],
             budget_status: CoreTreeSitterBudgetStatus::WithinBudget,
             chunks: vec![CoreTreeSitterChunk {
@@ -2892,15 +2935,60 @@ mod tests {
             embedded_regions: vec![],
         };
 
-        let model = project(
-            &ProjectionInput::new(&snapshot, &session_state, None)
-                .with_tree_sitter_syntax(Some(&syntax)),
-        );
+        let stale_revision = {
+            let mut syntax = base_syntax.clone();
+            syntax.source_revision = CoreBufferRevision {
+                value: active_buffer.source_revision.value.saturating_sub(1),
+            };
+            syntax
+        };
+        let stale_status = {
+            let mut syntax = base_syntax.clone();
+            syntax.status = CoreTreeSitterStatus::Stale;
+            syntax
+        };
+        let parser_error = {
+            let mut syntax = base_syntax.clone();
+            syntax.has_error = true;
+            syntax
+        };
+        let error_range = {
+            let mut syntax = base_syntax.clone();
+            syntax.error_ranges = vec![CoreTextRange {
+                start: CoreTextPosition { row: 0, col: 0 },
+                end: CoreTextPosition { row: 0, col: 2 },
+            }];
+            syntax
+        };
+        let budget_exceeded = {
+            let mut syntax = base_syntax.clone();
+            syntax.budget_status = CoreTreeSitterBudgetStatus::GlobalBudgetExceeded;
+            syntax
+        };
+        let uncovered = {
+            let mut syntax = base_syntax;
+            syntax.covered_ranges.clear();
+            syntax
+        };
 
-        assert!(
-            model.syntax_chunks.is_empty(),
-            "stale or non-prepared Tree-sitter data must not be drawn as fresh highlight"
-        );
+        for (case, syntax) in [
+            ("stale revision", stale_revision),
+            ("stale status", stale_status),
+            ("parser error", parser_error),
+            ("error range", error_range),
+            ("budget exceeded", budget_exceeded),
+            ("uncovered visible range", uncovered),
+        ] {
+            let model = project(
+                &ProjectionInput::new(&snapshot, &session_state, None)
+                    .with_tree_sitter_syntax(Some(&syntax)),
+            );
+
+            assert!(
+                model.syntax_chunks.is_empty(),
+                "{case} Tree-sitter data must not be drawn as fresh highlight"
+            );
+        }
     }
 
     #[test]
@@ -4121,7 +4209,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,
@@ -4185,7 +4273,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,
@@ -4248,7 +4336,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,
@@ -4292,7 +4380,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,
@@ -4354,7 +4442,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,
@@ -4404,7 +4492,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,
@@ -4445,7 +4533,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: Some(":w"),
@@ -4487,7 +4575,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: Some(":%s/foo/bar"),
@@ -4542,7 +4630,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,
@@ -4597,7 +4685,7 @@ mod tests {
             visual_selection: None,
             search_states: &search_states,
             syntax_lines: &syntax_lines,
-            #[cfg(feature = "experimental-tree-sitter-syntax")]
+            #[cfg(feature = "tree-sitter-syntax")]
             tree_sitter_syntax: &BTreeMap::new(),
             markdown_document_maps: &markdown_document_maps,
             command_preview: None,

@@ -5,6 +5,7 @@
 
 use saya::saya_live_runtime::runtime_public_surface_paths;
 use saya::startup_runtime::startup_public_surface_paths;
+use std::path::{Path, PathBuf};
 
 const FORBIDDEN_COMPAT_STRING_APIS: &[&str] = &["vim.cmd", ":set", ":map"];
 const STRUCTURAL_ACCEPTANCE_COMMAND: &str = "gtimeout 30s cargo test --test structural_refresh_contract && gtimeout 30s cargo test --test core_outcome_contract && gtimeout 30s cargo test --test tui_render_coordinator && gtimeout 30s cargo test --test integration_terminal && gtimeout 30s cargo test --test public_surface_guard";
@@ -99,6 +100,73 @@ fn runtime_surface_excludes_compatibility_string_apis() {
         !surface.iter().any(|entry| entry.starts_with("vim.")),
         "runtime surface should not expose vim namespace"
     );
+}
+
+#[test]
+fn tree_sitter_syntax_feature_uses_stable_name_without_worker_compatibility_path() {
+    let manifest = std::fs::read_to_string("Cargo.toml")
+        .expect("Cargo manifest should be readable from the repository root");
+
+    assert!(
+        manifest.contains("[features]\ndefault = []\ntree-sitter-syntax = ["),
+        "Cargo feature should expose the stable tree-sitter-syntax name"
+    );
+    assert!(
+        manifest.contains("\"vim-core-rs/tree-sitter-syntax\""),
+        "saya should enable vim-core-rs/tree-sitter-syntax directly"
+    );
+
+    let forbidden_terms = [
+        concat!("experimental", "-tree-sitter"),
+        concat!("experimental", "-tree-sitter-syntax"),
+        concat!("SAYA", "_EXPERIMENTAL_TREE_SITTER_SYNTAX"),
+        concat!("SAYA", "_TREE_SITTER_SYNTAX_WORKER"),
+        concat!("sy", "-tree-sitter-syntax-worker"),
+        concat!("tree", "_sitter_worker"),
+    ];
+    let mut violations = Vec::new();
+    for path in source_guard_paths() {
+        let source =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+        for term in forbidden_terms {
+            if source.contains(term) {
+                violations.push(format!("{} contains {term}", path.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Tree-sitter syntax integration must not retain experimental naming or worker compatibility paths: {violations:?}"
+    );
+}
+
+fn source_guard_paths() -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from("Cargo.toml")];
+    for root in ["src", "tests", "docs"] {
+        collect_source_guard_paths(Path::new(root), &mut paths);
+    }
+    paths
+}
+
+fn collect_source_guard_paths(path: &Path, paths: &mut Vec<PathBuf>) {
+    let entries = std::fs::read_dir(path).unwrap_or_else(|error| {
+        panic!("source guard directory should be readable {path:?}: {error}")
+    });
+    for entry in entries {
+        let entry = entry.expect("source guard directory entry should be readable");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_source_guard_paths(&path, paths);
+            continue;
+        }
+        if matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("rs" | "md")
+        ) {
+            paths.push(path);
+        }
+    }
 }
 
 #[test]

@@ -2215,7 +2215,7 @@ fn build_workspace_render_output(
     )?;
     let syntax_lines =
         collect_workspace_syntax_lines(&outcome.core_bridge, &snapshot, viewport_store);
-    #[cfg(feature = "experimental-tree-sitter-syntax")]
+    #[cfg(feature = "tree-sitter-syntax")]
     let tree_sitter_syntax =
         collect_workspace_tree_sitter_syntax(&mut outcome.core_bridge, &snapshot, viewport_store);
     let markdown_document_maps =
@@ -2230,7 +2230,7 @@ fn build_workspace_render_output(
         visual_selection: visual_selection.as_ref(),
         search_states: &search_states,
         syntax_lines: &syntax_lines,
-        #[cfg(feature = "experimental-tree-sitter-syntax")]
+        #[cfg(feature = "tree-sitter-syntax")]
         tree_sitter_syntax: &tree_sitter_syntax,
         markdown_document_maps: &markdown_document_maps,
         command_preview: command_preview.as_deref(),
@@ -2514,7 +2514,7 @@ fn collect_workspace_syntax_lines(
     syntax_lines
 }
 
-#[cfg(feature = "experimental-tree-sitter-syntax")]
+#[cfg(feature = "tree-sitter-syntax")]
 fn collect_workspace_tree_sitter_syntax(
     core_bridge: &mut saya::core_bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
@@ -2610,14 +2610,24 @@ fn collect_workspace_tree_sitter_syntax(
         };
         if syntax.source_revision != buffer.source_revision
             || !matches!(syntax.status, vim_core_rs::CoreTreeSitterStatus::Prepared)
+            || syntax.has_error
+            || !syntax.error_ranges.is_empty()
+            || !matches!(
+                syntax.budget_status,
+                vim_core_rs::CoreTreeSitterBudgetStatus::WithinBudget
+            )
+            || !tree_sitter_coverage_contains_range(&syntax.covered_ranges, range)
         {
             log::debug!(
-                "[main] Tree-sitter syntax not renderable as fresh highlight: window_id={}, buffer_id={}, syntax_revision={:?}, buffer_revision={:?}, status={:?}, budget_status={:?}",
+                "[main] Tree-sitter syntax not renderable as fresh highlight: window_id={}, buffer_id={}, syntax_revision={:?}, buffer_revision={:?}, status={:?}, has_error={}, error_ranges={}, covered_ranges={}, budget_status={:?}",
                 window.id,
                 buffer.id,
                 syntax.source_revision,
                 buffer.source_revision,
                 syntax.status,
+                syntax.has_error,
+                syntax.error_ranges.len(),
+                syntax.covered_ranges.len(),
                 syntax.budget_status
             );
             continue;
@@ -2633,6 +2643,16 @@ fn collect_workspace_tree_sitter_syntax(
         syntax_by_window.insert(window.id, syntax);
     }
     syntax_by_window
+}
+
+#[cfg(feature = "tree-sitter-syntax")]
+fn tree_sitter_coverage_contains_range(
+    covered_ranges: &[vim_core_rs::CoreTextRange],
+    range: vim_core_rs::CoreTextRange,
+) -> bool {
+    covered_ranges
+        .iter()
+        .any(|covered| covered.start <= range.start && range.end <= covered.end)
 }
 
 fn collect_workspace_markdown_document_maps(

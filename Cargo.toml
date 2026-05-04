@@ -7,8 +7,8 @@ readme = "README.md"
 
 [features]
 default = []
-experimental-tree-sitter-syntax = [
-    "vim-core-rs/experimental-tree-sitter",
+tree-sitter-syntax = [
+    "vim-core-rs/tree-sitter-syntax",
     "vim-core-rs/tree-sitter-markdown",
     "vim-core-rs/tree-sitter-rust",
     "vim-core-rs/tree-sitter-typescript",

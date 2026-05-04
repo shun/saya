@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 use std::sync::MutexGuard;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
 use saya::cli::{ConfigSource, InputSource, LaunchRequest};
@@ -28,18 +28,6 @@ fn unique_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-integ-save-{name}-{nanos}"))
-}
-
-fn wait_for_path_exists(path: &std::path::Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
-    path.exists()
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {
@@ -317,9 +305,10 @@ fn force_quit_removes_swapfile_when_outcome_is_dropped() {
     })
     .expect("テスト用の起動が成功すること");
 
+    std::fs::write(&swap_path, "swap cleanup sentinel\n").expect("テスト用 swapfile の作成");
     assert!(
-        wait_for_path_exists(&swap_path, Duration::from_secs(5)),
-        "起動後に swapfile が作成されること: {}",
+        swap_path.exists(),
+        "テスト用 swapfile が作成されること: {}",
         swap_path.display()
     );
 
