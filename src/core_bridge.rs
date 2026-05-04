@@ -43,6 +43,7 @@ pub struct CoreBridge {
     next_outcome_sequence: u64,
     active_input_correlation_id: Option<u64>,
     pending_transport_key: Option<String>,
+    syntax_enabled: bool,
 }
 
 impl fmt::Debug for CoreBridge {
@@ -61,6 +62,7 @@ impl CoreBridge {
         );
         let mut session = VimCoreSession::new(initial_text)?;
         configure_message_suppression(&mut session).map_err(CoreSessionError::CommandFailed)?;
+        configure_initial_syntax_state(&mut session).map_err(CoreSessionError::CommandFailed)?;
         log::debug!("[core_bridge] vim-core-rs session initialized");
         Ok(Self {
             session,
@@ -68,6 +70,7 @@ impl CoreBridge {
             next_outcome_sequence: 1,
             active_input_correlation_id: None,
             pending_transport_key: None,
+            syntax_enabled: false,
         })
     }
 
@@ -342,6 +345,7 @@ impl CoreBridge {
             .execute_ex_command(command)
             .map_err(CoreSessionError::CommandFailed)?;
         self.queue_transaction_artifacts(&outcome);
+        self.record_syntax_command_state(command);
         log::debug!("[core_bridge] ex command result: {:?}", outcome.outcome);
         Ok(outcome.outcome)
     }
@@ -665,16 +669,31 @@ impl CoreBridge {
     }
 
     pub fn is_syntax_enabled(&mut self) -> bool {
-        let enabled = self
-            .session
-            .eval_string("exists('g:syntax_on')")
-            .as_deref()
-            .is_some_and(|value| value.trim() == "1");
         log::debug!(
-            "[core_bridge] resolved syntax enabled state from g:syntax_on: enabled={}",
-            enabled
+            "[core_bridge] resolved syntax enabled state from host command state: enabled={}",
+            self.syntax_enabled
         );
-        enabled
+        self.syntax_enabled
+    }
+
+    fn record_syntax_command_state(&mut self, command: &str) {
+        match normalize_ex_command(command).as_deref() {
+            Some("syntax on") => {
+                log::debug!(
+                    "[core_bridge] syntax command state updated: {} -> true",
+                    self.syntax_enabled
+                );
+                self.syntax_enabled = true;
+            }
+            Some("syntax off") => {
+                log::debug!(
+                    "[core_bridge] syntax command state updated: {} -> false",
+                    self.syntax_enabled
+                );
+                self.syntax_enabled = false;
+            }
+            _ => {}
+        }
     }
 
     #[cfg(feature = "tree-sitter-syntax")]
@@ -1005,6 +1024,23 @@ fn configure_message_suppression(
     log::debug!("[core_bridge] configuring Vim message suppression: report=999999, shortmess+=F");
     session.execute_ex_command(":set report=999999 shortmess+=F")?;
     Ok(())
+}
+
+fn configure_initial_syntax_state(
+    session: &mut VimCoreSession,
+) -> Result<(), vim_core_rs::CoreCommandError> {
+    log::debug!("[core_bridge] configuring initial Vim syntax state: syntax off");
+    session.execute_ex_command("syntax off")?;
+    Ok(())
+}
+
+fn normalize_ex_command(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+    let trimmed = trimmed.strip_prefix(':').unwrap_or(trimmed).trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn is_visual_mode(mode: vim_core_rs::CoreMode) -> bool {

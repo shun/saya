@@ -48,6 +48,7 @@ pub enum SayaOptionName {
     LineNumbers,
     List,
     ListChars,
+    MarkdownRender,
     NumberWidth,
     RelativeNumber,
     ScrollOff,
@@ -80,6 +81,7 @@ impl SayaOptionName {
             Self::LineNumbers => "number",
             Self::List => "list",
             Self::ListChars => "listchars",
+            Self::MarkdownRender => "markdownrender",
             Self::NumberWidth => "numberwidth",
             Self::RelativeNumber => "relativenumber",
             Self::ScrollOff => "scrolloff",
@@ -398,6 +400,13 @@ const OPTION_DEFINITIONS: &[SayaOptionDefinition] = &[
         aliases: &["lcs"],
     },
     SayaOptionDefinition {
+        name: SayaOptionName::MarkdownRender,
+        value_type: SayaOptionType::Boolean,
+        owner: SayaOptionOwner::PresentationOwned,
+        startup_public: false,
+        aliases: &["mdrender"],
+    },
+    SayaOptionDefinition {
         name: SayaOptionName::NumberWidth,
         value_type: SayaOptionType::Number,
         owner: SayaOptionOwner::PresentationOwned,
@@ -514,6 +523,16 @@ mod tests {
         let clipboard = SayaOptionRegistry::resolve("clipboard").expect("clipboard");
         assert_eq!(clipboard.owner, SayaOptionOwner::HostOwned);
         assert!(!clipboard.startup_public);
+
+        let markdown_render =
+            SayaOptionRegistry::resolve("markdownrender").expect("markdownrender option");
+        assert_eq!(markdown_render.name, SayaOptionName::MarkdownRender);
+        assert_eq!(markdown_render.value_type, SayaOptionType::Boolean);
+        assert_eq!(markdown_render.owner, SayaOptionOwner::PresentationOwned);
+        assert!(
+            !markdown_render.startup_public,
+            "Markdown render mode is command-controlled until the startup API is explicitly designed"
+        );
     }
 
     #[test]
@@ -542,6 +561,18 @@ mod tests {
                 .expect("listchars")
                 .operation,
             SayaSetOperation::Assign(SayaOptionValue::String("tab:>-,trail:-".to_string()))
+        );
+        assert_eq!(
+            SayaOptionRegistry::parse_set_command(":set nomarkdownrender")
+                .expect("nomarkdownrender")
+                .operation,
+            SayaSetOperation::Assign(SayaOptionValue::Boolean(false))
+        );
+        assert_eq!(
+            SayaOptionRegistry::parse_set_command(":set markdownrender!")
+                .expect("markdownrender toggle")
+                .operation,
+            SayaSetOperation::Toggle
         );
     }
 }

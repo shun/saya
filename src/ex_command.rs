@@ -261,6 +261,9 @@ fn current_presentation_value(
         crate::option_registry::SayaOptionName::ListChars => {
             SayaOptionValue::String(session_state.listchars().to_string())
         }
+        crate::option_registry::SayaOptionName::MarkdownRender => {
+            SayaOptionValue::Boolean(session_state.markdown_render())
+        }
         crate::option_registry::SayaOptionName::FoldMethod => {
             SayaOptionValue::String(session_state.foldmethod().to_string())
         }
@@ -383,6 +386,35 @@ mod tests {
 
         assert_eq!(message, Some("numberwidth=1".to_string()));
         assert_eq!(session_state.number_width(), 1);
+    }
+
+    #[test]
+    fn apply_local_ex_command_toggles_markdown_render_projection() {
+        let mut session_state = EditorSessionState::new(None);
+
+        let off_message = apply_local_ex_command(&mut session_state, ":set nomarkdownrender");
+        assert_eq!(off_message, Some("markdownrender: off".to_string()));
+        assert!(!session_state.markdown_render());
+
+        let toggle_message = apply_local_ex_command(&mut session_state, ":set markdownrender!");
+        assert_eq!(toggle_message, Some("markdownrender: on".to_string()));
+        assert!(session_state.markdown_render());
+    }
+
+    #[test]
+    fn route_ex_command_routes_markdown_render_to_presentation_state() {
+        assert_eq!(
+            route_ex_command(":set markdownrender"),
+            ExCommandRoute::PresentationLocal
+        );
+        assert_eq!(
+            route_ex_command(":set nomarkdownrender"),
+            ExCommandRoute::PresentationLocal
+        );
+        assert_eq!(
+            route_ex_command(":set markdownrender!"),
+            ExCommandRoute::PresentationLocal
+        );
     }
 
     #[test]

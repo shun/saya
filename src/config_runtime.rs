@@ -184,9 +184,12 @@ impl From<SayaOptionName> for ConfigOptionName {
             | SayaOptionName::Clipboard
             | SayaOptionName::FileEncoding
             | SayaOptionName::FileFormat
+            | SayaOptionName::MarkdownRender
             | SayaOptionName::Undofile
             | SayaOptionName::WriteBackup => {
-                unreachable!("host I/O options must not be converted into startup config commands")
+                unreachable!(
+                    "non-startup-public options must not be converted into startup config commands"
+                )
             }
         }
     }

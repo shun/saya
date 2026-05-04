@@ -46,6 +46,7 @@ pub struct EditorSessionState {
     laststatus: u8,
     list: bool,
     listchars: String,
+    markdown_render: bool,
     foldmethod: String,
     foldlevel: u16,
     /// read-only 起動かどうか
@@ -122,6 +123,7 @@ impl EditorSessionState {
             laststatus: 2,
             list: false,
             listchars: "tab:>-,trail:-".to_string(),
+            markdown_render: true,
             foldmethod: "manual".to_string(),
             foldlevel: 0,
             read_only,
@@ -273,6 +275,10 @@ impl EditorSessionState {
         &self.listchars
     }
 
+    pub fn markdown_render(&self) -> bool {
+        self.markdown_render
+    }
+
     pub fn foldmethod(&self) -> &str {
         &self.foldmethod
     }
@@ -351,6 +357,15 @@ impl EditorSessionState {
             }
             (SayaOptionName::ListChars, SayaOptionValue::String(value)) => {
                 self.listchars = value;
+                Ok(())
+            }
+            (SayaOptionName::MarkdownRender, SayaOptionValue::Boolean(value)) => {
+                log::debug!(
+                    "[editor_session] markdown render projection updated: {} -> {}",
+                    self.markdown_render,
+                    value
+                );
+                self.markdown_render = value;
                 Ok(())
             }
             (SayaOptionName::FoldMethod, SayaOptionValue::String(value)) => {

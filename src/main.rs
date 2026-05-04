@@ -2668,7 +2668,7 @@ fn collect_workspace_tree_sitter_syntax(
             buffer_id: buffer.id,
             source_revision: Some(buffer.source_revision),
             range,
-            vim_filetype: None,
+            vim_filetype: tree_sitter_filetype_hint(&buffer.name),
             buffer_name: (!buffer.name.is_empty()).then(|| buffer.name.clone()),
             host_language_hint: None,
             snapshot_policy: vim_core_rs::CoreTreeSitterSnapshotPolicy::default(),
@@ -2747,6 +2747,20 @@ fn collect_workspace_tree_sitter_syntax(
 }
 
 #[cfg(feature = "tree-sitter-syntax")]
+fn tree_sitter_filetype_hint(buffer_name: &str) -> Option<String> {
+    std::path::Path::new(buffer_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(|extension| match extension {
+            "rs" => Some("rust"),
+            "md" | "markdown" => Some("markdown"),
+            "ts" => Some("typescript"),
+            _ => None,
+        })
+        .map(str::to_string)
+}
+
+#[cfg(feature = "tree-sitter-syntax")]
 fn tree_sitter_coverage_contains_range(
     covered_ranges: &[vim_core_rs::CoreTextRange],
     range: vim_core_rs::CoreTextRange,
@@ -2761,6 +2775,14 @@ fn collect_workspace_markdown_document_maps(
     session_state: &saya::editor_session::EditorSessionState,
     snapshot: &vim_core_rs::CoreSnapshot,
 ) -> BTreeMap<i32, Arc<MarkdownDocumentMap>> {
+    if !session_state.markdown_render() {
+        log::debug!(
+            "[main] skipping markdown metadata collection because markdownrender is off: target_path={:?}",
+            session_state.target_path()
+        );
+        return BTreeMap::new();
+    }
+
     if !is_markdown_target_path(session_state.target_path()) {
         log::debug!(
             "[main] skipping markdown metadata collection because target path is not markdown: target_path={:?}",
@@ -3104,7 +3126,7 @@ fn render_version_text() -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
     use saya::optional_graphics::RecordingOverlayWriter;
@@ -3199,6 +3221,41 @@ mod tests {
         assert_eq!(sequence.as_deref(), Some("\x1b[<0;65535;65535M"));
     }
 
+    #[test]
+    fn markdown_metadata_collection_is_skipped_when_markdown_render_is_disabled() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("markdown-render-off").with_extension("md");
+        std::fs::write(&target_path, "# Title\n").expect("test markdown file");
+        let outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path.clone()),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        session_state
+            .apply_presentation_option(
+                saya::option_registry::SayaOptionName::MarkdownRender,
+                saya::option_registry::SayaOptionValue::Boolean(false),
+            )
+            .expect("markdownrender option should apply");
+        let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+
+        let maps = collect_workspace_markdown_document_maps(
+            &mut markdown_metadata_cache,
+            &session_state,
+            &outcome.core_bridge.snapshot(),
+        );
+
+        assert!(
+            maps.is_empty(),
+            "raw Markdown mode should not collect render metadata"
+        );
+        std::fs::remove_file(&target_path).expect("test markdown file should be removed");
+    }
+
     #[cfg(feature = "tree-sitter-syntax")]
     #[test]
     fn workspace_render_collects_tree_sitter_highlight_only_when_vim_syntax_is_on() {
@@ -3206,10 +3263,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("syntax-toggle-main").with_extension("rs");
+        let config_path = unique_path("syntax-toggle-empty-init").with_extension("ts");
         std::fs::write(&target_path, "fn main() {}\n").expect("test source file");
+        std::fs::write(&config_path, "").expect("empty test config file");
         let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
             input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::Default,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
             ..saya::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
@@ -3260,29 +3319,47 @@ mod tests {
             "Rust source buffer name should be available for Tree-sitter language resolution: {:?}",
             snapshot.buffers
         );
-        let syntax_on_workspace = build_workspace_render_output(
-            &mut outcome,
-            &session_state,
-            &mut viewport_store,
-            &mut search_refresh_store,
-            &mut markdown_metadata_cache,
-            None,
-            "",
-            None,
-            None,
-            None,
-            None,
-            80,
-            24,
-        )
-        .expect("syntax-on workspace should render");
+        let mut syntax_on_workspace = None;
+        for _ in 0..20 {
+            let workspace = build_workspace_render_output(
+                &mut outcome,
+                &session_state,
+                &mut viewport_store,
+                &mut search_refresh_store,
+                &mut markdown_metadata_cache,
+                None,
+                "",
+                None,
+                None,
+                None,
+                None,
+                80,
+                24,
+            )
+            .expect("syntax-on workspace should render");
+            if workspace_has_syntax_chunks(&workspace) {
+                syntax_on_workspace = Some(workspace);
+                break;
+            }
+            syntax_on_workspace = Some(workspace);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let syntax_on_workspace =
+            syntax_on_workspace.expect("syntax-on workspace should render at least once");
         assert!(
-            syntax_on_workspace
-                .panes
-                .iter()
-                .any(|pane| !pane.syntax_chunks.is_empty()),
+            workspace_has_syntax_chunks(&syntax_on_workspace),
             "syntax on should allow Tree-sitter highlight chunks for Rust source"
         );
+        std::fs::remove_file(&target_path).expect("test source file should be removed");
+        std::fs::remove_file(&config_path).expect("test config file should be removed");
+    }
+
+    #[cfg(feature = "tree-sitter-syntax")]
+    fn workspace_has_syntax_chunks(workspace: &WorkspaceScreenModel) -> bool {
+        workspace
+            .panes
+            .iter()
+            .any(|pane| !pane.syntax_chunks.is_empty())
     }
 
     #[test]

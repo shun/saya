@@ -1663,10 +1663,13 @@ fn project_tree_sitter_syntax_chunks(
         );
         return Vec::new();
     };
+    let raw_lines = input.snapshot.text.split('\n').collect::<Vec<_>>();
+    let coverage_line_count = input.snapshot.text.lines().count().max(1);
     let viewport_bottom = input
         .viewport_top
         .saturating_add(input.body_height.max(1))
-        .saturating_sub(1);
+        .saturating_sub(1)
+        .min(coverage_line_count.saturating_sub(1));
     let visible_range = vim_core_rs::CoreTextRange {
         start: vim_core_rs::CoreTextPosition {
             row: input.viewport_top,
@@ -1703,7 +1706,6 @@ fn project_tree_sitter_syntax_chunks(
     }
 
     let line_numbers = input.session_state.line_numbers() || input.session_state.relative_number();
-    let raw_lines = input.snapshot.text.split('\n').collect::<Vec<_>>();
     let mut projected = Vec::new();
 
     for chunk in &syntax.chunks {
@@ -1888,6 +1890,16 @@ fn map_tree_sitter_modifier(modifier: vim_core_rs::CoreSyntaxModifier) -> Screen
 
 fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenLineProjection> {
     let raw_lines = input.snapshot.text.split('\n').collect::<Vec<_>>();
+    let markdown_document_map = if input.session_state.markdown_render() {
+        input.markdown_document_map
+    } else {
+        log::debug!(
+            "[screen_model] markdown render projection disabled by session option: window_id={}, cursor_row={}",
+            input.window_id,
+            input.cursor_row
+        );
+        None
+    };
     let line_number_enabled =
         input.session_state.line_numbers() || input.session_state.relative_number();
     let number_width = line_number_width(raw_lines.len(), input.session_state.number_width());
@@ -1909,7 +1921,7 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
             project_markdown_line_projection(
                 absolute_row,
                 raw_text,
-                input.markdown_document_map,
+                markdown_document_map,
                 keep_raw,
                 usize::from(input.session_state.tab_size().max(1)),
                 line_start_col,
@@ -1923,7 +1935,7 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
         projections.len(),
         input.viewport_top,
         line_start_col,
-        input.markdown_document_map.is_some(),
+        markdown_document_map.is_some(),
         raw_expansion
     );
 
@@ -2041,6 +2053,16 @@ impl MarkdownRawExpansion {
 }
 
 fn resolve_markdown_raw_expansion(input: &ProjectionInput<'_>) -> MarkdownRawExpansion {
+    if !input.session_state.markdown_render() {
+        log::debug!(
+            "[screen_model] markdown raw expansion disabled: window_id={}, active={}, cursor_row={}, reason=markdown_render_option_off",
+            input.window_id,
+            input.is_active,
+            input.cursor_row
+        );
+        return MarkdownRawExpansion::None;
+    }
+
     let Some(map) = input.markdown_document_map else {
         log::debug!(
             "[screen_model] markdown raw expansion disabled: window_id={}, active={}, cursor_row={}, reason=no_markdown_metadata",
@@ -3369,6 +3391,40 @@ mod tests {
 
         assert_eq!(model.line_projections[0].display_text, "• ✅ done");
         assert_eq!(model.line_projections[1].display_text, "Next");
+    }
+
+    #[test]
+    fn markdown_projection_keeps_all_rows_raw_when_markdown_render_is_disabled() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "# Title\n- [x] done\n*tail*\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let mut session_state = EditorSessionState::new(None);
+        session_state
+            .apply_presentation_option(
+                crate::option_registry::SayaOptionName::MarkdownRender,
+                crate::option_registry::SayaOptionValue::Boolean(false),
+            )
+            .expect("markdownrender option should apply");
+        let markdown_map = MarkdownDocumentMap::parse(source);
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+
+        assert_eq!(
+            model
+                .line_projections
+                .iter()
+                .map(|line| line.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["# Title", "- [x] done", "*tail*", ""],
+            "disabled Markdown rendering should keep raw Markdown even when metadata is present"
+        );
     }
 
     #[test]
