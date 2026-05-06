@@ -300,6 +300,15 @@ fn key_event_with_modifiers(code: KeyCode, modifiers: KeyModifiers) -> Event {
     })
 }
 
+fn key_event_with_kind(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> Event {
+    Event::Key(KeyEvent {
+        code,
+        modifiers,
+        kind,
+        state: KeyEventState::NONE,
+    })
+}
+
 fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
     Event::Mouse(MouseEvent {
         kind,
@@ -603,6 +612,7 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: false,
+            color_text: false,
             truecolor: false,
         },
         InlineGraphicsProbeResult::Disabled,
@@ -830,6 +840,7 @@ fn headless_workspace(
             visual_selection: None,
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -871,6 +882,7 @@ fn headless_split_workspace() -> WorkspaceScreenModel {
             visual_selection: None,
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: false,
@@ -891,6 +903,7 @@ fn plain_terminal_capabilities() -> saya::terminal_capability::TerminalCapabilit
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: false,
+            color_text: false,
             truecolor: false,
         },
         InlineGraphicsProbeResult::Disabled,
@@ -1709,6 +1722,46 @@ async fn extended_keyboard_terminal_events_resolve_to_editor_intent_texts_end_to
             "\x08",
         ],
         "extended keys should resolve to vim-core-rs bridge strings and unsupported keys should be ignored"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_key_release_events_do_not_dispatch_duplicate_edit_input() {
+    let events = vec![
+        key_event_with_kind(KeyCode::Char('T'), KeyModifiers::NONE, KeyEventKind::Press),
+        key_event_with_kind(
+            KeyCode::Char('T'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ),
+        key_event_with_kind(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Press),
+        key_event_with_kind(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ),
+        key_event_with_kind(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ),
+        key_event_with_kind(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ),
+    ];
+
+    let forwarded = collect_terminal_events_through_user_path(events, 3).await;
+    let edit_texts = forwarded
+        .into_iter()
+        .filter_map(intent_text_from_input_event)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        edit_texts,
+        vec!["T", "\x08", "\x08"],
+        "release events from enhanced keyboard reporting must not duplicate insert text or backspace input"
     );
 }
 

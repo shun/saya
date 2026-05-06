@@ -285,7 +285,10 @@ fn vfs_and_job_protocol_behavior_remains_out_of_scope_for_saya() {
 fn startup_surface_excludes_filesystem_and_network_capabilities() {
     let surface = startup_public_surface_names();
 
-    assert_eq!(surface, &["options", "keymap", "commands", "events"]);
+    assert_eq!(
+        surface,
+        &["options", "keymap", "commands", "events", "theme"]
+    );
     assert_eq!(
         startup_forbidden_surface_names(),
         &["filesystem", "network"]

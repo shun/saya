@@ -1,7 +1,8 @@
 # saya
 
-`saya` is a CLI text editor built on top of `vim-core-rs`. It keeps a
-Vim-derived editing model, uses Rust for orchestration and terminal UI, and
+`saya` is a Markdown-first CLI text editor built on top of `vim-core-rs`. It
+embeds Vim-derived editing semantics instead of approximating editor behavior
+in the application layer, uses Rust for orchestration and terminal UI, and
 rebuilds configuration and extension surfaces around TypeScript instead of Vim
 script.
 

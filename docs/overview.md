@@ -1,7 +1,8 @@
 # Project overview
 
-`saya` is a CLI text editor built on top of `vim-core-rs`. It preserves a
-Vim-derived editing model, keeps the application shell in Rust, and treats
+`saya` is a Markdown-first CLI text editor built on top of `vim-core-rs`. It
+embeds Vim-derived editing semantics instead of approximating editor behavior
+in the application layer, keeps the application shell in Rust, and treats
 TypeScript as the primary public surface for configuration and future
 extensions.
 
@@ -15,11 +16,13 @@ editing core.
 
 ## Product goals
 
-The project exists to give you a portable terminal editor with a small public
-surface and predictable responsibility boundaries.
+The project exists to give you a portable terminal editor with Vim-derived
+editing semantics, Markdown-native presentation, a small public surface, and
+predictable responsibility boundaries.
 
 - Keep editing semantics in `vim-core-rs` whenever possible
 - Keep the application layer focused on orchestration, rendering, and host I/O
+- Treat Markdown presentation as a first-class CLI editing experience
 - Expose configuration and extension entry points through TypeScript
 - Preserve startup speed, portability, and conceptual simplicity
 - Avoid Neovim compatibility layers and Vim script-first workflows
@@ -47,6 +50,7 @@ goals. These exclusions are part of the design, not temporary omissions.
 
 - Full Neovim compatibility
 - Vim script as the main extension surface
+- Editing behavior implemented as an application-layer approximation
 - String-first compatibility APIs such as `vim.cmd(...)`, `:set`, or `:map`
 - Broad filesystem or network capabilities in the public TypeScript API
 - Pulling application-level concerns down into `vim-core-rs`

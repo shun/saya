@@ -11,6 +11,7 @@ pub enum TerminalSessionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextStyleCapability {
     Plain,
+    Monochrome,
     Ansi,
     TrueColor,
 }
@@ -42,6 +43,7 @@ pub struct TerminalCapabilityObservation {
     pub session_kind: TerminalSessionKind,
     pub basic_terminal_control: bool,
     pub styled_text: bool,
+    pub color_text: bool,
     pub truecolor: bool,
 }
 
@@ -91,14 +93,16 @@ impl TerminalCapabilityProbe {
         let colorterm = env::var("COLORTERM")
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let truecolor = colorterm.contains("truecolor") || colorterm.contains("24bit");
-        let styled_text = env::var_os("NO_COLOR").is_none();
+        let color_text = env::var_os("NO_COLOR").is_none();
+        let truecolor =
+            color_text && (colorterm.contains("truecolor") || colorterm.contains("24bit"));
 
         Self::new(
             TerminalCapabilityObservation {
                 session_kind,
                 basic_terminal_control: true,
-                styled_text,
+                styled_text: true,
+                color_text,
                 truecolor,
             },
             InlineGraphicsProbeResult::Unsupported,
@@ -112,6 +116,8 @@ impl TerminalCapabilityProbeService for TerminalCapabilityProbe {
         let text_style = if !self.observation.styled_text {
             degraded_reasons.push(CapabilityDegradationReason::MissingStyledText);
             TextStyleCapability::Plain
+        } else if !self.observation.color_text {
+            TextStyleCapability::Monochrome
         } else if self.observation.truecolor {
             TextStyleCapability::TrueColor
         } else {
@@ -142,5 +148,57 @@ impl TerminalCapabilityProbeService for TerminalCapabilityProbe {
             inline_graphics,
             degraded_reasons,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_color_terminal_keeps_text_modifiers_available_without_color() {
+        let mut probe = TerminalCapabilityProbe::new(
+            TerminalCapabilityObservation {
+                session_kind: TerminalSessionKind::Local,
+                basic_terminal_control: true,
+                styled_text: true,
+                color_text: false,
+                truecolor: true,
+            },
+            InlineGraphicsProbeResult::Unsupported,
+        );
+
+        let profile = probe.detect();
+
+        assert_eq!(profile.text_style, TextStyleCapability::Monochrome);
+        assert!(
+            !profile
+                .degraded_reasons
+                .contains(&CapabilityDegradationReason::MissingStyledText),
+            "NO_COLOR should disable color without disabling bold or underline"
+        );
+    }
+
+    #[test]
+    fn terminal_without_styled_text_still_falls_back_to_plain() {
+        let mut probe = TerminalCapabilityProbe::new(
+            TerminalCapabilityObservation {
+                session_kind: TerminalSessionKind::Local,
+                basic_terminal_control: true,
+                styled_text: false,
+                color_text: false,
+                truecolor: false,
+            },
+            InlineGraphicsProbeResult::Unsupported,
+        );
+
+        let profile = probe.detect();
+
+        assert_eq!(profile.text_style, TextStyleCapability::Plain);
+        assert!(
+            profile
+                .degraded_reasons
+                .contains(&CapabilityDegradationReason::MissingStyledText)
+        );
     }
 }

@@ -1,6 +1,8 @@
 use crate::event_loop::{EventSender, UiEvent};
 use crate::input_router::{KeyInput, NavigationKey};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,6 +79,11 @@ pub fn run_terminal_input_loop<S: TerminalEventSource>(
                         log::debug!("[input_loop] receiver closed while sending key event");
                         break;
                     }
+                } else {
+                    log::debug!(
+                        "[input_loop] ignoring unsupported or non-dispatchable key event: {:?}",
+                        key_event
+                    );
                 }
             }
             Event::Resize(columns, rows) => {
@@ -135,6 +142,10 @@ pub fn run_terminal_input_loop<S: TerminalEventSource>(
 }
 
 fn map_key_input(key_event: KeyEvent) -> Option<KeyInput> {
+    if key_event.kind == KeyEventKind::Release {
+        return None;
+    }
+
     let modifiers = key_event.modifiers;
     match key_event.code {
         KeyCode::F(number @ 1..=12) => Some(KeyInput::F(number)),

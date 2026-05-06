@@ -149,6 +149,8 @@ design pages for flow-level details. Use
 [ADR 0002](adr/0002-adopt-three-layer-headless-test-architecture.md) and
 [Test architecture design](design/test-architecture.md) for the testing
 structure that supports this architecture.
+Use [Theme API design](design/theme-api.md) for the proposed TypeScript-first
+theme model for Markdown presentation, palettes, and plugin-provided themes.
 
 ## Next steps
 

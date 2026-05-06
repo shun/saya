@@ -5,6 +5,7 @@ use saya::startup_runtime::{
     StartupOptionName, StartupOptionValue, StartupRegistryEntry, collect_startup_registry,
     evaluate_startup_module, load_init_module, prepare_init_module, resolve_init_module_specifier,
 };
+use saya::theme::{MarkdownSemanticStyleKey, ThemeTextStyleDeclaration};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -92,6 +93,44 @@ fn init_ts_module_transpiles_into_executable_javascript() {
 }
 
 #[test]
+fn init_ts_module_transpile_keeps_theme_object_literals_executable() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r##"
+            const accent: string = "#7aa2f7";
+            saya.theme.palette = { accent };
+            saya.theme.markdown = {
+                heading: { fg: "accent", bold: true },
+                heading2: { fg: "#9ece6a", underline: true },
+            };
+        "##,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("const accent = \"#7aa2f7\";")
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("heading: { fg: \"accent\", bold: true }"),
+                "object literal values must not be stripped as type annotations"
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
 fn init_ts_module_transpile_failure_is_reported_structurally() {
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
@@ -169,6 +208,9 @@ async fn startup_surface_is_frozen_and_does_not_expose_runtime_api() {
             if (!Object.isFrozen(saya.events)) {
                 throw new Error("startup event surface should be frozen");
             }
+            if (!Object.isFrozen(saya.theme)) {
+                throw new Error("startup theme surface should be frozen");
+            }
             if (typeof saya.buffer !== "undefined") {
                 throw new Error("runtime buffer api leaked into startup namespace");
             }
@@ -185,6 +227,81 @@ async fn startup_surface_is_frozen_and_does_not_expose_runtime_api() {
     )
     .await
     .expect("startup surface should stay separated from runtime surface");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_theme_palette_and_markdown_styles_are_collected() {
+    let registry = collect_startup_registry(
+        r##"
+            saya.theme.palette = {
+                accent: "#7aa2f7",
+                heading2: "#9ece6a",
+                code: "#ff9e64",
+                link: "#2ac3de",
+            };
+            saya.theme.markdown = {
+                heading: { fg: "accent", bold: true },
+                heading2: { fg: "heading2", underline: true },
+                inlineCode: { fg: "code" },
+                link: { fg: "link", underline: true },
+            };
+        "##,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[
+            StartupRegistryEntry::ThemePalette {
+                name: "accent".to_string(),
+                value: "#7aa2f7".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "heading2".to_string(),
+                value: "#9ece6a".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "code".to_string(),
+                value: "#ff9e64".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "link".to_string(),
+                value: "#2ac3de".to_string(),
+            },
+            StartupRegistryEntry::ThemeMarkdownStyle {
+                key: MarkdownSemanticStyleKey::Heading,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("accent".to_string()),
+                    bold: Some(true),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeMarkdownStyle {
+                key: MarkdownSemanticStyleKey::Heading2,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("heading2".to_string()),
+                    underline: Some(true),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeMarkdownStyle {
+                key: MarkdownSemanticStyleKey::InlineCode,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("code".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeMarkdownStyle {
+                key: MarkdownSemanticStyleKey::Link,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("link".to_string()),
+                    underline: Some(true),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -217,6 +217,7 @@ async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_inter
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: true,
+            color_text: true,
             truecolor: true,
         },
         InlineGraphicsProbeResult::Unsupported,
@@ -309,6 +310,7 @@ fn prepare_tui_startup_context_composes_policy_probe_and_runtime_owner_before_ev
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: true,
+            color_text: true,
             truecolor: true,
         },
         InlineGraphicsProbeResult::Unsupported,
@@ -353,6 +355,7 @@ fn capability_probe_degrades_graphics_without_blocking_core_workflow_across_term
                 session_kind,
                 basic_terminal_control: true,
                 styled_text: true,
+                color_text: true,
                 truecolor: false,
             },
             InlineGraphicsProbeResult::Timeout,
@@ -398,6 +401,7 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             visual_selection: None,
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -428,6 +432,7 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: true,
+            color_text: true,
             truecolor: true,
         },
         InlineGraphicsProbeResult::Supported(
@@ -525,6 +530,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             visual_selection: None,
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -557,6 +563,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: false,
+            color_text: false,
             truecolor: false,
         },
         InlineGraphicsProbeResult::Disabled,
@@ -567,7 +574,19 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: true,
+            color_text: true,
             truecolor: true,
+        },
+        InlineGraphicsProbeResult::Unsupported,
+    )
+    .detect();
+    let monochrome_capabilities = TerminalCapabilityProbe::new(
+        TerminalCapabilityObservation {
+            session_kind: TerminalSessionKind::Local,
+            basic_terminal_control: true,
+            styled_text: true,
+            color_text: false,
+            truecolor: false,
         },
         InlineGraphicsProbeResult::Unsupported,
     )
@@ -577,6 +596,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             session_kind: TerminalSessionKind::Local,
             basic_terminal_control: true,
             styled_text: true,
+            color_text: true,
             truecolor: true,
         },
         InlineGraphicsProbeResult::Supported(
@@ -588,6 +608,8 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
 
     let plain_presentation = projector.project(&workspace, &runtime_intents, &plain_capabilities);
     let styled_presentation = projector.project(&workspace, &runtime_intents, &styled_capabilities);
+    let monochrome_presentation =
+        projector.project(&workspace, &runtime_intents, &monochrome_capabilities);
     let graphics_presentation =
         projector.project(&workspace, &runtime_intents, &graphics_capabilities);
 
@@ -612,6 +634,15 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             redraw_plan: None,
         })
         .expect("styled render should succeed");
+    let monochrome = coordinator
+        .render_workspace(RenderFrameRequest {
+            workspace: &workspace,
+            capabilities: &monochrome_capabilities,
+            presentation: &monochrome_presentation,
+            overlay_writer: Some(&mut writer),
+            redraw_plan: None,
+        })
+        .expect("monochrome render should succeed");
     let graphics = coordinator
         .render_workspace(RenderFrameRequest {
             workspace: &workspace,
@@ -623,6 +654,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
         .expect("graphics fallback render should succeed");
 
     assert_eq!(plain.text_mode, RenderTextMode::Plain);
+    assert_eq!(monochrome.text_mode, RenderTextMode::StyledMonochrome);
     assert_eq!(styled.text_mode, RenderTextMode::StyledTrueColor);
     assert_eq!(graphics.text_mode, RenderTextMode::StyledTrueColor);
     assert_eq!(
@@ -631,6 +663,10 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
     );
     assert_eq!(
         styled.rendered_workspace.panes[0].lines,
+        workspace.panes[0].lines
+    );
+    assert_eq!(
+        monochrome.rendered_workspace.panes[0].lines,
         workspace.panes[0].lines
     );
     assert_eq!(

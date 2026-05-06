@@ -28,6 +28,10 @@ The current repository already implements these behaviors.
 - Terminal lifecycle management, input routing, and event-loop coordination
 - Startup TypeScript evaluation through `deno_core`
 - Normalized startup registries for options, keymaps, commands, and events
+- Startup `saya.theme` declarations for palette tokens and Markdown semantic
+  styles
+- Resolved Markdown theme projection for headings, inline code, and links,
+  with plain text terminal fallback that preserves text
 - Runtime callback dispatch with typed payloads in headless tests
 - Headless integration coverage for the main application path around
   `vim-core-rs`

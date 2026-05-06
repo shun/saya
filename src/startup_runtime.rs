@@ -11,6 +11,7 @@ pub use crate::config_runtime::{
 pub use crate::config_runtime::{
     SayaOptionName as StartupOptionName, SayaOptionValue as StartupOptionValue,
 };
+use crate::theme::{MarkdownSemanticStyleKey, ThemeTextStyleDeclaration};
 
 const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.tabSize",
@@ -41,6 +42,8 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.commands.register",
     "saya.commands.execute",
     "saya.events.on",
+    "saya.theme.palette",
+    "saya.theme.markdown",
 ];
 
 const STARTUP_COMMAND_REFERENCE_PREFIX: &str = "__SAYA_STARTUP_COMMAND_REF__:";
@@ -61,6 +64,8 @@ const {
     op_collect_startup_keymap,
     op_collect_startup_command,
     op_collect_startup_event,
+    op_collect_startup_theme_palette,
+    op_collect_startup_theme_markdown,
 } = Deno.core.ops;
 
 globalThis.saya = {
@@ -129,7 +134,30 @@ globalThis.saya = {
             op_collect_startup_event(name, callback.toString());
         },
     },
+    theme: {},
 };
+
+Object.defineProperty(globalThis.saya.theme, "palette", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return {};
+    },
+    set(value) {
+        op_collect_startup_theme_palette(JSON.stringify(value ?? {}));
+    },
+});
+
+Object.defineProperty(globalThis.saya.theme, "markdown", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return {};
+    },
+    set(value) {
+        op_collect_startup_theme_markdown(JSON.stringify(value ?? {}));
+    },
+});
 
 function defineNumberOption(propertyName, runtimeName, defaultValue) {
     Object.defineProperty(globalThis.saya.options, propertyName, {
@@ -285,10 +313,11 @@ Object.freeze(globalThis.saya.options);
 Object.freeze(globalThis.saya.keymap);
 Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.events);
+Object.freeze(globalThis.saya.theme);
 Object.freeze(globalThis.saya);
 "#;
 
-const STARTUP_PUBLIC_SURFACE_NAMES: &[&str] = &["options", "keymap", "commands", "events"];
+const STARTUP_PUBLIC_SURFACE_NAMES: &[&str] = &["options", "keymap", "commands", "events", "theme"];
 const STARTUP_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
 pub const STARTUP_SAYA_TYPE_DECLARATION: &str = r#"
@@ -356,11 +385,44 @@ declare global {
         ): void;
     }
 
+    type SayaThemeColor = string;
+
+    interface SayaTextStyle {
+        fg?: SayaThemeColor;
+        bg?: SayaThemeColor;
+        bold?: boolean;
+        italic?: boolean;
+        underline?: boolean;
+        strikethrough?: boolean;
+    }
+
+    interface SayaStartupThemeSurface {
+        palette: Record<string, SayaThemeColor>;
+        markdown: Partial<Record<
+            | "heading"
+            | "heading1"
+            | "heading2"
+            | "heading3"
+            | "heading4"
+            | "heading5"
+            | "heading6"
+            | "inlineCode"
+            | "link"
+            | "listMarker"
+            | "checkboxChecked"
+            | "checkboxUnchecked"
+            | "table"
+            | "fencedCodeBlock",
+            SayaTextStyle
+        >>;
+    }
+
     interface SayaStartupSurface {
         options: SayaStartupOptionsSurface;
         keymap: SayaStartupKeymapSurface;
         commands: SayaStartupCommandsSurface;
         events: SayaStartupEventsSurface;
+        theme: SayaStartupThemeSurface;
     }
 
     var saya: SayaStartupSurface;
@@ -578,6 +640,109 @@ fn op_collect_startup_event(
     Ok(())
 }
 
+#[op2(fast)]
+fn op_collect_startup_theme_palette(
+    state: &mut OpState,
+    #[string] palette_json: String,
+) -> Result<(), JsErrorBox> {
+    let palette = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&palette_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid theme palette: {error}")))?;
+    log::debug!(
+        "[startup_runtime] collect startup theme palette: token_count={}",
+        palette.len()
+    );
+    let registry = state.borrow_mut::<StartupRegistry>();
+    for (name, value) in palette {
+        let Some(value) = value.as_str() else {
+            return Err(JsErrorBox::generic(format!(
+                "theme palette value must be a string: {name}"
+            )));
+        };
+        registry.push(StartupRegistryEntry::ThemePalette {
+            name,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_theme_markdown(
+    state: &mut OpState,
+    #[string] markdown_json: String,
+) -> Result<(), JsErrorBox> {
+    let markdown =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&markdown_json)
+            .map_err(|error| JsErrorBox::generic(format!("invalid markdown theme: {error}")))?;
+    log::debug!(
+        "[startup_runtime] collect startup markdown theme: style_count={}",
+        markdown.len()
+    );
+    let registry = state.borrow_mut::<StartupRegistry>();
+    for (name, value) in markdown {
+        let key = MarkdownSemanticStyleKey::parse(&name).ok_or_else(|| {
+            JsErrorBox::generic(format!("unsupported markdown theme key: {name}"))
+        })?;
+        let style = parse_theme_text_style(&name, value)?;
+        registry.push(StartupRegistryEntry::ThemeMarkdownStyle { key, style });
+    }
+    Ok(())
+}
+
+fn parse_theme_text_style(
+    name: &str,
+    value: serde_json::Value,
+) -> Result<ThemeTextStyleDeclaration, JsErrorBox> {
+    let serde_json::Value::Object(object) = value else {
+        return Err(JsErrorBox::generic(format!(
+            "markdown theme style must be an object: {name}"
+        )));
+    };
+    let mut style = ThemeTextStyleDeclaration::default();
+    for (property, value) in object {
+        match property.as_str() {
+            "fg" => style.fg = Some(theme_string_property(name, &property, value)?),
+            "bg" => style.bg = Some(theme_string_property(name, &property, value)?),
+            "bold" => style.bold = Some(theme_bool_property(name, &property, value)?),
+            "italic" => style.italic = Some(theme_bool_property(name, &property, value)?),
+            "underline" => style.underline = Some(theme_bool_property(name, &property, value)?),
+            "strikethrough" => {
+                style.strikethrough = Some(theme_bool_property(name, &property, value)?)
+            }
+            other => {
+                return Err(JsErrorBox::generic(format!(
+                    "unsupported markdown theme style property: {name}.{other}"
+                )));
+            }
+        }
+    }
+    Ok(style)
+}
+
+fn theme_string_property(
+    style_name: &str,
+    property: &str,
+    value: serde_json::Value,
+) -> Result<String, JsErrorBox> {
+    value.as_str().map(ToString::to_string).ok_or_else(|| {
+        JsErrorBox::generic(format!(
+            "markdown theme style property must be a string: {style_name}.{property}"
+        ))
+    })
+}
+
+fn theme_bool_property(
+    style_name: &str,
+    property: &str,
+    value: serde_json::Value,
+) -> Result<bool, JsErrorBox> {
+    value.as_bool().ok_or_else(|| {
+        JsErrorBox::generic(format!(
+            "markdown theme style property must be a boolean: {style_name}.{property}"
+        ))
+    })
+}
+
 deno_core::extension!(
     startup_saya_extension,
     ops = [
@@ -589,7 +754,9 @@ deno_core::extension!(
         op_collect_startup_string_option,
         op_collect_startup_keymap,
         op_collect_startup_command,
-        op_collect_startup_event
+        op_collect_startup_event,
+        op_collect_startup_theme_palette,
+        op_collect_startup_theme_markdown
     ],
     state = |state| state.put(StartupRegistry::default())
 );
@@ -791,6 +958,11 @@ fn strip_type_annotations(source_text: &str) -> String {
                 while lookahead < chars.len() && chars[lookahead].is_whitespace() {
                     lookahead += 1;
                 }
+                if looks_like_object_literal_value(&chars, lookahead) {
+                    output.push(ch);
+                    index += 1;
+                    continue;
+                }
                 while lookahead < chars.len() {
                     let next = chars[lookahead];
                     if next == '=' || next == ',' || next == ')' || next == ';' || next == '\n' {
@@ -808,6 +980,20 @@ fn strip_type_annotations(source_text: &str) -> String {
     }
 
     output
+}
+
+fn looks_like_object_literal_value(chars: &[char], index: usize) -> bool {
+    let Some(ch) = chars.get(index).copied() else {
+        return false;
+    };
+    if matches!(ch, '"' | '\'' | '`' | '{' | '[' | '-' | '0'..='9') {
+        return true;
+    }
+    let tail = chars[index..].iter().collect::<String>();
+    tail.starts_with("true")
+        || tail.starts_with("false")
+        || tail.starts_with("null")
+        || tail.starts_with("undefined")
 }
 
 fn validate_executable_module(path: &Path, executable_source_text: &str) -> Result<(), String> {

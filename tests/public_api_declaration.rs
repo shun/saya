@@ -13,6 +13,9 @@ fn startup_public_api_type_declaration_covers_formal_configuration_surface() {
     assert!(declaration.contains("keymap"));
     assert!(declaration.contains("commands"));
     assert!(declaration.contains("events"));
+    assert!(declaration.contains("theme"));
+    assert!(declaration.contains("SayaStartupThemeSurface"));
+    assert!(declaration.contains("inlineCode"));
     assert!(declaration.contains("SayaStartupSurface"));
 }
 

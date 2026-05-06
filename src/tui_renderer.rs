@@ -5,6 +5,7 @@ use crate::screen_model::{
     ScreenTreeSitterSyntax, WorkspaceScreenModel,
 };
 use crate::terminal_lifecycle::TerminalBackend;
+use crate::theme::{ResolvedTextStyle, ResolvedThemeColor};
 use crossterm::{cursor, event, execute, queue, style, terminal};
 use ratatui::Terminal;
 use ratatui::prelude::*;
@@ -77,6 +78,7 @@ pub struct RenderFrameOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderTextMode {
     Plain,
+    StyledMonochrome,
     StyledAnsi,
     StyledTrueColor,
 }
@@ -622,8 +624,9 @@ fn render_line(
     render_layered_line(line, &overlays, width, text_mode)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RenderOverlayKind {
+    Markdown(ResolvedTextStyle),
     Syntax(RenderSyntaxStyle),
     VisualSelection,
     Search(crate::search_query::SearchMatchKind),
@@ -643,7 +646,7 @@ struct RenderTreeSitterSyntaxStyle {
     deprecated: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderOverlayRange {
     start_col: usize,
     end_col_exclusive: usize,
@@ -652,6 +655,19 @@ struct RenderOverlayRange {
 
 fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<RenderOverlayRange> {
     let mut overlays = Vec::new();
+
+    overlays.extend(
+        model
+            .markdown_style_ranges
+            .iter()
+            .filter(|range| range.row == row)
+            .filter(|range| range.end_col_exclusive > range.start_col)
+            .map(|range| RenderOverlayRange {
+                start_col: usize::from(range.start_col),
+                end_col_exclusive: usize::from(range.end_col_exclusive),
+                kind: RenderOverlayKind::Markdown(range.style.clone()),
+            }),
+    );
 
     overlays.extend(
         model
@@ -705,7 +721,7 @@ fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<Ren
         (
             overlay.start_col,
             overlay.end_col_exclusive,
-            overlay_kind_rank(overlay.kind),
+            overlay_kind_rank(&overlay.kind),
         )
     });
     overlays
@@ -739,8 +755,8 @@ fn render_layered_line(
             .filter(|overlay| {
                 overlay.start_col < end_col_exclusive && overlay.end_col_exclusive > start_col
             })
-            .max_by_key(|overlay| overlay_kind_rank(overlay.kind))
-            .map(|overlay| style_for_overlay_kind(overlay.kind, text_mode))
+            .max_by_key(|overlay| overlay_kind_rank(&overlay.kind))
+            .map(|overlay| style_for_overlay_kind(overlay.kind.clone(), text_mode))
             .unwrap_or_default();
         if style == Style::default() {
             spans.push(Span::raw(text));
@@ -752,13 +768,14 @@ fn render_layered_line(
     pad_line_to_width(Line::from(spans), width)
 }
 
-fn overlay_kind_rank(kind: RenderOverlayKind) -> usize {
+fn overlay_kind_rank(kind: &RenderOverlayKind) -> usize {
     match kind {
         RenderOverlayKind::Syntax(_) => 0,
-        RenderOverlayKind::VisualSelection => 4,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => 3,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => 2,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => 1,
+        RenderOverlayKind::Markdown(_) => 1,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => 2,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => 3,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => 4,
+        RenderOverlayKind::VisualSelection => 5,
     }
 }
 
@@ -767,6 +784,7 @@ fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) ->
         return Style::default();
     }
     match kind {
+        RenderOverlayKind::Markdown(style) => style_for_markdown(style, text_mode),
         RenderOverlayKind::Syntax(style) => style_for_syntax(style, text_mode),
         RenderOverlayKind::VisualSelection => Style::default().add_modifier(Modifier::REVERSED),
         RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => {
@@ -782,6 +800,56 @@ fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) ->
             Style::default().fg(Color::Black).bg(Color::Yellow)
         }
     }
+}
+
+fn style_for_markdown(style: ResolvedTextStyle, text_mode: RenderTextMode) -> Style {
+    let mut rendered = Style::default();
+    if colors_enabled(text_mode) {
+        if let Some(fg) = style.fg {
+            rendered = rendered.fg(color_for_resolved_theme_color(&fg));
+        }
+        if let Some(bg) = style.bg {
+            rendered = rendered.bg(color_for_resolved_theme_color(&bg));
+        }
+    }
+    if style.bold {
+        rendered = rendered.add_modifier(Modifier::BOLD);
+    }
+    if style.italic {
+        rendered = rendered.add_modifier(Modifier::ITALIC);
+    }
+    if style.underline {
+        rendered = rendered.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.strikethrough {
+        rendered = rendered.add_modifier(Modifier::CROSSED_OUT);
+    }
+    rendered
+}
+
+fn colors_enabled(text_mode: RenderTextMode) -> bool {
+    matches!(
+        text_mode,
+        RenderTextMode::StyledAnsi | RenderTextMode::StyledTrueColor
+    )
+}
+
+fn color_for_resolved_theme_color(color: &ResolvedThemeColor) -> Color {
+    let hex = color.0.trim_start_matches('#');
+    if hex.len() == 6 {
+        if let (Ok(red), Ok(green), Ok(blue)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        ) {
+            return Color::Rgb(red, green, blue);
+        }
+    }
+    log::debug!(
+        "[tui_renderer] unresolved renderer color fallback used for theme color: {:?}",
+        color
+    );
+    Color::Reset
 }
 
 fn syntax_style(chunk: &crate::screen_model::ScreenSyntaxChunk) -> RenderSyntaxStyle {
@@ -816,28 +884,32 @@ fn style_for_tree_sitter_syntax(
     if text_mode == RenderTextMode::Plain {
         return Style::default();
     }
-    let mut style = match syntax.category {
-        ScreenSyntaxCategory::Comment => Style::default().fg(Color::DarkGray),
-        ScreenSyntaxCategory::String => Style::default().fg(Color::Green),
-        ScreenSyntaxCategory::Constant | ScreenSyntaxCategory::Number => {
-            Style::default().fg(Color::Magenta)
+    let mut style = if colors_enabled(text_mode) {
+        match syntax.category {
+            ScreenSyntaxCategory::Comment => Style::default().fg(Color::DarkGray),
+            ScreenSyntaxCategory::String => Style::default().fg(Color::Green),
+            ScreenSyntaxCategory::Constant | ScreenSyntaxCategory::Number => {
+                Style::default().fg(Color::Magenta)
+            }
+            ScreenSyntaxCategory::Keyword | ScreenSyntaxCategory::Operator => {
+                Style::default().fg(Color::Cyan)
+            }
+            ScreenSyntaxCategory::Function
+            | ScreenSyntaxCategory::Constructor
+            | ScreenSyntaxCategory::Type
+            | ScreenSyntaxCategory::Variable
+            | ScreenSyntaxCategory::Property
+            | ScreenSyntaxCategory::Attribute => Style::default().fg(Color::Yellow),
+            ScreenSyntaxCategory::Markup
+            | ScreenSyntaxCategory::Tag
+            | ScreenSyntaxCategory::Label => Style::default().fg(Color::Blue),
+            ScreenSyntaxCategory::Module
+            | ScreenSyntaxCategory::Punctuation
+            | ScreenSyntaxCategory::Text
+            | ScreenSyntaxCategory::Unknown => Style::default().fg(Color::White),
         }
-        ScreenSyntaxCategory::Keyword | ScreenSyntaxCategory::Operator => {
-            Style::default().fg(Color::Cyan)
-        }
-        ScreenSyntaxCategory::Function
-        | ScreenSyntaxCategory::Constructor
-        | ScreenSyntaxCategory::Type
-        | ScreenSyntaxCategory::Variable
-        | ScreenSyntaxCategory::Property
-        | ScreenSyntaxCategory::Attribute => Style::default().fg(Color::Yellow),
-        ScreenSyntaxCategory::Markup | ScreenSyntaxCategory::Tag | ScreenSyntaxCategory::Label => {
-            Style::default().fg(Color::Blue)
-        }
-        ScreenSyntaxCategory::Module
-        | ScreenSyntaxCategory::Punctuation
-        | ScreenSyntaxCategory::Text
-        | ScreenSyntaxCategory::Unknown => Style::default().fg(Color::White),
+    } else {
+        Style::default()
     };
     if syntax.definition || syntax.documentation {
         style = style.add_modifier(Modifier::BOLD);
@@ -875,7 +947,7 @@ fn syntax_family(name: Option<&str>) -> Option<&'static str> {
 }
 
 fn style_for_syntax_family(family: Option<&'static str>, text_mode: RenderTextMode) -> Style {
-    if text_mode == RenderTextMode::Plain {
+    if text_mode == RenderTextMode::Plain || !colors_enabled(text_mode) {
         return Style::default();
     }
     match family {
@@ -927,23 +999,58 @@ fn display_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use crate::bootstrap::prepare_launch;
-    use crate::cli::LaunchRequest;
+    use crate::cli::{ConfigSource, InputSource, LaunchRequest};
     use crate::core_notification_prompt::{
         BellIndication, InputPromptStatus, InputPromptView, MessageLineCandidate,
         MessageLineSource, PagerPromptView, PromptHintSuppressionReason, SuppressedPromptHint,
         resolve_workspace_message_line,
     };
     use crate::editor_session::EditorSessionState;
+    use crate::markdown_structure::MarkdownDocumentMap;
     use crate::screen_model::{
         ProjectionInput, ScreenLineProjection, ScreenSearchOverlay, project,
     };
-    use crate::screen_model::{ScreenSelection, ScreenSyntaxChunk};
+    use crate::screen_model::{ScreenMarkdownStyleRange, ScreenSelection, ScreenSyntaxChunk};
     use crate::search_query::SearchMatchKind;
     use crate::session_guard::test_lock as session_test_lock;
-    use ratatui::backend::TestBackend;
-    use ratatui::layout::Position;
+    use ratatui::backend::{CrosstermBackend, TestBackend};
+    use ratatui::layout::{Position, Rect};
+    use ratatui::{TerminalOptions, Viewport};
     use vim_core_rs::{CoreInputRequestKind, CorePagerPromptKind};
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Rc<RefCell<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CaptureWriter {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.borrow().clone()
+        }
+    }
+
+    fn unique_renderer_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        std::env::temp_dir().join(format!("saya-renderer-{name}-{nanos}"))
+    }
 
     fn screen_model_with_message(message_line: Option<&str>) -> ScreenModel {
         ScreenModel {
@@ -972,6 +1079,7 @@ mod tests {
             }),
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: message_line.map(ToString::to_string),
             command_cursor_col: None,
             is_active: true,
@@ -1087,6 +1195,7 @@ mod tests {
                 },
             ],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1180,6 +1289,403 @@ mod tests {
             Style::default().fg(Color::Black).bg(Color::Yellow)
         );
         assert_eq!(line.spans[1].content.as_ref(), "   ");
+    }
+
+    #[test]
+    fn render_buffer_text_applies_resolved_markdown_style_ranges() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["## Heading".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "## Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 7,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#9ece6a".to_string())),
+                underline: true,
+                bold: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "Heading");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x9e, 0xce, 0x6a))
+                .add_modifier(Modifier::UNDERLINED)
+                .add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn markdown_style_ranges_override_syntax_highlight_on_same_cells() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["## Heading".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "## Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.syntax_chunks = vec![ScreenSyntaxChunk {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 7,
+            syn_id: 9,
+            name: Some("Title".to_string()),
+            tree_sitter: None,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 7,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#9ece6a".to_string())),
+                underline: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "Heading");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x9e, 0xce, 0x6a))
+                .add_modifier(Modifier::UNDERLINED),
+            "Markdown semantic theme should win over core syntax style on projected Markdown cells"
+        );
+    }
+
+    #[test]
+    fn plain_text_mode_preserves_markdown_text_while_removing_style() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["`code`".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "`code`".to_string(),
+            display_text: "code".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 4,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#ff9e64".to_string())),
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        let text = render_buffer_text(&model, 6, RenderTextMode::Plain);
+
+        assert_eq!(rendered_text_line(&text, 0), "code  ");
+        assert!(
+            text.lines[0]
+                .spans
+                .iter()
+                .all(|span| span.style == Style::default())
+        );
+    }
+
+    #[test]
+    fn monochrome_text_mode_preserves_markdown_modifiers_while_removing_colors() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["## Heading".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "## Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 7,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#9ece6a".to_string())),
+                bold: true,
+                underline: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::StyledMonochrome);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "Heading");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
+            "NO_COLOR mode should remove theme colors without dropping text modifiers"
+        );
+    }
+
+    #[test]
+    fn crossterm_backend_emits_bold_sgr_for_markdown_heading_theme() {
+        let writer = CaptureWriter::default();
+        let backend = CrosstermBackend::new(writer.clone());
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 24, 4)),
+            },
+        )
+        .expect("crossterm test terminal should initialize");
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["## プロジェクト概要".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "## プロジェクト概要".to_string(),
+            display_text: "プロジェクト概要".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 16,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#9ece6a".to_string())),
+                bold: true,
+                underline: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        draw_editor_frame(&mut terminal, &model, true).expect("markdown heading should render");
+        let bytes = writer.bytes();
+        let output = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            output.contains("\u{1b}[1m"),
+            "Crossterm output should include SGR 1 for bold: {output:?}"
+        );
+        assert!(
+            output.contains("\u{1b}[4m"),
+            "Crossterm output should include SGR 4 for underline: {output:?}"
+        );
+    }
+
+    #[test]
+    fn crossterm_backend_omits_bold_sgr_when_heading_level_disables_bold() {
+        let writer = CaptureWriter::default();
+        let backend = CrosstermBackend::new(writer.clone());
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 24, 4)),
+            },
+        )
+        .expect("crossterm test terminal should initialize");
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["## プロジェクト概要".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "## プロジェクト概要".to_string(),
+            display_text: "プロジェクト概要".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 16,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#9ece6a".to_string())),
+                bold: false,
+                underline: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        draw_editor_frame(&mut terminal, &model, true).expect("markdown heading should render");
+        let bytes = writer.bytes();
+        let output = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            !output.contains("\u{1b}[1m"),
+            "Crossterm output should not include SGR 1 when bold=false: {output:?}"
+        );
+        assert!(
+            output.contains("\u{1b}[4m"),
+            "Crossterm output should still include SGR 4 for underline: {output:?}"
+        );
+    }
+
+    #[test]
+    fn crossterm_backend_emits_bold_sgr_for_startup_config_heading1_with_line_numbers() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_renderer_path("heading1-target.md");
+        let config_path = unique_renderer_path("heading1-init.ts");
+        let markdown_source = "# AGENTS.md\n\nbody\n";
+        std::fs::write(&target_path, markdown_source).expect("target file");
+        std::fs::write(
+            &config_path,
+            r##"
+                saya.options.lineNumbers = true;
+                saya.options.syntax = true;
+                saya.theme.palette = {
+                    accent: "#7aa2f7",
+                    heading2: "#9ece6a",
+                };
+                saya.theme.markdown = {
+                    heading: { fg: "accent", bold: true },
+                    heading2: { fg: "heading2", underline: true, bold: false },
+                };
+            "##,
+        )
+        .expect("config file");
+
+        let outcome = prepare_launch(LaunchRequest {
+            input_source: InputSource::File(target_path.clone()),
+            config_source: ConfigSource::File(config_path.clone()),
+            ..LaunchRequest::default()
+        })
+        .expect("startup with typescript theme config");
+        let markdown_map = MarkdownDocumentMap::parse(markdown_source);
+        let session_state = outcome.editor_session_state();
+        let model = project(
+            &ProjectionInput::new(&outcome.initial_snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map)),
+        );
+        let heading = model
+            .markdown_style_ranges
+            .iter()
+            .find(|range| range.row == 0)
+            .expect("heading1 range should be projected");
+
+        assert_eq!(model.line_projections[0].display_text, "# AGENTS.md");
+        assert_eq!(
+            heading.start_col, model.line_projections[0].line_start_col,
+            "active raw heading1 should style the heading after the line-number gutter"
+        );
+        assert!(
+            heading.style.bold,
+            "startup heading theme should keep heading1 bold before renderer output"
+        );
+
+        let writer = CaptureWriter::default();
+        let backend = CrosstermBackend::new(writer.clone());
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 32, 4)),
+            },
+        )
+        .expect("crossterm test terminal should initialize");
+
+        draw_editor_frame(&mut terminal, &model, true).expect("heading1 should render");
+        let bytes = writer.bytes();
+        let output = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            output.contains("\u{1b}[1m"),
+            "startup-configured heading1 should emit SGR 1 for bold: {output:?}"
+        );
+
+        std::fs::remove_file(&target_path).expect("remove target");
+        std::fs::remove_file(&config_path).expect("remove config");
+    }
+
+    #[test]
+    fn crossterm_backend_emits_bold_sgr_for_markdown_heading_in_monochrome_mode() {
+        let writer = CaptureWriter::default();
+        let backend = CrosstermBackend::new(writer.clone());
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 24, 4)),
+            },
+        )
+        .expect("crossterm test terminal should initialize");
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["   1 # AGENTS.md".to_string()];
+        model.is_active = true;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "# AGENTS.md".to_string(),
+            display_text: "# AGENTS.md".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 5,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 5,
+            end_col_exclusive: 16,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#7aa2f7".to_string())),
+                bold: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        draw_workspace_frame(
+            &mut terminal,
+            &WorkspaceScreenModel {
+                panes: vec![model.clone()],
+                active_window_id: model.window_id,
+                message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+                prompt_line: None,
+                pager_prompt: None,
+                suppressed_prompt_hints: vec![],
+                bell: None,
+                command_line: None,
+            },
+            true,
+            RenderTextMode::StyledMonochrome,
+        )
+        .expect("monochrome heading should render");
+        let bytes = writer.bytes();
+        let output = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            output.contains("\u{1b}[1m"),
+            "monochrome mode should still emit SGR 1 for bold: {output:?}"
+        );
+        assert!(
+            !output.contains("38;2"),
+            "monochrome mode should drop theme color SGR while keeping bold: {output:?}"
+        );
     }
 
     #[test]
@@ -1479,6 +1985,7 @@ mod tests {
                 name: Some("Keyword".to_string()),
                 tree_sitter: None,
             }],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1537,6 +2044,7 @@ mod tests {
                     capture_name: "ignored.capture".to_string(),
                 }),
             }],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1589,6 +2097,7 @@ mod tests {
                 kind: SearchMatchKind::Regular,
             }],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1642,6 +2151,7 @@ mod tests {
                 kind: SearchMatchKind::Regular,
             }],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1692,6 +2202,7 @@ mod tests {
             }),
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1850,6 +2361,7 @@ mod tests {
                     visual_selection: None,
                     search_overlays: vec![],
                     syntax_chunks: vec![],
+                    markdown_style_ranges: vec![],
                     message_line: None,
                     command_cursor_col: None,
                     is_active: false,
@@ -1874,6 +2386,7 @@ mod tests {
                     visual_selection: None,
                     search_overlays: vec![],
                     syntax_chunks: vec![],
+                    markdown_style_ranges: vec![],
                     message_line: None,
                     command_cursor_col: None,
                     is_active: false,
@@ -1921,6 +2434,7 @@ mod tests {
                 visual_selection: None,
                 search_overlays: vec![],
                 syntax_chunks: vec![],
+                markdown_style_ranges: vec![],
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,
@@ -1972,6 +2486,7 @@ mod tests {
                 visual_selection: None,
                 search_overlays: vec![],
                 syntax_chunks: vec![],
+                markdown_style_ranges: vec![],
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,

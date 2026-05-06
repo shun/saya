@@ -33,8 +33,8 @@ the core host-action boundary.
 ### Basic editing experience
 
 The application must present a narrow but real Vim-derived editing flow by
-embedding `vim-core-rs` rather than approximating editing through generic
-text-area behavior.
+embedding `vim-core-rs` rather than approximating editor behavior through
+generic text-area logic.
 
 - The application must surface at least Normal mode and Insert mode through the
   embedded core.

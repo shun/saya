@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::host_io::SaveRequest;
 use crate::option_registry::{SayaOptionName, SayaOptionValue};
+use crate::theme::ResolvedTheme;
 
 /// 保存要求の生成に失敗した理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,7 @@ pub struct EditorSessionState {
     markdown_render: bool,
     foldmethod: String,
     foldlevel: u16,
+    resolved_theme: ResolvedTheme,
     /// read-only 起動かどうか
     read_only: bool,
     /// 現在 dirty 状態かどうか
@@ -126,6 +128,7 @@ impl EditorSessionState {
             markdown_render: true,
             foldmethod: "manual".to_string(),
             foldlevel: 0,
+            resolved_theme: ResolvedTheme::default(),
             read_only,
             dirty: false,
             last_save_error: None,
@@ -285,6 +288,15 @@ impl EditorSessionState {
 
     pub fn foldlevel(&self) -> u16 {
         self.foldlevel
+    }
+
+    pub fn resolved_theme(&self) -> &ResolvedTheme {
+        &self.resolved_theme
+    }
+
+    pub fn set_resolved_theme(&mut self, resolved_theme: ResolvedTheme) {
+        log::debug!("[editor_session] resolved theme updated for session");
+        self.resolved_theme = resolved_theme;
     }
 
     /// 行番号表示の有効/無効を更新する。

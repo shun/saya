@@ -15,6 +15,7 @@ use saya::callback_registry_seed::CallbackRegistrySeed;
 use saya::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::editor_session::EditorSessionState;
 use saya::host_io::{SaveResult, write_to_path};
+use saya::markdown_structure::MarkdownDocumentMap;
 use saya::runtime_message::runtime_callback_failure_message;
 use saya::runtime_refresh::runtime_dispatch_requests_redraw;
 use saya::saya_live_runtime::{
@@ -23,6 +24,7 @@ use saya::saya_live_runtime::{
     RuntimeEventPayload, RuntimeMode, SayaLiveRuntime,
 };
 use saya::screen_model::{ProjectionInput, project};
+use saya::theme::ResolvedThemeColor;
 use tokio::sync::Mutex;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -154,6 +156,255 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
     assert_eq!(session_state.number_width(), 4);
     assert_eq!(model.lines[0], "   1 alpha");
     assert_eq!(model.lines[1], "   2 beta");
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[test]
+fn startup_typescript_config_resolves_markdown_theme_for_headless_projection() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("theme-target.md");
+    let config_path = unique_path("theme-init.ts");
+    let markdown_source = "## Heading\ninline `code` [link](https://example.com)\n";
+    std::fs::write(&target_path, markdown_source).expect("target file");
+    std::fs::write(
+        &config_path,
+        r##"
+            saya.theme.palette = {
+                accent: "#7aa2f7",
+                heading2: "#9ece6a",
+                code: "#ff9e64",
+                link: "#2ac3de",
+            };
+            saya.theme.markdown = {
+                heading: { fg: "accent", bold: true },
+                heading2: { fg: "heading2", underline: true },
+                inlineCode: { fg: "code" },
+                link: { fg: "link", underline: true },
+            };
+        "##,
+    )
+    .expect("config file");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup with typescript theme config");
+
+    let markdown_map = MarkdownDocumentMap::parse(markdown_source);
+    let session_state = outcome.editor_session_state();
+    let mut input = ProjectionInput::new(&outcome.initial_snapshot, &session_state, None)
+        .with_markdown_document_map(Some(&markdown_map));
+    input.is_active = false;
+    let model = project(&input);
+
+    assert_eq!(model.lines[0], "## Heading");
+    assert_eq!(model.line_projections[0].display_text, "Heading");
+    let heading = model
+        .markdown_style_ranges
+        .iter()
+        .find(|range| range.row == 0)
+        .expect("heading2 range should be projected");
+    assert_eq!(
+        heading.style.fg,
+        Some(ResolvedThemeColor("#9ece6a".to_string()))
+    );
+    assert!(
+        heading.style.bold,
+        "heading2 should inherit bold from heading"
+    );
+    assert!(
+        heading.style.underline,
+        "heading2 should add its level-specific underline"
+    );
+    assert!(
+        model.markdown_style_ranges.iter().any(|range| {
+            range.row == 1 && range.style.fg == Some(ResolvedThemeColor("#ff9e64".to_string()))
+        }),
+        "inlineCode should resolve through the palette into a concrete color"
+    );
+    assert!(
+        model.markdown_style_ranges.iter().any(|range| {
+            range.row == 1
+                && range.style.fg == Some(ResolvedThemeColor("#2ac3de".to_string()))
+                && range.style.underline
+        }),
+        "link should resolve through the palette and keep underline"
+    );
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[test]
+fn startup_typescript_config_heading_level_can_disable_inherited_bold() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("theme-bold-false-target.md");
+    let config_path = unique_path("theme-bold-false-init.ts");
+    let markdown_source = "## Heading\n";
+    std::fs::write(&target_path, markdown_source).expect("target file");
+    std::fs::write(
+        &config_path,
+        r##"
+            saya.theme.palette = {
+                accent: "#7aa2f7",
+                heading2: "#9ece6a",
+            };
+            saya.theme.markdown = {
+                heading: { fg: "accent", bold: true },
+                heading2: { fg: "heading2", bold: false, underline: true },
+            };
+        "##,
+    )
+    .expect("config file");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup with typescript theme config");
+
+    let markdown_map = MarkdownDocumentMap::parse(markdown_source);
+    let session_state = outcome.editor_session_state();
+    let mut input = ProjectionInput::new(&outcome.initial_snapshot, &session_state, None)
+        .with_markdown_document_map(Some(&markdown_map));
+    input.is_active = false;
+    let model = project(&input);
+
+    let heading = model
+        .markdown_style_ranges
+        .iter()
+        .find(|range| range.row == 0)
+        .expect("heading2 range should be projected");
+    assert_eq!(
+        heading.style.fg,
+        Some(ResolvedThemeColor("#9ece6a".to_string()))
+    );
+    assert!(
+        !heading.style.bold,
+        "heading2 bold=false should override inherited heading bold=true"
+    );
+    assert!(heading.style.underline);
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[test]
+fn startup_typescript_config_applies_heading_bold_to_heading1() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("theme-heading1-target.md");
+    let config_path = unique_path("theme-heading1-init.ts");
+    let markdown_source = "# AGENTS.md\n";
+    std::fs::write(&target_path, markdown_source).expect("target file");
+    std::fs::write(
+        &config_path,
+        r##"
+            saya.theme.palette = {
+                accent: "#7aa2f7",
+            };
+            saya.theme.markdown = {
+                heading: { fg: "accent", bold: true },
+            };
+        "##,
+    )
+    .expect("config file");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup with typescript theme config");
+
+    let markdown_map = MarkdownDocumentMap::parse(markdown_source);
+    let session_state = outcome.editor_session_state();
+    let mut input = ProjectionInput::new(&outcome.initial_snapshot, &session_state, None)
+        .with_markdown_document_map(Some(&markdown_map));
+    input.is_active = false;
+    let model = project(&input);
+
+    let heading = model
+        .markdown_style_ranges
+        .iter()
+        .find(|range| range.row == 0)
+        .expect("heading1 range should be projected");
+    assert_eq!(
+        heading.style.fg,
+        Some(ResolvedThemeColor("#7aa2f7".to_string()))
+    );
+    assert!(
+        heading.style.bold,
+        "heading1 should inherit bold from heading"
+    );
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[test]
+fn startup_typescript_config_applies_heading_bold_to_active_raw_heading1() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("theme-active-heading1-target.md");
+    let config_path = unique_path("theme-active-heading1-init.ts");
+    let markdown_source = "# AGENTS.md\n\nbody\n";
+    std::fs::write(&target_path, markdown_source).expect("target file");
+    std::fs::write(
+        &config_path,
+        r##"
+            saya.theme.palette = {
+                accent: "#7aa2f7",
+            };
+            saya.theme.markdown = {
+                heading: { fg: "accent", bold: true },
+            };
+        "##,
+    )
+    .expect("config file");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup with typescript theme config");
+
+    let markdown_map = MarkdownDocumentMap::parse(markdown_source);
+    let session_state = outcome.editor_session_state();
+    let input = ProjectionInput::new(&outcome.initial_snapshot, &session_state, None)
+        .with_markdown_document_map(Some(&markdown_map));
+    let model = project(&input);
+
+    assert_eq!(model.line_projections[0].display_text, "# AGENTS.md");
+    let heading = model
+        .markdown_style_ranges
+        .iter()
+        .find(|range| range.row == 0)
+        .expect("active raw heading1 range should be projected");
+    assert!(
+        heading.start_col == 0 && heading.end_col_exclusive > 0,
+        "active raw heading1 should keep a visible style range"
+    );
+    assert_eq!(
+        heading.style.fg,
+        Some(ResolvedThemeColor("#7aa2f7".to_string()))
+    );
+    assert!(
+        heading.style.bold,
+        "active raw heading1 should inherit bold from heading"
+    );
 
     std::fs::remove_file(&target_path).expect("remove target");
     std::fs::remove_file(&config_path).expect("remove config");

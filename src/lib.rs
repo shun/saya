@@ -39,6 +39,7 @@ pub mod swapfile;
 pub mod terminal_capability;
 pub mod terminal_io_broker;
 pub mod terminal_lifecycle;
+pub mod theme;
 pub mod tui_render_coordinator;
 pub mod tui_renderer;
 pub mod ui_surface;

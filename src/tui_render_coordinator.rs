@@ -230,6 +230,7 @@ impl TuiRenderCoordinator {
     fn resolve_text_mode(capabilities: &TerminalCapabilityProfile) -> RenderTextMode {
         match capabilities.text_style {
             TextStyleCapability::Plain => RenderTextMode::Plain,
+            TextStyleCapability::Monochrome => RenderTextMode::StyledMonochrome,
             TextStyleCapability::Ansi => RenderTextMode::StyledAnsi,
             TextStyleCapability::TrueColor => RenderTextMode::StyledTrueColor,
         }
@@ -487,6 +488,7 @@ mod tests {
                 session_kind: TerminalSessionKind::Local,
                 basic_terminal_control: true,
                 styled_text: false,
+                color_text: false,
                 truecolor: false,
             },
             InlineGraphicsProbeResult::Disabled,
@@ -516,6 +518,7 @@ mod tests {
                 visual_selection: None,
                 search_overlays: vec![],
                 syntax_chunks: vec![],
+                markdown_style_ranges: vec![],
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,

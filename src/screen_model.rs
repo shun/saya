@@ -22,6 +22,7 @@ use crate::markdown_structure::{
     MarkdownBlockKind, MarkdownCheckboxState, MarkdownDocumentMap, MarkdownInlineKind,
 };
 use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
+use crate::theme::{MarkdownSemanticStyleKey, ResolvedTextStyle};
 use crate::viewport::WindowViewportStore;
 
 /// 描画専用 view model。
@@ -55,6 +56,8 @@ pub struct ScreenModel {
     pub search_overlays: Vec<ScreenSearchOverlay>,
     /// 構文ハイライトの表示用 chunk（表示セル座標）
     pub syntax_chunks: Vec<ScreenSyntaxChunk>,
+    /// Markdown semantic presentation style ranges.
+    pub markdown_style_ranges: Vec<ScreenMarkdownStyleRange>,
     /// メッセージ欄に表示する通知（エラーやガイダンス）
     pub message_line: Option<String>,
     pub command_cursor_col: Option<u16>,
@@ -228,6 +231,14 @@ pub struct ScreenSyntaxChunk {
     pub syn_id: i32,
     pub name: Option<String>,
     pub tree_sitter: Option<ScreenTreeSitterSyntax>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenMarkdownStyleRange {
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col_exclusive: u16,
+    pub style: ResolvedTextStyle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -633,6 +644,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     );
     let visual_selection = resolve_visual_selection(input);
     let search_overlays = project_search_overlays(input, &line_projections);
+    let markdown_style_ranges = project_markdown_style_ranges(input, &line_projections);
     let mut syntax_chunks = project_syntax_chunks(input, &line_projections);
     #[cfg(feature = "tree-sitter-syntax")]
     syntax_chunks.extend(project_tree_sitter_syntax_chunks(input, &line_projections));
@@ -641,7 +653,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let message_line = message_state.as_ref().map(|state| state.text.clone());
 
     log::debug!(
-        "[screen_model] projected: file_name={:?}, mode_label={:?}, cursor_style={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, syntax_chunks={}, message_state_kind={:?}, message_line={:?}",
+        "[screen_model] projected: file_name={:?}, mode_label={:?}, cursor_style={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, markdown_style_ranges={}, syntax_chunks={}, message_state_kind={:?}, message_line={:?}",
         file_name,
         mode_label,
         cursor_style,
@@ -650,6 +662,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         cursor_row,
         cursor_col,
         search_overlays.len(),
+        markdown_style_ranges.len(),
         syntax_chunks.len(),
         message_state.as_ref().map(|state| state.kind),
         message_line,
@@ -670,6 +683,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         visual_selection,
         search_overlays,
         syntax_chunks,
+        markdown_style_ranges,
         message_line,
         command_cursor_col: None,
         is_active: input.is_active,
@@ -1533,6 +1547,172 @@ fn resolve_search_overlay_display_bounds(
     }
 
     Some((start_col, end_col_exclusive))
+}
+
+fn project_markdown_style_ranges(
+    input: &ProjectionInput<'_>,
+    line_projections: &[ScreenLineProjection],
+) -> Vec<ScreenMarkdownStyleRange> {
+    let Some(markdown_document_map) = input.markdown_document_map else {
+        return Vec::new();
+    };
+    if !input.session_state.markdown_render() {
+        return Vec::new();
+    }
+
+    let theme = input.session_state.resolved_theme();
+    let viewport_bottom = input
+        .viewport_top
+        .saturating_add(input.body_height.max(1))
+        .saturating_sub(1);
+    let mut ranges = Vec::new();
+
+    for block in &markdown_document_map.blocks {
+        if block.range.end.line < input.viewport_top || block.range.start.line > viewport_bottom {
+            continue;
+        }
+        match block.kind {
+            MarkdownBlockKind::Heading { level } => {
+                let Some(style) = theme.heading_style(level) else {
+                    continue;
+                };
+                if let Some((row, start_col, end_col_exclusive)) =
+                    project_markdown_range_display_bounds(
+                        line_projections,
+                        block.range.start.line,
+                        block.range.start.column,
+                        block.range.end.column,
+                        input.viewport_top,
+                    )
+                {
+                    ranges.push(ScreenMarkdownStyleRange {
+                        row,
+                        start_col,
+                        end_col_exclusive,
+                        style,
+                    });
+                }
+            }
+            MarkdownBlockKind::FencedCodeBlock { .. } => {
+                append_block_style_ranges(
+                    &mut ranges,
+                    line_projections,
+                    block.range,
+                    input.viewport_top,
+                    theme.markdown_style(MarkdownSemanticStyleKey::FencedCodeBlock),
+                );
+            }
+            MarkdownBlockKind::Table => {
+                append_block_style_ranges(
+                    &mut ranges,
+                    line_projections,
+                    block.range,
+                    input.viewport_top,
+                    theme.markdown_style(MarkdownSemanticStyleKey::Table),
+                );
+            }
+            MarkdownBlockKind::ListItem { .. } => {}
+        }
+    }
+
+    for inline in &markdown_document_map.inlines {
+        if inline.range.start.line < input.viewport_top || inline.range.start.line > viewport_bottom
+        {
+            continue;
+        }
+        let style = match &inline.kind {
+            MarkdownInlineKind::InlineCode => {
+                theme.markdown_style(MarkdownSemanticStyleKey::InlineCode)
+            }
+            MarkdownInlineKind::Link { .. } => theme.markdown_style(MarkdownSemanticStyleKey::Link),
+            MarkdownInlineKind::EmphasisMarker { .. } => None,
+        };
+        let Some(style) = style.cloned().filter(|style| !style.is_empty()) else {
+            continue;
+        };
+        if let Some((row, start_col, end_col_exclusive)) = project_markdown_range_display_bounds(
+            line_projections,
+            inline.range.start.line,
+            inline.range.start.column,
+            inline.range.end.column,
+            input.viewport_top,
+        ) {
+            ranges.push(ScreenMarkdownStyleRange {
+                row,
+                start_col,
+                end_col_exclusive,
+                style,
+            });
+        }
+    }
+
+    ranges.sort_by_key(|range| (range.row, range.start_col, range.end_col_exclusive));
+    log::debug!(
+        "[screen_model] markdown semantic style ranges projected: window_id={}, ranges={}",
+        input.window_id,
+        ranges.len()
+    );
+    ranges
+}
+
+fn append_block_style_ranges(
+    ranges: &mut Vec<ScreenMarkdownStyleRange>,
+    line_projections: &[ScreenLineProjection],
+    range: crate::markdown_structure::MarkdownTextRange,
+    viewport_top: usize,
+    style: Option<&ResolvedTextStyle>,
+) {
+    let Some(style) = style.cloned().filter(|style| !style.is_empty()) else {
+        return;
+    };
+    for absolute_row in range.start.line..=range.end.line {
+        let Some(projection) = line_projections
+            .iter()
+            .find(|projection| projection.absolute_row == absolute_row)
+        else {
+            continue;
+        };
+        let start = if absolute_row == range.start.line {
+            range.start.column
+        } else {
+            0
+        };
+        let end = if absolute_row == range.end.line {
+            range.end.column
+        } else {
+            projection.raw_text.len()
+        };
+        if let Some((row, start_col, end_col_exclusive)) = project_markdown_range_display_bounds(
+            line_projections,
+            absolute_row,
+            start,
+            end,
+            viewport_top,
+        ) {
+            ranges.push(ScreenMarkdownStyleRange {
+                row,
+                start_col,
+                end_col_exclusive,
+                style: style.clone(),
+            });
+        }
+    }
+}
+
+fn project_markdown_range_display_bounds(
+    line_projections: &[ScreenLineProjection],
+    absolute_row: usize,
+    raw_start_col: usize,
+    raw_end_col: usize,
+    viewport_top: usize,
+) -> Option<(u16, u16, u16)> {
+    let projection = line_projections
+        .iter()
+        .find(|projection| projection.absolute_row == absolute_row)?;
+    let row = u16::try_from(absolute_row.saturating_sub(viewport_top)).unwrap_or(u16::MAX);
+    let start_col = projection.logical_to_display_col(raw_start_col);
+    let end_col_exclusive = projection.logical_to_display_col(raw_end_col);
+    (end_col_exclusive > start_col).then_some((row, start_col, end_col_exclusive))
 }
 
 fn project_syntax_chunks(
@@ -2557,6 +2737,7 @@ mod tests {
             visual_selection: None,
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -3945,6 +4126,7 @@ mod tests {
             visual_selection: None,
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -4805,6 +4987,7 @@ mod tests {
             visual_selection: None,
             search_overlays: vec![],
             syntax_chunks: vec![],
+            markdown_style_ranges: vec![],
             message_line: None,
             command_cursor_col: None,
             is_active: true,

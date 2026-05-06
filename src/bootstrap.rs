@@ -19,6 +19,7 @@ use crate::startup_runtime::{
     StartupModulePrepareResult, collect_startup_registry, prepare_init_module,
 };
 use crate::swapfile::SwapfileCleanupGuard;
+use crate::theme::{ResolvedTheme, ThemeRegistry};
 use vim_core_rs::CoreSnapshot;
 
 #[derive(Debug)]
@@ -30,6 +31,7 @@ pub struct BootstrapOutcome {
     pub initial_number_width: u16,
     pub read_only: bool,
     pub startup_registry: StartupRegistrySnapshot,
+    pub resolved_theme: ResolvedTheme,
     pub callback_registry: CallbackRegistrySeed,
     pub initial_snapshot: CoreSnapshot,
     pub core_bridge: CoreBridge,
@@ -125,6 +127,7 @@ struct ResolvedStartupState {
     apply_state: ConfigApplyState,
     startup_registry: StartupRegistrySnapshot,
     callback_registry: CallbackRegistrySeed,
+    resolved_theme: ResolvedTheme,
 }
 
 impl StartupRegistrySnapshot {
@@ -186,6 +189,7 @@ impl BootstrapOutcome {
             self.read_only,
         );
         apply_startup_presentation_to_session_state(&mut state, &self.startup_registry.options);
+        state.set_resolved_theme(self.resolved_theme.clone());
         state
     }
 }
@@ -292,6 +296,7 @@ fn prepare_launch_with_guard<R: Read>(
         initial_number_width,
         read_only: request.read_only,
         startup_registry: bootstrap_state.startup_registry,
+        resolved_theme: bootstrap_state.resolved_theme,
         callback_registry: bootstrap_state.callback_registry,
         initial_snapshot,
         core_bridge,
@@ -391,6 +396,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
             let result = apply_config_commands(&commands, &mut state);
             let startup_registry = startup_registry_from_registry(&state, &registry);
             let callback_registry = callback_registry_from_registry(&registry);
+            let resolved_theme = ThemeRegistry::from_startup_registry(&registry).resolve();
             log::debug!(
                 "[bootstrap] resolved startup state from config: applied={}, errors={}, tab_size={}, line_numbers={}, keymaps={}, commands={}, events={}",
                 result.applied_count,
@@ -405,11 +411,13 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
                 apply_state: state,
                 startup_registry,
                 callback_registry,
+                resolved_theme,
             };
         }
         CapabilityLoadResult::DefaultUsed => {
             let startup_registry = StartupRegistrySnapshot::from_apply_state(&state);
             let callback_registry = CallbackRegistrySeed::empty();
+            let resolved_theme = ResolvedTheme::default();
             log::debug!(
                 "[bootstrap] resolved startup state from default config: tab_size={}, line_numbers={}, keymaps={}",
                 state.tab_size,
@@ -420,6 +428,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
                 apply_state: state,
                 startup_registry,
                 callback_registry,
+                resolved_theme,
             };
         }
         CapabilityLoadResult::ReadFailed { path, message } => {
@@ -452,6 +461,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
 
     let startup_registry = StartupRegistrySnapshot::from_apply_state(&state);
     let callback_registry = CallbackRegistrySeed::empty();
+    let resolved_theme = ResolvedTheme::default();
     log::debug!(
         "[bootstrap] fallback startup state resolved: tab_size={}, line_numbers={}, keymaps={}, commands={}, events={}",
         state.tab_size,
@@ -464,6 +474,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
         apply_state: state,
         startup_registry,
         callback_registry,
+        resolved_theme,
     }
 }
 
@@ -581,7 +592,10 @@ fn config_commands_from_registry(
                 }
                 SayaKeymapAction::RegisteredCommand(_) => None,
             },
-            StartupRegistryEntry::Command { .. } | StartupRegistryEntry::Event { .. } => None,
+            StartupRegistryEntry::Command { .. }
+            | StartupRegistryEntry::Event { .. }
+            | StartupRegistryEntry::ThemePalette { .. }
+            | StartupRegistryEntry::ThemeMarkdownStyle { .. } => None,
         })
         .collect()
 }

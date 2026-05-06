@@ -24,6 +24,7 @@ top-level areas.
 - `saya.keymap`
 - `saya.commands`
 - `saya.events`
+- `saya.theme`
 
 ## Options
 
@@ -108,6 +109,59 @@ saya.events.on("bufferOpen", (payload) => {
 });
 ```
 
+## Theme
+
+The theme surface lets you declare Markdown presentation styles at startup
+without exposing renderer internals or Vim-compatible highlight groups.
+
+### `saya.theme.palette`
+
+Use this object property to define named color tokens. Values must be direct
+hex colors in `#rrggbb` form.
+
+```ts
+saya.theme.palette = {
+  accent: "#7aa2f7",
+  heading2: "#9ece6a",
+  code: "#ff9e64",
+  link: "#2ac3de",
+};
+```
+
+### `saya.theme.markdown`
+
+Use this object property to define semantic Markdown styles. Color attributes
+can reference palette tokens or direct hex colors. Unknown palette tokens fall
+back deterministically by omitting that color.
+
+```ts
+saya.theme.markdown = {
+  heading: {
+    fg: "accent",
+    bold: true,
+  },
+  heading2: {
+    fg: "heading2",
+    underline: true,
+  },
+  inlineCode: {
+    fg: "code",
+  },
+  link: {
+    fg: "link",
+    underline: true,
+  },
+};
+```
+
+The current Markdown keys are `heading`, `heading1`, `heading2`, `heading3`,
+`heading4`, `heading5`, `heading6`, `inlineCode`, `link`, `listMarker`,
+`checkboxChecked`, `checkboxUnchecked`, `table`, and `fencedCodeBlock`.
+Level-specific heading keys inherit from `heading` and override attributes that
+they declare. Boolean attributes can also disable inherited values. For
+example, `heading2: { bold: false }` turns off `heading.bold` for level-two
+headings.
+
 ## What the startup API does not expose
 
 The startup surface deliberately excludes runtime-only and high-risk features.
@@ -119,6 +173,7 @@ The startup surface deliberately excludes runtime-only and high-risk features.
 - Filesystem access
 - Network access
 - Vim-compatibility string DSLs
+- Vim or Neovim `:highlight` compatibility
 
 ## Next steps
 

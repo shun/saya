@@ -300,6 +300,62 @@ fn text_input_reflected_in_screen_model_lines() {
     );
 }
 
+#[test]
+fn insert_mode_uppercase_sequence_does_not_duplicate_previous_character() {
+    let _lock = test_lock();
+    let mut outcome = launch_empty();
+    let session_state = EditorSessionState::new(None);
+
+    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
+    for key in ["A", "G", "E", "N", "T", "S"] {
+        outcome
+            .core_bridge
+            .dispatch_key(key)
+            .expect("insert edit key should dispatch");
+    }
+    outcome
+        .core_bridge
+        .dispatch_key("\x1b")
+        .expect("Esc dispatch");
+
+    let snapshot = outcome.core_bridge.snapshot();
+    let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+    assert!(
+        model.lines.iter().any(|line| line == "AGENTS"),
+        "one terminal key event per uppercase character should insert exactly once: {:?}",
+        model.lines
+    );
+}
+
+#[test]
+fn insert_mode_backspace_and_ctrl_h_delete_previous_character() {
+    let _lock = test_lock();
+    let mut outcome = launch_empty();
+    let session_state = EditorSessionState::new(None);
+
+    outcome.core_bridge.dispatch_key("i").expect("i dispatch");
+    for key in ["A", "G", "E", "N", "T", "S", "\x08", "S", "\x08"] {
+        outcome
+            .core_bridge
+            .dispatch_key(key)
+            .expect("insert edit key should dispatch");
+    }
+    outcome
+        .core_bridge
+        .dispatch_key("\x1b")
+        .expect("Esc dispatch");
+
+    let snapshot = outcome.core_bridge.snapshot();
+    let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+    assert!(
+        model.lines.iter().any(|line| line == "AGENT"),
+        "Backspace and Ctrl-H-compatible BS should delete the previous inserted character: {:?}",
+        model.lines
+    );
+}
+
 // host-integration: tab-size driven projection is an application-layer
 // presentation concern.
 #[test]
