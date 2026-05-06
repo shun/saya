@@ -44,6 +44,7 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.events.on",
     "saya.theme.palette",
     "saya.theme.markdown",
+    "saya.log.file",
 ];
 
 const STARTUP_COMMAND_REFERENCE_PREFIX: &str = "__SAYA_STARTUP_COMMAND_REF__:";
@@ -66,6 +67,7 @@ const {
     op_collect_startup_event,
     op_collect_startup_theme_palette,
     op_collect_startup_theme_markdown,
+    op_collect_startup_log_file,
 } = Deno.core.ops;
 
 globalThis.saya = {
@@ -135,6 +137,7 @@ globalThis.saya = {
         },
     },
     theme: {},
+    log: {},
 };
 
 Object.defineProperty(globalThis.saya.theme, "palette", {
@@ -156,6 +159,20 @@ Object.defineProperty(globalThis.saya.theme, "markdown", {
     },
     set(value) {
         op_collect_startup_theme_markdown(JSON.stringify(value ?? {}));
+    },
+});
+
+Object.defineProperty(globalThis.saya.log, "file", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return undefined;
+    },
+    set(value) {
+        if (typeof value !== "string") {
+            throw new TypeError("log.file must be a string");
+        }
+        op_collect_startup_log_file(value);
     },
 });
 
@@ -314,10 +331,12 @@ Object.freeze(globalThis.saya.keymap);
 Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.events);
 Object.freeze(globalThis.saya.theme);
+Object.freeze(globalThis.saya.log);
 Object.freeze(globalThis.saya);
 "#;
 
-const STARTUP_PUBLIC_SURFACE_NAMES: &[&str] = &["options", "keymap", "commands", "events", "theme"];
+const STARTUP_PUBLIC_SURFACE_NAMES: &[&str] =
+    &["options", "keymap", "commands", "events", "theme", "log"];
 const STARTUP_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
 pub const STARTUP_SAYA_TYPE_DECLARATION: &str = r#"
@@ -417,12 +436,17 @@ declare global {
         >>;
     }
 
+    interface SayaStartupLogSurface {
+        file?: string;
+    }
+
     interface SayaStartupSurface {
         options: SayaStartupOptionsSurface;
         keymap: SayaStartupKeymapSurface;
         commands: SayaStartupCommandsSurface;
         events: SayaStartupEventsSurface;
         theme: SayaStartupThemeSurface;
+        log: SayaStartupLogSurface;
     }
 
     var saya: SayaStartupSurface;
@@ -689,6 +713,18 @@ fn op_collect_startup_theme_markdown(
     Ok(())
 }
 
+#[op2(fast)]
+fn op_collect_startup_log_file(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<(), JsErrorBox> {
+    log::debug!("[startup_runtime] collect startup log file: path={}", path);
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::LogFile { path });
+    Ok(())
+}
+
 fn parse_theme_text_style(
     name: &str,
     value: serde_json::Value,
@@ -756,7 +792,8 @@ deno_core::extension!(
         op_collect_startup_command,
         op_collect_startup_event,
         op_collect_startup_theme_palette,
-        op_collect_startup_theme_markdown
+        op_collect_startup_theme_markdown,
+        op_collect_startup_log_file
     ],
     state = |state| state.put(StartupRegistry::default())
 );
@@ -954,6 +991,11 @@ fn strip_type_annotations(source_text: &str) -> String {
                 index += 1;
             }
             ':' => {
+                if looks_like_ternary_separator(&chars, index) {
+                    output.push(ch);
+                    index += 1;
+                    continue;
+                }
                 let mut lookahead = index + 1;
                 while lookahead < chars.len() && chars[lookahead].is_whitespace() {
                     lookahead += 1;
@@ -980,6 +1022,83 @@ fn strip_type_annotations(source_text: &str) -> String {
     }
 
     output
+}
+
+fn looks_like_ternary_separator(chars: &[char], colon_index: usize) -> bool {
+    if previous_non_whitespace(chars, colon_index) == Some('?') {
+        return false;
+    }
+
+    let mut unresolved_questions = 0usize;
+    let mut index = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut escape = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while index < colon_index {
+        let ch = chars[index];
+        let next = chars.get(index + 1).copied();
+
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if ch == '*' && next == Some('/') {
+                in_block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        if let Some(quote) = in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' => in_string = Some(ch),
+            '/' if next == Some('/') => {
+                in_line_comment = true;
+                index += 1;
+            }
+            '/' if next == Some('*') => {
+                in_block_comment = true;
+                index += 1;
+            }
+            ';' | '{' | '}' => unresolved_questions = 0,
+            '?' if next != Some('?') && next != Some('.') => unresolved_questions += 1,
+            ':' if unresolved_questions > 0 => unresolved_questions -= 1,
+            _ => {}
+        }
+
+        index += 1;
+    }
+
+    unresolved_questions > 0
+}
+
+fn previous_non_whitespace(chars: &[char], index: usize) -> Option<char> {
+    chars
+        .get(..index)?
+        .iter()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .copied()
 }
 
 fn looks_like_object_literal_value(chars: &[char], index: usize) -> bool {

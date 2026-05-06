@@ -75,6 +75,7 @@ pub enum BootstrapError {
 pub struct StartupRegistrySnapshot {
     pub options: StartupOptionsSnapshot,
     pub keymaps: Vec<StartupKeymapSnapshot>,
+    pub log: StartupLogSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +121,11 @@ pub enum StartupKeymapMode {
 pub enum StartupKeymapAction {
     Literal(String),
     RegisteredCommand(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupLogSnapshot {
+    pub log_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +175,7 @@ impl StartupRegistrySnapshot {
                 .cloned()
                 .map(startup_keymap_from_applied_mapping)
                 .collect(),
+            log: StartupLogSnapshot::default(),
         }
     }
 }
@@ -595,7 +602,8 @@ fn config_commands_from_registry(
             StartupRegistryEntry::Command { .. }
             | StartupRegistryEntry::Event { .. }
             | StartupRegistryEntry::ThemePalette { .. }
-            | StartupRegistryEntry::ThemeMarkdownStyle { .. } => None,
+            | StartupRegistryEntry::ThemeMarkdownStyle { .. }
+            | StartupRegistryEntry::LogFile { .. } => None,
         })
         .collect()
 }
@@ -614,6 +622,7 @@ fn startup_registry_from_registry(
             _ => None,
         })
         .collect();
+    let log = startup_log_from_registry(registry);
 
     StartupRegistrySnapshot {
         options: StartupOptionsSnapshot {
@@ -640,6 +649,22 @@ fn startup_registry_from_registry(
             foldlevel: normalize_u16(state.foldlevel),
         },
         keymaps,
+        log,
+    }
+}
+
+fn startup_log_from_registry(registry: &StartupRegistry) -> StartupLogSnapshot {
+    StartupLogSnapshot {
+        log_file: registry
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                StartupRegistryEntry::LogFile { path } if !path.trim().is_empty() => {
+                    Some(PathBuf::from(path))
+                }
+                _ => None,
+            }),
     }
 }
 
@@ -1268,6 +1293,25 @@ mod tests {
                 },
             ],
             "startup registry must preserve registration order and duplicates"
+        );
+    }
+
+    #[test]
+    fn startup_registry_from_registry_uses_last_log_file() {
+        let mut registry = StartupRegistry::default();
+        registry.push(StartupRegistryEntry::LogFile {
+            path: "/tmp/saya-old.log".to_string(),
+        });
+        registry.push(StartupRegistryEntry::LogFile {
+            path: "/tmp/saya-new.log".to_string(),
+        });
+
+        let state = ConfigApplyState::default_state();
+        let startup_registry = startup_registry_from_registry(&state, &registry);
+
+        assert_eq!(
+            startup_registry.log.log_file,
+            Some(PathBuf::from("/tmp/saya-new.log"))
         );
     }
 

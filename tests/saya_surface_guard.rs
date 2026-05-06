@@ -287,7 +287,7 @@ fn startup_surface_excludes_filesystem_and_network_capabilities() {
 
     assert_eq!(
         surface,
-        &["options", "keymap", "commands", "events", "theme"]
+        &["options", "keymap", "commands", "events", "theme", "log"]
     );
     assert_eq!(
         startup_forbidden_surface_names(),
@@ -317,7 +317,10 @@ async fn startup_runtime_does_not_expose_filesystem_or_network() {
 fn runtime_surface_excludes_filesystem_and_network_capabilities() {
     let surface = runtime_public_surface_names();
 
-    assert_eq!(surface, &["commands", "buffer", "window", "editor"]);
+    assert_eq!(
+        surface,
+        &["commands", "buffer", "window", "editor", "filer"]
+    );
     assert_eq!(
         runtime_forbidden_surface_names(),
         &["filesystem", "network"]

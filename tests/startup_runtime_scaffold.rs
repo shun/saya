@@ -131,6 +131,45 @@ fn init_ts_module_transpile_keeps_theme_object_literals_executable() {
 }
 
 #[test]
+fn init_ts_module_transpile_preserves_multiline_ternary_expressions() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            const currentPath: string = "/tmp/notes.txt";
+            const directory = currentPath.endsWith("/")
+                ? currentPath.slice(0, -1)
+                : currentPath.replace(/\/[^/]*$/, "") || ".";
+            saya.keymap.set("normal", "-", saya.commands.execute("dired.open"));
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("? currentPath.slice(0, -1)\n                : currentPath.replace"),
+                "ternary separator must not be stripped as a type annotation: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("const currentPath = \"/tmp/notes.txt\";"),
+                "real type annotations should still be stripped"
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
 fn init_ts_module_transpile_failure_is_reported_structurally() {
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
@@ -458,6 +497,24 @@ async fn startup_keymap_registered_command_reference_is_collected() {
             mode: SayaKeyMode::Normal,
             lhs: "<leader>w".to_string(),
             action: SayaKeymapAction::RegisteredCommand("writeCurrent".to_string()),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_log_file_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.log.file = "/tmp/saya-from-init.log";
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::LogFile {
+            path: "/tmp/saya-from-init.log".to_string(),
         }]
     );
 }

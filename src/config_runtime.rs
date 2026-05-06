@@ -148,6 +148,9 @@ pub enum StartupRegistryEntry {
         key: MarkdownSemanticStyleKey,
         style: ThemeTextStyleDeclaration,
     },
+    LogFile {
+        path: String,
+    },
 }
 
 /// startup keymap のモード。

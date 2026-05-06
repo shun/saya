@@ -113,6 +113,8 @@ prioritize typed, read-only state access plus explicit command execution.
 - The runtime surface must expose `saya.window.current()`.
 - The runtime surface must expose `saya.editor.current()`.
 - The runtime surface must expose `saya.editor.mode()`.
+- The runtime surface must expose `saya.filer.list(path)` for read-only
+  directory listing plugins.
 
 ### Runtime boundaries
 
@@ -124,6 +126,8 @@ blur registration logic and live callback execution.
 - Public APIs must stay under the `saya` namespace.
 - Public APIs must not center compatibility-oriented string DSLs.
 - Public APIs must not include broad filesystem or network access in the MVP.
+- Filer plugins must use the dedicated read-only filer surface instead of a
+  general filesystem namespace.
 
 ## Next steps
 

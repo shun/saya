@@ -29,6 +29,7 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.window.current",
     "saya.editor.current",
     "saya.editor.mode",
+    "saya.filer.list",
 ];
 
 /// Formal runtime surface は read-only/command 実行に限定し、compat 文字列 DSL は含めない。
@@ -117,16 +118,22 @@ globalThis.saya = {
             return editor.mode;
         },
     },
+    filer: {
+        list(path = ".") {
+            return Deno.core.ops.op_runtime_filer_list(String(path));
+        },
+    },
 };
 
 Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.buffer);
 Object.freeze(globalThis.saya.window);
 Object.freeze(globalThis.saya.editor);
+Object.freeze(globalThis.saya.filer);
 Object.freeze(globalThis.saya);
 "#;
 
-const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &["commands", "buffer", "window", "editor"];
+const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &["commands", "buffer", "window", "editor", "filer"];
 const RUNTIME_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
 pub const RUNTIME_SAYA_TYPE_DECLARATION: &str = r#"
@@ -164,11 +171,24 @@ declare global {
         mode(): Promise<SayaRuntimeMode>;
     }
 
+    type SayaFilerEntryKind = "directory" | "file" | "symlink" | "other";
+
+    interface SayaFilerEntry {
+        name: string;
+        path: string;
+        kind: SayaFilerEntryKind;
+    }
+
+    interface SayaRuntimeFilerSurface {
+        list(path?: string): Promise<SayaFilerEntry[]>;
+    }
+
     interface SayaRuntimeSurface {
         commands: SayaRuntimeCommandsSurface;
         buffer: SayaRuntimeBufferSurface;
         window: SayaRuntimeWindowSurface;
         editor: SayaRuntimeEditorSurface;
+        filer: SayaRuntimeFilerSurface;
     }
 
     var saya: SayaRuntimeSurface;
@@ -205,6 +225,28 @@ pub enum RuntimeMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BufferEventPayload {
     pub buffer: ReadonlyBufferSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFilerEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: RuntimeFilerEntryKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeFilerEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeFilerError {
+    ReadFailed { path: PathBuf, message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -282,6 +324,12 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
     fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot>;
     fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot>;
     fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot>;
+    fn list_filer_entries(
+        &self,
+        path: PathBuf,
+    ) -> BoxFuture<Result<Vec<RuntimeFilerEntry>, RuntimeFilerError>> {
+        Box::pin(async move { list_local_filer_entries(path) })
+    }
 }
 
 /// runtime phase の正式な `saya` 公開面を返す。
@@ -451,13 +499,32 @@ async fn op_runtime_current_editor(
     Ok(bridge.current_editor().await)
 }
 
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_list(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<Vec<RuntimeFilerEntry>, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let path = PathBuf::from(path);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer list: path={}",
+        path.display()
+    );
+    bridge
+        .list_filer_entries(path)
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
 deno_core::extension!(
     live_saya_extension,
     ops = [
         op_runtime_execute_host_command,
         op_runtime_current_buffer,
         op_runtime_current_window,
-        op_runtime_current_editor
+        op_runtime_current_editor,
+        op_runtime_filer_list
     ],
     options = {
         bridge: Arc<dyn HostCapabilityBridge>,
@@ -472,6 +539,75 @@ deno_core::extension!(
 fn runtime_command_error_to_js_error(error: RuntimeCommandError) -> JsErrorBox {
     let encoded = serde_json::to_string(&error).expect("runtime command error should serialize");
     JsErrorBox::generic(format!("{RUNTIME_COMMAND_ERROR_PREFIX}{encoded}"))
+}
+
+fn runtime_filer_error_to_js_error(error: RuntimeFilerError) -> JsErrorBox {
+    match error {
+        RuntimeFilerError::ReadFailed { path, message } => JsErrorBox::generic(format!(
+            "failed to list filer path {}: {}",
+            path.display(),
+            message
+        )),
+    }
+}
+
+fn list_local_filer_entries(path: PathBuf) -> Result<Vec<RuntimeFilerEntry>, RuntimeFilerError> {
+    log::debug!(
+        "[saya_live_runtime] listing local filer entries: path={}",
+        path.display()
+    );
+    let mut entries = std::fs::read_dir(&path)
+        .map_err(|error| RuntimeFilerError::ReadFailed {
+            path: path.clone(),
+            message: error.to_string(),
+        })?
+        .map(|entry| {
+            let entry = entry.map_err(|error| RuntimeFilerError::ReadFailed {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| RuntimeFilerError::ReadFailed {
+                    path: entry.path(),
+                    message: error.to_string(),
+                })?;
+            let kind = if file_type.is_dir() {
+                RuntimeFilerEntryKind::Directory
+            } else if file_type.is_file() {
+                RuntimeFilerEntryKind::File
+            } else if file_type.is_symlink() {
+                RuntimeFilerEntryKind::Symlink
+            } else {
+                RuntimeFilerEntryKind::Other
+            };
+            Ok(RuntimeFilerEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path().to_string_lossy().into_owned(),
+                kind,
+            })
+        })
+        .collect::<Result<Vec<_>, RuntimeFilerError>>()?;
+    entries.sort_by(|left, right| {
+        filer_entry_sort_rank(&left.kind)
+            .cmp(&filer_entry_sort_rank(&right.kind))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    log::debug!(
+        "[saya_live_runtime] listed local filer entries: path={}, count={}",
+        path.display(),
+        entries.len()
+    );
+    Ok(entries)
+}
+
+fn filer_entry_sort_rank(kind: &RuntimeFilerEntryKind) -> usize {
+    match kind {
+        RuntimeFilerEntryKind::Directory => 0,
+        RuntimeFilerEntryKind::File => 1,
+        RuntimeFilerEntryKind::Symlink => 2,
+        RuntimeFilerEntryKind::Other => 3,
+    }
 }
 
 fn runtime_callback_error_from_script_message(message: &str) -> RuntimeCallbackError {
@@ -603,6 +739,43 @@ async fn dispatch_event_in_seed_runtime(
         .await
         .map_err(|error| parse_runtime_dispatch_error(event_name, error.to_string()))?;
     Ok(())
+}
+
+async fn execute_command_in_seed_runtime(
+    runtime: &mut JsRuntime,
+    name: &str,
+) -> Result<(), RuntimeCommandError> {
+    let name_json = serde_json::to_string(name).expect("runtime command name should serialize");
+    let script = format!(
+        "(async () => {{ await globalThis.__sayaRuntime.executeCommand({name_json}); }})()"
+    );
+
+    log::debug!(
+        "[saya_live_runtime] execute seed runtime command script: name={}",
+        name
+    );
+    let promise = runtime
+        .execute_script("<saya-live-runtime-command>", script)
+        .map_err(|error| runtime_command_error_from_script_message(name, &error.to_string()))?;
+    #[allow(deprecated)]
+    runtime
+        .resolve_value(promise)
+        .await
+        .map_err(|error| runtime_command_error_from_script_message(name, &error.to_string()))?;
+    Ok(())
+}
+
+fn runtime_command_error_from_script_message(name: &str, message: &str) -> RuntimeCommandError {
+    if let Some(payload) = extract_prefixed_json_payload(message, RUNTIME_COMMAND_ERROR_PREFIX)
+        && let Ok(error) = serde_json::from_str::<RuntimeCommandError>(payload)
+    {
+        return error;
+    }
+
+    RuntimeCommandError::CommandFailed {
+        name: name.to_string(),
+        message: message.to_string(),
+    }
 }
 
 fn parse_runtime_dispatch_error(event: RuntimeEventName, message: String) -> RuntimeDispatchError {
@@ -832,12 +1005,15 @@ pub struct RuntimeCommandsApi {
 
 impl RuntimeCommandsApi {
     pub async fn execute(&self, name: &str) -> Result<(), RuntimeCommandError> {
-        log::debug!("[saya_live_runtime] execute command requested: {}", name);
+        log::info!("[saya_live_runtime][command] execute requested: {}", name);
 
         {
             let mut stack = self.shared.command_stack.lock().await;
             if stack.iter().any(|entry| entry == name) {
-                log::debug!("[saya_live_runtime] circular command detected: {}", name);
+                log::info!(
+                    "[saya_live_runtime][command] circular command detected: {}",
+                    name
+                );
                 return Err(RuntimeCommandError::CircularCommand {
                     name: name.to_string(),
                 });
@@ -846,14 +1022,17 @@ impl RuntimeCommandsApi {
         }
 
         let result = if let Some(callback) = self.shared.registry.command(name) {
-            log::debug!("[saya_live_runtime] execute registered command: {}", name);
+            log::info!(
+                "[saya_live_runtime][command] execute registered command: {}",
+                name
+            );
             callback(RuntimeContext {
                 shared: self.shared.clone(),
             })
             .await
         } else {
-            log::debug!(
-                "[saya_live_runtime] execute host command fallback: {}",
+            log::info!(
+                "[saya_live_runtime][host_command] execute host command fallback: {}",
                 name
             );
             self.shared.bridge.execute_host_command(name).await
@@ -950,6 +1129,15 @@ impl SayaLiveRuntime {
                         let result = dispatch_event(worker_shared.clone(), event).await;
                         let _ = reply.send(result);
                     }
+                    RuntimeMessage::ExecuteCommand { name, reply } => {
+                        let result = RuntimeContext {
+                            shared: worker_shared.clone(),
+                        }
+                        .commands()
+                        .execute(&name)
+                        .await;
+                        let _ = reply.send(result);
+                    }
                 }
             }
             log::debug!("[saya_live_runtime] live runtime worker stopped");
@@ -1009,6 +1197,15 @@ impl SayaLiveRuntime {
                                 });
                                 let _ = reply.send(report);
                             }
+                            RuntimeMessage::ExecuteCommand { name, reply } => {
+                                log::debug!(
+                                    "[saya_live_runtime] seed runtime received command execution: name={}",
+                                    name
+                                );
+                                let result =
+                                    execute_command_in_seed_runtime(&mut js_runtime, &name).await;
+                                let _ = reply.send(result);
+                            }
                         }
                     }
 
@@ -1051,6 +1248,27 @@ impl SayaLiveRuntime {
             .map_err(|_| RuntimeDispatchError::QueueClosed)?;
         Ok(RuntimeDispatchReceipt { receiver })
     }
+
+    pub fn execute_command(
+        &self,
+        name: &str,
+    ) -> Result<RuntimeCommandReceipt, RuntimeCommandError> {
+        log::info!(
+            "[saya_live_runtime][command] queue command execution: name={}",
+            name
+        );
+        let (reply, receiver) = oneshot::channel();
+        self.sender
+            .send(RuntimeMessage::ExecuteCommand {
+                name: name.to_string(),
+                reply,
+            })
+            .map_err(|_| RuntimeCommandError::CommandFailed {
+                name: name.to_string(),
+                message: "runtime command queue closed".to_string(),
+            })?;
+        Ok(RuntimeCommandReceipt { receiver })
+    }
 }
 
 pub struct RuntimeDispatchReceipt {
@@ -1065,10 +1283,29 @@ impl RuntimeDispatchReceipt {
     }
 }
 
+pub struct RuntimeCommandReceipt {
+    receiver: oneshot::Receiver<Result<(), RuntimeCommandError>>,
+}
+
+impl RuntimeCommandReceipt {
+    pub async fn await_result(self) -> Result<(), RuntimeCommandError> {
+        self.receiver
+            .await
+            .map_err(|_| RuntimeCommandError::CommandFailed {
+                name: "<runtime-command-reply>".to_string(),
+                message: "runtime command worker stopped".to_string(),
+            })?
+    }
+}
+
 enum RuntimeMessage {
     Dispatch {
         event: RuntimeEventPayload,
         reply: oneshot::Sender<Result<RuntimeDispatchReport, RuntimeDispatchError>>,
+    },
+    ExecuteCommand {
+        name: String,
+        reply: oneshot::Sender<Result<(), RuntimeCommandError>>,
     },
 }
 
@@ -1396,6 +1633,55 @@ mod tests {
             host_bridge.executed_commands.lock().await.clone(),
             vec!["write".to_string()]
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn seed_runtime_can_list_filer_entries_for_typescript_plugin() {
+        let root = unique_path("filer-root");
+        let dir_path = root.join("src");
+        let file_path = root.join("README.md");
+        std::fs::create_dir_all(&dir_path).expect("test directory");
+        std::fs::write(&file_path, "hello\n").expect("test file");
+        let root_json = serde_json::to_string(&root.to_string_lossy().to_string())
+            .expect("path should serialize");
+        let host_bridge = Arc::new(RecordingHostBridge::new());
+        let seed = CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Event {
+            name: "bufferOpen".to_string(),
+            callback_source: format!(
+                r#"
+                    async () => {{
+                        if (!Object.isFrozen(saya.filer)) {{
+                            throw new Error("runtime filer surface should be frozen");
+                        }}
+                        const entries = await saya.filer.list({root_json});
+                        await saya.commands.execute(entries.map((entry) => `${{entry.kind}}:${{entry.name}}`).join(","));
+                    }}
+                "#
+            ),
+        }]);
+
+        let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), seed)
+            .expect("runtime should initialize");
+        let receipt = runtime
+            .dispatch_event(RuntimeEventPayload::BufferOpen(BufferEventPayload {
+                buffer: ReadonlyBufferSnapshot {
+                    id: 22,
+                    path: None,
+                    line_count: 1,
+                },
+            }))
+            .expect("dispatch should queue");
+        let report = receipt.await_result().await.expect("dispatch report");
+
+        assert_eq!(report.handler_count, 1);
+        assert_eq!(
+            host_bridge.executed_commands.lock().await.clone(),
+            vec!["directory:src,file:README.md".to_string()]
+        );
+
+        std::fs::remove_file(file_path).expect("cleanup file");
+        std::fs::remove_dir(dir_path).expect("cleanup dir");
+        std::fs::remove_dir(root).expect("cleanup root");
     }
 
     #[tokio::test(flavor = "current_thread")]

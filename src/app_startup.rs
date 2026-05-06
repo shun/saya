@@ -1,5 +1,6 @@
 use crate::bootstrap::{BootstrapError, BootstrapOutcome, prepare_launch};
 use crate::cli::LaunchRequest;
+use crate::diagnostic_log::configure_from_startup as configure_diagnostic_log_from_startup;
 use crate::runtime_integration::RuntimeSessionOwner;
 use crate::saya_live_runtime::RuntimeInitError;
 use crate::terminal_capability::{TerminalCapabilityProbeService, TerminalCapabilityProfile};
@@ -61,6 +62,14 @@ pub fn prepare_launch_and_start_terminal<'a, B: TerminalBackend>(
             return Err(LaunchStartError::Bootstrap(error));
         }
     };
+    if let Err(error) =
+        configure_diagnostic_log_from_startup(outcome.startup_registry.log.log_file.as_deref())
+    {
+        log::debug!(
+            "[app_startup] startup log file configuration failed: {}",
+            error
+        );
+    }
 
     log::debug!("[app_startup] bootstrap succeeded, starting terminal I/O broker");
     let terminal_broker = match TerminalIoBroker::begin_session(backend, surface_mode) {

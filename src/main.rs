@@ -1,7 +1,9 @@
 use saya::app_startup::{
     LaunchStartError, PreparedTuiStartup, TuiStartupContextError, prepare_tui_startup_context,
 };
-use saya::bootstrap::{BootstrapError, bootstrap_warning_message};
+use saya::bootstrap::{
+    BootstrapError, StartupKeymapAction, StartupKeymapMode, bootstrap_warning_message,
+};
 use saya::cli::{CliParseError, StartupAction, parse_launch_request};
 use saya::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
 use saya::command_line_history::{
@@ -18,6 +20,10 @@ use saya::core_outcome::{
     NormalizedOutcomeBatch, StructuralEffectSet, fold_normalized_outcomes,
 };
 use saya::core_prompt::PromptResponseCommand;
+use saya::diagnostic_log::{
+    configure_from_startup as configure_diagnostic_log_from_startup,
+    init_from_env as init_diagnostic_log_from_env,
+};
 use saya::editor_session::{QuitDecision, SaveRequestError};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
@@ -81,6 +87,10 @@ struct MainOutcomeAccumulator {
 
 #[tokio::main]
 async fn main() {
+    if let Err(error) = init_diagnostic_log_from_env() {
+        eprintln!("[main] diagnostic log initialization failed: {error}");
+    }
+
     let launch_request = match parse_launch_request(std::env::args_os().skip(1)) {
         Ok(request) => request,
         Err(error) => {
@@ -271,6 +281,17 @@ async fn main() {
                 match event {
                     UiEvent::Input(key) => {
                         let mut handled = false;
+                        let input_snapshot = outcome.core_bridge.snapshot();
+                        log::info!(
+                            "[main][input] key={:?}, mode={:?}, prompt={:?}, cursor=({},{}), revision={}, keymaps={}",
+                            key,
+                            input_snapshot.mode,
+                            command_line_prompt,
+                            input_snapshot.cursor_row,
+                            input_snapshot.cursor_col,
+                            input_snapshot.revision,
+                            outcome.startup_registry.keymaps.len()
+                        );
 
                         match handle_prompt_key(&mut outcome_accumulator.projection, &key) {
                             PromptInputAction::Consumed | PromptInputAction::AwaitingCore => {
@@ -499,6 +520,68 @@ async fn main() {
                                 break 'main reason;
                             }
                         } else if !handled
+                            && let Some(action) = startup_keymap_action_for_input(
+                                &outcome.startup_registry.keymaps,
+                                outcome.core_bridge.snapshot().mode,
+                                &key,
+                            )
+                        {
+                            handled = true;
+                            log::debug!(
+                                "[main] applying startup keymap before core dispatch: key={:?}, action={:?}",
+                                key,
+                                action
+                            );
+                            match action {
+                                StartupKeymapAction::Literal(rhs) => {
+                                    let _ = outcome.core_bridge.dispatch_key(&rhs);
+                                    consume_core_outcomes_from_core(
+                                        &mut outcome.core_bridge,
+                                        &mut outcome_accumulator,
+                                        &mut need_redraw,
+                                    );
+
+                                    if let Some(reason) = process_pending_host_actions_with_runtime(
+                                        &mut outcome,
+                                        &mut outcome_accumulator,
+                                        &mut session_state,
+                                        &mut transient_msg,
+                                        &mut system_warning,
+                                        &mut host_action_runtime,
+                                        runtime_session.as_mut(),
+                                        &mut need_redraw,
+                                        &mut runtime_presentation_intents,
+                                    )
+                                    .await
+                                    {
+                                        break 'main reason;
+                                    }
+                                    session_state
+                                        .update_dirty(outcome.core_bridge.snapshot().dirty);
+                                }
+                                StartupKeymapAction::RegisteredCommand(command_name) => {
+                                    log::info!(
+                                        "[main][keymap] executing registered command from keymap: key={:?}, command={}",
+                                        key,
+                                        command_name
+                                    );
+                                    if let Some(reason) = execute_startup_keymap_registered_command(
+                                        runtime_session.as_mut(),
+                                        &command_name,
+                                        &mut outcome,
+                                        &mut session_state,
+                                        &mut transient_msg,
+                                        &mut need_redraw,
+                                        &mut runtime_presentation_intents,
+                                    )
+                                    .await
+                                    {
+                                        break 'main reason;
+                                    }
+                                }
+                            }
+                            need_redraw = true;
+                        } else if !handled
                             && (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
                             && outcome.core_bridge.snapshot().mode == CoreMode::Normal
                         {
@@ -513,6 +596,11 @@ async fn main() {
 
                         if !handled {
                             let intent = resolve_intent(&key);
+                            log::info!(
+                                "[main][input] key not handled by startup keymap, dispatching intent: key={:?}, intent={:?}",
+                                key,
+                                intent
+                            );
                             match intent {
                                 EditorIntent::EditKey(k) => {
                                     let before_snapshot = outcome.core_bridge.snapshot();
@@ -891,6 +979,8 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     eprintln!("[main][smoke] preparing headless launch");
     let mut outcome =
         saya::bootstrap::prepare_launch(launch_request).map_err(format_bootstrap_error)?;
+    configure_diagnostic_log_from_startup(outcome.startup_registry.log.log_file.as_deref())
+        .map_err(|error| error.to_string())?;
     let mut session_state = outcome.editor_session_state();
     let startup_model = project(&ProjectionInput::new(
         &outcome.initial_snapshot,
@@ -1697,10 +1787,11 @@ fn build_save_request_for_host_write(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MainHostCommand {
     Save,
     SaveThenQuit,
+    Edit(std::path::PathBuf),
 }
 
 fn parse_main_host_command(command: &str) -> Option<MainHostCommand> {
@@ -1708,8 +1799,19 @@ fn parse_main_host_command(command: &str) -> Option<MainHostCommand> {
     match normalized.as_str() {
         "w" | "write" => Some(MainHostCommand::Save),
         "wq" | "x" | "xit" | "exit" => Some(MainHostCommand::SaveThenQuit),
-        _ => None,
+        _ => parse_runtime_edit_command(&normalized).map(MainHostCommand::Edit),
     }
+}
+
+fn parse_runtime_edit_command(normalized: &str) -> Option<std::path::PathBuf> {
+    let path = normalized
+        .strip_prefix("edit ")
+        .or_else(|| normalized.strip_prefix("e "))?
+        .trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(path))
 }
 
 fn runtime_save_then_quit_ex_command(command: &str) -> Option<&'static str> {
@@ -1787,104 +1889,119 @@ fn execute_runtime_host_command_through_core(
 
     let mut effect = RuntimeCommandEffect::default();
     let mut host_action_runtime = HostActionRuntime::default();
-    let folded = fold_normalized_outcomes(
-        outcome.core_bridge.take_normalized_outcomes(),
-        ApplicationOutcomeState::default(),
-    );
-    if let Some(message) = folded.effects.notification.latest_user_visible_message {
-        log::debug!(
-            "[main] runtime host command consumed core message effect: {:?}",
-            message
+    let mut outcome_state = ApplicationOutcomeState::default();
+    loop {
+        let folded = fold_normalized_outcomes(
+            outcome.core_bridge.take_normalized_outcomes(),
+            outcome_state,
         );
-        effect.transient_message = Some(message.content);
-    }
-    if let Some(redraw) = folded.effects.structural.redraw {
-        log::debug!(
-            "[main] runtime host command consumed structural redraw effect: full={}, clear_before_draw={}, required_by_structure_change={}",
-            redraw.full,
-            redraw.clear_before_draw,
-            redraw.required_by_structure_change
+        outcome_state = folded.state;
+
+        if let Some(message) = folded.effects.notification.latest_user_visible_message {
+            log::debug!(
+                "[main] runtime host command consumed core message effect: {:?}",
+                message
+            );
+            effect.transient_message = Some(message.content);
+        }
+        if let Some(redraw) = folded.effects.structural.redraw {
+            log::debug!(
+                "[main] runtime host command consumed structural redraw effect: full={}, clear_before_draw={}, required_by_structure_change={}",
+                redraw.full,
+                redraw.clear_before_draw,
+                redraw.required_by_structure_change
+            );
+        }
+
+        let current_revision = outcome.core_bridge.snapshot().revision;
+        let directives = prioritize_save_family_host_directives(
+            folded.effects.host_directives,
+            current_revision,
         );
-    }
-    let current_revision = outcome.core_bridge.snapshot().revision;
-    for directive in
-        prioritize_save_family_host_directives(folded.effects.host_directives, current_revision)
-    {
-        match directive {
-            NormalizedHostDirective::Write { path, .. } => {
-                let snapshot = outcome.core_bridge.snapshot();
-                let save_outcome = save_snapshot_result_with_path_override(
-                    &snapshot.text,
-                    session_state,
-                    Some(path.as_str()),
-                );
-                effect.transient_message = save_outcome.transient_message;
-                if save_outcome.wrote {
-                    let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
-                    effect
-                        .follow_up_events
-                        .push(RuntimeEventMapper::buffer_write_post(
-                            host_session.current_buffer_snapshot(),
-                        ));
+        if directives.is_empty() {
+            break;
+        }
+
+        for directive in directives {
+            match directive {
+                NormalizedHostDirective::Write { path, .. } => {
+                    let snapshot = outcome.core_bridge.snapshot();
+                    let save_outcome = save_snapshot_result_with_path_override(
+                        &snapshot.text,
+                        session_state,
+                        Some(path.as_str()),
+                    );
+                    effect.transient_message = save_outcome.transient_message;
+                    if save_outcome.wrote {
+                        let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
+                        effect
+                            .follow_up_events
+                            .push(RuntimeEventMapper::buffer_write_post(
+                                host_session.current_buffer_snapshot(),
+                            ));
+                    }
                 }
-            }
-            NormalizedHostDirective::Quit { force, .. } => {
-                let decision = session_state.evaluate_quit(force);
-                merge_runtime_shutdown_intent(
-                    &mut effect.shutdown_intent,
-                    runtime_shutdown_intent_from_quit_decision(force, decision),
-                );
-            }
-            NormalizedHostDirective::Suspend { trace } => {
-                log::debug!(
-                    "[main] runtime host command observed suspend directive but cannot suspend outside interactive terminal loop: sequence={}",
-                    trace.sequence
-                );
-            }
-            NormalizedHostDirective::VfsRequest { request, trace } => {
-                log::debug!(
-                    "[main] runtime host command processing normalized VFS directive: sequence={}, request={:?}",
-                    trace.sequence,
-                    request
-                );
-                if let Err(error) =
-                    host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
-                {
-                    log::debug!(
-                        "[main] runtime host command VFS directive failed: {:?}",
-                        error
+                NormalizedHostDirective::Quit { force, .. } => {
+                    let decision = session_state.evaluate_quit(force);
+                    merge_runtime_shutdown_intent(
+                        &mut effect.shutdown_intent,
+                        runtime_shutdown_intent_from_quit_decision(force, decision),
                     );
                 }
-            }
-            NormalizedHostDirective::JobStart { request, trace } => {
-                log::debug!(
-                    "[main] runtime host command processing job start directive: sequence={}, job_id={}, argv={:?}",
-                    trace.sequence,
-                    request.job_id,
-                    request.argv
-                );
-                if let Err(error) = host_action_runtime.start_job(&mut outcome.core_bridge, request)
-                {
-                    log::debug!("[main] runtime host command job start failed: {:?}", error);
+                NormalizedHostDirective::Suspend { trace } => {
+                    log::debug!(
+                        "[main] runtime host command observed suspend directive but cannot suspend outside interactive terminal loop: sequence={}",
+                        trace.sequence
+                    );
                 }
-            }
-            NormalizedHostDirective::JobWrite { vfd, data, trace } => {
-                log::debug!(
-                    "[main] runtime host command processing job write directive: sequence={}, vfd={}, bytes={}",
-                    trace.sequence,
-                    vfd,
-                    data.len()
-                );
-                host_action_runtime.write_job(vfd, data);
-            }
-            NormalizedHostDirective::JobStop { job_id, trace } => {
-                log::debug!(
-                    "[main] runtime host command processing job stop directive: sequence={}, job_id={}",
-                    trace.sequence,
-                    job_id
-                );
-                if let Err(error) = host_action_runtime.stop_job(&mut outcome.core_bridge, job_id) {
-                    log::debug!("[main] runtime host command job stop failed: {:?}", error);
+                NormalizedHostDirective::VfsRequest { request, trace } => {
+                    log::debug!(
+                        "[main] runtime host command processing normalized VFS directive: sequence={}, request={:?}",
+                        trace.sequence,
+                        request
+                    );
+                    if let Err(error) =
+                        host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
+                    {
+                        log::debug!(
+                            "[main] runtime host command VFS directive failed: {:?}",
+                            error
+                        );
+                    }
+                }
+                NormalizedHostDirective::JobStart { request, trace } => {
+                    log::debug!(
+                        "[main] runtime host command processing job start directive: sequence={}, job_id={}, argv={:?}",
+                        trace.sequence,
+                        request.job_id,
+                        request.argv
+                    );
+                    if let Err(error) =
+                        host_action_runtime.start_job(&mut outcome.core_bridge, request)
+                    {
+                        log::debug!("[main] runtime host command job start failed: {:?}", error);
+                    }
+                }
+                NormalizedHostDirective::JobWrite { vfd, data, trace } => {
+                    log::debug!(
+                        "[main] runtime host command processing job write directive: sequence={}, vfd={}, bytes={}",
+                        trace.sequence,
+                        vfd,
+                        data.len()
+                    );
+                    host_action_runtime.write_job(vfd, data);
+                }
+                NormalizedHostDirective::JobStop { job_id, trace } => {
+                    log::debug!(
+                        "[main] runtime host command processing job stop directive: sequence={}, job_id={}",
+                        trace.sequence,
+                        job_id
+                    );
+                    if let Err(error) =
+                        host_action_runtime.stop_job(&mut outcome.core_bridge, job_id)
+                    {
+                        log::debug!("[main] runtime host command job stop failed: {:?}", error);
+                    }
                 }
             }
         }
@@ -1915,10 +2032,34 @@ fn execute_runtime_host_command(
             );
             execute_runtime_host_command_through_core(core_command, outcome, session_state)
         }
+        Some(MainHostCommand::Edit(path)) => {
+            let ex_command = format!(":edit {}", escape_runtime_edit_path(&path));
+            log::debug!(
+                "[main] routing runtime edit command through core VFS coordinator: path={}, core_command={}",
+                path.display(),
+                ex_command
+            );
+            let effect =
+                execute_runtime_host_command_through_core(&ex_command, outcome, session_state)?;
+            session_state.replace_target_path(path.clone());
+            outcome.target_path = Some(path);
+            Ok(effect)
+        }
         None => Err(RuntimeCommandError::UnknownCommand {
             name: command.to_string(),
         }),
     }
+}
+
+fn escape_runtime_edit_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => ['\\', '\\'].into_iter().collect::<Vec<_>>(),
+            ' ' => ['\\', ' '].into_iter().collect::<Vec<_>>(),
+            _ => [ch].into_iter().collect::<Vec<_>>(),
+        })
+        .collect()
 }
 
 fn save_error_message(error: &SaveRequestError) -> String {
@@ -2198,6 +2339,78 @@ fn apply_runtime_dispatch_outcome(
     })
 }
 
+async fn execute_startup_keymap_registered_command(
+    runtime_session: Option<&mut RuntimeSessionOwner>,
+    command_name: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+    need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+) -> Option<ShutdownReason> {
+    let Some(runtime_session) = runtime_session else {
+        log::info!(
+            "[main][keymap] registered command skipped because runtime session is unavailable: command={}",
+            command_name
+        );
+        *transient_msg = Some(format!("Runtime command unavailable: {}", command_name));
+        *need_redraw = true;
+        return None;
+    };
+    log::info!(
+        "[main][keymap] executing startup registered command: command={}",
+        command_name
+    );
+    let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
+    let dispatch_outcome = runtime_session
+        .execute_command(command_name, &mut host_session)
+        .await;
+    apply_runtime_dispatch_outcome(
+        transient_msg,
+        need_redraw,
+        runtime_presentation_intents,
+        dispatch_outcome,
+    )
+}
+
+fn startup_keymap_action_for_input(
+    keymaps: &[saya::bootstrap::StartupKeymapSnapshot],
+    mode: CoreMode,
+    key: &KeyInput,
+) -> Option<StartupKeymapAction> {
+    let mode = startup_keymap_mode_from_core_mode(mode)?;
+    let lhs = startup_keymap_lhs_from_input(key)?;
+    keymaps
+        .iter()
+        .rev()
+        .find(|keymap| keymap.mode == mode && keymap.lhs == lhs)
+        .map(|keymap| keymap.action.clone())
+}
+
+fn startup_keymap_mode_from_core_mode(mode: CoreMode) -> Option<StartupKeymapMode> {
+    match mode {
+        CoreMode::Insert => Some(StartupKeymapMode::Insert),
+        CoreMode::Visual | CoreMode::VisualLine | CoreMode::VisualBlock => {
+            Some(StartupKeymapMode::Visual)
+        }
+        CoreMode::Normal => Some(StartupKeymapMode::Normal),
+        _ => None,
+    }
+}
+
+fn startup_keymap_lhs_from_input(key: &KeyInput) -> Option<String> {
+    match key {
+        KeyInput::Char(ch) => Some(ch.to_string()),
+        KeyInput::Ctrl(ch) => Some(format!("<C-{}>", ch.to_ascii_lowercase())),
+        KeyInput::Tab => Some("<Tab>".to_string()),
+        KeyInput::BackTab => Some("<S-Tab>".to_string()),
+        KeyInput::Enter => Some("<Enter>".to_string()),
+        KeyInput::Escape => Some("<Esc>".to_string()),
+        KeyInput::Backspace => Some("<BS>".to_string()),
+        _ => None,
+    }
+}
+
 struct MainRuntimeHostSession<'a> {
     outcome: &'a mut saya::bootstrap::BootstrapOutcome,
     session_state: &'a mut saya::editor_session::EditorSessionState,
@@ -2251,8 +2464,8 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
         &mut self,
         name: &str,
     ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
-        log::debug!(
-            "[main] executing runtime host command through application session owner: {}",
+        log::info!(
+            "[main][host_command] executing runtime host command through application session owner: {}",
             name
         );
         execute_runtime_host_command(name, self.outcome, self.session_state)
@@ -3841,7 +4054,29 @@ mod tests {
             parse_main_host_command("exit"),
             Some(MainHostCommand::SaveThenQuit)
         );
+        assert_eq!(
+            parse_main_host_command("edit /tmp/project"),
+            Some(MainHostCommand::Edit(std::path::PathBuf::from(
+                "/tmp/project"
+            )))
+        );
         assert_eq!(parse_main_host_command("set number"), None);
+    }
+
+    #[test]
+    fn startup_keymap_action_for_input_resolves_registered_command_before_core_dispatch() {
+        let keymaps = vec![saya::bootstrap::StartupKeymapSnapshot {
+            mode: StartupKeymapMode::Normal,
+            lhs: "-".to_string(),
+            action: StartupKeymapAction::RegisteredCommand("dired.open".to_string()),
+        }];
+
+        assert_eq!(
+            startup_keymap_action_for_input(&keymaps, CoreMode::Normal, &KeyInput::Char('-')),
+            Some(StartupKeymapAction::RegisteredCommand(
+                "dired.open".to_string()
+            ))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3886,6 +4121,185 @@ mod tests {
         );
 
         std::fs::remove_file(&target_path).expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_host_command_executor_drains_vfs_until_directory_listing_loads() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("runtime-host-command-directory");
+        let nested_path = root_path.join("src");
+        let readme_path = root_path.join("README.md");
+        std::fs::create_dir_all(&nested_path).expect("test directory");
+        std::fs::write(&readme_path, "hello\n").expect("test file");
+
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("runtime edit command should load directory listing");
+
+        assert_eq!(outcome.core_bridge.snapshot().text, "README.md\nsrc/\n");
+
+        std::fs::remove_file(readme_path).expect("cleanup file");
+        std::fs::remove_dir(nested_path).expect("cleanup nested directory");
+        std::fs::remove_dir(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_registered_dired_keymap_opens_directory_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("startup-dired-root");
+        let nested_path = root_path.join("src");
+        let readme_path = root_path.join("README.md");
+        let target_path = root_path.join("notes.txt");
+        let config_path = unique_path("startup-dired-init").with_extension("ts");
+        std::fs::create_dir_all(&nested_path).expect("test directory");
+        std::fs::write(&readme_path, "hello\n").expect("readme file");
+        std::fs::write(&target_path, "notes\n").expect("target file");
+        std::fs::write(
+            &config_path,
+            r#"
+                saya.commands.register("dired.open", async () => {
+                    const buffer = await saya.buffer.current();
+                    const currentPath = buffer.path || ".";
+                    const directory = currentPath.endsWith("/")
+                        ? (currentPath.slice(0, -1) || "/")
+                        : (currentPath.lastIndexOf("/") >= 0 ? currentPath.slice(0, currentPath.lastIndexOf("/")) || "/" : ".");
+                    await saya.commands.execute(`edit ${directory}`);
+                });
+                saya.keymap.set("normal", "-", saya.commands.execute("dired.open"));
+            "#,
+        )
+        .expect("config file");
+
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path.clone()),
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+
+        let mode = outcome.core_bridge.snapshot().mode;
+        let action = startup_keymap_action_for_input(
+            &outcome.startup_registry.keymaps,
+            mode,
+            &KeyInput::Char('-'),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "dired keymap should resolve; mode={mode:?}, keymaps={:?}, warnings={:?}",
+                outcome.startup_registry.keymaps, outcome.warnings
+            )
+        });
+        let StartupKeymapAction::RegisteredCommand(command_name) = action else {
+            panic!("dired keymap should point at a registered command");
+        };
+        execute_startup_keymap_registered_command(
+            Some(&mut runtime_session),
+            &command_name,
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+        )
+        .await;
+
+        let text = outcome.core_bridge.snapshot().text;
+        assert!(
+            text.contains("README.md\n"),
+            "directory listing should include README.md: {text:?}"
+        );
+        assert!(
+            text.contains("src/\n"),
+            "directory listing should include src/: {text:?}"
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_registered_dired_keymap_opens_current_directory_for_relative_file() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config_path = unique_path("startup-dired-relative-init").with_extension("ts");
+        std::fs::write(
+            &config_path,
+            r#"
+                saya.commands.register("dired.open", async () => {
+                    const buffer = await saya.buffer.current();
+                    const currentPath = buffer.path || ".";
+                    const directory = currentPath.endsWith("/")
+                        ? (currentPath.slice(0, -1) || "/")
+                        : (currentPath.lastIndexOf("/") >= 0 ? currentPath.slice(0, currentPath.lastIndexOf("/")) || "/" : ".");
+                    await saya.commands.execute(`edit ${directory}`);
+                });
+                saya.keymap.set("normal", "-", saya.commands.execute("dired.open"));
+            "#,
+        )
+        .expect("config file");
+
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(PathBuf::from("AGENTS.md")),
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+
+        let action = startup_keymap_action_for_input(
+            &outcome.startup_registry.keymaps,
+            outcome.core_bridge.snapshot().mode,
+            &KeyInput::Char('-'),
+        )
+        .expect("dired keymap should resolve");
+        let StartupKeymapAction::RegisteredCommand(command_name) = action else {
+            panic!("dired keymap should point at a registered command");
+        };
+        execute_startup_keymap_registered_command(
+            Some(&mut runtime_session),
+            &command_name,
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+        )
+        .await;
+
+        let text = outcome.core_bridge.snapshot().text;
+        assert!(
+            text.contains("Cargo.toml\n"),
+            "relative file should open the current directory listing, got: {text:?}"
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
     }
 
     #[test]

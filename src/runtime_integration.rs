@@ -222,6 +222,48 @@ impl RuntimeSessionOwner {
         aggregate
     }
 
+    pub async fn execute_command<H: RuntimeHostSession>(
+        &mut self,
+        name: &str,
+        host_session: &mut H,
+    ) -> RuntimeDispatchOutcome {
+        self.refresh_cached_snapshots(host_session);
+        log::info!(
+            "[runtime_integration][command] execute runtime command through session owner: command={}",
+            name
+        );
+
+        let receipt = match self.runtime.execute_command(name) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                log::debug!(
+                    "[runtime_integration] failed to queue runtime command: command={}, error={:?}",
+                    name,
+                    error
+                );
+                return RuntimeDispatchOutcome {
+                    transient_message: Some(format!("Runtime command failed: {:?}", error)),
+                    requires_redraw: true,
+                    shutdown_intent: None,
+                    presentation_intents: Vec::new(),
+                };
+            }
+        };
+
+        let mut aggregate = self
+            .await_runtime_command(name, receipt, host_session)
+            .await;
+        let follow_up_events = std::mem::take(&mut aggregate.follow_up_events);
+        let mut dispatch_outcome = aggregate.outcome;
+        for event in follow_up_events {
+            merge_dispatch_outcome(
+                &mut dispatch_outcome,
+                self.dispatch(event, host_session).await,
+            );
+        }
+        dispatch_outcome
+    }
+
     async fn dispatch_once<H: RuntimeHostSession>(
         &mut self,
         event: RuntimeEventPayload,
@@ -334,6 +376,83 @@ impl RuntimeSessionOwner {
             editor,
         };
     }
+
+    async fn await_runtime_command<H: RuntimeHostSession>(
+        &mut self,
+        name: &str,
+        receipt: crate::saya_live_runtime::RuntimeCommandReceipt,
+        host_session: &mut H,
+    ) -> RuntimeCommandDispatchAggregate {
+        let mut projected = RuntimeDispatchOutcome::default();
+        let mut follow_up_events = Vec::new();
+        let result_future = receipt.await_result();
+        tokio::pin!(result_future);
+
+        loop {
+            tokio::select! {
+                result = &mut result_future => {
+                    match result {
+                        Ok(()) => {
+                            log::debug!(
+                                "[runtime_integration] runtime command completed: command={}",
+                                name
+                            );
+                        }
+                        Err(error) => {
+                            log::debug!(
+                                "[runtime_integration] runtime command failed: command={}, error={:?}",
+                                name,
+                                error
+                            );
+                            projected.transient_message = Some(format!("Runtime command failed: {:?}", error));
+                            projected.requires_redraw = true;
+                        }
+                    }
+                    break;
+                }
+                request = self.command_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] host command channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][host_command] servicing runtime host command request during command execution: command={}",
+                        request.name
+                    );
+                    match host_session.execute_host_command(&request.name) {
+                        Ok(effect) => {
+                            self.refresh_cached_snapshots(host_session);
+                            merge_dispatch_outcome(
+                                &mut projected,
+                                RuntimeDispatchOutcome {
+                                    transient_message: effect.transient_message.clone(),
+                                    requires_redraw: effect.transient_message.is_some()
+                                        || !effect.presentation_intents.is_empty(),
+                                    shutdown_intent: effect.shutdown_intent,
+                                    presentation_intents: effect.presentation_intents.clone(),
+                                },
+                            );
+                            follow_up_events.extend(effect.follow_up_events.clone());
+                            let _ = request.reply.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+            }
+        }
+
+        RuntimeCommandDispatchAggregate {
+            outcome: projected,
+            follow_up_events,
+        }
+    }
+}
+
+struct RuntimeCommandDispatchAggregate {
+    outcome: RuntimeDispatchOutcome,
+    follow_up_events: Vec<RuntimeEventPayload>,
 }
 
 fn merge_dispatch_outcome(target: &mut RuntimeDispatchOutcome, next: RuntimeDispatchOutcome) {

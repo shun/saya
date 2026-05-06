@@ -12,6 +12,7 @@ pub mod core_host_actions;
 pub mod core_notification_prompt;
 pub mod core_outcome;
 pub mod core_prompt;
+pub mod diagnostic_log;
 pub mod editor_session;
 pub mod event_loop;
 pub mod ex_command;

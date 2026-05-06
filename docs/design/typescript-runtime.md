@@ -50,6 +50,7 @@ read-only state plus explicit command execution.
 - `saya.window.current()`
 - `saya.editor.current()`
 - `saya.editor.mode()`
+- `saya.filer.list(path)`
 
 The runtime phase does not expose startup registration APIs.
 
@@ -64,6 +65,7 @@ That bridge lets the runtime ask for these operations.
 - Read the current buffer snapshot
 - Read the current window snapshot
 - Read the current editor snapshot
+- Read a directory listing for filer plugins
 
 This keeps the runtime decoupled from the TUI loop and makes headless testing
 practical.
@@ -74,6 +76,8 @@ The repository enforces several rules around the `saya` namespace.
 
 - Startup and runtime surfaces remain separate
 - Filesystem and network capabilities stay out of the public MVP surface
+- Filer plugins use the narrow `saya.filer` surface instead of broad
+  filesystem access
 - Compatibility-oriented string DSLs do not define the public contract
 - Typed payloads are preferred over loosely structured callback arguments
 

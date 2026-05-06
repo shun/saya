@@ -38,11 +38,19 @@ fn sy_binary_path() -> PathBuf {
 }
 
 fn run_sy_headless_smoke(args: &[&str]) -> Output {
+    run_sy_headless_smoke_with_env(args, &[])
+}
+
+fn run_sy_headless_smoke_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
     let binary = sy_binary_path();
     assert!(binary.exists(), "sy binary should exist at {:?}", binary);
 
-    Command::new(binary)
-        .env("SAYA_BINARY_SMOKE", "1")
+    let mut command = Command::new(binary);
+    command.env("SAYA_BINARY_SMOKE", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -149,6 +157,55 @@ fn opening_with_u_init_ts_projects_startup_configuration_into_the_ui() {
 
     std::fs::remove_file(&target_path).expect("cleanup target");
     std::fs::remove_file(&config_path).expect("cleanup config");
+}
+
+#[test]
+fn init_ts_log_file_writes_binary_smoke_logs() {
+    let target_path = unique_path("startup-log-target.txt");
+    let config_path = unique_path("log-init.ts");
+    let log_path = unique_path("startup.log");
+    std::fs::write(&target_path, "alpha\n").expect("target file should be created");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                saya.log.file = {};
+            "#,
+            serde_json::to_string(log_path.to_str().expect("log path should be UTF-8"))
+                .expect("log path should serialize")
+        ),
+    )
+    .expect("startup config should be created");
+
+    let output = run_sy_headless_smoke_with_env(
+        &[
+            "-u",
+            config_path.to_str().expect("config path should be UTF-8"),
+            target_path.to_str().expect("target path should be UTF-8"),
+        ],
+        &[("SAYA_LOG", "0")],
+    );
+
+    assert!(
+        output.status.success(),
+        "sy binary should exit cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = std::fs::read_to_string(&log_path).expect("init.ts log file should be created");
+    assert!(
+        log.contains("[diagnostic_log] startup log file configured"),
+        "log should confirm init.ts configured logging: {log}"
+    );
+    assert!(
+        log.contains("[bootstrap] startup preflight requested"),
+        "buffered startup logs should be flushed into the init.ts log file: {log}"
+    );
+
+    std::fs::remove_file(&target_path).expect("cleanup target");
+    std::fs::remove_file(&config_path).expect("cleanup config");
+    std::fs::remove_file(&log_path).expect("cleanup log");
 }
 
 #[test]

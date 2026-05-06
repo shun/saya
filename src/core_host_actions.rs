@@ -107,22 +107,22 @@ impl LocalVfsHost {
                 request_id,
                 document_id,
                 ..
-            } => match path_from_document_id(&document_id)
-                .and_then(|path| fs::read_to_string(path).ok())
-            {
-                Some(text) => CoreVfsResponse::Loaded {
-                    request_id,
-                    document_id,
-                    text,
-                },
-                None => CoreVfsResponse::Failed {
-                    request_id,
-                    error: vfs_error(
-                        CoreVfsErrorKind::HostUnavailable,
-                        "failed to load local file",
-                    ),
-                },
-            },
+            } => {
+                match path_from_document_id(&document_id).and_then(|path| load_local_text(&path)) {
+                    Some(text) => CoreVfsResponse::Loaded {
+                        request_id,
+                        document_id,
+                        text,
+                    },
+                    None => CoreVfsResponse::Failed {
+                        request_id,
+                        error: vfs_error(
+                            CoreVfsErrorKind::HostUnavailable,
+                            "failed to load local file",
+                        ),
+                    },
+                }
+            }
             CoreVfsRequest::Save {
                 request_id,
                 document_id,
@@ -165,6 +165,33 @@ fn path_from_document_id(document_id: &str) -> Option<PathBuf> {
         .strip_prefix("file://")
         .map(PathBuf::from)
         .or_else(|| Some(PathBuf::from(document_id)).filter(|path| path.exists()))
+}
+
+fn load_local_text(path: &Path) -> Option<String> {
+    if path.is_dir() {
+        log::debug!(
+            "[core_host_actions] loading local directory as editable listing: path={}",
+            path.display()
+        );
+        return render_directory_listing(path).ok();
+    }
+    fs::read_to_string(path).ok()
+}
+
+fn render_directory_listing(path: &Path) -> std::io::Result<String> {
+    let mut entries = fs::read_dir(path)?
+        .map(|entry| {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+            if file_type.is_dir() {
+                name.push('/');
+            }
+            Ok(name)
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(entries.join("\n") + "\n")
 }
 
 fn locator_to_path(locator: &str) -> PathBuf {

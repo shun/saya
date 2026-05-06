@@ -49,6 +49,9 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("buffer"));
     assert!(declaration.contains("window"));
     assert!(declaration.contains("editor"));
+    assert!(declaration.contains("filer"));
+    assert!(declaration.contains("SayaRuntimeFilerSurface"));
+    assert!(declaration.contains("SayaFilerEntry"));
     assert!(declaration.contains("SayaRuntimeSurface"));
 }
 

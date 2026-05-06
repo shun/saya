@@ -23,6 +23,7 @@ top-level areas.
 - `saya.buffer`
 - `saya.window`
 - `saya.editor`
+- `saya.filer`
 
 ## Commands
 
@@ -94,6 +95,28 @@ const mode = await saya.editor.mode();
 console.log(mode);
 ```
 
+## Filer
+
+The filer surface lets TypeScript plugins read a directory listing without
+opening a broad filesystem API. Use it for directory-editor plugins that need
+file entries while keeping writes and arbitrary filesystem access out of the
+runtime surface.
+
+### `saya.filer.list(path)`
+
+Use this method to read a sorted directory listing.
+
+```ts
+const entries = await saya.filer.list(".");
+console.log(entries.map((entry) => `${entry.kind}:${entry.name}`));
+```
+
+Each entry contains:
+
+- `name`
+- `path`
+- `kind`, as `"directory"`, `"file"`, `"symlink"`, or `"other"`
+
 ## What the runtime API does not expose
 
 The runtime surface deliberately excludes startup registration and high-risk
@@ -103,7 +126,7 @@ capabilities.
 - `saya.keymap.set(...)`
 - `saya.commands.register(...)`
 - `saya.events.on(...)`
-- Filesystem access
+- Broad filesystem access
 - Network access
 - Vim-compatibility string DSLs
 

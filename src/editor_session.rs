@@ -231,6 +231,18 @@ impl EditorSessionState {
         self.target_path.as_ref()
     }
 
+    /// active buffer の対象パスを host application 側の保存状態へ反映する。
+    pub fn replace_target_path(&mut self, target_path: PathBuf) {
+        log::debug!(
+            "[editor_session] replacing target path from runtime host action: old={:?}, new={}",
+            self.target_path,
+            target_path.display()
+        );
+        self.target_path = Some(target_path);
+        self.dirty = false;
+        self.last_save_error = None;
+    }
+
     /// 描画時のタブ幅を返す。
     pub fn tab_size(&self) -> u16 {
         self.tab_size
