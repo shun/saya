@@ -396,6 +396,44 @@ impl CoreBridge {
         snapshot.text
     }
 
+    pub fn replace_buffer_text(&mut self, text: &str) -> Result<(), CoreSessionError> {
+        let lines = text
+            .strip_suffix('\n')
+            .unwrap_or(text)
+            .split('\n')
+            .collect::<Vec<_>>();
+        let lines = if lines.is_empty() { vec![""] } else { lines };
+        let list_expr = lines
+            .iter()
+            .map(|line| format!("'{}'", line.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        log::debug!(
+            "[core_bridge] replacing active buffer text through setline: line_count={}, text_len={}",
+            lines.len(),
+            text.len()
+        );
+        let setline = self
+            .session
+            .execute_ex_command(&format!("call setline(1, [{list_expr}])"))
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&setline);
+        let snapshot = self.session.snapshot();
+        if snapshot.text.lines().count() > lines.len() {
+            let delete = self
+                .session
+                .execute_ex_command(&format!("{},$delete _", lines.len() + 1))
+                .map_err(CoreSessionError::CommandFailed)?;
+            self.queue_transaction_artifacts(&delete);
+        }
+        let nomodified = self
+            .session
+            .execute_ex_command("set nomodified")
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&nomodified);
+        Ok(())
+    }
+
     pub fn attach_target_path(&mut self, target_path: &Path) -> Result<(), CoreSessionError> {
         let escaped_path = escape_path_for_file_command(target_path);
         log::debug!(

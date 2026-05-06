@@ -30,6 +30,18 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.editor.current",
     "saya.editor.mode",
     "saya.filer.list",
+    "saya.filer.currentEntry",
+    "saya.filer.createFile",
+    "saya.filer.createDirectory",
+    "saya.filer.copy",
+    "saya.filer.move",
+    "saya.filer.rename",
+    "saya.filer.delete",
+    "saya.filer.mark",
+    "saya.filer.unmark",
+    "saya.filer.clearMarks",
+    "saya.filer.bulkDeletePreview",
+    "saya.filer.bulkDelete",
 ];
 
 /// Formal runtime surface は read-only/command 実行に限定し、compat 文字列 DSL は含めない。
@@ -119,8 +131,52 @@ globalThis.saya = {
         },
     },
     filer: {
-        list(path = ".") {
-            return Deno.core.ops.op_runtime_filer_list(String(path));
+        list(path = ".", options = {}) {
+            return Deno.core.ops.op_runtime_filer_list(String(path), JSON.stringify(options ?? {}));
+        },
+        currentEntry() {
+            return Deno.core.ops.op_runtime_filer_current_entry();
+        },
+        createFile(path) {
+            return Deno.core.ops.op_runtime_filer_create_file(String(path));
+        },
+        createDirectory(path) {
+            return Deno.core.ops.op_runtime_filer_create_directory(String(path));
+        },
+        copy(from, to) {
+            return Deno.core.ops.op_runtime_filer_copy(String(from), String(to));
+        },
+        move(from, to) {
+            return Deno.core.ops.op_runtime_filer_move(String(from), String(to));
+        },
+        rename(from, to) {
+            return Deno.core.ops.op_runtime_filer_rename(String(from), String(to));
+        },
+        delete(path, options = {}) {
+            return Deno.core.ops.op_runtime_filer_delete(
+                String(path),
+                Boolean(options?.confirm),
+                Boolean(options?.recursive),
+                Boolean(options?.trash),
+            );
+        },
+        mark(path) {
+            return Deno.core.ops.op_runtime_filer_mark(String(path));
+        },
+        unmark(path) {
+            return Deno.core.ops.op_runtime_filer_unmark(String(path));
+        },
+        clearMarks() {
+            return Deno.core.ops.op_runtime_filer_clear_marks();
+        },
+        bulkDeletePreview() {
+            return Deno.core.ops.op_runtime_filer_bulk_delete_preview();
+        },
+        bulkDelete(options = {}) {
+            return Deno.core.ops.op_runtime_filer_bulk_delete(
+                String(options?.previewId ?? ""),
+                Boolean(options?.confirm),
+            );
         },
     },
 };
@@ -144,6 +200,8 @@ declare global {
         id: number;
         path: string | null;
         lineCount: number;
+        cursorRow: number;
+        currentLine: string;
     }
 
     interface SayaReadonlyWindowSnapshot {
@@ -173,14 +231,117 @@ declare global {
 
     type SayaFilerEntryKind = "directory" | "file" | "symlink" | "other";
 
+    type SayaFilerSortKey = "name" | "kind" | "modifiedTime" | "size";
+
+    interface SayaFilerListOptions {
+        showHidden?: boolean;
+        sortBy?: SayaFilerSortKey;
+        filter?: string | null;
+    }
+
     interface SayaFilerEntry {
         name: string;
         path: string;
         kind: SayaFilerEntryKind;
+        displayText: string;
+        size?: number | null;
+        modifiedTimeMs?: number | null;
+    }
+
+    interface SayaCurrentFilerEntry extends SayaFilerEntry {
+        id: number;
+        rootPath: string;
+        displayText: string;
     }
 
     interface SayaRuntimeFilerSurface {
-        list(path?: string): Promise<SayaFilerEntry[]>;
+        list(path?: string, options?: SayaFilerListOptions): Promise<SayaFilerEntry[]>;
+        currentEntry(): Promise<SayaCurrentFilerEntry | null>;
+        createFile(path: string): Promise<SayaFilerOperationReport>;
+        createDirectory(path: string): Promise<SayaFilerOperationReport>;
+        copy(from: string, to: string): Promise<SayaFilerOperationReport>;
+        move(from: string, to: string): Promise<SayaFilerOperationReport>;
+        rename(from: string, to: string): Promise<SayaFilerOperationReport>;
+        delete(path: string, options?: SayaFilerDeleteOptions): Promise<SayaFilerOperationReport>;
+        mark(path: string): Promise<SayaFilerOperationReport>;
+        unmark(path: string): Promise<SayaFilerOperationReport>;
+        clearMarks(): Promise<SayaFilerOperationReport>;
+        bulkDeletePreview(): Promise<SayaFilerOperationReport>;
+        bulkDelete(options?: SayaFilerBulkDeleteOptions): Promise<SayaFilerOperationReport>;
+    }
+
+    interface SayaFilerDeleteOptions {
+        confirm?: boolean;
+        recursive?: boolean;
+        trash?: boolean;
+    }
+
+    interface SayaFilerBulkDeleteOptions {
+        confirm?: boolean;
+        previewId?: string;
+    }
+
+    type SayaFilerOperationKind =
+        | "createFile"
+        | "createDirectory"
+        | "copy"
+        | "move"
+        | "rename"
+        | "delete"
+        | "mark"
+        | "unmark"
+        | "clearMarks"
+        | "bulkDeletePreview"
+        | "bulkDelete";
+
+    interface SayaFilerOperationReport {
+        operation: SayaFilerOperationKind;
+        path: string;
+        targetPath?: string | null;
+        entries: SayaCurrentFilerEntry[];
+        previewId?: string | null;
+    }
+
+    type SayaDirectoryBufferOperationKind =
+        | "createFile"
+        | "createDirectory"
+        | "rename"
+        | "delete";
+
+    type SayaDirectoryBufferOperationRisk = "low" | "high";
+
+    interface SayaDirectoryBufferPreviewOperation {
+        kind: SayaDirectoryBufferOperationKind;
+        sourcePath?: string | null;
+        targetPath?: string | null;
+        risk: SayaDirectoryBufferOperationRisk;
+    }
+
+    interface SayaDirectoryBufferOperationPreview {
+        id: string;
+        rootPath: string;
+        operationCount: number;
+        highRiskCount: number;
+        operations: SayaDirectoryBufferPreviewOperation[];
+    }
+
+    interface SayaDirectoryBufferOperationPrompt {
+        previewId: string;
+        statusLine: string;
+        detailLines: string[];
+        confirmCommand: "OK";
+        cancelCommand: "Cancel";
+        recoveryHint: string;
+    }
+
+    interface SayaDirectoryBufferApplyReport {
+        rootPath: string;
+        operationCount: number;
+        successfulSteps: number;
+        failedSteps: number;
+        rollbackSucceeded: number;
+        rollbackFailed: number;
+        manualRecoveryRequired: boolean;
     }
 
     interface SayaRuntimeSurface {
@@ -203,6 +364,8 @@ pub struct ReadonlyBufferSnapshot {
     pub id: u64,
     pub path: Option<PathBuf>,
     pub line_count: usize,
+    pub cursor_row: usize,
+    pub current_line: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,7 +378,7 @@ pub struct ReadonlyEditorSnapshot {
     pub mode: RuntimeMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeMode {
     Normal,
     Insert,
@@ -233,6 +396,20 @@ pub struct RuntimeFilerEntry {
     pub name: String,
     pub path: String,
     pub kind: RuntimeFilerEntryKind,
+    pub display_text: String,
+    pub size: Option<u64>,
+    pub modified_time_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFilerCurrentEntry {
+    pub id: u64,
+    pub name: String,
+    pub path: String,
+    pub kind: RuntimeFilerEntryKind,
+    pub root_path: String,
+    pub display_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,9 +421,137 @@ pub enum RuntimeFilerEntryKind {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeFilerSortKey {
+    Name,
+    Kind,
+    ModifiedTime,
+    Size,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFilerListOptions {
+    #[serde(default = "runtime_filer_show_hidden_default")]
+    pub show_hidden: bool,
+    #[serde(default)]
+    pub sort_by: RuntimeFilerSortKey,
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+impl Default for RuntimeFilerListOptions {
+    fn default() -> Self {
+        Self {
+            show_hidden: runtime_filer_show_hidden_default(),
+            sort_by: RuntimeFilerSortKey::Kind,
+            filter: None,
+        }
+    }
+}
+
+impl Default for RuntimeFilerSortKey {
+    fn default() -> Self {
+        Self::Kind
+    }
+}
+
+fn runtime_filer_show_hidden_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeFilerOperationKind {
+    CreateFile,
+    CreateDirectory,
+    Copy,
+    Move,
+    Rename,
+    Delete,
+    Mark,
+    Unmark,
+    ClearMarks,
+    BulkDeletePreview,
+    BulkDelete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuntimeFilerErrorKind {
+    AlreadyExists,
+    ConfirmationRequired,
+    Io,
+    NotFound,
+    PermissionDenied,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFilerOperationReport {
+    pub operation: RuntimeFilerOperationKind,
+    pub path: String,
+    pub target_path: Option<String>,
+    pub entries: Vec<RuntimeFilerCurrentEntry>,
+    pub preview_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeFilerOperation {
+    CreateFile {
+        path: PathBuf,
+    },
+    CreateDirectory {
+        path: PathBuf,
+    },
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Delete {
+        path: PathBuf,
+        confirm: bool,
+        recursive: bool,
+        trash: bool,
+    },
+    Mark {
+        path: PathBuf,
+    },
+    Unmark {
+        path: PathBuf,
+    },
+    ClearMarks,
+    BulkDeletePreview,
+    BulkDelete {
+        preview_id: String,
+        confirm: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RuntimeFilerError {
-    ReadFailed { path: PathBuf, message: String },
+    ReadFailed {
+        path: PathBuf,
+        message: String,
+    },
+    OperationFailed {
+        operation: RuntimeFilerOperationKind,
+        path: PathBuf,
+        target_path: Option<PathBuf>,
+        kind: RuntimeFilerErrorKind,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -327,8 +632,20 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
     fn list_filer_entries(
         &self,
         path: PathBuf,
+        options: RuntimeFilerListOptions,
     ) -> BoxFuture<Result<Vec<RuntimeFilerEntry>, RuntimeFilerError>> {
-        Box::pin(async move { list_local_filer_entries(path) })
+        Box::pin(async move { list_local_filer_entries(path, options) })
+    }
+    fn current_filer_entry(
+        &self,
+    ) -> BoxFuture<Result<Option<RuntimeFilerCurrentEntry>, RuntimeFilerError>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn execute_filer_operation(
+        &self,
+        operation: RuntimeFilerOperation,
+    ) -> BoxFuture<Result<RuntimeFilerOperationReport, RuntimeFilerError>> {
+        Box::pin(async move { execute_local_filer_operation(operation) })
     }
 }
 
@@ -504,15 +821,246 @@ async fn op_runtime_current_editor(
 async fn op_runtime_filer_list(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
+    #[string] options_json: String,
 ) -> Result<Vec<RuntimeFilerEntry>, JsErrorBox> {
     let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
     let path = PathBuf::from(path);
+    let options = serde_json::from_str::<RuntimeFilerListOptions>(&options_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid filer list options: {error}")))?;
     log::debug!(
-        "[saya_live_runtime] runtime op filer list: path={}",
+        "[saya_live_runtime] runtime op filer list: path={}, show_hidden={}, sort_by={:?}, filter={:?}",
+        path.display(),
+        options.show_hidden,
+        options.sort_by,
+        options.filter
+    );
+    bridge
+        .list_filer_entries(path, options)
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_current_entry(
+    state: Rc<RefCell<OpState>>,
+) -> Result<Option<RuntimeFilerCurrentEntry>, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime] runtime op filer currentEntry");
+    bridge
+        .current_filer_entry()
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_create_file(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let path = PathBuf::from(path);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer createFile: path={}",
         path.display()
     );
     bridge
-        .list_filer_entries(path)
+        .execute_filer_operation(RuntimeFilerOperation::CreateFile { path })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_create_directory(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let path = PathBuf::from(path);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer createDirectory: path={}",
+        path.display()
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::CreateDirectory { path })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_rename(
+    state: Rc<RefCell<OpState>>,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let from = PathBuf::from(from);
+    let to = PathBuf::from(to);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer rename: from={}, to={}",
+        from.display(),
+        to.display()
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::Rename { from, to })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_copy(
+    state: Rc<RefCell<OpState>>,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let from = PathBuf::from(from);
+    let to = PathBuf::from(to);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer copy: from={}, to={}",
+        from.display(),
+        to.display()
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::Copy { from, to })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_move(
+    state: Rc<RefCell<OpState>>,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let from = PathBuf::from(from);
+    let to = PathBuf::from(to);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer move: from={}, to={}",
+        from.display(),
+        to.display()
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::Move { from, to })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_delete(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+    confirm: bool,
+    recursive: bool,
+    trash: bool,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let path = PathBuf::from(path);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer delete: path={}, confirm={}, recursive={}, trash={}",
+        path.display(),
+        confirm,
+        recursive,
+        trash
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::Delete {
+            path,
+            confirm,
+            recursive,
+            trash,
+        })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_mark(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let path = PathBuf::from(path);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer mark: path={}",
+        path.display()
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::Mark { path })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_unmark(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    let path = PathBuf::from(path);
+    log::debug!(
+        "[saya_live_runtime] runtime op filer unmark: path={}",
+        path.display()
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::Unmark { path })
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_clear_marks(
+    state: Rc<RefCell<OpState>>,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime] runtime op filer clearMarks");
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::ClearMarks)
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_bulk_delete_preview(
+    state: Rc<RefCell<OpState>>,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime] runtime op filer bulkDeletePreview");
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::BulkDeletePreview)
+        .await
+        .map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_filer_bulk_delete(
+    state: Rc<RefCell<OpState>>,
+    #[string] preview_id: String,
+    confirm: bool,
+) -> Result<RuntimeFilerOperationReport, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!(
+        "[saya_live_runtime] runtime op filer bulkDelete: preview_id={}, confirm={}",
+        preview_id,
+        confirm
+    );
+    bridge
+        .execute_filer_operation(RuntimeFilerOperation::BulkDelete {
+            preview_id,
+            confirm,
+        })
         .await
         .map_err(runtime_filer_error_to_js_error)
 }
@@ -524,7 +1072,19 @@ deno_core::extension!(
         op_runtime_current_buffer,
         op_runtime_current_window,
         op_runtime_current_editor,
-        op_runtime_filer_list
+        op_runtime_filer_list,
+        op_runtime_filer_current_entry,
+        op_runtime_filer_create_file,
+        op_runtime_filer_create_directory,
+        op_runtime_filer_copy,
+        op_runtime_filer_move,
+        op_runtime_filer_rename,
+        op_runtime_filer_delete,
+        op_runtime_filer_mark,
+        op_runtime_filer_unmark,
+        op_runtime_filer_clear_marks,
+        op_runtime_filer_bulk_delete_preview,
+        op_runtime_filer_bulk_delete
     ],
     options = {
         bridge: Arc<dyn HostCapabilityBridge>,
@@ -548,14 +1108,291 @@ fn runtime_filer_error_to_js_error(error: RuntimeFilerError) -> JsErrorBox {
             path.display(),
             message
         )),
+        RuntimeFilerError::OperationFailed { .. } => {
+            let encoded = serde_json::to_string(&error)
+                .expect("runtime filer operation error should serialize");
+            JsErrorBox::generic(format!("filer operation failed: {encoded}"))
+        }
     }
 }
 
-fn list_local_filer_entries(path: PathBuf) -> Result<Vec<RuntimeFilerEntry>, RuntimeFilerError> {
+pub fn execute_local_filer_operation(
+    operation: RuntimeFilerOperation,
+) -> Result<RuntimeFilerOperationReport, RuntimeFilerError> {
+    match operation {
+        RuntimeFilerOperation::CreateFile { path } => {
+            log::info!(
+                "[saya_live_runtime][filer] creating file through host operation: path={}",
+                path.display()
+            );
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    runtime_filer_io_error(
+                        RuntimeFilerOperationKind::CreateFile,
+                        &path,
+                        None,
+                        error,
+                    )
+                })?;
+            Ok(RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::CreateFile,
+                path: path.to_string_lossy().into_owned(),
+                target_path: None,
+                entries: Vec::new(),
+                preview_id: None,
+            })
+        }
+        RuntimeFilerOperation::CreateDirectory { path } => {
+            log::info!(
+                "[saya_live_runtime][filer] creating directory through host operation: path={}",
+                path.display()
+            );
+            std::fs::create_dir(&path).map_err(|error| {
+                runtime_filer_io_error(
+                    RuntimeFilerOperationKind::CreateDirectory,
+                    &path,
+                    None,
+                    error,
+                )
+            })?;
+            Ok(RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::CreateDirectory,
+                path: path.to_string_lossy().into_owned(),
+                target_path: None,
+                entries: Vec::new(),
+                preview_id: None,
+            })
+        }
+        RuntimeFilerOperation::Rename { from, to } => {
+            log::info!(
+                "[saya_live_runtime][filer] renaming through host operation: from={}, to={}",
+                from.display(),
+                to.display()
+            );
+            std::fs::rename(&from, &to).map_err(|error| {
+                runtime_filer_io_error(RuntimeFilerOperationKind::Rename, &from, Some(&to), error)
+            })?;
+            Ok(RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::Rename,
+                path: from.to_string_lossy().into_owned(),
+                target_path: Some(to.to_string_lossy().into_owned()),
+                entries: Vec::new(),
+                preview_id: None,
+            })
+        }
+        RuntimeFilerOperation::Copy { from, to } => {
+            let start = std::time::Instant::now();
+            log::info!(
+                "[saya_live_runtime][filer] copying through host operation: from={}, to={}",
+                from.display(),
+                to.display()
+            );
+            if from.is_dir() {
+                return Err(RuntimeFilerError::OperationFailed {
+                    operation: RuntimeFilerOperationKind::Copy,
+                    path: from,
+                    target_path: Some(to),
+                    kind: RuntimeFilerErrorKind::Unsupported,
+                    message: "directory copy is not supported yet; recursive copy requires an explicit future policy".to_string(),
+                });
+            }
+            std::fs::copy(&from, &to).map_err(|error| {
+                runtime_filer_io_error(RuntimeFilerOperationKind::Copy, &from, Some(&to), error)
+            })?;
+            log::info!(
+                "[saya_live_runtime][filer] copy completed: from={}, to={}, duration_ms={}",
+                from.display(),
+                to.display(),
+                start.elapsed().as_millis()
+            );
+            Ok(RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::Copy,
+                path: from.to_string_lossy().into_owned(),
+                target_path: Some(to.to_string_lossy().into_owned()),
+                entries: Vec::new(),
+                preview_id: None,
+            })
+        }
+        RuntimeFilerOperation::Move { from, to } => {
+            let start = std::time::Instant::now();
+            log::info!(
+                "[saya_live_runtime][filer] moving through host operation: from={}, to={}",
+                from.display(),
+                to.display()
+            );
+            std::fs::rename(&from, &to).map_err(|error| {
+                runtime_filer_io_error(RuntimeFilerOperationKind::Move, &from, Some(&to), error)
+            })?;
+            log::info!(
+                "[saya_live_runtime][filer] move completed: from={}, to={}, duration_ms={}",
+                from.display(),
+                to.display(),
+                start.elapsed().as_millis()
+            );
+            Ok(RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::Move,
+                path: from.to_string_lossy().into_owned(),
+                target_path: Some(to.to_string_lossy().into_owned()),
+                entries: Vec::new(),
+                preview_id: None,
+            })
+        }
+        RuntimeFilerOperation::Delete {
+            path,
+            confirm,
+            recursive,
+            trash,
+        } => {
+            let start = std::time::Instant::now();
+            log::info!(
+                "[saya_live_runtime][filer] deleting through host operation: path={}, confirm={}, recursive={}, trash={}",
+                path.display(),
+                confirm,
+                recursive,
+                trash
+            );
+            if !confirm {
+                return Err(RuntimeFilerError::OperationFailed {
+                    operation: RuntimeFilerOperationKind::Delete,
+                    path,
+                    target_path: None,
+                    kind: RuntimeFilerErrorKind::ConfirmationRequired,
+                    message: "delete requires explicit confirmation".to_string(),
+                });
+            }
+            if trash {
+                return Err(RuntimeFilerError::OperationFailed {
+                    operation: RuntimeFilerOperationKind::Delete,
+                    path,
+                    target_path: None,
+                    kind: RuntimeFilerErrorKind::Unsupported,
+                    message: "trash backend is not configured for this platform; permanent delete policy remains separate".to_string(),
+                });
+            }
+            if recursive {
+                return Err(RuntimeFilerError::OperationFailed {
+                    operation: RuntimeFilerOperationKind::Delete,
+                    path,
+                    target_path: None,
+                    kind: RuntimeFilerErrorKind::Unsupported,
+                    message:
+                        "recursive delete is disabled; it requires an explicit future opt-in policy"
+                            .to_string(),
+                });
+            }
+            if path.is_dir() {
+                std::fs::remove_dir(&path).map_err(|error| {
+                    runtime_filer_io_error(RuntimeFilerOperationKind::Delete, &path, None, error)
+                })?;
+            } else {
+                std::fs::remove_file(&path).map_err(|error| {
+                    runtime_filer_io_error(RuntimeFilerOperationKind::Delete, &path, None, error)
+                })?;
+            }
+            log::info!(
+                "[saya_live_runtime][filer] delete completed: path={}, duration_ms={}",
+                path.display(),
+                start.elapsed().as_millis()
+            );
+            Ok(RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::Delete,
+                path: path.to_string_lossy().into_owned(),
+                target_path: None,
+                entries: Vec::new(),
+                preview_id: None,
+            })
+        }
+        RuntimeFilerOperation::Mark { path } => Err(RuntimeFilerError::OperationFailed {
+            operation: RuntimeFilerOperationKind::Mark,
+            path,
+            target_path: None,
+            kind: RuntimeFilerErrorKind::Unsupported,
+            message: "mark requires an active directory buffer".to_string(),
+        }),
+        RuntimeFilerOperation::Unmark { path } => Err(RuntimeFilerError::OperationFailed {
+            operation: RuntimeFilerOperationKind::Unmark,
+            path,
+            target_path: None,
+            kind: RuntimeFilerErrorKind::Unsupported,
+            message: "unmark requires an active directory buffer".to_string(),
+        }),
+        RuntimeFilerOperation::ClearMarks => Err(RuntimeFilerError::OperationFailed {
+            operation: RuntimeFilerOperationKind::ClearMarks,
+            path: PathBuf::new(),
+            target_path: None,
+            kind: RuntimeFilerErrorKind::Unsupported,
+            message: "clearMarks requires an active directory buffer".to_string(),
+        }),
+        RuntimeFilerOperation::BulkDeletePreview => Err(RuntimeFilerError::OperationFailed {
+            operation: RuntimeFilerOperationKind::BulkDeletePreview,
+            path: PathBuf::new(),
+            target_path: None,
+            kind: RuntimeFilerErrorKind::Unsupported,
+            message: "bulkDeletePreview requires an active directory buffer".to_string(),
+        }),
+        RuntimeFilerOperation::BulkDelete {
+            preview_id,
+            confirm: _,
+        } => Err(RuntimeFilerError::OperationFailed {
+            operation: RuntimeFilerOperationKind::BulkDelete,
+            path: PathBuf::from(preview_id),
+            target_path: None,
+            kind: RuntimeFilerErrorKind::Unsupported,
+            message: "bulkDelete requires an active directory buffer".to_string(),
+        }),
+    }
+}
+
+fn runtime_filer_io_error(
+    operation: RuntimeFilerOperationKind,
+    path: &PathBuf,
+    target_path: Option<&PathBuf>,
+    error: std::io::Error,
+) -> RuntimeFilerError {
+    let kind = match error.kind() {
+        std::io::ErrorKind::AlreadyExists => RuntimeFilerErrorKind::AlreadyExists,
+        std::io::ErrorKind::NotFound => RuntimeFilerErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied => RuntimeFilerErrorKind::PermissionDenied,
+        _ => RuntimeFilerErrorKind::Io,
+    };
     log::debug!(
-        "[saya_live_runtime] listing local filer entries: path={}",
-        path.display()
+        "[saya_live_runtime][filer] operation failed: operation={:?}, path={}, target_path={:?}, kind={:?}, message={}",
+        operation,
+        path.display(),
+        target_path.map(|path| path.display().to_string()),
+        kind,
+        error
     );
+    RuntimeFilerError::OperationFailed {
+        operation,
+        path: path.clone(),
+        target_path: target_path.cloned(),
+        kind,
+        message: error.to_string(),
+    }
+}
+
+pub fn list_local_filer_entries(
+    path: PathBuf,
+    options: RuntimeFilerListOptions,
+) -> Result<Vec<RuntimeFilerEntry>, RuntimeFilerError> {
+    let started_at = std::time::Instant::now();
+    log::debug!(
+        "[saya_live_runtime] listing local filer entries: path={}, show_hidden={}, sort_by={:?}, filter={:?}",
+        path.display(),
+        options.show_hidden,
+        options.sort_by,
+        options.filter
+    );
+    let normalized_filter = options
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .map(|filter| filter.to_ascii_lowercase());
     let mut entries = std::fs::read_dir(&path)
         .map_err(|error| RuntimeFilerError::ReadFailed {
             path: path.clone(),
@@ -581,24 +1418,86 @@ fn list_local_filer_entries(path: PathBuf) -> Result<Vec<RuntimeFilerEntry>, Run
             } else {
                 RuntimeFilerEntryKind::Other
             };
-            Ok(RuntimeFilerEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !options.show_hidden && name.starts_with('.') {
+                return Ok(None);
+            }
+            if let Some(filter) = normalized_filter.as_deref() {
+                let display_text = runtime_filer_display_text(&name, &kind);
+                let normalized_name = name.to_ascii_lowercase();
+                let normalized_display_text = display_text.to_ascii_lowercase();
+                if !normalized_name.contains(filter) && !normalized_display_text.contains(filter) {
+                    return Ok(None);
+                }
+            }
+            let metadata = entry
+                .metadata()
+                .map_err(|error| RuntimeFilerError::ReadFailed {
+                    path: entry.path(),
+                    message: error.to_string(),
+                })?;
+            let modified_time_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+            let display_text = runtime_filer_display_text(&name, &kind);
+            Ok(Some(RuntimeFilerEntry {
+                name,
                 path: entry.path().to_string_lossy().into_owned(),
                 kind,
-            })
+                display_text,
+                size: Some(metadata.len()),
+                modified_time_ms,
+            }))
+        })
+        .filter_map(|entry| match entry {
+            Ok(Some(entry)) => Some(Ok(entry)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
         })
         .collect::<Result<Vec<_>, RuntimeFilerError>>()?;
-    entries.sort_by(|left, right| {
-        filer_entry_sort_rank(&left.kind)
-            .cmp(&filer_entry_sort_rank(&right.kind))
-            .then_with(|| left.name.cmp(&right.name))
-    });
+    entries.sort_by(|left, right| runtime_filer_compare_entries(left, right, options.sort_by));
     log::debug!(
-        "[saya_live_runtime] listed local filer entries: path={}, count={}",
+        "[saya_live_runtime] listed local filer entries: path={}, count={}, duration_ms={}, show_hidden={}, sort_by={:?}, filter={:?}",
         path.display(),
-        entries.len()
+        entries.len(),
+        started_at.elapsed().as_millis(),
+        options.show_hidden,
+        options.sort_by,
+        options.filter
     );
     Ok(entries)
+}
+
+fn runtime_filer_display_text(name: &str, kind: &RuntimeFilerEntryKind) -> String {
+    match kind {
+        RuntimeFilerEntryKind::Directory => format!("{name}/"),
+        RuntimeFilerEntryKind::Symlink => format!("{name}@"),
+        RuntimeFilerEntryKind::Other => format!("{name}?"),
+        RuntimeFilerEntryKind::File => name.to_string(),
+    }
+}
+
+fn runtime_filer_compare_entries(
+    left: &RuntimeFilerEntry,
+    right: &RuntimeFilerEntry,
+    sort_by: RuntimeFilerSortKey,
+) -> std::cmp::Ordering {
+    match sort_by {
+        RuntimeFilerSortKey::Name => left.display_text.cmp(&right.display_text),
+        RuntimeFilerSortKey::Kind => filer_entry_sort_rank(&left.kind)
+            .cmp(&filer_entry_sort_rank(&right.kind))
+            .then_with(|| left.display_text.cmp(&right.display_text)),
+        RuntimeFilerSortKey::ModifiedTime => left
+            .modified_time_ms
+            .cmp(&right.modified_time_ms)
+            .then_with(|| left.display_text.cmp(&right.display_text)),
+        RuntimeFilerSortKey::Size => left
+            .size
+            .cmp(&right.size)
+            .then_with(|| left.display_text.cmp(&right.display_text)),
+    }
 }
 
 fn filer_entry_sort_rank(kind: &RuntimeFilerEntryKind) -> usize {
@@ -1365,7 +2264,8 @@ mod tests {
     use super::{
         BufferEventPayload, CallbackRegistryBuilder, HostCapabilityBridge, ReadonlyBufferSnapshot,
         ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
-        RuntimeMode, SayaLiveRuntime, SayaStartupPhaseEvaluator, SayaStartupPhaseRunner,
+        RuntimeFilerError, RuntimeFilerErrorKind, RuntimeFilerOperationKind, RuntimeMode,
+        SayaLiveRuntime, SayaStartupPhaseEvaluator, SayaStartupPhaseRunner, runtime_filer_io_error,
         spawn_startup_runtime_prepare_runner,
     };
 
@@ -1375,6 +2275,66 @@ mod tests {
             .expect("time went backwards")
             .as_nanos();
         std::env::temp_dir().join(format!("saya-live-runtime-{name}-{nanos}"))
+    }
+
+    #[test]
+    fn filer_io_error_maps_permission_denied_to_structured_error_kind() {
+        let path = PathBuf::from("/tmp/permission-denied.txt");
+        let error = runtime_filer_io_error(
+            RuntimeFilerOperationKind::CreateFile,
+            &path,
+            None,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+
+        assert_eq!(
+            error,
+            RuntimeFilerError::OperationFailed {
+                operation: RuntimeFilerOperationKind::CreateFile,
+                path,
+                target_path: None,
+                kind: RuntimeFilerErrorKind::PermissionDenied,
+                message: "permission denied".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn filer_list_options_filter_hidden_and_sort_by_size_with_metadata() {
+        let root_path = unique_path("filer-list-options");
+        let small_path = root_path.join("small.txt");
+        let large_path = root_path.join("large.txt");
+        let hidden_path = root_path.join(".hidden.txt");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&small_path, "1").expect("small file");
+        std::fs::write(&large_path, "12345").expect("large file");
+        std::fs::write(&hidden_path, "hidden").expect("hidden file");
+
+        let entries = super::list_local_filer_entries(
+            root_path.clone(),
+            super::RuntimeFilerListOptions {
+                show_hidden: false,
+                sort_by: super::RuntimeFilerSortKey::Size,
+                filter: None,
+            },
+        )
+        .expect("filer list should succeed");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["small.txt", "large.txt"]
+        );
+        assert_eq!(entries[0].size, Some(1));
+        assert_eq!(entries[1].size, Some(5));
+        assert!(
+            entries.iter().all(|entry| entry.modified_time_ms.is_some()),
+            "metadata should include modified_time_ms without removing existing fields"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
     }
 
     struct RecordingHostBridge {
@@ -1423,6 +2383,8 @@ mod tests {
                     id: 7,
                     path: Some(PathBuf::from("notes.md")),
                     line_count: 3,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 }
             })
         }
@@ -1548,6 +2510,8 @@ mod tests {
                 id: 11,
                 path: Some(PathBuf::from("article.md")),
                 line_count: 8,
+                cursor_row: 0,
+                current_line: String::new(),
             },
         });
 
@@ -1615,6 +2579,8 @@ mod tests {
                     id: 21,
                     path: Some(PathBuf::from("typed.md")),
                     line_count: 5,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch should succeed");
@@ -1640,8 +2606,12 @@ mod tests {
         let root = unique_path("filer-root");
         let dir_path = root.join("src");
         let file_path = root.join("README.md");
+        let alpha_path = root.join("alpha.md");
+        let hidden_path = root.join(".hidden.md");
         std::fs::create_dir_all(&dir_path).expect("test directory");
         std::fs::write(&file_path, "hello\n").expect("test file");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&hidden_path, "hidden\n").expect("hidden file");
         let root_json = serde_json::to_string(&root.to_string_lossy().to_string())
             .expect("path should serialize");
         let host_bridge = Arc::new(RecordingHostBridge::new());
@@ -1655,6 +2625,8 @@ mod tests {
                         }}
                         const entries = await saya.filer.list({root_json});
                         await saya.commands.execute(entries.map((entry) => `${{entry.kind}}:${{entry.name}}`).join(","));
+                        const visibleByName = await saya.filer.list({root_json}, {{ showHidden: false, sortBy: "name" }});
+                        await saya.commands.execute(visibleByName.map((entry) => `${{entry.displayText}}:${{entry.size != null}}:${{entry.modifiedTimeMs != null}}`).join(","));
                     }}
                 "#
             ),
@@ -1668,6 +2640,8 @@ mod tests {
                     id: 22,
                     path: None,
                     line_count: 1,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch should queue");
@@ -1676,9 +2650,14 @@ mod tests {
         assert_eq!(report.handler_count, 1);
         assert_eq!(
             host_bridge.executed_commands.lock().await.clone(),
-            vec!["directory:src,file:README.md".to_string()]
+            vec![
+                "directory:src,file:.hidden.md,file:README.md,file:alpha.md".to_string(),
+                "README.md:true:true,alpha.md:true:true,src/:true:true".to_string()
+            ]
         );
 
+        std::fs::remove_file(hidden_path).expect("cleanup hidden file");
+        std::fs::remove_file(alpha_path).expect("cleanup alpha file");
         std::fs::remove_file(file_path).expect("cleanup file");
         std::fs::remove_dir(dir_path).expect("cleanup dir");
         std::fs::remove_dir(root).expect("cleanup root");
@@ -1709,6 +2688,8 @@ mod tests {
                     id: 51,
                     path: Some(PathBuf::from("typed-payload.md")),
                     line_count: 12,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -1742,6 +2723,8 @@ mod tests {
                     id: 61,
                     path: Some(PathBuf::from("write-post.md")),
                     line_count: 14,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -1778,6 +2761,8 @@ mod tests {
                     id: 71,
                     path: Some(PathBuf::from("unknown-command.md")),
                     line_count: 2,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -1814,6 +2799,8 @@ mod tests {
                     id: 81,
                     path: Some(PathBuf::from("script-failure.md")),
                     line_count: 6,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -1852,6 +2839,8 @@ mod tests {
                     id: 31,
                     path: Some(PathBuf::from("seed.md")),
                     line_count: 4,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch should be queued");
@@ -1892,6 +2881,8 @@ mod tests {
                     id: 41,
                     path: Some(PathBuf::from("ordered.md")),
                     line_count: 9,
+                    cursor_row: 0,
+                    current_line: String::new(),
                 },
             }))
             .expect("dispatch queued")

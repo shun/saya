@@ -141,6 +141,89 @@ fn local_vfs_host_opens_directory_locator_as_sorted_listing() {
 }
 
 #[test]
+fn local_vfs_host_opens_empty_directory_as_empty_listing() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root_path = unique_path("directory-empty");
+    std::fs::create_dir_all(&root_path).expect("target directory");
+    let locator = format!("file://{}", root_path.display());
+    let mut bridge = CoreBridge::new("").expect("bridge");
+    let mut runtime = CoreHostActionRuntime::default();
+
+    bridge
+        .apply_ex_command(&format!(":edit {locator}"))
+        .expect("edit should queue VFS request");
+    drain_vfs_until_idle(&mut bridge, &mut runtime);
+
+    let snapshot = bridge.snapshot();
+    assert_eq!(
+        snapshot.text, "\n",
+        "vim-core-rs projects an empty loaded buffer as one empty line"
+    );
+
+    std::fs::remove_dir(&root_path).expect("cleanup root directory");
+}
+
+#[test]
+fn local_vfs_host_preserves_space_names_in_directory_listing() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root_path = unique_path("directory-space-names");
+    let nested_path = root_path.join("src dir");
+    let notes_path = root_path.join("daily notes.md");
+    std::fs::create_dir_all(&nested_path).expect("target directory");
+    std::fs::write(&notes_path, "notes\n").expect("target file");
+    let locator = format!("file://{}", root_path.display());
+    let mut bridge = CoreBridge::new("").expect("bridge");
+    let mut runtime = CoreHostActionRuntime::default();
+
+    bridge
+        .apply_ex_command(&format!(":edit {locator}"))
+        .expect("edit should queue VFS request");
+    drain_vfs_until_idle(&mut bridge, &mut runtime);
+
+    let snapshot = bridge.snapshot();
+    assert_eq!(snapshot.text, "daily notes.md\nsrc dir/\n");
+
+    std::fs::remove_file(&notes_path).expect("cleanup file");
+    std::fs::remove_dir(&nested_path).expect("cleanup nested directory");
+    std::fs::remove_dir(&root_path).expect("cleanup root directory");
+}
+
+#[test]
+fn local_vfs_host_opens_relative_directory_locator_from_current_directory() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root_path = unique_path("directory-relative-root");
+    let work_path = root_path.join("work");
+    let nested_path = work_path.join("src");
+    let readme_path = work_path.join("README.md");
+    std::fs::create_dir_all(&nested_path).expect("target directory");
+    std::fs::write(&readme_path, "alpha\n").expect("target file");
+    let previous_dir = std::env::current_dir().expect("current dir");
+    std::env::set_current_dir(&root_path).expect("enter test root");
+    let mut bridge = CoreBridge::new("").expect("bridge");
+    let mut runtime = CoreHostActionRuntime::default();
+
+    bridge
+        .apply_ex_command(":edit work")
+        .expect("edit should queue VFS request");
+    drain_vfs_until_idle(&mut bridge, &mut runtime);
+
+    std::env::set_current_dir(previous_dir).expect("restore current dir");
+    let snapshot = bridge.snapshot();
+    assert_eq!(snapshot.text, "README.md\nsrc/\n");
+
+    std::fs::remove_file(&readme_path).expect("cleanup file");
+    std::fs::remove_dir(&nested_path).expect("cleanup nested directory");
+    std::fs::remove_dir(&work_path).expect("cleanup work directory");
+    std::fs::remove_dir(&root_path).expect("cleanup root directory");
+}
+
+#[test]
 fn local_vfs_host_saves_file_locator_through_core_bridge() {
     let _lock = launch_test_lock()
         .lock()

@@ -25,6 +25,11 @@ and callback registrations.
 The startup phase does not expose runtime-only state readers such as
 `saya.buffer.current()`.
 
+Startup evaluation supports static local TypeScript imports so user config can
+load project plugins without copying plugin source into `init.ts`. The loader
+inlines local file imports before evaluation and rejects non-local import
+specifiers.
+
 ## Startup output model
 
 The startup runtime does not directly mutate editor state. Instead, it collects
@@ -50,7 +55,14 @@ read-only state plus explicit command execution.
 - `saya.window.current()`
 - `saya.editor.current()`
 - `saya.editor.mode()`
-- `saya.filer.list(path)`
+- `saya.filer.list(path, options)`
+- `saya.filer.currentEntry()`
+- `saya.filer.createFile(path)`
+- `saya.filer.createDirectory(path)`
+- `saya.filer.copy(from, to)`
+- `saya.filer.move(from, to)`
+- `saya.filer.rename(from, to)`
+- `saya.filer.delete(path, options)`
 
 The runtime phase does not expose startup registration APIs.
 
@@ -65,7 +77,10 @@ That bridge lets the runtime ask for these operations.
 - Read the current buffer snapshot
 - Read the current window snapshot
 - Read the current editor snapshot
-- Read a directory listing for filer plugins
+- Read a directory listing for filer plugins, including narrow sort, hidden,
+  and filter options
+- Read the current directory buffer entry from host-side metadata
+- Execute explicit filer operations without exposing broad filesystem access
 
 This keeps the runtime decoupled from the TUI loop and makes headless testing
 practical.

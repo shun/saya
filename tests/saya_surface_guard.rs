@@ -329,6 +329,30 @@ fn runtime_surface_excludes_filesystem_and_network_capabilities() {
     assert!(!surface.contains(&"network"));
 }
 
+#[test]
+fn dired_preview_surface_is_documented_from_setup_to_host_layer_decision() {
+    let readme = std::fs::read_to_string("README.md")
+        .expect("README should be readable from repository root");
+    let adr = std::fs::read_to_string("docs/adr/0003-keep-dired-in-host-layer.md")
+        .expect("dired host-layer ADR should be readable from repository root");
+
+    assert!(
+        readme.contains("setupSayaDired")
+            && readme.contains("hiddenFilePolicy")
+            && readme.contains("sortPolicy")
+            && readme.contains("confirmStrategy"),
+        "README should show how to configure the preview dired plugin"
+    );
+    assert!(
+        adr.contains("host application layer")
+            && adr.contains("TypeScript")
+            && adr.contains("vim-core-rs")
+            && adr.contains("preview feature")
+            && adr.contains("Destructive operations"),
+        "dired ADR should record ownership, preview status, and destructive-operation policy"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_does_not_expose_filesystem_or_network() {
     let seed = CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Event {
@@ -355,6 +379,8 @@ async fn runtime_does_not_expose_filesystem_or_network() {
                 id: 7,
                 path: Some(PathBuf::from("surface-guard.md")),
                 line_count: 1,
+                cursor_row: 0,
+                current_line: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -378,6 +404,8 @@ impl HostCapabilityBridge for NoopHostBridge {
                 id: 1,
                 path: None,
                 line_count: 0,
+                cursor_row: 0,
+                current_line: String::new(),
             }
         })
     }

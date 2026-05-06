@@ -15,6 +15,60 @@ that you pass through `--config`.
 The startup surface is designed for declaration, not for broad live editor
 control.
 
+`init.ts` can use static local TypeScript imports for project plugins. The
+startup loader resolves local file imports before evaluation, strips type-only
+declarations, and evaluates the combined startup module.
+
+```ts
+import { setupSayaDired } from "./plugins/saya-dired.ts";
+
+setupSayaDired();
+```
+
+Only local file imports are supported. Bare package imports and network imports
+are intentionally outside the startup surface.
+
+### Preview dired setup
+
+The repository includes `plugins/saya-dired.ts` as a preview TypeScript plugin.
+Import it from `init.ts` when you want the directory editor commands and
+keymaps to be registered at startup.
+
+```ts
+import { setupSayaDired } from "./plugins/saya-dired.ts";
+
+setupSayaDired({
+  root: ".",
+  hiddenFilePolicy: "hide",
+  sortPolicy: "kind",
+  filter: "rs",
+  confirmStrategy: "preview",
+  commands: {
+    enter: "workspace.enter",
+    refresh: "workspace.refresh",
+  },
+  keymap: {
+    enter: "<Enter>",
+    refresh: "gr",
+  },
+});
+```
+
+`setupSayaDired()` keeps the public setup surface grouped around command names,
+keymaps, root selection, hidden-file policy, sort policy, filter text, and
+destructive operation confirmation strategy. Filesystem mutation still goes
+through the runtime `saya.filer` surface, not through broad startup filesystem
+access.
+The default mark bindings are `m` for marking, `M` for unmarking, and `gM` for
+clearing marks, leaving `u` available for normal-mode undo while editing a
+writable directory listing.
+
+> **Note:** Dired is a preview feature currently under active development. The
+> setup options are public enough for plugin reuse, but they can change before
+> the API is stabilized.
+> See [Dired API v1](dired-api-v1.md) for the versioned local dired contract,
+> migration notes, and plugin author anti-patterns.
+
 ## Namespace
 
 The startup surface lives under the global `saya` object and exposes these

@@ -6,7 +6,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vim_core_rs::{
     CoreJobStartRequest, CoreVfsError, CoreVfsErrorKind, CoreVfsRequest, CoreVfsResponse, JobStatus,
@@ -134,6 +134,19 @@ impl LocalVfsHost {
                     .map(|locator| locator_to_path(&locator))
                     .or_else(|| path_from_document_id(&document_id));
                 match path {
+                    Some(path) if path.is_dir() => {
+                        log::debug!(
+                            "[core_host_actions] refusing to save directory listing as a regular file: path={}",
+                            path.display()
+                        );
+                        CoreVfsResponse::Failed {
+                            request_id,
+                            error: vfs_error(
+                                CoreVfsErrorKind::HostUnavailable,
+                                "directory listings are not saved as regular files",
+                            ),
+                        }
+                    }
                     Some(path) if fs::write(&path, text).is_ok() => CoreVfsResponse::Saved {
                         request_id,
                         document_id,
@@ -169,16 +182,42 @@ fn path_from_document_id(document_id: &str) -> Option<PathBuf> {
 
 fn load_local_text(path: &Path) -> Option<String> {
     if path.is_dir() {
+        let started_at = Instant::now();
         log::debug!(
             "[core_host_actions] loading local directory as editable listing: path={}",
             path.display()
         );
-        return render_directory_listing(path).ok();
+        return match render_directory_listing(path) {
+            Ok(listing) => {
+                log::debug!(
+                    "[core_host_actions] loaded local directory listing: path={}, entry_count={}, duration_ms={}",
+                    path.display(),
+                    listing.entry_count,
+                    started_at.elapsed().as_millis()
+                );
+                Some(listing.text)
+            }
+            Err(error) => {
+                log::debug!(
+                    "[core_host_actions] failed to load local directory listing: path={}, duration_ms={}, error={}",
+                    path.display(),
+                    started_at.elapsed().as_millis(),
+                    error
+                );
+                None
+            }
+        };
     }
     fs::read_to_string(path).ok()
 }
 
-fn render_directory_listing(path: &Path) -> std::io::Result<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryListing {
+    text: String,
+    entry_count: usize,
+}
+
+fn render_directory_listing(path: &Path) -> std::io::Result<DirectoryListing> {
     let mut entries = fs::read_dir(path)?
         .map(|entry| {
             let entry = entry?;
@@ -191,7 +230,13 @@ fn render_directory_listing(path: &Path) -> std::io::Result<String> {
         })
         .collect::<std::io::Result<Vec<_>>>()?;
     entries.sort();
-    Ok(entries.join("\n") + "\n")
+    let entry_count = entries.len();
+    let text = if entries.is_empty() {
+        String::new()
+    } else {
+        entries.join("\n") + "\n"
+    };
+    Ok(DirectoryListing { text, entry_count })
 }
 
 fn locator_to_path(locator: &str) -> PathBuf {

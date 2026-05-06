@@ -113,8 +113,20 @@ prioritize typed, read-only state access plus explicit command execution.
 - The runtime surface must expose `saya.window.current()`.
 - The runtime surface must expose `saya.editor.current()`.
 - The runtime surface must expose `saya.editor.mode()`.
-- The runtime surface must expose `saya.filer.list(path)` for read-only
-  directory listing plugins.
+- The runtime surface must expose `saya.filer.list(path, options)` for
+  read-only directory listing plugins, including narrow sort, hidden-file, and
+  substring filter options.
+- The runtime surface must expose `saya.filer.currentEntry()` so dired-style
+  commands can read the current entry from host-side directory buffer metadata.
+- The runtime surface must expose host-mediated filer operations for creating
+  one file, creating one directory, copying one regular file, moving or
+  renaming one path, and deleting one explicitly confirmed path.
+- The runtime buffer snapshot must include the current cursor row and rendered
+  current line for non-mutating directory navigation commands.
+- Directory listing buffers must not be saved as regular files. Writable
+  directory buffers must convert rendered listing edits into a save-time
+  preview, require a matching confirmation before apply, and execute confirmed
+  mutations through explicit host-mediated filer operations.
 
 ### Runtime boundaries
 

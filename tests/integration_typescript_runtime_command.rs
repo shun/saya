@@ -137,6 +137,8 @@ impl HostCapabilityBridge for RecordingHostBridge {
                 id: 404,
                 path: Some(PathBuf::from("wave6-runtime.md")),
                 line_count: 9,
+                cursor_row: 0,
+                current_line: String::new(),
             }
         })
     }
@@ -226,6 +228,8 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
                 id: 17,
                 path: Some(PathBuf::from("headless.md")),
                 line_count: 4,
+                cursor_row: 0,
+                current_line: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -318,6 +322,8 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
                 id: 22,
                 path: Some(PathBuf::from("boundary.md")),
                 line_count: 3,
+                cursor_row: 0,
+                current_line: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -355,6 +361,8 @@ impl Default for RecordingRuntimeHostSession {
                 id: 1,
                 path: None,
                 line_count: 1,
+                cursor_row: 0,
+                current_line: String::new(),
             },
             window: ReadonlyWindowSnapshot { id: 1 },
             editor: ReadonlyEditorSnapshot {
@@ -371,6 +379,8 @@ impl RecordingRuntimeHostSession {
                 id: 55,
                 path: Some(PathBuf::from(path)),
                 line_count,
+                cursor_row: 0,
+                current_line: String::new(),
             },
             window: ReadonlyWindowSnapshot { id: 1 },
             editor: ReadonlyEditorSnapshot {
@@ -495,6 +505,8 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
                 id: 55,
                 path: Some(PathBuf::from("live-session.md")),
                 line_count: 4,
+                cursor_row: 0,
+                current_line: String::new(),
             }
         )]
     );
@@ -563,6 +575,8 @@ async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_fo
                 id: 55,
                 path: Some(PathBuf::from("live-session.md")),
                 line_count: 4,
+                cursor_row: 0,
+                current_line: String::new(),
             }
         )]
     );

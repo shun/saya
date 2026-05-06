@@ -47,6 +47,17 @@ pub fn apply_local_ex_command(
         return Some(message);
     }
     let message = match normalized.as_str() {
+        "dired-cancel" | "diredcancel" => {
+            return Some(
+                match session_state.cancel_directory_buffer_operation_preview() {
+                    Some(preview) => format!(
+                        "Directory operation preview cancelled: {} operation(s), preview_id={}",
+                        preview.operation_count, preview.id
+                    ),
+                    None => "No directory operation preview to cancel".to_string(),
+                },
+            );
+        }
         "set number" | "set nu" => {
             log::debug!(
                 "[ex_command] enabling line numbers from command: {:?}",
@@ -158,7 +169,7 @@ fn parse_search_option_command_normalized(normalized: &str) -> Option<SearchOpti
 fn is_presentation_local_command_normalized(normalized: &str) -> bool {
     matches!(
         normalized,
-        "set number" | "set nu" | "set nonumber" | "set nonu"
+        "dired-cancel" | "diredcancel" | "set number" | "set nu" | "set nonumber" | "set nonu"
     ) || normalized.starts_with("set numberwidth=")
         || normalized.starts_with("set nuw=")
 }
@@ -399,6 +410,50 @@ mod tests {
         let toggle_message = apply_local_ex_command(&mut session_state, ":set markdownrender!");
         assert_eq!(toggle_message, Some("markdownrender: on".to_string()));
         assert!(session_state.markdown_render());
+    }
+
+    #[test]
+    fn apply_local_ex_command_cancels_pending_directory_operation_preview() {
+        let root_path = std::env::temp_dir().join(format!(
+            "saya-ex-command-dired-cancel-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let alpha_path = root_path.join("alpha.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        let mut session_state = EditorSessionState::new(Some(root_path.clone()));
+        let preview = session_state
+            .prepare_directory_buffer_operation_preview("")
+            .expect("delete preview should be prepared");
+
+        let message = apply_local_ex_command(&mut session_state, ":dired-cancel");
+
+        assert_eq!(
+            message,
+            Some(format!(
+                "Directory operation preview cancelled: 1 operation(s), preview_id={}",
+                preview.id
+            ))
+        );
+        assert!(
+            session_state
+                .pending_directory_operation_preview()
+                .is_none()
+        );
+        assert!(alpha_path.exists(), "cancel must not delete files");
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn route_ex_command_routes_dired_cancel_to_host_local_handler() {
+        assert_eq!(
+            route_ex_command(":dired-cancel"),
+            ExCommandRoute::PresentationLocal
+        );
     }
 
     #[test]

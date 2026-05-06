@@ -51,6 +51,8 @@ async fn runtime_callback_consumes_typed_payload_for_buffer_write_post_headlessl
                 id: 41,
                 path: Some(PathBuf::from("typed-payload.md")),
                 line_count: 12,
+                cursor_row: 0,
+                current_line: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -103,6 +105,8 @@ impl HostCapabilityBridge for RecordingHostBridge {
                 id: 1,
                 path: None,
                 line_count: 0,
+                cursor_row: 0,
+                current_line: String::new(),
             }
         })
     }

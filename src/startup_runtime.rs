@@ -637,7 +637,7 @@ fn op_collect_startup_command(
         .borrow_mut::<StartupRegistry>()
         .push(StartupRegistryEntry::Command {
             name,
-            callback_source: collapse_whitespace(&callback_source),
+            callback_source,
         });
 
     Ok(())
@@ -658,7 +658,7 @@ fn op_collect_startup_event(
         .borrow_mut::<StartupRegistry>()
         .push(StartupRegistryEntry::Event {
             name,
-            callback_source: collapse_whitespace(&callback_source),
+            callback_source,
         });
 
     Ok(())
@@ -955,10 +955,175 @@ fn transpile_typescript_module(module: &StartupModuleSource) -> Result<String, S
         module.path.display(),
         module.source_text.len()
     );
+    let expanded_source_text = expand_local_startup_imports(module)?;
+    let without_type_declarations = strip_type_declarations(&expanded_source_text);
+    let without_export_modifiers = strip_export_modifiers(&without_type_declarations);
     let executable_source_text =
-        normalize_assignment_spacing(&strip_type_annotations(&module.source_text));
+        normalize_assignment_spacing(&strip_type_annotations(&without_export_modifiers));
     validate_executable_module(&module.path, &executable_source_text)?;
     Ok(executable_source_text)
+}
+
+fn expand_local_startup_imports(module: &StartupModuleSource) -> Result<String, String> {
+    let mut stack = Vec::new();
+    expand_local_startup_imports_from_path(&module.path, &module.source_text, &mut stack)
+}
+
+fn expand_local_startup_imports_from_path(
+    path: &Path,
+    source_text: &str,
+    stack: &mut Vec<PathBuf>,
+) -> Result<String, String> {
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if stack.contains(&canonical_path) {
+        return Err(format!(
+            "startup module import cycle detected: {}",
+            canonical_path.display()
+        ));
+    }
+    stack.push(canonical_path);
+
+    let mut output = String::with_capacity(source_text.len());
+    for line in source_text.lines() {
+        let Some(specifier) = parse_static_import_specifier(line) else {
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        };
+
+        let imported_path = resolve_local_startup_import(path, specifier)?;
+        log::debug!(
+            "[startup_runtime] inline local startup import: importer={}, specifier={}, resolved={}",
+            path.display(),
+            specifier,
+            imported_path.display()
+        );
+        let imported_source = fs::read_to_string(&imported_path).map_err(|error| {
+            format!(
+                "failed to read startup import {} from {}: {}",
+                specifier,
+                path.display(),
+                error
+            )
+        })?;
+        let expanded_import =
+            expand_local_startup_imports_from_path(&imported_path, &imported_source, stack)?;
+        output.push_str(&expanded_import);
+        output.push('\n');
+    }
+
+    stack.pop();
+    Ok(output)
+}
+
+fn parse_static_import_specifier(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("import ") {
+        return None;
+    }
+    let after_from = trimmed
+        .split_once(" from ")
+        .map(|(_, specifier)| specifier.trim())
+        .unwrap_or_else(|| trimmed.trim_start_matches("import").trim());
+    parse_quoted_module_specifier(after_from.trim_end_matches(';').trim())
+}
+
+fn parse_quoted_module_specifier(value: &str) -> Option<&str> {
+    let quote = value.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &value[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(&rest[..end])
+}
+
+fn resolve_local_startup_import(importer: &Path, specifier: &str) -> Result<PathBuf, String> {
+    let path = if let Some(path) = specifier.strip_prefix("file://") {
+        PathBuf::from(path)
+    } else if specifier.starts_with("./") || specifier.starts_with("../") {
+        importer
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(specifier)
+    } else if specifier.starts_with('/') {
+        PathBuf::from(specifier)
+    } else {
+        return Err(format!(
+            "unsupported startup import specifier: {} (only local file imports are supported)",
+            specifier
+        ));
+    };
+
+    Ok(path)
+}
+
+fn strip_type_declarations(source_text: &str) -> String {
+    let mut output = String::with_capacity(source_text.len());
+    let mut skipping_type_block = false;
+    let mut brace_depth = 0isize;
+
+    for line in source_text.lines() {
+        let trimmed = line.trim_start();
+        if !skipping_type_block
+            && (trimmed.starts_with("interface ") || trimmed.starts_with("export interface "))
+        {
+            skipping_type_block = true;
+            brace_depth += line.matches('{').count() as isize;
+            brace_depth -= line.matches('}').count() as isize;
+            if brace_depth <= 0 && line.contains('}') {
+                skipping_type_block = false;
+                brace_depth = 0;
+            }
+            continue;
+        }
+
+        if skipping_type_block {
+            brace_depth += line.matches('{').count() as isize;
+            brace_depth -= line.matches('}').count() as isize;
+            if brace_depth <= 0 {
+                skipping_type_block = false;
+                brace_depth = 0;
+            }
+            continue;
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    output
+}
+
+fn strip_export_modifiers(source_text: &str) -> String {
+    let mut output = String::with_capacity(source_text.len());
+    for line in source_text.lines() {
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        let replacement = if trimmed.starts_with("export async function ")
+            || trimmed.starts_with("export function ")
+            || trimmed.starts_with("export const ")
+            || trimmed.starts_with("export let ")
+            || trimmed.starts_with("export class ")
+        {
+            Some(format!(
+                "{}{}",
+                &line[..indent_len],
+                &trimmed["export ".len()..]
+            ))
+        } else if trimmed == "export {};" {
+            Some(String::new())
+        } else {
+            None
+        };
+
+        match replacement {
+            Some(line) => output.push_str(&line),
+            None => output.push_str(line),
+        }
+        output.push('\n');
+    }
+    output
 }
 
 fn strip_type_annotations(source_text: &str) -> String {
@@ -1007,7 +1172,13 @@ fn strip_type_annotations(source_text: &str) -> String {
                 }
                 while lookahead < chars.len() {
                     let next = chars[lookahead];
-                    if next == '=' || next == ',' || next == ')' || next == ';' || next == '\n' {
+                    if next == '='
+                        || next == ','
+                        || next == ')'
+                        || next == ';'
+                        || next == '{'
+                        || next == '\n'
+                    {
                         break;
                     }
                     lookahead += 1;
@@ -1241,15 +1412,6 @@ pub async fn collect_startup_registry(source_text: &str) -> Result<StartupRegist
     evaluation.await.map_err(|error| error.to_string())?;
     let op_state = runtime.op_state();
     Ok(op_state.borrow().borrow::<StartupRegistry>().clone())
-}
-
-fn collapse_whitespace(source: &str) -> String {
-    source
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
 }
 
 fn parse_startup_keymap_action(action: &str) -> SayaKeymapAction {

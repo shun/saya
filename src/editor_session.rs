@@ -2,7 +2,10 @@
 ///
 /// CoreBridge から取得した buffer 情報と対象パスを組み合わせて、
 /// 保存要求の生成、保存結果の反映、終了判定を行う。
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use crate::host_io::SaveRequest;
 use crate::option_registry::{SayaOptionName, SayaOptionValue};
@@ -15,6 +18,8 @@ pub enum SaveRequestError {
     NoTargetPath,
     /// read-only 起動のため保存不可
     ReadOnly,
+    /// directory listing buffer は通常ファイル保存の対象外
+    DirectoryBuffer,
 }
 
 /// 終了要求の判定結果。
@@ -26,6 +31,173 @@ pub enum QuitDecision {
     WarnUnsaved,
     /// 強制終了（未保存でも終了）
     ForceQuit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirectoryBufferEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryBufferEntry {
+    pub id: u64,
+    pub name: String,
+    pub path: PathBuf,
+    pub kind: DirectoryBufferEntryKind,
+    pub display_text: String,
+    pub size: Option<u64>,
+    pub modified_time_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryBufferState {
+    pub root_path: PathBuf,
+    pub display_text: String,
+    pub entries: Vec<DirectoryBufferEntry>,
+    pub mode: DirectoryBufferMode,
+    pub listing_options: DirectoryBufferListingOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryBufferMode {
+    Writable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryBufferListingOptions {
+    pub show_hidden: bool,
+    pub sort_by: DirectoryBufferSortKey,
+    pub filter: Option<String>,
+}
+
+impl Default for DirectoryBufferListingOptions {
+    fn default() -> Self {
+        Self {
+            show_hidden: true,
+            sort_by: DirectoryBufferSortKey::Name,
+            filter: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryBufferSortKey {
+    Name,
+    Kind,
+    ModifiedTime,
+    Size,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryBufferOperationPlan {
+    pub root_path: PathBuf,
+    pub operations: Vec<DirectoryBufferPlannedOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DirectoryBufferPlannedOperation {
+    CreateFile {
+        path: PathBuf,
+        name: String,
+    },
+    CreateDirectory {
+        path: PathBuf,
+        name: String,
+    },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+        from_name: String,
+        to_name: String,
+        kind: DirectoryBufferEntryKind,
+    },
+    Delete {
+        path: PathBuf,
+        name: String,
+        kind: DirectoryBufferEntryKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirectoryBufferOperationKind {
+    CreateFile,
+    CreateDirectory,
+    Rename,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirectoryBufferOperationRisk {
+    Low,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryBufferPreviewOperation {
+    pub kind: DirectoryBufferOperationKind,
+    pub source_path: Option<PathBuf>,
+    pub target_path: Option<PathBuf>,
+    pub risk: DirectoryBufferOperationRisk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryBufferOperationPreview {
+    pub id: String,
+    pub root_path: PathBuf,
+    pub operation_count: usize,
+    pub high_risk_count: usize,
+    pub operations: Vec<DirectoryBufferPreviewOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryBufferOperationPrompt {
+    pub preview_id: String,
+    pub status_line: String,
+    pub detail_lines: Vec<String>,
+    pub confirm_command: String,
+    pub cancel_command: String,
+    pub recovery_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectoryBufferPreviewConfirmationError {
+    Validation(Vec<DirectoryBufferPlanValidationError>),
+    MissingPreview,
+    StalePreview {
+        expected_preview_id: String,
+        actual_preview_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectoryBufferPlanValidationError {
+    NoDirectoryBuffer,
+    EmptyLine {
+        line_number: usize,
+    },
+    EmptyName {
+        line_number: usize,
+    },
+    DuplicateName {
+        line_number: usize,
+        first_line_number: usize,
+        name: String,
+    },
+    ParentDirectoryEscape {
+        line_number: usize,
+        name: String,
+    },
+    PathSeparator {
+        line_number: usize,
+        name: String,
+    },
+    UnsupportedDecoration {
+        line_number: usize,
+        line: String,
+    },
 }
 
 /// エディタセッションの状態。保存と終了の判定に使用する。
@@ -57,6 +229,14 @@ pub struct EditorSessionState {
     dirty: bool,
     /// 直近の保存失敗メッセージ
     last_save_error: Option<String>,
+    /// directory buffer の表示と操作対象 metadata。
+    directory_buffer: Option<DirectoryBufferState>,
+    directory_marked_paths: BTreeSet<PathBuf>,
+    pending_directory_operation_preview: Option<(
+        DirectoryBufferOperationPreview,
+        DirectoryBufferOperationPlan,
+    )>,
+    directory_operation_confirmation_dialog_active: bool,
 }
 
 impl EditorSessionState {
@@ -112,7 +292,7 @@ impl EditorSessionState {
             number_width,
             read_only
         );
-        Self {
+        let mut state = Self {
             target_path,
             tab_size,
             line_numbers,
@@ -132,7 +312,21 @@ impl EditorSessionState {
             read_only,
             dirty: false,
             last_save_error: None,
+            directory_buffer: None,
+            directory_marked_paths: BTreeSet::new(),
+            pending_directory_operation_preview: None,
+            directory_operation_confirmation_dialog_active: false,
+        };
+        if let Some(path) = state.target_path.clone() {
+            if let Err(error) = state.refresh_directory_buffer_for_path(&path) {
+                log::debug!(
+                    "[editor_session] failed to initialize directory buffer metadata: path={}, error={}",
+                    path.display(),
+                    error
+                );
+            }
         }
+        state
     }
 
     /// 現在の buffer 内容から保存要求を生成する。
@@ -151,8 +345,23 @@ impl EditorSessionState {
             log::debug!("[editor_session] save request failed: session is read-only");
             return Err(SaveRequestError::ReadOnly);
         }
+        if let Some(directory_buffer) = &self.directory_buffer {
+            log::debug!(
+                "[editor_session] save request failed: active directory buffer is not writable: root_path={}, entries={}",
+                directory_buffer.root_path.display(),
+                directory_buffer.entries.len()
+            );
+            return Err(SaveRequestError::DirectoryBuffer);
+        }
         match &self.target_path {
             Some(path) => {
+                if path.is_dir() {
+                    log::debug!(
+                        "[editor_session] save request failed: directory buffer is not writable: path={}",
+                        path.display()
+                    );
+                    return Err(SaveRequestError::DirectoryBuffer);
+                }
                 let request = SaveRequest {
                     path: path.clone(),
                     contents: buffer_contents.to_string(),
@@ -172,6 +381,17 @@ impl EditorSessionState {
 
     /// dirty 状態を更新する（CoreBridge の snapshot から反映する想定）。
     pub fn update_dirty(&mut self, dirty: bool) {
+        if let Some(directory_buffer) = &self.directory_buffer {
+            log::debug!(
+                "[editor_session][dired] dirty update projected for directory buffer: previous={}, requested={}, root_path={}, entries={}",
+                self.dirty,
+                dirty,
+                directory_buffer.root_path.display(),
+                directory_buffer.entries.len()
+            );
+            self.dirty = dirty;
+            return;
+        }
         log::debug!(
             "[editor_session] dirty state updated: {} -> {}",
             self.dirty,
@@ -238,9 +458,365 @@ impl EditorSessionState {
             self.target_path,
             target_path.display()
         );
+        if let Err(error) = self.refresh_directory_buffer_for_path(&target_path) {
+            log::debug!(
+                "[editor_session] failed to refresh directory buffer metadata during target replacement: path={}, error={}",
+                target_path.display(),
+                error
+            );
+            self.directory_buffer = None;
+        }
         self.target_path = Some(target_path);
         self.dirty = false;
         self.last_save_error = None;
+    }
+
+    pub fn directory_buffer(&self) -> Option<&DirectoryBufferState> {
+        self.directory_buffer.as_ref()
+    }
+
+    pub fn refresh_directory_buffer_listing(
+        &mut self,
+        root_path: PathBuf,
+        options: DirectoryBufferListingOptions,
+    ) -> std::io::Result<Vec<DirectoryBufferEntry>> {
+        log::debug!(
+            "[editor_session][dired] refreshing directory buffer listing with options: root_path={}, show_hidden={}, sort_by={:?}, filter={:?}",
+            root_path.display(),
+            options.show_hidden,
+            options.sort_by,
+            options.filter
+        );
+        let directory_buffer = read_directory_buffer_state_with_options(&root_path, options)?;
+        let entries = directory_buffer.entries.clone();
+        self.directory_buffer = Some(directory_buffer);
+        self.target_path = Some(root_path);
+        self.dirty = false;
+        self.last_save_error = None;
+        Ok(entries)
+    }
+
+    pub fn current_directory_entry(&self, cursor_row: usize) -> Option<&DirectoryBufferEntry> {
+        let directory_buffer = self.directory_buffer.as_ref()?;
+        let entry = directory_buffer.entries.get(cursor_row);
+        log::debug!(
+            "[editor_session] resolving current directory entry: root_path={}, cursor_row={}, entries={}, found={}",
+            directory_buffer.root_path.display(),
+            cursor_row,
+            directory_buffer.entries.len(),
+            entry.is_some()
+        );
+        entry
+    }
+
+    pub fn mark_directory_entry(&mut self, entry: &DirectoryBufferEntry) {
+        let inserted = self.directory_marked_paths.insert(entry.path.clone());
+        log::debug!(
+            "[editor_session][dired] mark entry: path={}, inserted={}, marked_count={}",
+            entry.path.display(),
+            inserted,
+            self.directory_marked_paths.len()
+        );
+    }
+
+    pub fn unmark_directory_entry(&mut self, entry: &DirectoryBufferEntry) {
+        let removed = self.directory_marked_paths.remove(&entry.path);
+        log::debug!(
+            "[editor_session][dired] unmark entry: path={}, removed={}, marked_count={}",
+            entry.path.display(),
+            removed,
+            self.directory_marked_paths.len()
+        );
+    }
+
+    pub fn clear_directory_marks(&mut self) {
+        let cleared = self.directory_marked_paths.len();
+        self.directory_marked_paths.clear();
+        log::debug!(
+            "[editor_session][dired] clear directory marks: cleared_count={}",
+            cleared
+        );
+    }
+
+    pub fn record_directory_entry_rename(&mut self, from: &Path, to: &Path) {
+        let was_marked = self.directory_marked_paths.remove(from);
+        if was_marked {
+            self.directory_marked_paths.insert(to.to_path_buf());
+        }
+        log::debug!(
+            "[editor_session][dired] record directory entry rename: from={}, to={}, was_marked={}, marked_count={}",
+            from.display(),
+            to.display(),
+            was_marked,
+            self.directory_marked_paths.len()
+        );
+    }
+
+    pub fn marked_directory_entries(&self) -> Vec<DirectoryBufferEntry> {
+        let Some(directory_buffer) = &self.directory_buffer else {
+            log::debug!(
+                "[editor_session][dired] marked entries requested outside directory buffer: marked_count={}",
+                self.directory_marked_paths.len()
+            );
+            return Vec::new();
+        };
+        let entries = directory_buffer
+            .entries
+            .iter()
+            .filter(|entry| self.directory_marked_paths.contains(&entry.path))
+            .cloned()
+            .collect::<Vec<_>>();
+        log::debug!(
+            "[editor_session][dired] resolved marked directory entries: root_path={}, marked_count={}, resolved_count={}",
+            directory_buffer.root_path.display(),
+            self.directory_marked_paths.len(),
+            entries.len()
+        );
+        entries
+    }
+
+    pub fn build_directory_buffer_operation_plan(
+        &self,
+        edited_text: &str,
+    ) -> Result<DirectoryBufferOperationPlan, Vec<DirectoryBufferPlanValidationError>> {
+        let Some(directory_buffer) = &self.directory_buffer else {
+            log::debug!(
+                "[editor_session][dired][writable] operation plan requested outside directory buffer: target_path={:?}, edited_len={}",
+                self.target_path,
+                edited_text.len()
+            );
+            return Err(vec![DirectoryBufferPlanValidationError::NoDirectoryBuffer]);
+        };
+        log::debug!(
+            "[editor_session][dired][writable] building operation plan: root_path={}, mode={:?}, original_entries={}, edited_len={}",
+            directory_buffer.root_path.display(),
+            directory_buffer.mode,
+            directory_buffer.entries.len(),
+            edited_text.len()
+        );
+
+        let edited_lines = parse_directory_buffer_edited_lines(directory_buffer, edited_text)?;
+        let matched_entry_ids = edited_lines
+            .iter()
+            .filter_map(|line| line.matched_entry_id)
+            .collect::<BTreeSet<_>>();
+        let removed_entries = directory_buffer
+            .entries
+            .iter()
+            .filter(|entry| !matched_entry_ids.contains(&entry.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let added_lines = edited_lines
+            .iter()
+            .filter(|line| line.matched_entry_id.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        let rename_count = removed_entries.len().min(added_lines.len());
+        let mut operations = Vec::new();
+
+        for (entry, line) in removed_entries.iter().zip(added_lines.iter()) {
+            let to = directory_buffer.root_path.join(&line.name);
+            if entry.path != to {
+                operations.push(DirectoryBufferPlannedOperation::Rename {
+                    from: entry.path.clone(),
+                    to,
+                    from_name: entry.name.clone(),
+                    to_name: line.name.clone(),
+                    kind: entry.kind,
+                });
+            }
+        }
+
+        for line in added_lines.iter().skip(rename_count) {
+            let path = directory_buffer.root_path.join(&line.name);
+            match line.create_kind {
+                DirectoryBufferCreateKind::File => {
+                    operations.push(DirectoryBufferPlannedOperation::CreateFile {
+                        path,
+                        name: line.name.clone(),
+                    });
+                }
+                DirectoryBufferCreateKind::Directory => {
+                    operations.push(DirectoryBufferPlannedOperation::CreateDirectory {
+                        path,
+                        name: line.name.clone(),
+                    });
+                }
+            }
+        }
+
+        for entry in removed_entries.iter().skip(rename_count) {
+            operations.push(DirectoryBufferPlannedOperation::Delete {
+                path: entry.path.clone(),
+                name: entry.name.clone(),
+                kind: entry.kind,
+            });
+        }
+
+        log::debug!(
+            "[editor_session][dired][writable] built operation plan: root_path={}, operations={}, removed_entries={}, added_lines={}, rename_count={}",
+            directory_buffer.root_path.display(),
+            operations.len(),
+            removed_entries.len(),
+            added_lines.len(),
+            rename_count
+        );
+        Ok(DirectoryBufferOperationPlan {
+            root_path: directory_buffer.root_path.clone(),
+            operations,
+        })
+    }
+
+    pub fn prepare_directory_buffer_operation_preview(
+        &mut self,
+        edited_text: &str,
+    ) -> Result<DirectoryBufferOperationPreview, Vec<DirectoryBufferPlanValidationError>> {
+        let plan = self.build_directory_buffer_operation_plan(edited_text)?;
+        let preview = directory_buffer_operation_preview(&plan);
+        log::info!(
+            "[editor_session][dired][writable] prepared save-time operation preview: root_path={}, preview_id={}, operations={}, high_risk={}",
+            preview.root_path.display(),
+            preview.id,
+            preview.operation_count,
+            preview.high_risk_count
+        );
+        self.pending_directory_operation_preview = Some((preview.clone(), plan));
+        self.directory_operation_confirmation_dialog_active = true;
+        Ok(preview)
+    }
+
+    pub fn confirm_directory_buffer_operation_preview(
+        &self,
+        edited_text: &str,
+    ) -> Result<DirectoryBufferOperationPlan, DirectoryBufferPreviewConfirmationError> {
+        let plan = self
+            .build_directory_buffer_operation_plan(edited_text)
+            .map_err(DirectoryBufferPreviewConfirmationError::Validation)?;
+        let actual_preview = directory_buffer_operation_preview(&plan);
+        let Some((expected_preview, expected_plan)) = &self.pending_directory_operation_preview
+        else {
+            log::debug!(
+                "[editor_session][dired][writable] save-time operation confirmation rejected without preview: actual_preview_id={}",
+                actual_preview.id
+            );
+            return Err(DirectoryBufferPreviewConfirmationError::MissingPreview);
+        };
+        if expected_preview.id != actual_preview.id {
+            log::debug!(
+                "[editor_session][dired][writable] save-time operation confirmation rejected as stale: expected_preview_id={}, actual_preview_id={}",
+                expected_preview.id,
+                actual_preview.id
+            );
+            return Err(DirectoryBufferPreviewConfirmationError::StalePreview {
+                expected_preview_id: expected_preview.id.clone(),
+                actual_preview_id: actual_preview.id,
+            });
+        }
+        Ok(expected_plan.clone())
+    }
+
+    pub fn pending_directory_operation_preview(&self) -> Option<&DirectoryBufferOperationPreview> {
+        self.pending_directory_operation_preview
+            .as_ref()
+            .map(|(preview, _)| preview)
+    }
+
+    pub fn directory_operation_confirmation_dialog_active(&self) -> bool {
+        self.directory_operation_confirmation_dialog_active
+    }
+
+    pub fn directory_buffer_operation_prompt(&self) -> Option<DirectoryBufferOperationPrompt> {
+        self.pending_directory_operation_preview
+            .as_ref()
+            .map(|(preview, _)| directory_buffer_operation_prompt(preview))
+    }
+
+    pub fn cancel_directory_buffer_operation_preview(
+        &mut self,
+    ) -> Option<DirectoryBufferOperationPreview> {
+        let Some((preview, _)) = self.pending_directory_operation_preview.take() else {
+            log::debug!(
+                "[editor_session][dired][writable] cancel requested without pending operation preview"
+            );
+            return None;
+        };
+        log::info!(
+            "[editor_session][dired][writable] cancelled pending operation preview: root_path={}, preview_id={}, operations={}, high_risk={}",
+            preview.root_path.display(),
+            preview.id,
+            preview.operation_count,
+            preview.high_risk_count
+        );
+        self.directory_operation_confirmation_dialog_active = false;
+        Some(preview)
+    }
+
+    pub fn clear_pending_directory_operation_preview(&mut self) {
+        self.directory_operation_confirmation_dialog_active = false;
+        if let Some((preview, _)) = self.pending_directory_operation_preview.take() {
+            log::debug!(
+                "[editor_session][dired][writable] cleared pending operation preview: preview_id={}, operations={}",
+                preview.id,
+                preview.operation_count
+            );
+        }
+    }
+
+    fn refresh_directory_buffer_for_path(&mut self, path: &Path) -> std::io::Result<()> {
+        if !path.is_dir() {
+            if self.directory_buffer.is_some() {
+                log::debug!(
+                    "[editor_session] clearing directory buffer metadata for non-directory target: path={}",
+                    path.display()
+                );
+            }
+            self.directory_buffer = None;
+            self.clear_directory_marks();
+            self.clear_pending_directory_operation_preview();
+            return Ok(());
+        }
+
+        if self
+            .directory_buffer
+            .as_ref()
+            .is_some_and(|directory_buffer| directory_buffer.root_path != path)
+        {
+            log::debug!(
+                "[editor_session][dired] clearing marks because directory root changed: old_root={}, new_root={}, marked_count={}",
+                self.directory_buffer
+                    .as_ref()
+                    .map(|directory_buffer| directory_buffer.root_path.display().to_string())
+                    .unwrap_or_default(),
+                path.display(),
+                self.directory_marked_paths.len()
+            );
+            self.directory_marked_paths.clear();
+        }
+        let options = self
+            .directory_buffer
+            .as_ref()
+            .filter(|directory_buffer| directory_buffer.root_path == path)
+            .map(|directory_buffer| directory_buffer.listing_options.clone())
+            .unwrap_or_default();
+        let directory_buffer = read_directory_buffer_state_with_options(path, options)?;
+        let entry_paths = directory_buffer
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<BTreeSet<_>>();
+        let before_prune = self.directory_marked_paths.len();
+        self.directory_marked_paths
+            .retain(|marked_path| entry_paths.contains(marked_path));
+        log::debug!(
+            "[editor_session] refreshed directory buffer metadata: root_path={}, entries={}, display_len={}, marked_before_prune={}, marked_after_prune={}",
+            directory_buffer.root_path.display(),
+            directory_buffer.entries.len(),
+            directory_buffer.display_text.len(),
+            before_prune,
+            self.directory_marked_paths.len()
+        );
+        self.directory_buffer = Some(directory_buffer);
+        Ok(())
     }
 
     /// 描画時のタブ幅を返す。
@@ -411,11 +987,411 @@ impl EditorSessionState {
     }
 }
 
+fn read_directory_buffer_state_with_options(
+    path: &Path,
+    options: DirectoryBufferListingOptions,
+) -> std::io::Result<DirectoryBufferState> {
+    let normalized_filter = options
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .map(|filter| filter.to_ascii_lowercase());
+    let mut entries = fs::read_dir(path)?
+        .map(|entry| {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let kind = if file_type.is_dir() {
+                DirectoryBufferEntryKind::Directory
+            } else if file_type.is_file() {
+                DirectoryBufferEntryKind::File
+            } else if file_type.is_symlink() {
+                DirectoryBufferEntryKind::Symlink
+            } else {
+                DirectoryBufferEntryKind::Other
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !options.show_hidden && name.starts_with('.') {
+                return Ok(None);
+            }
+            let display_text = match kind {
+                DirectoryBufferEntryKind::Directory => format!("{name}/"),
+                DirectoryBufferEntryKind::Symlink => format!("{name}@"),
+                DirectoryBufferEntryKind::Other => format!("{name}?"),
+                DirectoryBufferEntryKind::File => name.clone(),
+            };
+            if let Some(filter) = normalized_filter.as_deref() {
+                let normalized_name = name.to_ascii_lowercase();
+                let normalized_display_text = display_text.to_ascii_lowercase();
+                if !normalized_name.contains(filter) && !normalized_display_text.contains(filter) {
+                    return Ok(None);
+                }
+            }
+            let metadata = entry.metadata()?;
+            let modified_time_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+            Ok(Some(DirectoryBufferEntry {
+                id: directory_buffer_entry_id(path, &name, kind),
+                name,
+                path: entry.path(),
+                kind,
+                display_text,
+                size: Some(metadata.len()),
+                modified_time_ms,
+            }))
+        })
+        .filter_map(|entry| match entry {
+            Ok(Some(entry)) => Some(Ok(entry)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by(|left, right| directory_buffer_compare_entries(left, right, options.sort_by));
+    let display_text = if entries.is_empty() {
+        String::new()
+    } else {
+        entries
+            .iter()
+            .map(|entry| entry.display_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    };
+
+    Ok(DirectoryBufferState {
+        root_path: path.to_path_buf(),
+        display_text,
+        entries,
+        mode: DirectoryBufferMode::Writable,
+        listing_options: options,
+    })
+}
+
+fn directory_buffer_compare_entries(
+    left: &DirectoryBufferEntry,
+    right: &DirectoryBufferEntry,
+    sort_by: DirectoryBufferSortKey,
+) -> std::cmp::Ordering {
+    match sort_by {
+        DirectoryBufferSortKey::Name => left.display_text.cmp(&right.display_text),
+        DirectoryBufferSortKey::Kind => directory_buffer_entry_sort_rank(left.kind)
+            .cmp(&directory_buffer_entry_sort_rank(right.kind))
+            .then_with(|| left.display_text.cmp(&right.display_text)),
+        DirectoryBufferSortKey::ModifiedTime => left
+            .modified_time_ms
+            .cmp(&right.modified_time_ms)
+            .then_with(|| left.display_text.cmp(&right.display_text)),
+        DirectoryBufferSortKey::Size => left
+            .size
+            .cmp(&right.size)
+            .then_with(|| left.display_text.cmp(&right.display_text)),
+    }
+}
+
+fn directory_buffer_entry_sort_rank(kind: DirectoryBufferEntryKind) -> usize {
+    match kind {
+        DirectoryBufferEntryKind::Directory => 0,
+        DirectoryBufferEntryKind::File => 1,
+        DirectoryBufferEntryKind::Symlink => 2,
+        DirectoryBufferEntryKind::Other => 3,
+    }
+}
+
+fn directory_buffer_entry_id(root_path: &Path, name: &str, kind: DirectoryBufferEntryKind) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    root_path.hash(&mut hasher);
+    name.hash(&mut hasher);
+    kind.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn directory_buffer_operation_preview(
+    plan: &DirectoryBufferOperationPlan,
+) -> DirectoryBufferOperationPreview {
+    let operations = plan
+        .operations
+        .iter()
+        .map(directory_buffer_preview_operation)
+        .collect::<Vec<_>>();
+    let high_risk_count = operations
+        .iter()
+        .filter(|operation| operation.risk == DirectoryBufferOperationRisk::High)
+        .count();
+    let mut hasher = DefaultHasher::new();
+    plan.root_path.hash(&mut hasher);
+    plan.operations.hash(&mut hasher);
+    let id = format!("{:016x}", hasher.finish());
+    DirectoryBufferOperationPreview {
+        id,
+        root_path: plan.root_path.clone(),
+        operation_count: operations.len(),
+        high_risk_count,
+        operations,
+    }
+}
+
+fn directory_buffer_operation_prompt(
+    preview: &DirectoryBufferOperationPreview,
+) -> DirectoryBufferOperationPrompt {
+    let status_line = format!(
+        "Apply {} dired operation(s) ({} high-risk)? y/Enter=OK n/Esc=Cancel id={}",
+        preview.operation_count, preview.high_risk_count, preview.id
+    );
+    let detail_lines = preview
+        .operations
+        .iter()
+        .map(directory_buffer_prompt_operation_line)
+        .collect::<Vec<_>>();
+    DirectoryBufferOperationPrompt {
+        preview_id: preview.id.clone(),
+        status_line,
+        detail_lines,
+        confirm_command: "OK".to_string(),
+        cancel_command: "Cancel".to_string(),
+        recovery_hint: "No filesystem changes have been applied yet. Cancel or edit the directory listing, then run :write again to prepare a fresh preview.".to_string(),
+    }
+}
+
+fn directory_buffer_prompt_operation_line(operation: &DirectoryBufferPreviewOperation) -> String {
+    let risk = match operation.risk {
+        DirectoryBufferOperationRisk::Low => "low risk",
+        DirectoryBufferOperationRisk::High => "HIGH RISK",
+    };
+    match operation.kind {
+        DirectoryBufferOperationKind::CreateFile => format!(
+            "{risk}: create file {}",
+            display_optional_path(operation.target_path.as_deref())
+        ),
+        DirectoryBufferOperationKind::CreateDirectory => format!(
+            "{risk}: create directory {}",
+            display_optional_path(operation.target_path.as_deref())
+        ),
+        DirectoryBufferOperationKind::Rename => format!(
+            "{risk}: rename {} -> {}",
+            display_optional_path(operation.source_path.as_deref()),
+            display_optional_path(operation.target_path.as_deref())
+        ),
+        DirectoryBufferOperationKind::Delete => format!(
+            "{risk}: delete {}",
+            display_optional_path(operation.source_path.as_deref())
+        ),
+    }
+}
+
+fn display_optional_path(path: Option<&Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<none>".to_string())
+}
+
+fn directory_buffer_preview_operation(
+    operation: &DirectoryBufferPlannedOperation,
+) -> DirectoryBufferPreviewOperation {
+    match operation {
+        DirectoryBufferPlannedOperation::CreateFile { path, .. } => {
+            DirectoryBufferPreviewOperation {
+                kind: DirectoryBufferOperationKind::CreateFile,
+                source_path: None,
+                target_path: Some(path.clone()),
+                risk: DirectoryBufferOperationRisk::Low,
+            }
+        }
+        DirectoryBufferPlannedOperation::CreateDirectory { path, .. } => {
+            DirectoryBufferPreviewOperation {
+                kind: DirectoryBufferOperationKind::CreateDirectory,
+                source_path: None,
+                target_path: Some(path.clone()),
+                risk: DirectoryBufferOperationRisk::Low,
+            }
+        }
+        DirectoryBufferPlannedOperation::Rename { from, to, .. } => {
+            DirectoryBufferPreviewOperation {
+                kind: DirectoryBufferOperationKind::Rename,
+                source_path: Some(from.clone()),
+                target_path: Some(to.clone()),
+                risk: DirectoryBufferOperationRisk::Low,
+            }
+        }
+        DirectoryBufferPlannedOperation::Delete { path, .. } => DirectoryBufferPreviewOperation {
+            kind: DirectoryBufferOperationKind::Delete,
+            source_path: Some(path.clone()),
+            target_path: None,
+            risk: DirectoryBufferOperationRisk::High,
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryBufferCreateKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedDirectoryBufferLine {
+    line_number: usize,
+    name: String,
+    create_kind: DirectoryBufferCreateKind,
+    matched_entry_id: Option<u64>,
+}
+
+fn parse_directory_buffer_edited_lines(
+    directory_buffer: &DirectoryBufferState,
+    edited_text: &str,
+) -> Result<Vec<ParsedDirectoryBufferLine>, Vec<DirectoryBufferPlanValidationError>> {
+    let mut errors = Vec::new();
+    let mut first_line_by_name = BTreeMap::new();
+    let mut used_entry_ids = BTreeSet::new();
+    let mut entry_by_display_text = BTreeMap::new();
+    let mut entry_by_name = BTreeMap::new();
+    for entry in &directory_buffer.entries {
+        entry_by_display_text.insert(entry.display_text.as_str(), entry);
+        entry_by_name.insert(entry.name.as_str(), entry);
+    }
+
+    let mut raw_lines = if edited_text.is_empty() {
+        Vec::new()
+    } else {
+        edited_text.split('\n').collect::<Vec<_>>()
+    };
+    if edited_text.ends_with('\n') {
+        raw_lines.pop();
+    }
+    let mut lines = Vec::new();
+    for (index, raw_line) in raw_lines.into_iter().enumerate() {
+        let line_number = index + 1;
+        let Some(mut parsed) = parse_directory_buffer_edited_line(
+            directory_buffer,
+            raw_line,
+            line_number,
+            &mut errors,
+        ) else {
+            continue;
+        };
+        if let Some(first_line_number) = first_line_by_name.insert(parsed.name.clone(), line_number)
+        {
+            errors.push(DirectoryBufferPlanValidationError::DuplicateName {
+                line_number,
+                first_line_number,
+                name: parsed.name.clone(),
+            });
+        }
+        if parsed.matched_entry_id.is_none() {
+            let matching_entry = entry_by_display_text
+                .get(raw_line)
+                .or_else(|| entry_by_name.get(parsed.name.as_str()));
+            if let Some(entry) = matching_entry.filter(|entry| !used_entry_ids.contains(&entry.id))
+            {
+                parsed.name = entry.name.clone();
+                parsed.matched_entry_id = Some(entry.id);
+                used_entry_ids.insert(entry.id);
+            }
+        } else if let Some(entry_id) = parsed.matched_entry_id {
+            used_entry_ids.insert(entry_id);
+        }
+        lines.push(parsed);
+    }
+
+    if errors.is_empty() {
+        Ok(lines)
+    } else {
+        log::debug!(
+            "[editor_session][dired][writable] edited directory listing validation failed: root_path={}, error_count={}",
+            directory_buffer.root_path.display(),
+            errors.len()
+        );
+        Err(errors)
+    }
+}
+
+fn parse_directory_buffer_edited_line(
+    directory_buffer: &DirectoryBufferState,
+    raw_line: &str,
+    line_number: usize,
+    errors: &mut Vec<DirectoryBufferPlanValidationError>,
+) -> Option<ParsedDirectoryBufferLine> {
+    if raw_line.is_empty() {
+        errors.push(DirectoryBufferPlanValidationError::EmptyLine { line_number });
+        return None;
+    }
+    if let Some(entry) = directory_buffer
+        .entries
+        .iter()
+        .find(|entry| entry.display_text == raw_line)
+    {
+        return Some(ParsedDirectoryBufferLine {
+            line_number,
+            name: entry.name.clone(),
+            create_kind: DirectoryBufferCreateKind::File,
+            matched_entry_id: Some(entry.id),
+        });
+    }
+    if raw_line.ends_with('@') || raw_line.ends_with('?') {
+        errors.push(DirectoryBufferPlanValidationError::UnsupportedDecoration {
+            line_number,
+            line: raw_line.to_string(),
+        });
+        return None;
+    }
+
+    let create_kind = if raw_line.ends_with('/') {
+        DirectoryBufferCreateKind::Directory
+    } else {
+        DirectoryBufferCreateKind::File
+    };
+    let name = raw_line
+        .strip_suffix('/')
+        .map(str::to_string)
+        .unwrap_or_else(|| raw_line.to_string());
+    validate_directory_buffer_plan_name(line_number, &name, errors);
+    Some(ParsedDirectoryBufferLine {
+        line_number,
+        name,
+        create_kind,
+        matched_entry_id: None,
+    })
+}
+
+fn validate_directory_buffer_plan_name(
+    line_number: usize,
+    name: &str,
+    errors: &mut Vec<DirectoryBufferPlanValidationError>,
+) {
+    if name.is_empty() {
+        errors.push(DirectoryBufferPlanValidationError::EmptyName { line_number });
+        return;
+    }
+    if name == "." || name == ".." || name.starts_with("../") || name.contains("/../") {
+        errors.push(DirectoryBufferPlanValidationError::ParentDirectoryEscape {
+            line_number,
+            name: name.to_string(),
+        });
+    }
+    if name.contains('/') || name.contains('\\') {
+        errors.push(DirectoryBufferPlanValidationError::PathSeparator {
+            line_number,
+            name: name.to_string(),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "saya-editor-session-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ))
+    }
 
     // ---- タスク 5.1: 保存要求の生成テスト ----
 
@@ -737,5 +1713,489 @@ mod tests {
 
         assert_eq!(result, Err(SaveRequestError::ReadOnly));
         assert!(state.read_only());
+    }
+
+    #[test]
+    fn build_save_request_fails_when_target_path_is_directory() {
+        let dir_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-buffer-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir_path).expect("test directory");
+        let state = EditorSessionState::new(Some(dir_path.clone()));
+
+        let result = state.build_save_request("README.md\n");
+
+        assert_eq!(result, Err(SaveRequestError::DirectoryBuffer));
+        std::fs::remove_dir(dir_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_metadata_tracks_display_root_entries_and_ids() {
+        let root_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-metadata-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let nested_path = root_path.join("src");
+        let readme_path = root_path.join("README.md");
+        std::fs::create_dir_all(&nested_path).expect("nested directory");
+        std::fs::write(&readme_path, "hello\n").expect("test file");
+
+        let state = EditorSessionState::new(Some(root_path.clone()));
+        let directory_buffer = state
+            .directory_buffer()
+            .expect("directory target should initialize directory buffer metadata");
+
+        assert_eq!(directory_buffer.root_path, root_path);
+        assert_eq!(directory_buffer.display_text, "README.md\nsrc/\n");
+        assert_eq!(directory_buffer.entries.len(), 2);
+        assert_eq!(directory_buffer.entries[0].name, "README.md");
+        assert_eq!(directory_buffer.entries[0].path, readme_path);
+        assert_eq!(
+            directory_buffer.entries[0].kind,
+            DirectoryBufferEntryKind::File
+        );
+        assert_eq!(directory_buffer.entries[0].display_text, "README.md");
+        assert_ne!(
+            directory_buffer.entries[0].id, directory_buffer.entries[1].id,
+            "entry ids should distinguish entries in the same directory"
+        );
+        assert_eq!(directory_buffer.entries[1].name, "src");
+        assert_eq!(
+            directory_buffer.entries[1].kind,
+            DirectoryBufferEntryKind::Directory
+        );
+        assert_eq!(directory_buffer.entries[1].display_text, "src/");
+
+        std::fs::remove_dir_all(directory_buffer.root_path.clone()).expect("cleanup directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_buffer_display_marks_symlink_entries() {
+        let root_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-symlink-display-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let target_path = root_path.join("target.md");
+        let link_path = root_path.join("linked.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&target_path, "target\n").expect("target file");
+        std::os::unix::fs::symlink(&target_path, &link_path).expect("symlink");
+
+        let state = EditorSessionState::new(Some(root_path.clone()));
+        let directory_buffer = state
+            .directory_buffer()
+            .expect("directory target should initialize directory buffer metadata");
+
+        let link = directory_buffer
+            .entries
+            .iter()
+            .find(|entry| entry.name == "linked.md")
+            .expect("symlink entry should exist");
+        assert_eq!(link.kind, DirectoryBufferEntryKind::Symlink);
+        assert_eq!(link.display_text, "linked.md@");
+        assert!(
+            directory_buffer.display_text.contains("linked.md@\n"),
+            "rendered dired listing should identify symlinks: {:?}",
+            directory_buffer.display_text
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_dirty_update_is_projected_but_kept_out_of_regular_save_flow() {
+        let dir_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-dirty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir_path).expect("test directory");
+        let mut state = EditorSessionState::new(Some(dir_path.clone()));
+
+        state.update_dirty(true);
+
+        assert!(
+            state.is_dirty(),
+            "directory buffer edits should still project a modified state"
+        );
+        assert_eq!(
+            state.build_save_request("mutated listing"),
+            Err(SaveRequestError::DirectoryBuffer)
+        );
+
+        std::fs::remove_dir(dir_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_preview_prompt_emphasizes_risky_operations_for_headless_ui() {
+        let root_path = unique_test_dir("preview-prompt");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut state = EditorSessionState::new(Some(root_path.clone()));
+
+        let preview = state
+            .prepare_directory_buffer_operation_preview("beta.md\n")
+            .expect("deleted listing line should prepare a preview");
+        let prompt = state
+            .directory_buffer_operation_prompt()
+            .expect("prepared preview should expose a prompt state");
+
+        assert_eq!(prompt.preview_id, preview.id);
+        assert!(prompt.status_line.contains("Apply 1 dired operation"));
+        assert!(prompt.status_line.contains("1 high-risk"));
+        assert!(prompt.status_line.contains("y/Enter=OK"));
+        assert!(prompt.status_line.contains("n/Esc=Cancel"));
+        assert!(
+            prompt.detail_lines.iter().any(|line| {
+                line.contains("HIGH RISK") && line.contains("delete") && line.contains("alpha.md")
+            }),
+            "delete preview should be clearly marked as high risk: {:?}",
+            prompt.detail_lines
+        );
+        assert_eq!(prompt.confirm_command, "OK");
+        assert_eq!(prompt.cancel_command, "Cancel");
+        assert!(prompt.recovery_hint.contains("No filesystem changes"));
+        assert!(
+            alpha_path.exists(),
+            "preview must not mutate the filesystem"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_preview_cancel_clears_state_without_filesystem_mutation() {
+        let root_path = unique_test_dir("preview-cancel");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut state = EditorSessionState::new(Some(root_path.clone()));
+
+        state
+            .prepare_directory_buffer_operation_preview("beta.md\n")
+            .expect("deleted listing line should prepare a preview");
+        let cancelled = state
+            .cancel_directory_buffer_operation_preview()
+            .expect("pending preview should be cancellable");
+
+        assert_eq!(cancelled.operation_count, 1);
+        assert!(state.pending_directory_operation_preview().is_none());
+        assert!(state.directory_buffer_operation_prompt().is_none());
+        assert!(alpha_path.exists(), "cancel must not delete files");
+        assert!(beta_path.exists());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_mark_state_survives_refresh_and_tracks_rename() {
+        let root_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-mark-refresh-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        let renamed_path = root_path.join("renamed.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut state = EditorSessionState::new(Some(root_path.clone()));
+
+        let alpha = state
+            .current_directory_entry(0)
+            .expect("alpha should be first")
+            .clone();
+        state.mark_directory_entry(&alpha);
+        state
+            .refresh_directory_buffer_for_path(&root_path)
+            .expect("refresh should keep directory metadata");
+
+        assert_eq!(
+            state.marked_directory_entries(),
+            vec![alpha.clone()],
+            "marked entry should remain selected after refresh"
+        );
+
+        std::fs::rename(&alpha_path, &renamed_path).expect("rename file");
+        state.record_directory_entry_rename(&alpha_path, &renamed_path);
+        state
+            .refresh_directory_buffer_for_path(&root_path)
+            .expect("refresh after rename");
+
+        let marked = state.marked_directory_entries();
+        assert_eq!(marked.len(), 1);
+        assert_eq!(marked[0].name, "renamed.md");
+        assert_eq!(marked[0].path, renamed_path);
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_mark_state_clears_when_moving_to_another_directory() {
+        let root_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-mark-move-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let first_path = root_path.join("first");
+        let second_path = root_path.join("second");
+        let first_file_path = first_path.join("alpha.md");
+        let second_file_path = second_path.join("beta.md");
+        std::fs::create_dir_all(&first_path).expect("first directory");
+        std::fs::create_dir_all(&second_path).expect("second directory");
+        std::fs::write(&first_file_path, "alpha\n").expect("first file");
+        std::fs::write(&second_file_path, "beta\n").expect("second file");
+        let mut state = EditorSessionState::new(Some(first_path.clone()));
+
+        let entry = state
+            .current_directory_entry(0)
+            .expect("entry should exist")
+            .clone();
+        state.mark_directory_entry(&entry);
+        assert_eq!(state.marked_directory_entries().len(), 1);
+
+        state.replace_target_path(second_path);
+
+        assert!(
+            state.marked_directory_entries().is_empty(),
+            "marks from the previous directory must not leak into the next directory"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_unmark_and_clear_all_update_mark_state() {
+        let root_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-mark-clear-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut state = EditorSessionState::new(Some(root_path.clone()));
+        let alpha = state
+            .current_directory_entry(0)
+            .expect("alpha should exist")
+            .clone();
+        let beta = state
+            .current_directory_entry(1)
+            .expect("beta should exist")
+            .clone();
+
+        state.mark_directory_entry(&alpha);
+        state.mark_directory_entry(&beta);
+        assert_eq!(state.marked_directory_entries().len(), 2);
+
+        state.unmark_directory_entry(&alpha);
+        assert_eq!(state.marked_directory_entries(), vec![beta]);
+
+        state.clear_directory_marks();
+        assert!(state.marked_directory_entries().is_empty());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn writable_directory_buffer_deleted_line_builds_delete_plan_without_touching_filesystem() {
+        let root_path = unique_test_dir("writable-delete-plan");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let state = EditorSessionState::new(Some(root_path.clone()));
+
+        let plan = state
+            .build_directory_buffer_operation_plan("beta.md\n")
+            .expect("deleted listing line should produce a plan");
+
+        assert_eq!(
+            plan.operations,
+            vec![DirectoryBufferPlannedOperation::Delete {
+                path: alpha_path.clone(),
+                name: "alpha.md".to_string(),
+                kind: DirectoryBufferEntryKind::File,
+            }]
+        );
+        assert!(
+            alpha_path.exists(),
+            "phase 7 only plans deletion and must not mutate the filesystem"
+        );
+        assert!(beta_path.exists());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn writable_directory_buffer_empty_edited_text_deletes_every_entry_in_plan_only() {
+        let root_path = unique_test_dir("writable-delete-all-plan");
+        let alpha_path = root_path.join("alpha.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        let state = EditorSessionState::new(Some(root_path.clone()));
+
+        let plan = state
+            .build_directory_buffer_operation_plan("")
+            .expect("empty edited listing should mean every entry was deleted");
+
+        assert_eq!(
+            plan.operations,
+            vec![DirectoryBufferPlannedOperation::Delete {
+                path: alpha_path.clone(),
+                name: "alpha.md".to_string(),
+                kind: DirectoryBufferEntryKind::File,
+            }]
+        );
+        assert!(
+            alpha_path.exists(),
+            "empty edited listing must still only prepare a delete plan"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn writable_directory_buffer_rename_builds_rename_plan_and_reorder_is_noop() {
+        let root_path = unique_test_dir("writable-rename-plan");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        let renamed_path = root_path.join("renamed.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let state = EditorSessionState::new(Some(root_path.clone()));
+
+        let rename_plan = state
+            .build_directory_buffer_operation_plan("renamed.md\nbeta.md\n")
+            .expect("changed existing line should produce a rename plan");
+
+        assert_eq!(
+            rename_plan.operations,
+            vec![DirectoryBufferPlannedOperation::Rename {
+                from: alpha_path.clone(),
+                to: renamed_path,
+                from_name: "alpha.md".to_string(),
+                to_name: "renamed.md".to_string(),
+                kind: DirectoryBufferEntryKind::File,
+            }]
+        );
+
+        let reorder_plan = state
+            .build_directory_buffer_operation_plan("beta.md\nalpha.md\n")
+            .expect("pure reorder should still be a valid plan");
+
+        assert!(
+            reorder_plan.operations.is_empty(),
+            "line reorder alone must not produce filesystem operations"
+        );
+        assert!(alpha_path.exists());
+        assert!(beta_path.exists());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn writable_directory_buffer_added_lines_build_file_and_directory_create_plan() {
+        let root_path = unique_test_dir("writable-create-plan");
+        let alpha_path = root_path.join("alpha.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        let state = EditorSessionState::new(Some(root_path.clone()));
+
+        let plan = state
+            .build_directory_buffer_operation_plan("alpha.md\nnotes.md\nsrc/\n")
+            .expect("new listing lines should produce create operations");
+
+        assert_eq!(
+            plan.operations,
+            vec![
+                DirectoryBufferPlannedOperation::CreateFile {
+                    path: root_path.join("notes.md"),
+                    name: "notes.md".to_string(),
+                },
+                DirectoryBufferPlannedOperation::CreateDirectory {
+                    path: root_path.join("src"),
+                    name: "src".to_string(),
+                },
+            ]
+        );
+        assert!(
+            !root_path.join("notes.md").exists() && !root_path.join("src").exists(),
+            "phase 7 create operations must remain plans only"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn writable_directory_buffer_invalid_diff_returns_validation_errors_without_filesystem_changes()
+    {
+        let root_path = unique_test_dir("writable-validation");
+        let alpha_path = root_path.join("alpha.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        let state = EditorSessionState::new(Some(root_path.clone()));
+
+        let errors = state
+            .build_directory_buffer_operation_plan(
+                "alpha.md\n\n../escape.md\nalpha.md\nbad/name\nlink@\n",
+            )
+            .expect_err("invalid edited listing should fail validation");
+
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            DirectoryBufferPlanValidationError::EmptyLine { line_number: 2 }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            DirectoryBufferPlanValidationError::ParentDirectoryEscape { line_number: 3, .. }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            DirectoryBufferPlanValidationError::DuplicateName { name, .. } if name == "alpha.md"
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            DirectoryBufferPlanValidationError::PathSeparator { line_number: 5, .. }
+        )));
+        assert!(errors.iter().any(|error| matches!(
+            error,
+            DirectoryBufferPlanValidationError::UnsupportedDecoration { line_number: 6, .. }
+        )));
+        assert!(
+            alpha_path.exists(),
+            "validation must happen before any filesystem mutation"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
     }
 }

@@ -127,6 +127,55 @@ saya.events.on("bufferOpen", (payload) => {
 });
 ```
 
+You can import local TypeScript plugins from `init.ts`. Static local imports
+are resolved before startup evaluation.
+
+```ts
+import { setupSayaDired } from "./plugins/saya-dired.ts";
+
+setupSayaDired();
+```
+
+### Preview dired setup
+
+`setupSayaDired()` registers the preview directory editor commands and normal
+mode keymaps. The default bindings are `-` for parent directory navigation,
+`<Enter>` for opening the current entry, `gr` for refresh, `m` for marking,
+`M` for unmarking, `gM` for clearing marks, and `D` for a bulk-delete
+preview. The defaults avoid binding `u` so normal-mode undo remains available
+while editing writable directory listings.
+
+You can customize the public setup surface without exposing broad filesystem
+access to TypeScript plugins.
+
+```ts
+import { setupSayaDired } from "./plugins/saya-dired.ts";
+
+setupSayaDired({
+  root: ".",
+  hiddenFilePolicy: "hide",
+  sortPolicy: "kind",
+  filter: "rs",
+  confirmStrategy: "preview",
+  commands: {
+    enter: "workspace.enter",
+    refresh: "workspace.refresh",
+  },
+  keymap: {
+    enter: "<Enter>",
+    refresh: "gr",
+  },
+});
+```
+
+> **Note:** Dired is a preview feature. The command names, keymap shape,
+> `hiddenFilePolicy`, `sortPolicy`, `filter`, and `confirmStrategy` options are
+> public setup points, but they can still change before the dired API is
+> stabilized.
+> The versioned local contract is documented in
+> [`docs/api/dired-api-v1.md`](docs/api/dired-api-v1.md), including migration
+> notes and plugin author anti-patterns.
+
 At the moment, `tabSize` and `lineNumbers` are the most visible startup
 settings in the TUI. Command and event registration are implemented and tested
 headlessly, but their full live integration is still in progress.

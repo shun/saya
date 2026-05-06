@@ -10,7 +10,9 @@ use crate::runtime_refresh::runtime_dispatch_requests_redraw;
 use crate::saya_live_runtime::{
     HostCapabilityBridge, ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot,
     RuntimeCommandError, RuntimeDispatchError, RuntimeDispatchReport, RuntimeEventPayload,
-    RuntimeInitError, RuntimeMode, SayaLiveRuntime,
+    RuntimeFilerCurrentEntry, RuntimeFilerEntry, RuntimeFilerError, RuntimeFilerErrorKind,
+    RuntimeFilerListOptions, RuntimeFilerOperation, RuntimeFilerOperationKind,
+    RuntimeFilerOperationReport, RuntimeInitError, RuntimeMode, SayaLiveRuntime,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -39,6 +41,31 @@ pub trait RuntimeHostSession {
     fn current_buffer_snapshot(&mut self) -> ReadonlyBufferSnapshot;
     fn current_window_snapshot(&mut self) -> ReadonlyWindowSnapshot;
     fn current_editor_snapshot(&mut self) -> ReadonlyEditorSnapshot;
+    fn current_filer_entry(
+        &mut self,
+    ) -> Result<Option<RuntimeFilerCurrentEntry>, RuntimeFilerError> {
+        Ok(None)
+    }
+    fn list_filer_entries(
+        &mut self,
+        path: std::path::PathBuf,
+        options: RuntimeFilerListOptions,
+    ) -> Result<Vec<RuntimeFilerEntry>, RuntimeFilerError> {
+        crate::saya_live_runtime::list_local_filer_entries(path, options)
+    }
+    fn execute_filer_operation(
+        &mut self,
+        operation: RuntimeFilerOperation,
+    ) -> Result<RuntimeFilerOperationReport, RuntimeFilerError> {
+        let (kind, path, target_path) = runtime_filer_operation_parts(&operation);
+        Err(RuntimeFilerError::OperationFailed {
+            operation: kind,
+            path,
+            target_path,
+            kind: RuntimeFilerErrorKind::Unsupported,
+            message: "runtime host session does not support filer operations".to_string(),
+        })
+    }
     fn execute_host_command(
         &mut self,
         name: &str,
@@ -87,6 +114,7 @@ struct CachedRuntimeSnapshots {
     buffer: ReadonlyBufferSnapshot,
     window: ReadonlyWindowSnapshot,
     editor: ReadonlyEditorSnapshot,
+    current_filer_entry: Option<RuntimeFilerCurrentEntry>,
 }
 
 impl Default for CachedRuntimeSnapshots {
@@ -96,11 +124,14 @@ impl Default for CachedRuntimeSnapshots {
                 id: 1,
                 path: None,
                 line_count: 1,
+                cursor_row: 0,
+                current_line: String::new(),
             },
             window: ReadonlyWindowSnapshot { id: 1 },
             editor: ReadonlyEditorSnapshot {
                 mode: RuntimeMode::Normal,
             },
+            current_filer_entry: None,
         }
     }
 }
@@ -110,9 +141,80 @@ struct RuntimeHostCommandRequest {
     reply: oneshot::Sender<Result<(), RuntimeCommandError>>,
 }
 
+struct RuntimeFilerOperationRequest {
+    operation: RuntimeFilerOperation,
+    reply: oneshot::Sender<Result<RuntimeFilerOperationReport, RuntimeFilerError>>,
+}
+
+struct RuntimeFilerListRequest {
+    path: std::path::PathBuf,
+    options: RuntimeFilerListOptions,
+    reply: oneshot::Sender<Result<Vec<RuntimeFilerEntry>, RuntimeFilerError>>,
+}
+
+fn runtime_filer_operation_parts(
+    operation: &RuntimeFilerOperation,
+) -> (
+    RuntimeFilerOperationKind,
+    std::path::PathBuf,
+    Option<std::path::PathBuf>,
+) {
+    match operation {
+        RuntimeFilerOperation::CreateFile { path } => {
+            (RuntimeFilerOperationKind::CreateFile, path.clone(), None)
+        }
+        RuntimeFilerOperation::CreateDirectory { path } => (
+            RuntimeFilerOperationKind::CreateDirectory,
+            path.clone(),
+            None,
+        ),
+        RuntimeFilerOperation::Copy { from, to } => (
+            RuntimeFilerOperationKind::Copy,
+            from.clone(),
+            Some(to.clone()),
+        ),
+        RuntimeFilerOperation::Move { from, to } => (
+            RuntimeFilerOperationKind::Move,
+            from.clone(),
+            Some(to.clone()),
+        ),
+        RuntimeFilerOperation::Rename { from, to } => (
+            RuntimeFilerOperationKind::Rename,
+            from.clone(),
+            Some(to.clone()),
+        ),
+        RuntimeFilerOperation::Delete { path, .. } => {
+            (RuntimeFilerOperationKind::Delete, path.clone(), None)
+        }
+        RuntimeFilerOperation::Mark { path } => {
+            (RuntimeFilerOperationKind::Mark, path.clone(), None)
+        }
+        RuntimeFilerOperation::Unmark { path } => {
+            (RuntimeFilerOperationKind::Unmark, path.clone(), None)
+        }
+        RuntimeFilerOperation::ClearMarks => (
+            RuntimeFilerOperationKind::ClearMarks,
+            std::path::PathBuf::new(),
+            None,
+        ),
+        RuntimeFilerOperation::BulkDeletePreview => (
+            RuntimeFilerOperationKind::BulkDeletePreview,
+            std::path::PathBuf::new(),
+            None,
+        ),
+        RuntimeFilerOperation::BulkDelete { preview_id, .. } => (
+            RuntimeFilerOperationKind::BulkDelete,
+            std::path::PathBuf::from(preview_id),
+            None,
+        ),
+    }
+}
+
 struct ChannelBackedHostBridge {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
     command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
+    filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
+    filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
 }
 
 impl HostCapabilityBridge for ChannelBackedHostBridge {
@@ -174,6 +276,77 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
                 .clone()
         })
     }
+
+    fn current_filer_entry(
+        &self,
+    ) -> crate::saya_live_runtime::BoxFuture<
+        Result<Option<RuntimeFilerCurrentEntry>, RuntimeFilerError>,
+    > {
+        let snapshots = self.snapshots.clone();
+        Box::pin(async move {
+            Ok(snapshots
+                .lock()
+                .expect("runtime snapshots mutex should not poison")
+                .current_filer_entry
+                .clone())
+        })
+    }
+
+    fn list_filer_entries(
+        &self,
+        path: std::path::PathBuf,
+        options: RuntimeFilerListOptions,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<Vec<RuntimeFilerEntry>, RuntimeFilerError>>
+    {
+        let filer_list_sender = self.filer_list_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            filer_list_sender
+                .send(RuntimeFilerListRequest {
+                    path: path.clone(),
+                    options,
+                    reply,
+                })
+                .map_err(|_| RuntimeFilerError::ReadFailed {
+                    path: path.clone(),
+                    message: "host filer list channel closed".to_string(),
+                })?;
+            receiver.await.map_err(|_| RuntimeFilerError::ReadFailed {
+                path,
+                message: "host filer list reply channel closed".to_string(),
+            })?
+        })
+    }
+
+    fn execute_filer_operation(
+        &self,
+        operation: RuntimeFilerOperation,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<RuntimeFilerOperationReport, RuntimeFilerError>>
+    {
+        let filer_operation_sender = self.filer_operation_sender.clone();
+        Box::pin(async move {
+            let (kind, path, target_path) = runtime_filer_operation_parts(&operation);
+            let (reply, receiver) = oneshot::channel();
+            filer_operation_sender
+                .send(RuntimeFilerOperationRequest { operation, reply })
+                .map_err(|_| RuntimeFilerError::OperationFailed {
+                    operation: kind,
+                    path: path.clone(),
+                    target_path: target_path.clone(),
+                    kind: RuntimeFilerErrorKind::Io,
+                    message: "host filer operation channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeFilerError::OperationFailed {
+                    operation: kind,
+                    path,
+                    target_path,
+                    kind: RuntimeFilerErrorKind::Io,
+                    message: "host filer operation reply channel closed".to_string(),
+                })?
+        })
+    }
 }
 
 pub struct RuntimeSessionOwner {
@@ -181,6 +354,10 @@ pub struct RuntimeSessionOwner {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
     _command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
     command_receiver: mpsc::UnboundedReceiver<RuntimeHostCommandRequest>,
+    _filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
+    filer_operation_receiver: mpsc::UnboundedReceiver<RuntimeFilerOperationRequest>,
+    _filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
+    filer_list_receiver: mpsc::UnboundedReceiver<RuntimeFilerListRequest>,
 }
 
 impl RuntimeSessionOwner {
@@ -192,9 +369,13 @@ impl RuntimeSessionOwner {
         );
         let snapshots = Arc::new(Mutex::new(CachedRuntimeSnapshots::default()));
         let (command_sender, command_receiver) = mpsc::unbounded_channel();
+        let (filer_operation_sender, filer_operation_receiver) = mpsc::unbounded_channel();
+        let (filer_list_sender, filer_list_receiver) = mpsc::unbounded_channel();
         let bridge = Arc::new(ChannelBackedHostBridge {
             snapshots: snapshots.clone(),
             command_sender: command_sender.clone(),
+            filer_operation_sender: filer_operation_sender.clone(),
+            filer_list_sender: filer_list_sender.clone(),
         });
         let runtime = SayaLiveRuntime::spawn_from_seed(bridge, seed)?;
         Ok(Self {
@@ -202,6 +383,10 @@ impl RuntimeSessionOwner {
             snapshots,
             _command_sender: command_sender,
             command_receiver,
+            _filer_operation_sender: filer_operation_sender,
+            filer_operation_receiver,
+            _filer_list_sender: filer_list_sender,
+            filer_list_receiver,
         })
     }
 
@@ -351,6 +536,47 @@ impl RuntimeSessionOwner {
                         }
                     }
                 }
+                request = self.filer_operation_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] filer operation channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][filer] servicing runtime filer operation request during event dispatch: operation={:?}",
+                        request.operation
+                    );
+                    match host_session.execute_filer_operation(request.operation) {
+                        Ok(report) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(report));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.filer_list_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] filer list channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][filer] servicing runtime filer list request during event dispatch: path={}, options={:?}",
+                        request.path.display(),
+                        request.options
+                    );
+                    match host_session.list_filer_entries(request.path, request.options) {
+                        Ok(entries) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(entries));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
             }
         }
 
@@ -361,11 +587,22 @@ impl RuntimeSessionOwner {
         let buffer = host_session.current_buffer_snapshot();
         let window = host_session.current_window_snapshot();
         let editor = host_session.current_editor_snapshot();
+        let current_filer_entry = match host_session.current_filer_entry() {
+            Ok(entry) => entry,
+            Err(error) => {
+                log::debug!(
+                    "[runtime_integration] failed to refresh current filer entry snapshot: {:?}",
+                    error
+                );
+                None
+            }
+        };
         log::debug!(
-            "[runtime_integration] refreshing cached runtime snapshots: buffer_id={}, window_id={}, mode={:?}",
+            "[runtime_integration] refreshing cached runtime snapshots: buffer_id={}, window_id={}, mode={:?}, current_filer_entry={}",
             buffer.id,
             window.id,
-            editor.mode
+            editor.mode,
+            current_filer_entry.is_some()
         );
         *self
             .snapshots
@@ -374,6 +611,7 @@ impl RuntimeSessionOwner {
             buffer,
             window,
             editor,
+            current_filer_entry,
         };
     }
 
@@ -434,6 +672,47 @@ impl RuntimeSessionOwner {
                             );
                             follow_up_events.extend(effect.follow_up_events.clone());
                             let _ = request.reply.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.filer_operation_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] filer operation channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][filer] servicing runtime filer operation request during command execution: operation={:?}",
+                        request.operation
+                    );
+                    match host_session.execute_filer_operation(request.operation) {
+                        Ok(report) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(report));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.filer_list_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] filer list channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][filer] servicing runtime filer list request during command execution: path={}, options={:?}",
+                        request.path.display(),
+                        request.options
+                    );
+                    match host_session.list_filer_entries(request.path, request.options) {
+                        Ok(entries) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(entries));
                         }
                         Err(error) => {
                             let _ = request.reply.send(Err(error));

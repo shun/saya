@@ -24,7 +24,11 @@ use saya::diagnostic_log::{
     configure_from_startup as configure_diagnostic_log_from_startup,
     init_from_env as init_diagnostic_log_from_env,
 };
-use saya::editor_session::{QuitDecision, SaveRequestError};
+use saya::editor_session::{
+    DirectoryBufferListingOptions, DirectoryBufferPlannedOperation,
+    DirectoryBufferPreviewConfirmationError, DirectoryBufferSortKey, QuitDecision,
+    SaveRequestError,
+};
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
 use saya::host_io::{SaveRequest, SaveResult, write_to_path};
@@ -43,7 +47,9 @@ use saya::runtime_integration::{
 };
 use saya::saya_live_runtime::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
-    RuntimeMode,
+    RuntimeFilerCurrentEntry, RuntimeFilerEntry, RuntimeFilerEntryKind, RuntimeFilerError,
+    RuntimeFilerErrorKind, RuntimeFilerListOptions, RuntimeFilerOperation,
+    RuntimeFilerOperationKind, RuntimeFilerOperationReport, RuntimeFilerSortKey, RuntimeMode,
 };
 use saya::screen_model::{
     CommandLineModel, ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput,
@@ -62,7 +68,7 @@ use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::WindowViewportStore;
 #[cfg(test)]
 use vim_core_rs::CoreMessageEvent;
-use vim_core_rs::CoreMode;
+use vim_core_rs::{CoreMode, CoreVfsError, CoreVfsErrorKind, CoreVfsRequest, CoreVfsResponse};
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -293,38 +299,58 @@ async fn main() {
                             outcome.startup_registry.keymaps.len()
                         );
 
-                        match handle_prompt_key(&mut outcome_accumulator.projection, &key) {
-                            PromptInputAction::Consumed | PromptInputAction::AwaitingCore => {
-                                handled = true;
-                                need_redraw = true;
+                        if let Some(reason) =
+                            handle_directory_operation_confirmation_key_with_runtime(
+                                &key,
+                                &mut outcome,
+                                &mut session_state,
+                                &mut transient_msg,
+                                &mut need_redraw,
+                                runtime_session.as_mut(),
+                                &mut runtime_presentation_intents,
+                            )
+                            .await
+                        {
+                            handled = true;
+                            if let Some(reason) = reason {
+                                break 'main reason;
                             }
-                            PromptInputAction::Submit(command)
-                            | PromptInputAction::Cancel(command) => {
-                                handled = true;
-                                dispatch_prompt_response_command(
-                                    &mut outcome.core_bridge,
-                                    &mut outcome_accumulator,
-                                    command,
-                                    &mut need_redraw,
-                                );
+                        }
 
-                                if let Some(reason) = process_pending_host_actions_with_runtime(
-                                    &mut outcome,
-                                    &mut outcome_accumulator,
-                                    &mut session_state,
-                                    &mut transient_msg,
-                                    &mut system_warning,
-                                    &mut host_action_runtime,
-                                    runtime_session.as_mut(),
-                                    &mut need_redraw,
-                                    &mut runtime_presentation_intents,
-                                )
-                                .await
-                                {
-                                    break 'main reason;
+                        if !handled {
+                            match handle_prompt_key(&mut outcome_accumulator.projection, &key) {
+                                PromptInputAction::Consumed | PromptInputAction::AwaitingCore => {
+                                    handled = true;
+                                    need_redraw = true;
                                 }
+                                PromptInputAction::Submit(command)
+                                | PromptInputAction::Cancel(command) => {
+                                    handled = true;
+                                    dispatch_prompt_response_command(
+                                        &mut outcome.core_bridge,
+                                        &mut outcome_accumulator,
+                                        command,
+                                        &mut need_redraw,
+                                    );
+
+                                    if let Some(reason) = process_pending_host_actions_with_runtime(
+                                        &mut outcome,
+                                        &mut outcome_accumulator,
+                                        &mut session_state,
+                                        &mut transient_msg,
+                                        &mut system_warning,
+                                        &mut host_action_runtime,
+                                        runtime_session.as_mut(),
+                                        &mut need_redraw,
+                                        &mut runtime_presentation_intents,
+                                    )
+                                    .await
+                                    {
+                                        break 'main reason;
+                                    }
+                                }
+                                PromptInputAction::NotPromptInput => {}
                             }
-                            PromptInputAction::NotPromptInput => {}
                         }
 
                         if !handled && let Some(prompt) = command_line_prompt {
@@ -520,9 +546,9 @@ async fn main() {
                                 break 'main reason;
                             }
                         } else if !handled
-                            && let Some(action) = startup_keymap_action_for_input(
+                            && let Some(action) = startup_keymap_action_for_snapshot_input(
                                 &outcome.startup_registry.keymaps,
-                                outcome.core_bridge.snapshot().mode,
+                                &outcome.core_bridge.snapshot(),
                                 &key,
                             )
                         {
@@ -532,6 +558,14 @@ async fn main() {
                                 key,
                                 action
                             );
+                            if outcome.core_bridge.snapshot().pending_input.is_pending() {
+                                let _ = outcome.core_bridge.dispatch_key("\x1b");
+                                consume_core_outcomes_from_core(
+                                    &mut outcome.core_bridge,
+                                    &mut outcome_accumulator,
+                                    &mut need_redraw,
+                                );
+                            }
                             match action {
                                 StartupKeymapAction::Literal(rhs) => {
                                     let _ = outcome.core_bridge.dispatch_key(&rhs);
@@ -973,6 +1007,10 @@ async fn main() {
         shutdown_sequence.steps(),
         shutdown_sequence.is_complete()
     );
+}
+
+fn current_line_from_text(text: &str, cursor_row: usize) -> String {
+    text.lines().nth(cursor_row).unwrap_or_default().to_string()
 }
 
 fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), String> {
@@ -1436,11 +1474,12 @@ async fn process_pending_host_actions_with_runtime(
 
         for directive in prioritize_save_family_host_directives(directives, current_revision) {
             match directive {
-                NormalizedHostDirective::Write { path, .. } => {
+                NormalizedHostDirective::Write { path, force, .. } => {
                     if let Some(reason) = handle_write_host_action_with_runtime(
                         outcome,
                         session_state,
                         Some(path.as_str()),
+                        force,
                         transient_msg,
                         runtime_session.as_deref_mut(),
                         need_redraw,
@@ -1472,6 +1511,16 @@ async fn process_pending_host_actions_with_runtime(
                         trace.sequence,
                         request
                     );
+                    if handle_directory_buffer_vfs_save_request(
+                        outcome,
+                        session_state,
+                        request.clone(),
+                        transient_msg,
+                    )
+                    .is_some()
+                    {
+                        continue;
+                    }
                     if let Err(error) =
                         host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
                     {
@@ -1606,14 +1655,22 @@ fn process_pending_host_actions_without_runtime(
 
         for directive in prioritize_save_family_host_directives(directives, current_revision) {
             match directive {
-                NormalizedHostDirective::Write { path, .. } => {
+                NormalizedHostDirective::Write { path, force, .. } => {
                     let snapshot = outcome.core_bridge.snapshot();
-                    let save_outcome = save_snapshot_result_with_path_override(
+                    let save_outcome = save_snapshot_result_with_confirmation(
                         &snapshot.text,
                         session_state,
                         Some(path.as_str()),
+                        force,
                     );
                     *transient_msg = save_outcome.transient_message;
+                    if save_outcome.wrote {
+                        refresh_directory_buffer_after_confirmed_save(
+                            outcome,
+                            session_state,
+                            transient_msg,
+                        );
+                    }
                 }
                 NormalizedHostDirective::Quit { force, .. } => {
                     let decision = session_state.evaluate_quit(force);
@@ -1636,6 +1693,16 @@ fn process_pending_host_actions_without_runtime(
                         trace.sequence,
                         request
                     );
+                    if handle_directory_buffer_vfs_save_request(
+                        outcome,
+                        session_state,
+                        request.clone(),
+                        transient_msg,
+                    )
+                    .is_some()
+                    {
+                        continue;
+                    }
                     if let Err(error) =
                         host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
                     {
@@ -1693,6 +1760,7 @@ async fn handle_write_host_action_with_runtime(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
     path_override: Option<&str>,
+    confirmed: bool,
     transient_msg: &mut Option<String>,
     runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
@@ -1705,10 +1773,15 @@ async fn handle_write_host_action_with_runtime(
             || session_state.target_path().is_some(),
         snapshot.text.len()
     );
-    let save_outcome =
-        save_snapshot_result_with_path_override(&snapshot.text, session_state, path_override);
+    let save_outcome = save_snapshot_result_with_confirmation(
+        &snapshot.text,
+        session_state,
+        path_override,
+        confirmed,
+    );
     *transient_msg = save_outcome.transient_message;
     if save_outcome.wrote {
+        refresh_directory_buffer_after_confirmed_save(outcome, session_state, transient_msg);
         return dispatch_buffer_write_post_with_runtime(
             runtime_session,
             outcome,
@@ -1721,6 +1794,220 @@ async fn handle_write_host_action_with_runtime(
     }
 
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryOperationConfirmationKeyAction {
+    Confirm,
+    Cancel,
+    KeepWaiting,
+}
+
+fn directory_operation_confirmation_key_action(
+    key: &KeyInput,
+    session_state: &saya::editor_session::EditorSessionState,
+) -> Option<DirectoryOperationConfirmationKeyAction> {
+    if !session_state.directory_operation_confirmation_dialog_active() {
+        return None;
+    }
+    let action = match key {
+        KeyInput::Enter | KeyInput::Char('y') | KeyInput::Char('Y') => {
+            DirectoryOperationConfirmationKeyAction::Confirm
+        }
+        KeyInput::Escape | KeyInput::Char('n') | KeyInput::Char('N') => {
+            DirectoryOperationConfirmationKeyAction::Cancel
+        }
+        _ => DirectoryOperationConfirmationKeyAction::KeepWaiting,
+    };
+    Some(action)
+}
+
+fn directory_operation_cancel_message(
+    session_state: &mut saya::editor_session::EditorSessionState,
+) -> String {
+    match session_state.cancel_directory_buffer_operation_preview() {
+        Some(_) => "Directory operation cancelled; no filesystem changes were applied".to_string(),
+        None => "No directory operation preview to cancel".to_string(),
+    }
+}
+
+#[cfg(test)]
+fn handle_directory_operation_confirmation_key_without_runtime(
+    key: &KeyInput,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+    need_redraw: &mut bool,
+) -> bool {
+    let Some(action) = directory_operation_confirmation_key_action(key, session_state) else {
+        return false;
+    };
+    *need_redraw = true;
+    match action {
+        DirectoryOperationConfirmationKeyAction::Confirm => {
+            let snapshot = outcome.core_bridge.snapshot();
+            let save_outcome =
+                save_snapshot_result_with_confirmation(&snapshot.text, session_state, None, true);
+            *transient_msg = save_outcome.transient_message;
+            if save_outcome.wrote {
+                refresh_directory_buffer_after_confirmed_save(
+                    outcome,
+                    session_state,
+                    transient_msg,
+                );
+            }
+        }
+        DirectoryOperationConfirmationKeyAction::Cancel => {
+            *transient_msg = Some(directory_operation_cancel_message(session_state));
+        }
+        DirectoryOperationConfirmationKeyAction::KeepWaiting => {
+            *transient_msg = Some(
+                "Apply directory operations? Press y or Enter for OK, n or Esc to cancel"
+                    .to_string(),
+            );
+        }
+    }
+    true
+}
+
+async fn handle_directory_operation_confirmation_key_with_runtime(
+    key: &KeyInput,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+    need_redraw: &mut bool,
+    runtime_session: Option<&mut RuntimeSessionOwner>,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+) -> Option<Option<ShutdownReason>> {
+    let action = directory_operation_confirmation_key_action(key, session_state)?;
+    *need_redraw = true;
+    match action {
+        DirectoryOperationConfirmationKeyAction::Confirm => {
+            let snapshot = outcome.core_bridge.snapshot();
+            let save_outcome =
+                save_snapshot_result_with_confirmation(&snapshot.text, session_state, None, true);
+            *transient_msg = save_outcome.transient_message;
+            if save_outcome.wrote {
+                refresh_directory_buffer_after_confirmed_save(
+                    outcome,
+                    session_state,
+                    transient_msg,
+                );
+                return Some(
+                    dispatch_buffer_write_post_with_runtime(
+                        runtime_session,
+                        outcome,
+                        session_state,
+                        transient_msg,
+                        need_redraw,
+                        runtime_presentation_intents,
+                    )
+                    .await,
+                );
+            }
+        }
+        DirectoryOperationConfirmationKeyAction::Cancel => {
+            *transient_msg = Some(directory_operation_cancel_message(session_state));
+        }
+        DirectoryOperationConfirmationKeyAction::KeepWaiting => {
+            *transient_msg = Some(
+                "Apply directory operations? Press y or Enter for OK, n or Esc to cancel"
+                    .to_string(),
+            );
+        }
+    }
+    Some(None)
+}
+
+fn refresh_directory_buffer_after_confirmed_save(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+) {
+    let Some(root_path) = session_state
+        .target_path()
+        .filter(|path| path.is_dir())
+        .cloned()
+    else {
+        return;
+    };
+    log::debug!(
+        "[main][dired][writable] refreshing directory buffer after confirmed save: root_path={}",
+        root_path.display()
+    );
+    if let Err(error) = execute_runtime_host_command(
+        &format!("edit {}", root_path.display()),
+        outcome,
+        session_state,
+    ) {
+        log::debug!(
+            "[main][dired][writable] failed to refresh directory buffer after confirmed save: root_path={}, error={:?}",
+            root_path.display(),
+            error
+        );
+        *transient_msg = Some(format!(
+            "Directory operations applied, but refresh failed: {error:?}"
+        ));
+    }
+}
+
+fn handle_directory_buffer_vfs_save_request(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    request: CoreVfsRequest,
+    transient_msg: &mut Option<String>,
+) -> Option<SaveSnapshotOutcome> {
+    let CoreVfsRequest::Save {
+        request_id,
+        document_id,
+        target_locator,
+        text,
+        force,
+        ..
+    } = request
+    else {
+        return None;
+    };
+    let path_override = target_locator.as_deref().or(Some(document_id.as_str()));
+    if effective_host_write_path_override(session_state, path_override).is_some()
+        || session_state.directory_buffer().is_none()
+    {
+        return None;
+    }
+
+    log::debug!(
+        "[main][dired][writable] handling directory buffer save through VFS request: document_id={}, force={}, text_len={}",
+        document_id,
+        force,
+        text.len()
+    );
+    let save_outcome =
+        save_snapshot_result_with_confirmation(&text, session_state, path_override, force);
+    *transient_msg = save_outcome.transient_message.clone();
+    let response = if save_outcome.wrote {
+        CoreVfsResponse::Saved {
+            request_id,
+            document_id,
+        }
+    } else {
+        CoreVfsResponse::Failed {
+            request_id,
+            error: CoreVfsError {
+                kind: CoreVfsErrorKind::HostUnavailable,
+                message: save_outcome.transient_message.clone(),
+            },
+        }
+    };
+    if let Err(error) = outcome.core_bridge.submit_vfs_response(response) {
+        log::debug!(
+            "[main][dired][writable] failed to submit directory buffer VFS save response: {:?}",
+            error
+        );
+    }
+    if save_outcome.wrote {
+        refresh_directory_buffer_after_confirmed_save(outcome, session_state, transient_msg);
+    }
+    Some(save_outcome)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1741,6 +2028,121 @@ fn save_snapshot_result_with_path_override(
     session_state: &mut saya::editor_session::EditorSessionState,
     path_override: Option<&str>,
 ) -> SaveSnapshotOutcome {
+    save_snapshot_result_with_confirmation(buffer_contents, session_state, path_override, false)
+}
+
+fn save_snapshot_result_with_confirmation(
+    buffer_contents: &str,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    path_override: Option<&str>,
+    confirmed: bool,
+) -> SaveSnapshotOutcome {
+    let path_override = effective_host_write_path_override(session_state, path_override);
+    if path_override.is_none() && session_state.directory_buffer().is_some() {
+        if confirmed {
+            return match session_state.confirm_directory_buffer_operation_preview(buffer_contents) {
+                Ok(plan) => match apply_directory_buffer_operation_plan(session_state, &plan) {
+                    Ok(applied_count) => {
+                        session_state.clear_pending_directory_operation_preview();
+                        session_state.record_save_success();
+                        log::info!(
+                            "[main][dired][writable] applied confirmed directory operation plan: root_path={}, operations={}",
+                            plan.root_path.display(),
+                            applied_count
+                        );
+                        SaveSnapshotOutcome {
+                            transient_message: Some(format!(
+                                "Directory operations applied: {applied_count} operation(s)"
+                            )),
+                            wrote: true,
+                        }
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            "[main][dired][writable] confirmed directory operation plan failed during apply: root_path={}, error={:?}",
+                            plan.root_path.display(),
+                            error
+                        );
+                        session_state.record_save_failure(format!("{error:?}"));
+                        SaveSnapshotOutcome {
+                            transient_message: Some(format!(
+                                "Directory operation apply failed: {error:?}. Recovery: directory metadata was refreshed from the filesystem; inspect the listing before retrying."
+                            )),
+                            wrote: false,
+                        }
+                    }
+                },
+                Err(DirectoryBufferPreviewConfirmationError::MissingPreview) => {
+                    SaveSnapshotOutcome {
+                        transient_message: Some(
+                            "Directory operation preview is required before :write!".to_string(),
+                        ),
+                        wrote: false,
+                    }
+                }
+                Err(DirectoryBufferPreviewConfirmationError::StalePreview { .. }) => {
+                    SaveSnapshotOutcome {
+                        transient_message: Some(
+                            "Directory operation preview is stale; run :write again before :write!"
+                                .to_string(),
+                        ),
+                        wrote: false,
+                    }
+                }
+                Err(DirectoryBufferPreviewConfirmationError::Validation(errors)) => {
+                    log::debug!(
+                        "[main][dired][writable] confirmed directory operation plan validation failed before apply: errors={:?}",
+                        errors
+                    );
+                    SaveSnapshotOutcome {
+                        transient_message: Some(format!(
+                            "Directory operation plan failed validation: {} error(s)",
+                            errors.len()
+                        )),
+                        wrote: false,
+                    }
+                }
+            };
+        }
+        return match session_state.prepare_directory_buffer_operation_preview(buffer_contents) {
+            Ok(preview) => {
+                let prompt = session_state.directory_buffer_operation_prompt();
+                log::info!(
+                    "[main][dired][writable] prepared directory operation preview instead of regular save: root_path={}, preview_id={}, operations={}, high_risk={}",
+                    preview.root_path.display(),
+                    preview.id,
+                    preview.operation_count,
+                    preview.high_risk_count
+                );
+                SaveSnapshotOutcome {
+                    transient_message: Some(prompt.map_or_else(
+                        || {
+                            format!(
+                                "Directory operation preview prepared: {} operation(s), high_risk={}, preview_id={}",
+                                preview.operation_count, preview.high_risk_count, preview.id
+                            )
+                        },
+                        |prompt| prompt.status_line,
+                    )),
+                    wrote: false,
+                }
+            }
+            Err(errors) => {
+                log::debug!(
+                    "[main][dired][writable] directory operation plan validation failed before save: errors={:?}",
+                    errors
+                );
+                SaveSnapshotOutcome {
+                    transient_message: Some(format!(
+                        "Directory operation plan failed validation: {} error(s)",
+                        errors.len()
+                    )),
+                    wrote: false,
+                }
+            }
+        };
+    }
+
     match build_save_request_for_host_write(buffer_contents, session_state, path_override) {
         Ok(req) => match write_to_path(&req) {
             SaveResult::Saved => {
@@ -1768,12 +2170,477 @@ fn save_snapshot_result_with_path_override(
     }
 }
 
+fn apply_directory_buffer_operation_plan(
+    session_state: &mut saya::editor_session::EditorSessionState,
+    plan: &saya::editor_session::DirectoryBufferOperationPlan,
+) -> Result<usize, RuntimeFilerError> {
+    log::info!(
+        "[main][dired][writable] applying confirmed directory operation plan through filer operations: root_path={}, operations={}",
+        plan.root_path.display(),
+        plan.operations.len()
+    );
+    let transaction = build_directory_buffer_operation_transaction(plan)?;
+    match execute_directory_buffer_operation_transaction(&transaction) {
+        Ok(_report) => {
+            for (from, to) in &transaction.rename_marks {
+                session_state.record_directory_entry_rename(from, to);
+            }
+            session_state.replace_target_path(plan.root_path.clone());
+            Ok(plan.operations.len())
+        }
+        Err(error) => {
+            session_state.replace_target_path(plan.root_path.clone());
+            Err(error)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryBufferOperationTransaction {
+    steps: Vec<DirectoryBufferOperationTransactionStep>,
+    rename_marks: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+#[derive(Debug, Clone)]
+struct DirectoryBufferOperationTransactionStep {
+    operation: RuntimeFilerOperation,
+    rollback: Option<RuntimeFilerOperation>,
+    rollback_manual_recovery_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryBufferOperationTransactionReport {
+    successful: usize,
+    failed: usize,
+    rollback_succeeded: usize,
+    rollback_failed: usize,
+    manual_recovery_required: usize,
+}
+
+fn build_directory_buffer_operation_transaction(
+    plan: &saya::editor_session::DirectoryBufferOperationPlan,
+) -> Result<DirectoryBufferOperationTransaction, RuntimeFilerError> {
+    validate_directory_buffer_operation_conflicts(plan)?;
+    let mut steps = Vec::new();
+    let mut rename_second_phase = Vec::new();
+    let mut rename_marks = Vec::new();
+
+    for (index, operation) in plan
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            DirectoryBufferPlannedOperation::Rename { from, to, .. } => Some((from, to)),
+            _ => None,
+        })
+        .enumerate()
+    {
+        let temp_path = unique_directory_transaction_temp_path(&plan.root_path, index);
+        steps.push(DirectoryBufferOperationTransactionStep {
+            operation: RuntimeFilerOperation::Rename {
+                from: operation.0.clone(),
+                to: temp_path.clone(),
+            },
+            rollback: Some(RuntimeFilerOperation::Rename {
+                from: temp_path.clone(),
+                to: operation.0.clone(),
+            }),
+            rollback_manual_recovery_required: false,
+        });
+        rename_second_phase.push(DirectoryBufferOperationTransactionStep {
+            operation: RuntimeFilerOperation::Rename {
+                from: temp_path,
+                to: operation.1.clone(),
+            },
+            rollback: Some(RuntimeFilerOperation::Rename {
+                from: operation.1.clone(),
+                to: operation.0.clone(),
+            }),
+            rollback_manual_recovery_required: false,
+        });
+        rename_marks.push((operation.0.clone(), operation.1.clone()));
+    }
+    steps.extend(rename_second_phase);
+
+    for operation in plan.operations.iter().filter(|operation| {
+        matches!(
+            operation,
+            DirectoryBufferPlannedOperation::CreateDirectory { .. }
+        )
+    }) {
+        if let DirectoryBufferPlannedOperation::CreateDirectory { path, .. } = operation {
+            steps.push(DirectoryBufferOperationTransactionStep {
+                operation: RuntimeFilerOperation::CreateDirectory { path: path.clone() },
+                rollback: None,
+                rollback_manual_recovery_required: true,
+            });
+        }
+    }
+
+    for operation in plan.operations.iter().filter(|operation| {
+        matches!(
+            operation,
+            DirectoryBufferPlannedOperation::CreateFile { .. }
+        )
+    }) {
+        if let DirectoryBufferPlannedOperation::CreateFile { path, .. } = operation {
+            steps.push(DirectoryBufferOperationTransactionStep {
+                operation: RuntimeFilerOperation::CreateFile { path: path.clone() },
+                rollback: None,
+                rollback_manual_recovery_required: true,
+            });
+        }
+    }
+
+    for operation in plan
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation, DirectoryBufferPlannedOperation::Delete { .. }))
+    {
+        if let DirectoryBufferPlannedOperation::Delete { path, .. } = operation {
+            steps.push(DirectoryBufferOperationTransactionStep {
+                operation: RuntimeFilerOperation::Delete {
+                    path: path.clone(),
+                    confirm: true,
+                    recursive: false,
+                    trash: false,
+                },
+                rollback: None,
+                rollback_manual_recovery_required: true,
+            });
+        }
+    }
+
+    log::debug!(
+        "[main][dired][transaction] built operation transaction: root_path={}, planned_operations={}, executable_steps={}, rename_count={}",
+        plan.root_path.display(),
+        plan.operations.len(),
+        steps.len(),
+        rename_marks.len()
+    );
+    Ok(DirectoryBufferOperationTransaction {
+        steps,
+        rename_marks,
+    })
+}
+
+fn validate_directory_buffer_operation_conflicts(
+    plan: &saya::editor_session::DirectoryBufferOperationPlan,
+) -> Result<(), RuntimeFilerError> {
+    let rename_sources = plan
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            DirectoryBufferPlannedOperation::Rename { from, .. } => Some(from.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for operation in &plan.operations {
+        match operation {
+            DirectoryBufferPlannedOperation::CreateFile { path, .. } => {
+                validate_directory_transaction_parent_permission(
+                    RuntimeFilerOperationKind::CreateFile,
+                    path,
+                    None,
+                )?;
+                if path.exists() && !rename_sources.contains(path) {
+                    return Err(directory_transaction_conflict_error(
+                        RuntimeFilerOperationKind::CreateFile,
+                        path,
+                        None,
+                        RuntimeFilerErrorKind::AlreadyExists,
+                        "operation transaction conflict check failed: target path already exists",
+                    ));
+                }
+            }
+            DirectoryBufferPlannedOperation::CreateDirectory { path, .. } => {
+                validate_directory_transaction_parent_permission(
+                    RuntimeFilerOperationKind::CreateDirectory,
+                    path,
+                    None,
+                )?;
+                if path.exists() && !rename_sources.contains(path) {
+                    return Err(directory_transaction_conflict_error(
+                        RuntimeFilerOperationKind::CreateDirectory,
+                        path,
+                        None,
+                        RuntimeFilerErrorKind::AlreadyExists,
+                        "operation transaction conflict check failed: target path already exists",
+                    ));
+                }
+            }
+            DirectoryBufferPlannedOperation::Rename { from, to, kind, .. } => {
+                validate_directory_transaction_entry_kind(
+                    RuntimeFilerOperationKind::Rename,
+                    from,
+                    *kind,
+                )?;
+                validate_directory_transaction_parent_permission(
+                    RuntimeFilerOperationKind::Rename,
+                    from,
+                    Some(to),
+                )?;
+                if !from.exists() {
+                    return Err(directory_transaction_conflict_error(
+                        RuntimeFilerOperationKind::Rename,
+                        from,
+                        Some(to),
+                        RuntimeFilerErrorKind::NotFound,
+                        "operation transaction conflict check failed: source path is missing",
+                    ));
+                }
+                if to.exists() && !rename_sources.contains(to) {
+                    return Err(directory_transaction_conflict_error(
+                        RuntimeFilerOperationKind::Rename,
+                        from,
+                        Some(to),
+                        RuntimeFilerErrorKind::AlreadyExists,
+                        "operation transaction conflict check failed: target path already exists",
+                    ));
+                }
+            }
+            DirectoryBufferPlannedOperation::Delete { path, kind, .. } => {
+                validate_directory_transaction_entry_kind(
+                    RuntimeFilerOperationKind::Delete,
+                    path,
+                    *kind,
+                )?;
+                validate_directory_transaction_parent_permission(
+                    RuntimeFilerOperationKind::Delete,
+                    path,
+                    None,
+                )?;
+                if !path.exists() {
+                    return Err(directory_transaction_conflict_error(
+                        RuntimeFilerOperationKind::Delete,
+                        path,
+                        None,
+                        RuntimeFilerErrorKind::NotFound,
+                        "operation transaction conflict check failed: source path is missing",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_directory_transaction_parent_permission(
+    operation: RuntimeFilerOperationKind,
+    path: &std::path::Path,
+    target_path: Option<&std::path::PathBuf>,
+) -> Result<(), RuntimeFilerError> {
+    let mut parents = Vec::new();
+    if let Some(parent) = path.parent() {
+        parents.push(parent.to_path_buf());
+    }
+    if let Some(target_parent) = target_path.and_then(|target_path| target_path.parent()) {
+        parents.push(target_parent.to_path_buf());
+    }
+    for parent in parents {
+        if !directory_transaction_path_has_write_permission(&parent) {
+            return Err(directory_transaction_conflict_error(
+                operation,
+                path,
+                target_path,
+                RuntimeFilerErrorKind::PermissionDenied,
+                "operation transaction conflict check failed: parent directory is not writable",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn directory_transaction_path_has_write_permission(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.permissions().mode() & 0o222 != 0)
+        .unwrap_or(true)
+}
+
+#[cfg(not(unix))]
+fn directory_transaction_path_has_write_permission(path: &std::path::Path) -> bool {
+    path.metadata()
+        .map(|metadata| !metadata.permissions().readonly())
+        .unwrap_or(true)
+}
+
+fn validate_directory_transaction_entry_kind(
+    operation: RuntimeFilerOperationKind,
+    path: &std::path::Path,
+    kind: saya::editor_session::DirectoryBufferEntryKind,
+) -> Result<(), RuntimeFilerError> {
+    if kind == saya::editor_session::DirectoryBufferEntryKind::Other {
+        return Err(directory_transaction_conflict_error(
+            operation,
+            path,
+            None,
+            RuntimeFilerErrorKind::Unsupported,
+            "operation transaction conflict check failed: special file entries are unsupported",
+        ));
+    }
+    Ok(())
+}
+
+fn execute_directory_buffer_operation_transaction(
+    transaction: &DirectoryBufferOperationTransaction,
+) -> Result<DirectoryBufferOperationTransactionReport, RuntimeFilerError> {
+    let mut report = DirectoryBufferOperationTransactionReport {
+        successful: 0,
+        failed: 0,
+        rollback_succeeded: 0,
+        rollback_failed: 0,
+        manual_recovery_required: 0,
+    };
+    let mut applied_steps = Vec::new();
+    for (index, step) in transaction.steps.iter().enumerate() {
+        log::info!(
+            "[main][dired][transaction] executing transaction step: index={}, operation={:?}",
+            index,
+            step.operation
+        );
+        match saya::saya_live_runtime::execute_local_filer_operation(step.operation.clone()) {
+            Ok(_) => {
+                report.successful += 1;
+                applied_steps.push(step);
+            }
+            Err(error) => {
+                report.failed += 1;
+                log::debug!(
+                    "[main][dired][transaction] transaction step failed: index={}, error={:?}",
+                    index,
+                    error
+                );
+                for applied_step in applied_steps.into_iter().rev() {
+                    if let Some(rollback) = &applied_step.rollback {
+                        match saya::saya_live_runtime::execute_local_filer_operation(
+                            rollback.clone(),
+                        ) {
+                            Ok(_) => report.rollback_succeeded += 1,
+                            Err(rollback_error) => {
+                                report.rollback_failed += 1;
+                                report.manual_recovery_required += 1;
+                                log::debug!(
+                                    "[main][dired][transaction] transaction rollback failed: rollback={:?}, error={:?}",
+                                    rollback,
+                                    rollback_error
+                                );
+                            }
+                        }
+                    } else if applied_step.rollback_manual_recovery_required {
+                        report.manual_recovery_required += 1;
+                    }
+                }
+                return Err(directory_transaction_report_error(report, error));
+            }
+        }
+    }
+    log::info!(
+        "[main][dired][transaction] transaction completed: successful={}, failed={}, rollback_succeeded={}, rollback_failed={}, manual_recovery_required={}",
+        report.successful,
+        report.failed,
+        report.rollback_succeeded,
+        report.rollback_failed,
+        report.manual_recovery_required
+    );
+    Ok(report)
+}
+
+fn directory_transaction_report_error(
+    report: DirectoryBufferOperationTransactionReport,
+    error: RuntimeFilerError,
+) -> RuntimeFilerError {
+    let (operation, path, target_path, kind, cause) = match error {
+        RuntimeFilerError::OperationFailed {
+            operation,
+            path,
+            target_path,
+            kind,
+            message,
+        } => (operation, path, target_path, kind, message),
+        RuntimeFilerError::ReadFailed { path, message } => (
+            RuntimeFilerOperationKind::BulkDelete,
+            path,
+            None,
+            RuntimeFilerErrorKind::Io,
+            message,
+        ),
+    };
+    let message = format!(
+        "directory operation transaction failed: successful={}, failed={}, rollback_succeeded={}, rollback_failed={}, manual_recovery_required={}, cause={}",
+        report.successful,
+        report.failed,
+        report.rollback_succeeded,
+        report.rollback_failed,
+        report.manual_recovery_required,
+        cause
+    );
+    log::debug!(
+        "[main][dired][transaction] transaction failed report: operation={:?}, path={}, target_path={:?}, kind={:?}, {}",
+        operation,
+        path.display(),
+        target_path.as_ref().map(|path| path.display().to_string()),
+        kind,
+        message
+    );
+    RuntimeFilerError::OperationFailed {
+        operation,
+        path,
+        target_path,
+        kind,
+        message,
+    }
+}
+
+fn directory_transaction_conflict_error(
+    operation: RuntimeFilerOperationKind,
+    path: &std::path::Path,
+    target_path: Option<&std::path::PathBuf>,
+    kind: RuntimeFilerErrorKind,
+    message: &str,
+) -> RuntimeFilerError {
+    log::debug!(
+        "[main][dired][transaction] conflict check failed: operation={:?}, path={}, target_path={:?}, kind={:?}, message={}",
+        operation,
+        path.display(),
+        target_path.map(|path| path.display().to_string()),
+        kind,
+        message
+    );
+    RuntimeFilerError::OperationFailed {
+        operation,
+        path: path.to_path_buf(),
+        target_path: target_path.cloned(),
+        kind,
+        message: message.to_string(),
+    }
+}
+
+fn unique_directory_transaction_temp_path(
+    root_path: &std::path::Path,
+    index: usize,
+) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    for attempt in 0..1000 {
+        let candidate = root_path.join(format!(".saya-dired-txn-{nanos}-{index}-{attempt}.tmp"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    root_path.join(format!(".saya-dired-txn-{nanos}-{index}-fallback.tmp"))
+}
+
 fn build_save_request_for_host_write(
     buffer_contents: &str,
     session_state: &saya::editor_session::EditorSessionState,
     path_override: Option<&str>,
 ) -> Result<SaveRequest, SaveRequestError> {
-    let Some(path_override) = path_override.filter(|path| !path.is_empty()) else {
+    let Some(path_override) = effective_host_write_path_override(session_state, path_override)
+    else {
         return session_state.build_save_request(buffer_contents);
     };
 
@@ -1787,10 +2654,40 @@ fn build_save_request_for_host_write(
     })
 }
 
+fn effective_host_write_path_override<'a>(
+    session_state: &saya::editor_session::EditorSessionState,
+    path_override: Option<&'a str>,
+) -> Option<&'a str> {
+    let path_override = path_override.filter(|path| !path.is_empty())?;
+    let Some(target_path) = session_state.target_path() else {
+        return Some(path_override);
+    };
+    let override_path = path_override
+        .strip_prefix("file://")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(path_override));
+    let same_target = override_path == target_path.as_path()
+        || override_path
+            .canonicalize()
+            .ok()
+            .zip(target_path.canonicalize().ok())
+            .is_some_and(|(left, right)| left == right);
+    if same_target {
+        log::debug!(
+            "[main] treating host write path as current target instead of explicit override: path={}",
+            target_path.display()
+        );
+        None
+    } else {
+        Some(path_override)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MainHostCommand {
     Save,
     SaveThenQuit,
+    CancelDirectoryPreview,
     Edit(std::path::PathBuf),
 }
 
@@ -1799,6 +2696,7 @@ fn parse_main_host_command(command: &str) -> Option<MainHostCommand> {
     match normalized.as_str() {
         "w" | "write" => Some(MainHostCommand::Save),
         "wq" | "x" | "xit" | "exit" => Some(MainHostCommand::SaveThenQuit),
+        "dired-cancel" | "diredcancel" => Some(MainHostCommand::CancelDirectoryPreview),
         _ => parse_runtime_edit_command(&normalized).map(MainHostCommand::Edit),
     }
 }
@@ -1924,15 +2822,21 @@ fn execute_runtime_host_command_through_core(
 
         for directive in directives {
             match directive {
-                NormalizedHostDirective::Write { path, .. } => {
+                NormalizedHostDirective::Write { path, force, .. } => {
                     let snapshot = outcome.core_bridge.snapshot();
-                    let save_outcome = save_snapshot_result_with_path_override(
+                    let save_outcome = save_snapshot_result_with_confirmation(
                         &snapshot.text,
                         session_state,
                         Some(path.as_str()),
+                        force,
                     );
                     effect.transient_message = save_outcome.transient_message;
                     if save_outcome.wrote {
+                        refresh_directory_buffer_after_confirmed_save(
+                            outcome,
+                            session_state,
+                            &mut effect.transient_message,
+                        );
                         let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
                         effect
                             .follow_up_events
@@ -1960,6 +2864,23 @@ fn execute_runtime_host_command_through_core(
                         trace.sequence,
                         request
                     );
+                    if let Some(save_outcome) = handle_directory_buffer_vfs_save_request(
+                        outcome,
+                        session_state,
+                        request.clone(),
+                        &mut effect.transient_message,
+                    ) {
+                        if save_outcome.wrote {
+                            let mut host_session =
+                                MainRuntimeHostSession::new(outcome, session_state);
+                            effect
+                                .follow_up_events
+                                .push(RuntimeEventMapper::buffer_write_post(
+                                    host_session.current_buffer_snapshot(),
+                                ));
+                        }
+                        continue;
+                    }
                     if let Err(error) =
                         host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
                     {
@@ -2032,6 +2953,18 @@ fn execute_runtime_host_command(
             );
             execute_runtime_host_command_through_core(core_command, outcome, session_state)
         }
+        Some(MainHostCommand::CancelDirectoryPreview) => {
+            let mut effect = RuntimeCommandEffect::default();
+            effect.transient_message =
+                match session_state.cancel_directory_buffer_operation_preview() {
+                    Some(preview) => Some(format!(
+                        "Directory operation preview cancelled: {} operation(s), preview_id={}",
+                        preview.operation_count, preview.id
+                    )),
+                    None => Some("No directory operation preview to cancel".to_string()),
+                };
+            Ok(effect)
+        }
         Some(MainHostCommand::Edit(path)) => {
             let ex_command = format!(":edit {}", escape_runtime_edit_path(&path));
             log::debug!(
@@ -2042,6 +2975,18 @@ fn execute_runtime_host_command(
             let effect =
                 execute_runtime_host_command_through_core(&ex_command, outcome, session_state)?;
             session_state.replace_target_path(path.clone());
+            if let Some(directory_buffer) = session_state
+                .directory_buffer()
+                .filter(|directory_buffer| directory_buffer.root_path == path)
+            {
+                outcome
+                    .core_bridge
+                    .replace_buffer_text(&directory_buffer.display_text)
+                    .map_err(|error| RuntimeCommandError::CommandFailed {
+                        name: command.to_string(),
+                        message: format!("failed to project directory buffer listing: {error:?}"),
+                    })?;
+            }
             outcome.target_path = Some(path);
             Ok(effect)
         }
@@ -2066,6 +3011,9 @@ fn save_error_message(error: &SaveRequestError) -> String {
     match error {
         SaveRequestError::NoTargetPath => "No file name to save".to_string(),
         SaveRequestError::ReadOnly => "Read-only option is set; add ! to override".to_string(),
+        SaveRequestError::DirectoryBuffer => {
+            "Directory listings are not saved as regular files".to_string()
+        }
     }
 }
 
@@ -2387,6 +3335,32 @@ fn startup_keymap_action_for_input(
         .map(|keymap| keymap.action.clone())
 }
 
+fn startup_keymap_action_for_snapshot_input(
+    keymaps: &[saya::bootstrap::StartupKeymapSnapshot],
+    snapshot: &vim_core_rs::CoreSnapshot,
+    key: &KeyInput,
+) -> Option<StartupKeymapAction> {
+    let mode = startup_keymap_mode_from_core_mode(snapshot.mode)?;
+    let key_lhs = startup_keymap_lhs_from_input(key)?;
+    if snapshot.pending_input.pending_keys.is_empty() {
+        return startup_keymap_action_for_input(keymaps, snapshot.mode, key);
+    }
+    let pending_lhs = (!snapshot.pending_input.pending_keys.is_empty())
+        .then(|| format!("{}{}", snapshot.pending_input.pending_keys, key_lhs));
+    let direct_lhs = startup_keymap_lhs_from_input(key)?;
+
+    [pending_lhs.as_deref(), Some(direct_lhs.as_str())]
+        .into_iter()
+        .flatten()
+        .find_map(|lhs| {
+            keymaps
+                .iter()
+                .rev()
+                .find(|keymap| keymap.mode == mode && keymap.lhs == lhs)
+                .map(|keymap| keymap.action.clone())
+        })
+}
+
 fn startup_keymap_mode_from_core_mode(mode: CoreMode) -> Option<StartupKeymapMode> {
     match mode {
         CoreMode::Insert => Some(StartupKeymapMode::Insert),
@@ -2441,6 +3415,8 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             id: active_buffer_id,
             path: self.session_state.target_path().cloned(),
             line_count: buffer_line_count(&snapshot.text),
+            cursor_row: snapshot.cursor_row,
+            current_line: current_line_from_text(&snapshot.text, snapshot.cursor_row),
         }
     }
 
@@ -2460,6 +3436,97 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
         }
     }
 
+    fn current_filer_entry(
+        &mut self,
+    ) -> Result<Option<RuntimeFilerCurrentEntry>, saya::saya_live_runtime::RuntimeFilerError> {
+        let snapshot = self.outcome.core_bridge.snapshot();
+        let Some(directory_buffer) = self.session_state.directory_buffer() else {
+            log::debug!(
+                "[main][runtime] current filer entry requested outside directory buffer: target_path={:?}",
+                self.session_state.target_path()
+            );
+            return Ok(None);
+        };
+        let Some(entry) = self
+            .session_state
+            .current_directory_entry(snapshot.cursor_row)
+        else {
+            log::debug!(
+                "[main][runtime] current filer entry missing for cursor row: root_path={}, cursor_row={}, entries={}",
+                directory_buffer.root_path.display(),
+                snapshot.cursor_row,
+                directory_buffer.entries.len()
+            );
+            return Ok(None);
+        };
+        log::debug!(
+            "[main][runtime] current filer entry resolved: root_path={}, cursor_row={}, entry_id={}, name={}, path={}, kind={:?}",
+            directory_buffer.root_path.display(),
+            snapshot.cursor_row,
+            entry.id,
+            entry.name,
+            entry.path.display(),
+            entry.kind
+        );
+        Ok(Some(RuntimeFilerCurrentEntry {
+            id: entry.id,
+            name: entry.name.clone(),
+            path: entry.path.to_string_lossy().into_owned(),
+            kind: runtime_filer_kind_from_directory_entry(entry.kind),
+            root_path: directory_buffer.root_path.to_string_lossy().into_owned(),
+            display_text: entry.display_text.clone(),
+        }))
+    }
+
+    fn list_filer_entries(
+        &mut self,
+        path: std::path::PathBuf,
+        options: RuntimeFilerListOptions,
+    ) -> Result<Vec<RuntimeFilerEntry>, RuntimeFilerError> {
+        log::debug!(
+            "[main][runtime][filer] list requested through host session: path={}, show_hidden={}, sort_by={:?}, filter={:?}",
+            path.display(),
+            options.show_hidden,
+            options.sort_by,
+            options.filter
+        );
+        let listing_options = directory_buffer_listing_options_from_runtime(options);
+        let entries = self
+            .session_state
+            .refresh_directory_buffer_listing(path.clone(), listing_options)
+            .map_err(|error| RuntimeFilerError::ReadFailed {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        let display_text = self
+            .session_state
+            .directory_buffer()
+            .map(|directory_buffer| directory_buffer.display_text.clone())
+            .unwrap_or_default();
+        self.outcome
+            .core_bridge
+            .replace_buffer_text(&display_text)
+            .map_err(|error| RuntimeFilerError::ReadFailed {
+                path: path.clone(),
+                message: format!("failed to project filer listing into buffer: {error:?}"),
+            })?;
+        self.outcome.target_path = Some(path.clone());
+        log::debug!(
+            "[main][runtime][filer] projected directory listing into active buffer: path={}, entries={}, text_len={}",
+            path.display(),
+            entries.len(),
+            display_text.len()
+        );
+        Ok(directory_entries_for_runtime_entries(entries))
+    }
+
+    fn execute_filer_operation(
+        &mut self,
+        operation: RuntimeFilerOperation,
+    ) -> Result<RuntimeFilerOperationReport, RuntimeFilerError> {
+        execute_runtime_filer_operation(operation, self.outcome, self.session_state)
+    }
+
     fn execute_host_command(
         &mut self,
         name: &str,
@@ -2469,6 +3536,301 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             name
         );
         execute_runtime_host_command(name, self.outcome, self.session_state)
+    }
+}
+
+fn directory_buffer_listing_options_from_runtime(
+    options: RuntimeFilerListOptions,
+) -> DirectoryBufferListingOptions {
+    DirectoryBufferListingOptions {
+        show_hidden: options.show_hidden,
+        sort_by: match options.sort_by {
+            RuntimeFilerSortKey::Name => DirectoryBufferSortKey::Name,
+            RuntimeFilerSortKey::Kind => DirectoryBufferSortKey::Kind,
+            RuntimeFilerSortKey::ModifiedTime => DirectoryBufferSortKey::ModifiedTime,
+            RuntimeFilerSortKey::Size => DirectoryBufferSortKey::Size,
+        },
+        filter: options.filter,
+    }
+}
+
+fn execute_runtime_filer_operation(
+    operation: RuntimeFilerOperation,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+) -> Result<RuntimeFilerOperationReport, RuntimeFilerError> {
+    let refresh_path = runtime_filer_operation_refresh_path(&operation)
+        .or_else(|| session_state.target_path().cloned());
+    log::info!(
+        "[main][runtime][filer] executing host-mediated filer operation: operation={:?}, refresh_path={:?}",
+        operation,
+        refresh_path
+    );
+
+    let operation_for_refresh = operation.clone();
+    let report = match operation {
+        RuntimeFilerOperation::Mark { path } => {
+            let entry = find_directory_entry_by_path(session_state, &path).ok_or_else(|| {
+                RuntimeFilerError::OperationFailed {
+                    operation: RuntimeFilerOperationKind::Mark,
+                    path: path.clone(),
+                    target_path: None,
+                    kind: RuntimeFilerErrorKind::NotFound,
+                    message: "mark target is not in the active directory buffer".to_string(),
+                }
+            })?;
+            session_state.mark_directory_entry(&entry);
+            RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::Mark,
+                path: path.to_string_lossy().into_owned(),
+                target_path: None,
+                entries: directory_entries_for_runtime(session_state.marked_directory_entries()),
+                preview_id: None,
+            }
+        }
+        RuntimeFilerOperation::Unmark { path } => {
+            let entry = find_directory_entry_by_path(session_state, &path).ok_or_else(|| {
+                RuntimeFilerError::OperationFailed {
+                    operation: RuntimeFilerOperationKind::Unmark,
+                    path: path.clone(),
+                    target_path: None,
+                    kind: RuntimeFilerErrorKind::NotFound,
+                    message: "unmark target is not in the active directory buffer".to_string(),
+                }
+            })?;
+            session_state.unmark_directory_entry(&entry);
+            RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::Unmark,
+                path: path.to_string_lossy().into_owned(),
+                target_path: None,
+                entries: directory_entries_for_runtime(session_state.marked_directory_entries()),
+                preview_id: None,
+            }
+        }
+        RuntimeFilerOperation::ClearMarks => {
+            session_state.clear_directory_marks();
+            RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::ClearMarks,
+                path: session_state
+                    .target_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                target_path: None,
+                entries: Vec::new(),
+                preview_id: None,
+            }
+        }
+        RuntimeFilerOperation::BulkDeletePreview => {
+            let entries = session_state.marked_directory_entries();
+            let preview_id = runtime_filer_bulk_delete_preview_id(&entries);
+            log::info!(
+                "[main][runtime][filer] prepared bulk delete preview: preview_id={}, entry_count={}",
+                preview_id,
+                entries.len()
+            );
+            RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::BulkDeletePreview,
+                path: session_state
+                    .target_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                target_path: None,
+                entries: directory_entries_for_runtime(entries),
+                preview_id: Some(preview_id),
+            }
+        }
+        RuntimeFilerOperation::BulkDelete {
+            preview_id,
+            confirm,
+        } => {
+            let entries = session_state.marked_directory_entries();
+            let expected_preview_id = runtime_filer_bulk_delete_preview_id(&entries);
+            if !confirm || preview_id.is_empty() || preview_id != expected_preview_id {
+                return Err(RuntimeFilerError::OperationFailed {
+                    operation: RuntimeFilerOperationKind::BulkDelete,
+                    path: session_state.target_path().cloned().unwrap_or_default(),
+                    target_path: None,
+                    kind: RuntimeFilerErrorKind::ConfirmationRequired,
+                    message: format!(
+                        "bulk delete requires explicit confirmation with the latest preview id: expected={expected_preview_id}, actual={preview_id}"
+                    ),
+                });
+            }
+            log::info!(
+                "[main][runtime][filer] executing confirmed bulk delete: preview_id={}, entry_count={}",
+                preview_id,
+                entries.len()
+            );
+            for entry in &entries {
+                saya::saya_live_runtime::execute_local_filer_operation(
+                    RuntimeFilerOperation::Delete {
+                        path: entry.path.clone(),
+                        confirm: true,
+                        recursive: false,
+                        trash: false,
+                    },
+                )?;
+            }
+            session_state.clear_directory_marks();
+            RuntimeFilerOperationReport {
+                operation: RuntimeFilerOperationKind::BulkDelete,
+                path: session_state
+                    .target_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                target_path: None,
+                entries: directory_entries_for_runtime(entries),
+                preview_id: Some(preview_id),
+            }
+        }
+        operation => {
+            let report = saya::saya_live_runtime::execute_local_filer_operation(operation)?;
+            if let RuntimeFilerOperation::Rename { from, to }
+            | RuntimeFilerOperation::Move { from, to } = &operation_for_refresh
+            {
+                session_state.record_directory_entry_rename(from, to);
+            }
+            report
+        }
+    };
+
+    if let Some(refresh_path) = refresh_path.filter(|path| path.is_dir()) {
+        let previous_row = outcome.core_bridge.snapshot().cursor_row;
+        log::debug!(
+            "[main][runtime][filer] refreshing directory buffer after operation: path={}, previous_cursor_row={}",
+            refresh_path.display(),
+            previous_row
+        );
+        execute_runtime_host_command(
+            &format!("edit {}", refresh_path.display()),
+            outcome,
+            session_state,
+        )
+        .map_err(|error| RuntimeFilerError::OperationFailed {
+            operation: report.operation,
+            path: std::path::PathBuf::from(report.path.clone()),
+            target_path: report.target_path.clone().map(std::path::PathBuf::from),
+            kind: RuntimeFilerErrorKind::Io,
+            message: format!("failed to refresh directory buffer: {error:?}"),
+        })?;
+        if let Some(directory_buffer) = session_state
+            .directory_buffer()
+            .filter(|directory_buffer| directory_buffer.root_path == refresh_path)
+        {
+            outcome
+                .core_bridge
+                .replace_buffer_text(&directory_buffer.display_text)
+                .map_err(|error| RuntimeFilerError::OperationFailed {
+                    operation: report.operation,
+                    path: std::path::PathBuf::from(report.path.clone()),
+                    target_path: report.target_path.clone().map(std::path::PathBuf::from),
+                    kind: RuntimeFilerErrorKind::Io,
+                    message: format!("failed to project refreshed directory buffer: {error:?}"),
+                })?;
+        }
+        let refreshed = outcome.core_bridge.snapshot();
+        log::debug!(
+            "[main][runtime][filer] refreshed directory buffer after operation: path={}, cursor_row_before={}, cursor_row_after={}, line_count={}",
+            refresh_path.display(),
+            previous_row,
+            refreshed.cursor_row,
+            buffer_line_count(&refreshed.text)
+        );
+    }
+
+    Ok(report)
+}
+
+fn find_directory_entry_by_path(
+    session_state: &saya::editor_session::EditorSessionState,
+    path: &std::path::Path,
+) -> Option<saya::editor_session::DirectoryBufferEntry> {
+    session_state
+        .directory_buffer()?
+        .entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .cloned()
+}
+
+fn directory_entries_for_runtime(
+    entries: Vec<saya::editor_session::DirectoryBufferEntry>,
+) -> Vec<RuntimeFilerCurrentEntry> {
+    entries
+        .into_iter()
+        .map(|entry| RuntimeFilerCurrentEntry {
+            id: entry.id,
+            name: entry.name,
+            path: entry.path.to_string_lossy().into_owned(),
+            kind: runtime_filer_kind_from_directory_entry(entry.kind),
+            root_path: entry
+                .path
+                .parent()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            display_text: entry.display_text,
+        })
+        .collect()
+}
+
+fn directory_entries_for_runtime_entries(
+    entries: Vec<saya::editor_session::DirectoryBufferEntry>,
+) -> Vec<RuntimeFilerEntry> {
+    entries
+        .into_iter()
+        .map(|entry| RuntimeFilerEntry {
+            name: entry.name,
+            path: entry.path.to_string_lossy().into_owned(),
+            kind: runtime_filer_kind_from_directory_entry(entry.kind),
+            display_text: entry.display_text,
+            size: entry.size,
+            modified_time_ms: entry.modified_time_ms,
+        })
+        .collect()
+}
+
+fn runtime_filer_bulk_delete_preview_id(
+    entries: &[saya::editor_session::DirectoryBufferEntry],
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    for entry in entries {
+        entry.id.hash(&mut hasher);
+        entry.path.hash(&mut hasher);
+        entry.kind.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn runtime_filer_operation_refresh_path(
+    operation: &RuntimeFilerOperation,
+) -> Option<std::path::PathBuf> {
+    match operation {
+        RuntimeFilerOperation::CreateFile { path }
+        | RuntimeFilerOperation::CreateDirectory { path }
+        | RuntimeFilerOperation::Delete { path, .. } => {
+            path.parent().map(|path| path.to_path_buf())
+        }
+        RuntimeFilerOperation::Rename { from, .. }
+        | RuntimeFilerOperation::Copy { from, .. }
+        | RuntimeFilerOperation::Move { from, .. } => from.parent().map(|path| path.to_path_buf()),
+        RuntimeFilerOperation::Mark { .. }
+        | RuntimeFilerOperation::Unmark { .. }
+        | RuntimeFilerOperation::ClearMarks
+        | RuntimeFilerOperation::BulkDeletePreview
+        | RuntimeFilerOperation::BulkDelete { .. } => None,
+    }
+}
+
+fn runtime_filer_kind_from_directory_entry(
+    kind: saya::editor_session::DirectoryBufferEntryKind,
+) -> RuntimeFilerEntryKind {
+    match kind {
+        saya::editor_session::DirectoryBufferEntryKind::Directory => {
+            RuntimeFilerEntryKind::Directory
+        }
+        saya::editor_session::DirectoryBufferEntryKind::File => RuntimeFilerEntryKind::File,
+        saya::editor_session::DirectoryBufferEntryKind::Symlink => RuntimeFilerEntryKind::Symlink,
+        saya::editor_session::DirectoryBufferEntryKind::Other => RuntimeFilerEntryKind::Other,
     }
 }
 
@@ -4036,6 +5398,921 @@ mod tests {
     }
 
     #[test]
+    fn directory_buffer_write_prepares_operation_preview_without_filesystem_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-plan");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        let renamed_path = root_path.join("renamed.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+
+        let save_outcome = save_snapshot_result("renamed.md\nbeta.md\n", &mut session_state);
+
+        let preview = session_state
+            .pending_directory_operation_preview()
+            .expect("plain write should prepare a preview");
+        assert_eq!(
+            save_outcome,
+            SaveSnapshotOutcome {
+                transient_message: Some(format!(
+                    "Apply 1 dired operation(s) (0 high-risk)? y/Enter=OK n/Esc=Cancel id={}",
+                    preview.id
+                )),
+                wrote: false,
+            }
+        );
+        assert!(alpha_path.exists(), "rename must not be applied in phase 7");
+        assert!(!renamed_path.exists(), "rename target is only planned");
+        assert!(beta_path.exists());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_write_reports_validation_error_without_filesystem_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-validation");
+        let alpha_path = root_path.join("alpha.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+
+        let save_outcome =
+            save_snapshot_result("alpha.md\n\n../escape.md\nalpha.md\n", &mut session_state);
+
+        assert_eq!(
+            save_outcome,
+            SaveSnapshotOutcome {
+                transient_message: Some(
+                    "Directory operation plan failed validation: 4 error(s)".to_string()
+                ),
+                wrote: false,
+            }
+        );
+        assert!(
+            alpha_path.exists(),
+            "invalid writable directory edits must not mutate the filesystem"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_plain_write_previews_delete_without_filesystem_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-preview-delete");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+
+        let save_outcome = save_snapshot_result("beta.md\n", &mut session_state);
+        let preview = session_state
+            .pending_directory_operation_preview()
+            .expect("plain write should prepare a pending preview");
+
+        assert_eq!(preview.operation_count, 1);
+        assert_eq!(preview.high_risk_count, 1);
+        assert_eq!(
+            save_outcome.transient_message,
+            Some(format!(
+                "Apply 1 dired operation(s) (1 high-risk)? y/Enter=OK n/Esc=Cancel id={}",
+                preview.id
+            ))
+        );
+        assert!(!save_outcome.wrote);
+        assert!(
+            session_state.directory_operation_confirmation_dialog_active(),
+            "plain :write should open the confirmation dialog"
+        );
+        assert!(alpha_path.exists(), "plain :write must not delete files");
+        assert!(beta_path.exists());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_write_confirmation_ok_applies_delete_and_refreshes_metadata() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-dialog-ok");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open directory listing");
+        outcome
+            .core_bridge
+            .dispatch_key("dd")
+            .expect("delete current listing line");
+
+        let preview_effect =
+            execute_runtime_host_command("write", &mut outcome, &mut session_state)
+                .expect("plain write should prepare confirmation dialog");
+        assert!(
+            preview_effect
+                .transient_message
+                .as_deref()
+                .is_some_and(|message| message.contains("y/Enter=OK n/Esc=Cancel")),
+            "plain write should ask for confirmation: {:?}",
+            preview_effect.transient_message
+        );
+        assert!(alpha_path.exists());
+
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let applied = handle_directory_operation_confirmation_key_without_runtime(
+            &KeyInput::Char('y'),
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+        );
+
+        assert!(applied, "y should confirm the pending directory write");
+        assert_eq!(
+            transient_msg,
+            Some("Directory operations applied: 1 operation(s)".to_string())
+        );
+        assert!(need_redraw);
+        assert!(!alpha_path.exists(), "OK should delete alpha");
+        assert!(beta_path.exists());
+        assert_eq!(outcome.core_bridge.snapshot().text, "beta.md\n");
+        assert!(
+            !session_state.directory_operation_confirmation_dialog_active(),
+            "confirmed dialog should be cleared"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_write_confirmation_cancel_keeps_filesystem_unchanged() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-dialog-cancel");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open directory listing");
+        outcome
+            .core_bridge
+            .dispatch_key("dd")
+            .expect("delete current listing line");
+        execute_runtime_host_command("write", &mut outcome, &mut session_state)
+            .expect("plain write should prepare confirmation dialog");
+
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let cancelled = handle_directory_operation_confirmation_key_without_runtime(
+            &KeyInput::Escape,
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+        );
+
+        assert!(cancelled, "Esc should cancel the pending directory write");
+        assert_eq!(
+            transient_msg,
+            Some("Directory operation cancelled; no filesystem changes were applied".to_string())
+        );
+        assert!(need_redraw);
+        assert!(alpha_path.exists(), "cancel must not delete alpha");
+        assert!(beta_path.exists());
+        assert!(
+            session_state
+                .pending_directory_operation_preview()
+                .is_none()
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_force_write_applies_latest_preview_and_refreshes_metadata() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-apply");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        let renamed_path = root_path.join("renamed.md");
+        let created_path = root_path.join("notes.md");
+        let created_dir_path = root_path.join("src");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+
+        let edited_text = "renamed.md\nnotes.md\nsrc/\n";
+        let preview_outcome = save_snapshot_result(edited_text, &mut session_state);
+        assert!(!preview_outcome.wrote);
+
+        let apply_outcome =
+            save_snapshot_result_with_confirmation(edited_text, &mut session_state, None, true);
+
+        assert_eq!(
+            apply_outcome.transient_message,
+            Some("Directory operations applied: 3 operation(s)".to_string())
+        );
+        assert!(apply_outcome.wrote);
+        assert!(!alpha_path.exists(), "rename source should be moved");
+        assert!(renamed_path.is_file(), "rename target should exist");
+        assert!(created_path.is_file(), "create file plan should be applied");
+        assert!(
+            created_dir_path.is_dir(),
+            "create directory plan should be applied"
+        );
+        assert!(
+            session_state
+                .pending_directory_operation_preview()
+                .is_none(),
+            "successful apply should clear the pending preview"
+        );
+        let entries = session_state
+            .directory_buffer()
+            .expect("directory metadata should remain active")
+            .entries
+            .iter()
+            .map(|entry| entry.display_text.clone())
+            .collect::<Vec<_>>();
+        assert!(entries.contains(&"renamed.md".to_string()));
+        assert!(entries.contains(&"notes.md".to_string()));
+        assert!(entries.contains(&"src/".to_string()));
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_force_write_applies_confirmed_delete_and_refreshes_metadata() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-apply-delete");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+
+        let preview_outcome = save_snapshot_result("beta.md\n", &mut session_state);
+        let preview = session_state
+            .pending_directory_operation_preview()
+            .expect("plain write should prepare delete preview");
+        assert!(!preview_outcome.wrote);
+        assert_eq!(preview.operation_count, 1);
+        assert_eq!(preview.high_risk_count, 1);
+        assert!(alpha_path.exists());
+
+        let apply_outcome =
+            save_snapshot_result_with_confirmation("beta.md\n", &mut session_state, None, true);
+
+        assert_eq!(
+            apply_outcome.transient_message,
+            Some("Directory operations applied: 1 operation(s)".to_string())
+        );
+        assert!(apply_outcome.wrote);
+        assert!(!alpha_path.exists(), "confirmed delete should remove alpha");
+        assert!(beta_path.is_file());
+        let entries = session_state
+            .directory_buffer()
+            .expect("directory metadata should refresh after delete")
+            .entries
+            .iter()
+            .map(|entry| entry.display_text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec!["beta.md".to_string()]);
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_write_host_action_previews_confirms_deletes_and_refreshes_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-host-action-delete");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        let gamma_path = root_path.join("gamma.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open directory listing");
+        assert_eq!(outcome.core_bridge.snapshot().text, "alpha.md\nbeta.md\n");
+
+        outcome
+            .core_bridge
+            .dispatch_key("dd")
+            .expect("delete current listing line");
+        let mut outcome_accumulator = MainOutcomeAccumulator::default();
+        let mut transient_msg = None;
+        let mut system_warning = None;
+        let mut need_redraw = false;
+        let mut host_action_runtime = HostActionRuntime::default();
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        outcome
+            .core_bridge
+            .apply_ex_command(":write")
+            .expect(":write should produce a preview host action");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        assert!(
+            !outcome_accumulator.host_directives.is_empty(),
+            ":write should emit a host directive before preview processing"
+        );
+
+        let preview_shutdown = process_pending_host_actions_without_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+        );
+        let preview = session_state
+            .pending_directory_operation_preview()
+            .unwrap_or_else(|| {
+                panic!(
+                    "plain :write should prepare a directory operation preview; transient={transient_msg:?}, target={:?}, directory_buffer_present={}",
+                    session_state.target_path(),
+                    session_state.directory_buffer().is_some()
+                )
+            });
+        assert_eq!(preview_shutdown, None);
+        assert_eq!(preview.operation_count, 1);
+        assert_eq!(preview.high_risk_count, 1);
+        assert!(
+            transient_msg
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Apply 1 dired operation")),
+            "plain :write should report the pending preview: {transient_msg:?}"
+        );
+        assert!(
+            alpha_path.exists(),
+            "unconfirmed preview must not delete files"
+        );
+        std::fs::write(&gamma_path, "gamma\n").expect("external file before confirmed apply");
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":write!")
+            .expect(":write! should produce a confirmed host action");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        let apply_shutdown = process_pending_host_actions_without_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+        );
+
+        assert_eq!(apply_shutdown, None);
+        assert_eq!(
+            transient_msg,
+            Some("Directory operations applied: 1 operation(s)".to_string())
+        );
+        assert!(
+            !alpha_path.exists(),
+            "confirmed :write! should delete alpha"
+        );
+        assert!(beta_path.exists());
+        assert!(gamma_path.exists());
+        assert_eq!(outcome.core_bridge.snapshot().text, "beta.md\ngamma.md\n");
+        assert!(
+            session_state
+                .pending_directory_operation_preview()
+                .is_none(),
+            "confirmed apply should clear the pending preview"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_force_write_rejects_stale_preview_without_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-stale-preview");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+
+        let preview_outcome = save_snapshot_result("beta.md\n", &mut session_state);
+        assert!(!preview_outcome.wrote);
+
+        let apply_outcome =
+            save_snapshot_result_with_confirmation("alpha.md\n", &mut session_state, None, true);
+
+        assert_eq!(
+            apply_outcome.transient_message,
+            Some(
+                "Directory operation preview is stale; run :write again before :write!".to_string()
+            )
+        );
+        assert!(!apply_outcome.wrote);
+        assert!(alpha_path.exists(), "stale preview must not delete files");
+        assert!(beta_path.exists());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_cancel_command_clears_preview_without_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-cancel-preview");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open directory listing");
+        outcome
+            .core_bridge
+            .dispatch_key("dd")
+            .expect("delete current listing line");
+
+        let preview_effect =
+            execute_runtime_host_command("write", &mut outcome, &mut session_state)
+                .expect("plain write should prepare preview");
+        let preview_id = session_state
+            .pending_directory_operation_preview()
+            .expect("preview should be pending")
+            .id
+            .clone();
+        assert!(
+            preview_effect
+                .transient_message
+                .as_deref()
+                .is_some_and(|message| message.contains("y/Enter=OK n/Esc=Cancel")),
+            "preview message should show the cancel command: {:?}",
+            preview_effect.transient_message
+        );
+
+        let cancel_effect =
+            execute_runtime_host_command("dired-cancel", &mut outcome, &mut session_state)
+                .expect("cancel command should be host-handled");
+
+        assert_eq!(
+            cancel_effect.transient_message,
+            Some(format!(
+                "Directory operation preview cancelled: 1 operation(s), preview_id={preview_id}"
+            ))
+        );
+        assert!(
+            session_state
+                .pending_directory_operation_preview()
+                .is_none()
+        );
+        assert!(alpha_path.exists(), "cancel must not delete alpha");
+        assert!(beta_path.exists());
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_transaction_applies_multiple_renames_without_collision() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-transaction-rename-collision");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        let gamma_path = root_path.join("gamma.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            root_path: root_path.clone(),
+            operations: vec![
+                DirectoryBufferPlannedOperation::Rename {
+                    from: alpha_path.clone(),
+                    to: beta_path.clone(),
+                    from_name: "alpha.md".to_string(),
+                    to_name: "beta.md".to_string(),
+                    kind: saya::editor_session::DirectoryBufferEntryKind::File,
+                },
+                DirectoryBufferPlannedOperation::Rename {
+                    from: beta_path.clone(),
+                    to: gamma_path.clone(),
+                    from_name: "beta.md".to_string(),
+                    to_name: "gamma.md".to_string(),
+                    kind: saya::editor_session::DirectoryBufferEntryKind::File,
+                },
+            ],
+        };
+
+        let applied_count = apply_directory_buffer_operation_plan(&mut session_state, &plan)
+            .expect("transaction should avoid rename target collisions");
+
+        assert_eq!(applied_count, 2);
+        assert!(!alpha_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&beta_path).expect("beta target"),
+            "alpha\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&gamma_path).expect("gamma target"),
+            "beta\n"
+        );
+        let entries = session_state
+            .directory_buffer()
+            .expect("directory metadata should refresh after transaction")
+            .entries
+            .iter()
+            .map(|entry| entry.display_text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec!["beta.md".to_string(), "gamma.md".to_string()]);
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_transaction_reports_partial_failure_and_refreshes_metadata() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-transaction-partial-failure");
+        let created_path = root_path.join("created.md");
+        let non_empty_dir = root_path.join("non-empty");
+        std::fs::create_dir_all(&non_empty_dir).expect("test directory");
+        std::fs::write(non_empty_dir.join("child.md"), "child\n").expect("child file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            root_path: root_path.clone(),
+            operations: vec![
+                DirectoryBufferPlannedOperation::CreateFile {
+                    path: created_path.clone(),
+                    name: "created.md".to_string(),
+                },
+                DirectoryBufferPlannedOperation::Delete {
+                    path: non_empty_dir.clone(),
+                    name: "non-empty".to_string(),
+                    kind: saya::editor_session::DirectoryBufferEntryKind::Directory,
+                },
+            ],
+        };
+
+        let error = apply_directory_buffer_operation_plan(&mut session_state, &plan)
+            .expect_err("non-empty directory delete should report a partial failure");
+
+        match error {
+            RuntimeFilerError::OperationFailed { message, .. } => {
+                assert!(
+                    message.contains("successful=1")
+                        && message.contains("failed=1")
+                        && message.contains("manual_recovery_required=1"),
+                    "partial failure report should include structured counts: {message}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(
+            created_path.is_file(),
+            "successful operation should be left in place and reported"
+        );
+        assert!(
+            non_empty_dir.is_dir(),
+            "failed delete should leave the original directory"
+        );
+        let entries = session_state
+            .directory_buffer()
+            .expect("directory metadata should refresh even after partial failure")
+            .entries
+            .iter()
+            .map(|entry| entry.display_text.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            entries.contains(&"created.md".to_string())
+                && entries.contains(&"non-empty/".to_string()),
+            "refreshed metadata should reflect the real filesystem: {entries:?}"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_confirm_failure_reports_recovery_hint_and_keeps_real_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-write-recovery-hint");
+        let non_empty_dir = root_path.join("non-empty");
+        std::fs::create_dir_all(&non_empty_dir).expect("test directory");
+        std::fs::write(non_empty_dir.join("child.md"), "child\n").expect("child file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+
+        let preview_outcome = save_snapshot_result("", &mut session_state);
+        assert!(!preview_outcome.wrote);
+
+        let apply_outcome =
+            save_snapshot_result_with_confirmation("", &mut session_state, None, true);
+
+        let message = apply_outcome
+            .transient_message
+            .expect("failed directory apply should report a message");
+        assert!(
+            message.contains("Directory operation apply failed")
+                && message.contains("Recovery:")
+                && message.contains("inspect the listing before retrying"),
+            "failed apply should include a recovery hint: {message}"
+        );
+        assert!(!apply_outcome.wrote);
+        assert!(
+            non_empty_dir.is_dir(),
+            "failed delete must not remove directory"
+        );
+        let entries = session_state
+            .directory_buffer()
+            .expect("directory metadata should remain active")
+            .entries
+            .iter()
+            .map(|entry| entry.display_text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec!["non-empty/".to_string()]);
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_transaction_rejects_existing_create_target_before_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-transaction-create-conflict");
+        let existing_path = root_path.join("existing.md");
+        let later_path = root_path.join("later.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&existing_path, "existing\n").expect("existing file");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            root_path: root_path.clone(),
+            operations: vec![
+                DirectoryBufferPlannedOperation::CreateFile {
+                    path: existing_path.clone(),
+                    name: "existing.md".to_string(),
+                },
+                DirectoryBufferPlannedOperation::CreateFile {
+                    path: later_path.clone(),
+                    name: "later.md".to_string(),
+                },
+            ],
+        };
+
+        let error = apply_directory_buffer_operation_plan(&mut session_state, &plan)
+            .expect_err("existing create target should be rejected before execution");
+
+        assert!(matches!(
+            error,
+            RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::AlreadyExists,
+                ..
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&existing_path).expect("existing file"),
+            "existing\n"
+        );
+        assert!(
+            !later_path.exists(),
+            "conflict check must stop before later operations mutate the filesystem"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_transaction_rejects_missing_rename_source_before_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-transaction-missing-source");
+        let missing_path = root_path.join("missing.md");
+        let renamed_path = root_path.join("renamed.md");
+        let later_path = root_path.join("later.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            root_path: root_path.clone(),
+            operations: vec![
+                DirectoryBufferPlannedOperation::Rename {
+                    from: missing_path.clone(),
+                    to: renamed_path.clone(),
+                    from_name: "missing.md".to_string(),
+                    to_name: "renamed.md".to_string(),
+                    kind: saya::editor_session::DirectoryBufferEntryKind::File,
+                },
+                DirectoryBufferPlannedOperation::CreateFile {
+                    path: later_path.clone(),
+                    name: "later.md".to_string(),
+                },
+            ],
+        };
+
+        let error = apply_directory_buffer_operation_plan(&mut session_state, &plan)
+            .expect_err("missing rename source should be rejected before execution");
+
+        assert!(matches!(
+            error,
+            RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::NotFound,
+                ..
+            }
+        ));
+        assert!(!renamed_path.exists());
+        assert!(
+            !later_path.exists(),
+            "conflict check must stop before later operations mutate the filesystem"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_transaction_rejects_special_file_entries_before_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-transaction-special-file");
+        let special_path = root_path.join("special");
+        let later_path = root_path.join("later.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&special_path, "special\n").expect("special placeholder");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            root_path: root_path.clone(),
+            operations: vec![
+                DirectoryBufferPlannedOperation::Delete {
+                    path: special_path.clone(),
+                    name: "special".to_string(),
+                    kind: saya::editor_session::DirectoryBufferEntryKind::Other,
+                },
+                DirectoryBufferPlannedOperation::CreateFile {
+                    path: later_path.clone(),
+                    name: "later.md".to_string(),
+                },
+            ],
+        };
+
+        let error = apply_directory_buffer_operation_plan(&mut session_state, &plan)
+            .expect_err("special entries should be rejected before execution");
+
+        assert!(matches!(
+            error,
+            RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::Unsupported,
+                ..
+            }
+        ));
+        assert!(special_path.is_file());
+        assert!(
+            !later_path.exists(),
+            "unsupported special entry must stop before later operations mutate the filesystem"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_buffer_transaction_rejects_unwritable_parent_before_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-transaction-permission-conflict");
+        let create_path = root_path.join("created.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        let original_permissions = std::fs::metadata(&root_path)
+            .expect("root metadata")
+            .permissions();
+        std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o555))
+            .expect("make root read-only");
+        let mut session_state =
+            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            root_path: root_path.clone(),
+            operations: vec![DirectoryBufferPlannedOperation::CreateFile {
+                path: create_path.clone(),
+                name: "created.md".to_string(),
+            }],
+        };
+
+        let error = apply_directory_buffer_operation_plan(&mut session_state, &plan)
+            .expect_err("unwritable parent should be rejected before execution");
+
+        assert!(matches!(
+            error,
+            RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::PermissionDenied,
+                ..
+            }
+        ));
+        assert!(!create_path.exists());
+
+        std::fs::set_permissions(&root_path, original_permissions).expect("restore permissions");
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
     fn parse_main_host_command_recognizes_save_and_quit_family_commands() {
         assert_eq!(parse_main_host_command(":w"), Some(MainHostCommand::Save));
         assert_eq!(
@@ -4077,6 +6354,135 @@ mod tests {
                 "dired.open".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn startup_keymap_action_for_input_resolves_pending_two_key_sequence() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let keymaps = vec![saya::bootstrap::StartupKeymapSnapshot {
+            mode: StartupKeymapMode::Normal,
+            lhs: "gr".to_string(),
+            action: StartupKeymapAction::RegisteredCommand("dired.refresh".to_string()),
+        }];
+        let mut bridge = saya::core_bridge::CoreBridge::new("README.md\nsrc/\n")
+            .expect("core bridge should initialize");
+
+        bridge.dispatch_key("g").expect("g should become pending");
+
+        assert_eq!(
+            startup_keymap_action_for_snapshot_input(
+                &keymaps,
+                &bridge.snapshot(),
+                &KeyInput::Char('r')
+            ),
+            Some(StartupKeymapAction::RegisteredCommand(
+                "dired.refresh".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn runtime_current_buffer_snapshot_includes_cursor_line_for_dired_navigation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("runtime-buffer-snapshot-current-line");
+        std::fs::write(&target_path, "README.md\nsrc/\n").expect("test file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path.clone()),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        outcome.core_bridge.dispatch_key("j").expect("move to src");
+        let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
+
+        let snapshot = host_session.current_buffer_snapshot();
+
+        assert_eq!(snapshot.cursor_row, 1);
+        assert_eq!(snapshot.current_line, "src/");
+        std::fs::remove_file(target_path).expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_current_filer_entry_uses_directory_metadata_not_rendered_text() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("runtime-current-filer-entry-root");
+        let nested_path = root_path.join("src");
+        let readme_path = root_path.join("README.md");
+        std::fs::create_dir_all(&nested_path).expect("nested directory");
+        std::fs::write(&readme_path, "hello\n").expect("readme file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        outcome.core_bridge.dispatch_key("j").expect("move to src");
+        outcome
+            .core_bridge
+            .dispatch_key("i")
+            .expect("enter insert mode");
+        outcome
+            .core_bridge
+            .dispatch_key("BROKEN-")
+            .expect("mutate rendered listing text");
+        outcome
+            .core_bridge
+            .dispatch_key("\x1b")
+            .expect("normal mode");
+        let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
+
+        let entry = host_session
+            .current_filer_entry()
+            .expect("directory metadata should resolve current entry")
+            .expect("cursor row should map to directory entry");
+
+        assert_eq!(entry.name, "src");
+        assert_eq!(entry.path, nested_path.to_string_lossy());
+        assert_eq!(
+            entry.kind,
+            saya::saya_live_runtime::RuntimeFilerEntryKind::Directory
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[test]
+    fn runtime_current_filer_entry_is_none_for_regular_file_buffer() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("runtime-current-filer-entry-file");
+        std::fs::write(&target_path, "hello\n").expect("test file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path.clone()),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
+
+        let entry = host_session
+            .current_filer_entry()
+            .expect("regular file should not fail metadata lookup");
+
+        assert_eq!(entry, None);
+        std::fs::remove_file(target_path).expect("cleanup file");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4154,6 +6560,1196 @@ mod tests {
         std::fs::remove_file(readme_path).expect("cleanup file");
         std::fs::remove_dir(nested_path).expect("cleanup nested directory");
         std::fs::remove_dir(root_path).expect("cleanup root directory");
+    }
+
+    fn dired_phase1_config_source() -> &'static str {
+        r#"
+            const trimTrailingSlash = (path) => path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+            const dirname = (path) => {
+                const normalized = trimTrailingSlash(path || ".");
+                const index = normalized.lastIndexOf("/");
+                if (index < 0) return ".";
+                return index === 0 ? "/" : normalized.slice(0, index);
+            };
+            saya.commands.register("dired.enter", async () => {
+                const entry = await saya.filer.currentEntry();
+                if (entry) {
+                    await saya.commands.execute(`edit ${entry.path}`);
+                }
+            });
+            saya.commands.register("dired.up", async () => {
+                const trimTrailingSlash = (path) => path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+                const dirname = (path) => {
+                    const normalized = trimTrailingSlash(path || ".");
+                    const index = normalized.lastIndexOf("/");
+                    if (index < 0) return ".";
+                    return index === 0 ? "/" : normalized.slice(0, index);
+                };
+                const buffer = await saya.buffer.current();
+                await saya.commands.execute(`edit ${dirname(buffer.path || ".")}`);
+            });
+            saya.commands.register("dired.refresh", async () => {
+                const buffer = await saya.buffer.current();
+                await saya.commands.execute(`edit ${buffer.path || "."}`);
+            });
+            saya.keymap.set("normal", "-", saya.commands.execute("dired.up"));
+            saya.keymap.set("normal", "<Enter>", saya.commands.execute("dired.enter"));
+            saya.keymap.set("normal", "gr", saya.commands.execute("dired.refresh"));
+        "#
+    }
+
+    fn dired_phase3_config_source() -> &'static str {
+        r#"
+            saya.commands.register("dired.createFile", async () => {
+                const buffer = await saya.buffer.current();
+                await saya.filer.createFile(`${buffer.path}/created.txt`);
+            });
+            saya.commands.register("dired.createDirectory", async () => {
+                const buffer = await saya.buffer.current();
+                await saya.filer.createDirectory(`${buffer.path}/created-dir`);
+            });
+            saya.commands.register("dired.rename", async () => {
+                const entry = await saya.filer.currentEntry();
+                await saya.filer.rename(entry.path, `${entry.rootPath}/renamed.txt`);
+            });
+            saya.commands.register("dired.deleteConfirmed", async () => {
+                const entry = await saya.filer.currentEntry();
+                await saya.filer.delete(entry.path, { confirm: true });
+            });
+            saya.commands.register("dired.deleteWithoutConfirm", async () => {
+                const entry = await saya.filer.currentEntry();
+                await saya.filer.delete(entry.path);
+            });
+            saya.commands.register("dired.createFileCollision", async () => {
+                const buffer = await saya.buffer.current();
+                await saya.filer.createFile(`${buffer.path}/existing.txt`);
+            });
+            saya.commands.register("dired.renameMissing", async () => {
+                const buffer = await saya.buffer.current();
+                await saya.filer.rename(`${buffer.path}/missing.txt`, `${buffer.path}/never.txt`);
+            });
+        "#
+    }
+
+    fn dired_phase4_config_source() -> &'static str {
+        r#"
+            saya.commands.register("dired.mark", async () => {
+                const entry = await saya.filer.currentEntry();
+                if (entry) {
+                    await saya.filer.mark(entry.path);
+                }
+            });
+            saya.commands.register("dired.unmark", async () => {
+                const entry = await saya.filer.currentEntry();
+                if (entry) {
+                    await saya.filer.unmark(entry.path);
+                }
+            });
+            saya.commands.register("dired.clearMarks", async () => {
+                await saya.filer.clearMarks();
+            });
+            saya.commands.register("dired.bulkDeletePreview", async () => {
+                await saya.filer.bulkDeletePreview();
+            });
+            saya.commands.register("dired.bulkDeleteWithoutPreview", async () => {
+                await saya.filer.bulkDelete({ confirm: true, previewId: "stale" });
+            });
+        "#
+    }
+
+    fn dired_phase12_config_source() -> &'static str {
+        r#"
+            saya.commands.register("dired.filterRust", async () => {
+                const buffer = await saya.buffer.current();
+                await saya.filer.list(buffer.path || ".", {
+                    showHidden: false,
+                    sortBy: "name",
+                    filter: "rs",
+                });
+            });
+            saya.commands.register("dired.createFilteredRust", async () => {
+                const buffer = await saya.buffer.current();
+                await saya.filer.createFile(`${buffer.path}/beta.rs`);
+            });
+        "#
+    }
+
+    async fn execute_runtime_command_for_test(
+        outcome: &mut saya::bootstrap::BootstrapOutcome,
+        session_state: &mut saya::editor_session::EditorSessionState,
+        runtime_session: &mut RuntimeSessionOwner,
+        command_name: &str,
+    ) {
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+        let shutdown = execute_startup_keymap_registered_command(
+            Some(runtime_session),
+            command_name,
+            outcome,
+            session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+        )
+        .await;
+
+        assert_eq!(shutdown, None);
+        assert_eq!(transient_msg, None);
+    }
+
+    async fn execute_runtime_command_outcome_for_test(
+        outcome: &mut saya::bootstrap::BootstrapOutcome,
+        session_state: &mut saya::editor_session::EditorSessionState,
+        runtime_session: &mut RuntimeSessionOwner,
+        command_name: &str,
+    ) -> (Option<String>, bool) {
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+        let shutdown = execute_startup_keymap_registered_command(
+            Some(runtime_session),
+            command_name,
+            outcome,
+            session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+        )
+        .await;
+
+        assert_eq!(shutdown, None);
+        assert!(runtime_presentation_intents.is_empty());
+        (transient_msg, need_redraw)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_enter_opens_directory_entry_from_current_line() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-enter-directory-root");
+        let nested_path = root_path.join("src");
+        let nested_file = nested_path.join("mod.rs");
+        let readme_path = root_path.join("README.md");
+        let config_path = unique_path("dired-enter-directory-init").with_extension("ts");
+        std::fs::create_dir_all(&nested_path).expect("nested directory");
+        std::fs::write(&nested_file, "mod\n").expect("nested file");
+        std::fs::write(&readme_path, "hello\n").expect("readme file");
+        std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        outcome.core_bridge.dispatch_key("j").expect("move to src");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.enter",
+        )
+        .await;
+
+        assert_eq!(outcome.target_path, Some(nested_path.clone()));
+        assert_eq!(outcome.core_bridge.snapshot().text, "mod.rs\n");
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_enter_opens_file_entry_from_current_line() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-enter-file-root");
+        let readme_path = root_path.join("README.md");
+        let config_path = unique_path("dired-enter-file-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&readme_path, "hello\n").expect("readme file");
+        std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.enter",
+        )
+        .await;
+
+        assert_eq!(outcome.target_path, Some(readme_path.clone()));
+        assert_eq!(outcome.core_bridge.snapshot().text, "hello\n");
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_up_opens_parent_directory() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-up-root");
+        let child_path = root_path.join("child");
+        let config_path = unique_path("dired-up-init").with_extension("ts");
+        std::fs::create_dir_all(&child_path).expect("child directory");
+        std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", child_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open child listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.up",
+        )
+        .await;
+
+        assert_eq!(outcome.target_path, Some(root_path.clone()));
+        assert!(outcome.core_bridge.snapshot().text.contains("child/\n"));
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_refresh_reloads_current_directory_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-refresh-root");
+        let readme_path = root_path.join("README.md");
+        let later_path = root_path.join("later.txt");
+        let config_path = unique_path("dired-refresh-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&readme_path, "hello\n").expect("readme file");
+        std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        assert!(!outcome.core_bridge.snapshot().text.contains("later.txt\n"));
+        std::fs::write(&later_path, "later\n").expect("later file");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.refresh",
+        )
+        .await;
+
+        assert!(outcome.core_bridge.snapshot().text.contains("later.txt\n"));
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_filter_projects_listing_and_current_entry_metadata() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-filter-root");
+        let alpha_path = root_path.join("alpha.rs");
+        let notes_path = root_path.join("notes.txt");
+        let hidden_path = root_path.join(".hidden.rs");
+        let config_path = unique_path("dired-filter-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&notes_path, "notes\n").expect("notes file");
+        std::fs::write(&hidden_path, "hidden\n").expect("hidden file");
+        std::fs::write(&config_path, dired_phase12_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.filterRust",
+        )
+        .await;
+
+        assert_eq!(outcome.core_bridge.snapshot().text, "alpha.rs\n");
+        let entry = MainRuntimeHostSession::new(&mut outcome, &mut session_state)
+            .current_filer_entry()
+            .expect("current filer entry should resolve")
+            .expect("filtered listing should keep a current entry");
+        assert_eq!(entry.name, "alpha.rs");
+        assert_eq!(entry.path, alpha_path.to_string_lossy());
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_filter_sort_and_hidden_state_survive_operation_refresh() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-filter-refresh-root");
+        let alpha_path = root_path.join("alpha.rs");
+        let notes_path = root_path.join("notes.txt");
+        let hidden_path = root_path.join(".hidden.rs");
+        let beta_path = root_path.join("beta.rs");
+        let config_path = unique_path("dired-filter-refresh-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&notes_path, "notes\n").expect("notes file");
+        std::fs::write(&hidden_path, "hidden\n").expect("hidden file");
+        std::fs::write(&config_path, dired_phase12_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.filterRust",
+        )
+        .await;
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.createFilteredRust",
+        )
+        .await;
+
+        assert!(beta_path.is_file());
+        assert_eq!(outcome.core_bridge.snapshot().text, "alpha.rs\nbeta.rs\n");
+        let entries = session_state
+            .directory_buffer()
+            .expect("directory metadata should remain active")
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec!["alpha.rs", "beta.rs"]);
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_create_file_refreshes_directory_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-create-file-root");
+        let created_path = root_path.join("created.txt");
+        let config_path = unique_path("dired-create-file-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.createFile",
+        )
+        .await;
+
+        assert!(created_path.is_file());
+        assert!(
+            outcome
+                .core_bridge
+                .snapshot()
+                .text
+                .contains("created.txt\n")
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_create_directory_refreshes_directory_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-create-directory-root");
+        let created_path = root_path.join("created-dir");
+        let config_path = unique_path("dired-create-directory-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.createDirectory",
+        )
+        .await;
+
+        assert!(created_path.is_dir());
+        assert!(
+            outcome
+                .core_bridge
+                .snapshot()
+                .text
+                .contains("created-dir/\n")
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_rename_refreshes_directory_listing_and_preserves_cursor_target() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-rename-root");
+        let source_path = root_path.join("source.txt");
+        let renamed_path = root_path.join("renamed.txt");
+        let config_path = unique_path("dired-rename-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&source_path, "hello\n").expect("source file");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.rename",
+        )
+        .await;
+
+        assert!(!source_path.exists());
+        assert!(renamed_path.is_file());
+        let snapshot = outcome.core_bridge.snapshot();
+        assert!(snapshot.text.contains("renamed.txt\n"));
+        assert_eq!(snapshot.cursor_row, 0);
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_copy_and_move_are_host_mediated_and_refresh_directory_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-copy-move-root");
+        let source_path = root_path.join("source.txt");
+        let copied_path = root_path.join("copied.txt");
+        let moved_path = root_path.join("moved.txt");
+        let directory_source_path = root_path.join("source-dir");
+        let directory_moved_path = root_path.join("moved-dir");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::create_dir_all(&directory_source_path).expect("source directory");
+        std::fs::write(&source_path, "hello\n").expect("source file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        let copy_report = execute_runtime_filer_operation(
+            RuntimeFilerOperation::Copy {
+                from: source_path.clone(),
+                to: copied_path.clone(),
+            },
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("copy should succeed through host-mediated filer operation");
+        let move_report = execute_runtime_filer_operation(
+            RuntimeFilerOperation::Move {
+                from: copied_path.clone(),
+                to: moved_path.clone(),
+            },
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("move should succeed through host-mediated filer operation");
+        let move_directory_report = execute_runtime_filer_operation(
+            RuntimeFilerOperation::Move {
+                from: directory_source_path.clone(),
+                to: directory_moved_path.clone(),
+            },
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("directory move should use the host rename path");
+
+        assert_eq!(copy_report.operation, RuntimeFilerOperationKind::Copy);
+        assert_eq!(move_report.operation, RuntimeFilerOperationKind::Move);
+        assert_eq!(
+            move_directory_report.operation,
+            RuntimeFilerOperationKind::Move
+        );
+        assert_eq!(
+            std::fs::read_to_string(&source_path).expect("source file remains after copy"),
+            "hello\n"
+        );
+        assert!(
+            !copied_path.exists(),
+            "move should remove the intermediate path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&moved_path).expect("moved file should exist"),
+            "hello\n"
+        );
+        assert!(!directory_source_path.exists());
+        assert!(directory_moved_path.is_dir());
+        let snapshot = outcome.core_bridge.snapshot();
+        assert!(snapshot.text.contains("source.txt\n"));
+        assert!(snapshot.text.contains("moved.txt\n"));
+        assert!(snapshot.text.contains("moved-dir/\n"));
+        assert!(!snapshot.text.contains("copied.txt\n"));
+
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_recursive_delete_and_trash_policy_fail_without_mutation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-recursive-delete-policy");
+        let non_empty_dir = root_path.join("non-empty");
+        let child_path = non_empty_dir.join("child.txt");
+        let copy_dir = root_path.join("copy-dir");
+        let copied_dir = root_path.join("copied-dir");
+        let trash_target = root_path.join("trash-me.txt");
+        std::fs::create_dir_all(&non_empty_dir).expect("nested directory");
+        std::fs::create_dir_all(&copy_dir).expect("copy directory");
+        std::fs::write(&child_path, "child\n").expect("child file");
+        std::fs::write(&trash_target, "trash\n").expect("trash target");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        let recursive_without_opt_in = execute_runtime_filer_operation(
+            RuntimeFilerOperation::Delete {
+                path: non_empty_dir.clone(),
+                confirm: true,
+                recursive: false,
+                trash: false,
+            },
+            &mut outcome,
+            &mut session_state,
+        );
+        assert!(
+            recursive_without_opt_in.is_err(),
+            "non-empty directory delete must not silently become recursive"
+        );
+        assert!(child_path.is_file());
+
+        let directory_copy = execute_runtime_filer_operation(
+            RuntimeFilerOperation::Copy {
+                from: copy_dir.clone(),
+                to: copied_dir.clone(),
+            },
+            &mut outcome,
+            &mut session_state,
+        );
+        assert!(matches!(
+            directory_copy,
+            Err(RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::Unsupported,
+                ..
+            })
+        ));
+        assert!(copy_dir.is_dir());
+        assert!(!copied_dir.exists());
+
+        let trash_request = execute_runtime_filer_operation(
+            RuntimeFilerOperation::Delete {
+                path: trash_target.clone(),
+                confirm: true,
+                recursive: false,
+                trash: true,
+            },
+            &mut outcome,
+            &mut session_state,
+        );
+        assert!(matches!(
+            trash_request,
+            Err(RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::Unsupported,
+                ..
+            })
+        ));
+        assert!(
+            trash_target.is_file(),
+            "unsupported trash backend must fail without deleting permanently"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_delete_confirmed_single_file_refreshes_directory_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-delete-file-root");
+        let delete_path = root_path.join("delete-me.txt");
+        let keep_path = root_path.join("keep.txt");
+        let config_path = unique_path("dired-delete-file-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&delete_path, "delete\n").expect("delete file");
+        std::fs::write(&keep_path, "keep\n").expect("keep file");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.deleteConfirmed",
+        )
+        .await;
+
+        assert!(!delete_path.exists());
+        assert!(keep_path.is_file());
+        let snapshot = outcome.core_bridge.snapshot();
+        assert!(!snapshot.text.contains("delete-me.txt\n"));
+        assert!(snapshot.text.contains("keep.txt\n"));
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_delete_confirmed_single_empty_directory_refreshes_directory_listing() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-delete-directory-root");
+        let delete_path = root_path.join("delete-dir");
+        let config_path = unique_path("dired-delete-directory-init").with_extension("ts");
+        std::fs::create_dir_all(&delete_path).expect("delete directory");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.deleteConfirmed",
+        )
+        .await;
+
+        assert!(!delete_path.exists());
+        assert!(
+            !outcome
+                .core_bridge
+                .snapshot()
+                .text
+                .contains("delete-dir/\n")
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_delete_requires_explicit_confirmation() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-delete-confirm-root");
+        let delete_path = root_path.join("delete-me.txt");
+        let config_path = unique_path("dired-delete-confirm-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&delete_path, "delete\n").expect("delete file");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        let (transient_msg, need_redraw) = execute_runtime_command_outcome_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.deleteWithoutConfirm",
+        )
+        .await;
+
+        assert!(delete_path.is_file());
+        let message = transient_msg.expect("delete without confirmation should surface an error");
+        assert!(
+            message.contains("confirmationRequired") && message.contains("delete-me.txt"),
+            "message should include structured error kind and path, got: {message}"
+        );
+        assert!(need_redraw);
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_mark_unmark_and_clear_are_available_from_typescript_commands() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-mark-runtime-root");
+        let alpha_path = root_path.join("alpha.txt");
+        let beta_path = root_path.join("beta.txt");
+        let config_path = unique_path("dired-mark-runtime-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        std::fs::write(&config_path, dired_phase4_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.mark",
+        )
+        .await;
+        assert_eq!(session_state.marked_directory_entries().len(), 1);
+
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.unmark",
+        )
+        .await;
+        assert!(session_state.marked_directory_entries().is_empty());
+
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.mark",
+        )
+        .await;
+        outcome.core_bridge.dispatch_key("j").expect("move to beta");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.mark",
+        )
+        .await;
+        assert_eq!(session_state.marked_directory_entries().len(), 2);
+
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.clearMarks",
+        )
+        .await;
+        assert!(session_state.marked_directory_entries().is_empty());
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_bulk_delete_requires_preview_id_and_confirmation_before_deleting_marks() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-bulk-delete-root");
+        let alpha_path = root_path.join("alpha.txt");
+        let beta_path = root_path.join("beta.txt");
+        let keep_path = root_path.join("keep.txt");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        std::fs::write(&keep_path, "keep\n").expect("keep file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_filer_operation(
+            RuntimeFilerOperation::Mark {
+                path: alpha_path.clone(),
+            },
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("mark alpha");
+        execute_runtime_filer_operation(
+            RuntimeFilerOperation::Mark {
+                path: beta_path.clone(),
+            },
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("mark beta");
+
+        let without_preview = execute_runtime_filer_operation(
+            RuntimeFilerOperation::BulkDelete {
+                preview_id: String::new(),
+                confirm: true,
+            },
+            &mut outcome,
+            &mut session_state,
+        );
+        assert!(matches!(
+            without_preview,
+            Err(RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::ConfirmationRequired,
+                ..
+            })
+        ));
+        assert!(alpha_path.is_file());
+        assert!(beta_path.is_file());
+
+        let preview = execute_runtime_filer_operation(
+            RuntimeFilerOperation::BulkDeletePreview,
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("preview should be available");
+        assert_eq!(
+            preview.operation,
+            RuntimeFilerOperationKind::BulkDeletePreview
+        );
+        assert_eq!(preview.entries.len(), 2);
+        let preview_id = preview.preview_id.expect("preview id");
+
+        let without_confirm = execute_runtime_filer_operation(
+            RuntimeFilerOperation::BulkDelete {
+                preview_id: preview_id.clone(),
+                confirm: false,
+            },
+            &mut outcome,
+            &mut session_state,
+        );
+        assert!(matches!(
+            without_confirm,
+            Err(RuntimeFilerError::OperationFailed {
+                kind: RuntimeFilerErrorKind::ConfirmationRequired,
+                ..
+            })
+        ));
+        assert!(alpha_path.is_file());
+        assert!(beta_path.is_file());
+
+        let report = execute_runtime_filer_operation(
+            RuntimeFilerOperation::BulkDelete {
+                preview_id,
+                confirm: true,
+            },
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("confirmed bulk delete should succeed");
+
+        assert_eq!(report.operation, RuntimeFilerOperationKind::BulkDelete);
+        assert_eq!(report.entries.len(), 2);
+        assert!(!alpha_path.exists());
+        assert!(!beta_path.exists());
+        assert!(keep_path.is_file());
+        assert!(session_state.marked_directory_entries().is_empty());
+        let snapshot = outcome.core_bridge.snapshot();
+        assert!(!snapshot.text.contains("alpha.txt\n"));
+        assert!(!snapshot.text.contains("beta.txt\n"));
+        assert!(snapshot.text.contains("keep.txt\n"));
+
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_create_file_collision_surfaces_structured_error() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-create-collision-root");
+        let existing_path = root_path.join("existing.txt");
+        let config_path = unique_path("dired-create-collision-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&existing_path, "existing\n").expect("existing file");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        let (transient_msg, need_redraw) = execute_runtime_command_outcome_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.createFileCollision",
+        )
+        .await;
+
+        let message = transient_msg.expect("collision should surface an error");
+        assert!(
+            message.contains("alreadyExists") && message.contains("existing.txt"),
+            "message should include structured error kind and path, got: {message}"
+        );
+        assert!(need_redraw);
+        assert_eq!(
+            std::fs::read_to_string(&existing_path).expect("existing file"),
+            "existing\n"
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_rename_missing_path_surfaces_structured_error() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-rename-missing-root");
+        let config_path = unique_path("dired-rename-missing-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        let (transient_msg, need_redraw) = execute_runtime_command_outcome_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.renameMissing",
+        )
+        .await;
+
+        let message = transient_msg.expect("missing path should surface an error");
+        assert!(
+            message.contains("notFound") && message.contains("missing.txt"),
+            "message should include structured error kind and path, got: {message}"
+        );
+        assert!(need_redraw);
+        assert!(!root_path.join("never.txt").exists());
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
     }
 
     #[tokio::test(flavor = "current_thread")]

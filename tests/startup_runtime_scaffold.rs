@@ -1,5 +1,11 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use saya::callback_registry_seed::CallbackRegistrySeed;
+use saya::saya_live_runtime::{
+    BoxFuture, HostCapabilityBridge, ReadonlyBufferSnapshot, ReadonlyEditorSnapshot,
+    ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeMode, SayaLiveRuntime,
+};
 use saya::startup_runtime::{
     SayaKeyMode, SayaKeymapAction, StartupModuleLoadResult, StartupModulePrepareResult,
     StartupOptionName, StartupOptionValue, StartupRegistryEntry, collect_startup_registry,
@@ -13,6 +19,38 @@ fn unique_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-startup-runtime-{name}-{nanos}"))
+}
+
+struct NoopHostBridge;
+
+impl HostCapabilityBridge for NoopHostBridge {
+    fn execute_host_command(&self, _name: &str) -> BoxFuture<Result<(), RuntimeCommandError>> {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot> {
+        Box::pin(async move {
+            ReadonlyBufferSnapshot {
+                id: 1,
+                path: None,
+                line_count: 1,
+                cursor_row: 0,
+                current_line: String::new(),
+            }
+        })
+    }
+
+    fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot> {
+        Box::pin(async move { ReadonlyWindowSnapshot { id: 1 } })
+    }
+
+    fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot> {
+        Box::pin(async move {
+            ReadonlyEditorSnapshot {
+                mode: RuntimeMode::Normal,
+            }
+        })
+    }
 }
 
 #[test]
@@ -90,6 +128,308 @@ fn init_ts_module_transpiles_into_executable_javascript() {
         }
         other => panic!("Success を返すこと, got: {:?}", other),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn init_ts_module_can_import_local_typescript_plugin() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let plugin_path = current_dir.join("saya-dired.ts");
+    std::fs::write(
+        &plugin_path,
+        r#"
+            export interface SayaDiredOptions {
+              enterKey?: string;
+            }
+
+            export function setupSayaDired(options: SayaDiredOptions = {}): void {
+              const enterKey = options.enterKey ?? "<Enter>";
+              saya.commands.register("dired.enter", async () => {});
+              saya.keymap.set("normal", enterKey, saya.commands.execute("dired.enter"));
+            }
+        "#,
+    )
+    .expect("plugin file");
+    std::fs::write(
+        &config_path,
+        r#"
+            import { setupSayaDired } from "./saya-dired.ts";
+            setupSayaDired();
+        "#,
+    )
+    .expect("config file");
+
+    let prepared = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!("imported local plugin should prepare, got: {:?}", prepared);
+    };
+    assert!(
+        module
+            .executable_source_text
+            .contains("function setupSayaDired"),
+        "plugin function should be inlined into the executable source: {}",
+        module.executable_source_text
+    );
+    assert!(
+        !module
+            .executable_source_text
+            .contains("interface SayaDiredOptions"),
+        "type-only plugin declarations must be stripped"
+    );
+
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("inlined plugin should evaluate");
+
+    assert!(registry.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            StartupRegistryEntry::Command { name, .. } if name == "dired.enter"
+        )
+    }));
+    assert!(registry.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            StartupRegistryEntry::Keymap {
+                mode: SayaKeyMode::Normal,
+                lhs,
+                action: SayaKeymapAction::RegisteredCommand(command),
+            } if lhs == "<Enter>" && command == "dired.enter"
+        )
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn init_ts_module_can_import_repository_dired_plugin() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-dired.ts");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaDired }} from "{}";
+                setupSayaDired();
+            "#,
+            plugin_path.display()
+        ),
+    )
+    .expect("config file");
+
+    let prepared = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!(
+            "repository dired plugin should prepare, got: {:?}",
+            prepared
+        );
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("repository dired plugin should evaluate");
+
+    for expected_command in [
+        "dired.open",
+        "dired.enter",
+        "dired.up",
+        "dired.refresh",
+        "dired.mark",
+        "dired.unmark",
+        "dired.clearMarks",
+        "dired.bulkDeletePreview",
+    ] {
+        assert!(
+            registry.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    StartupRegistryEntry::Command { name, .. } if name == expected_command
+                )
+            }),
+            "missing command {expected_command}"
+        );
+    }
+    for (expected_lhs, expected_command) in [
+        ("-", "dired.up"),
+        ("<Enter>", "dired.enter"),
+        ("gr", "dired.refresh"),
+        ("m", "dired.mark"),
+        ("M", "dired.unmark"),
+        ("gM", "dired.clearMarks"),
+        ("D", "dired.bulkDeletePreview"),
+    ] {
+        assert!(
+            registry.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    StartupRegistryEntry::Keymap {
+                        mode: SayaKeyMode::Normal,
+                        lhs,
+                        action: SayaKeymapAction::RegisteredCommand(command),
+                    } if lhs == expected_lhs && command == expected_command
+                )
+            }),
+            "missing keymap {expected_lhs} -> {expected_command}"
+        );
+    }
+
+    let seed = CallbackRegistrySeed::from_startup_registry(&registry);
+    SayaLiveRuntime::spawn_from_seed(Arc::new(NoopHostBridge), seed)
+        .expect("repository dired command callbacks should initialize in live runtime");
+}
+
+#[test]
+fn repository_dired_plugin_public_options_cover_phase6_surface() {
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-dired.ts");
+    let source = std::fs::read_to_string(plugin_path).expect("repository dired plugin");
+
+    for expected in [
+        "commandName?:",
+        "keymap?:",
+        "root?:",
+        "hiddenFilePolicy?:",
+        "sortPolicy?:",
+        "filter?:",
+        "confirmStrategy?:",
+        "SayaDiredCommandNames",
+        "SayaDiredKeymap",
+        "SayaDiredHiddenFilePolicy",
+        "SayaDiredSortPolicy",
+        "SayaDiredConfirmStrategy",
+    ] {
+        assert!(
+            source.contains(expected),
+            "dired public options should include phase 6 surface item: {expected}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repository_dired_plugin_phase6_options_affect_registered_surface() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-dired.ts");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaDired }} from "{}";
+                setupSayaDired({{
+                    hiddenFilePolicy: "hide",
+                    sortPolicy: "size",
+                    filter: "rs",
+                    confirmStrategy: "disabled",
+                    commands: {{
+                        refresh: "workspace.refresh",
+                        bulkDeletePreview: "workspace.previewDelete",
+                    }},
+                    keymap: {{
+                        refresh: "R",
+                        bulkDeletePreview: "X",
+                    }},
+                }});
+            "#,
+            plugin_path.display()
+        ),
+    )
+    .expect("config file");
+
+    let prepared = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!(
+            "repository dired plugin with custom options should prepare, got: {:?}",
+            prepared
+        );
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("repository dired plugin with custom options should evaluate");
+
+    let refresh_callback = registry
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            StartupRegistryEntry::Command {
+                name,
+                callback_source,
+            } if name == "workspace.refresh" => Some(callback_source),
+            _ => None,
+        })
+        .expect("custom refresh command should be registered");
+    assert!(refresh_callback.contains("const showHidden = false;"));
+    assert!(refresh_callback.contains(r#"const sortBy = "size";"#));
+    assert!(refresh_callback.contains(r#"const filter = "rs";"#));
+
+    let preview_callback = registry
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            StartupRegistryEntry::Command {
+                name,
+                callback_source,
+            } if name == "workspace.previewDelete" => Some(callback_source),
+            _ => None,
+        })
+        .expect("custom bulk delete preview command should be registered");
+    assert!(preview_callback.contains(r#"const confirmStrategy = "disabled";"#));
+
+    for (expected_lhs, expected_command) in
+        [("R", "workspace.refresh"), ("X", "workspace.previewDelete")]
+    {
+        assert!(
+            registry.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    StartupRegistryEntry::Keymap {
+                        mode: SayaKeyMode::Normal,
+                        lhs,
+                        action: SayaKeymapAction::RegisteredCommand(command),
+                    } if lhs == expected_lhs && command == expected_command
+                )
+            }),
+            "missing custom keymap {expected_lhs} -> {expected_command}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_command_callback_source_preserves_line_comment_boundaries() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.commands.register("commented", async () => {
+              // This comment must not swallow the executable line below.
+              await saya.commands.execute("write");
+            });
+        "#,
+    )
+    .await
+    .expect("startup module should evaluate");
+
+    let callback_source = registry
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            StartupRegistryEntry::Command {
+                name,
+                callback_source,
+            } if name == "commented" => Some(callback_source.as_str()),
+            _ => None,
+        })
+        .expect("command callback should be collected");
+
+    assert!(
+        callback_source.contains("// This comment must not swallow"),
+        "line comment should be preserved in source: {callback_source}"
+    );
+    assert!(
+        callback_source.contains('\n'),
+        "callback source must preserve line boundaries: {callback_source}"
+    );
+    assert!(
+        callback_source.contains("await saya.commands.execute(\"write\")"),
+        "executable line after comment should remain visible: {callback_source}"
+    );
 }
 
 #[test]
@@ -535,7 +875,8 @@ async fn startup_command_registration_is_collected() {
         registry.entries(),
         &[StartupRegistryEntry::Command {
             name: "writeCurrent".to_string(),
-            callback_source: "() => { console.log(\"write\"); }".to_string(),
+            callback_source: "() => {\n                console.log(\"write\");\n            }"
+                .to_string(),
         }]
     );
 }
@@ -556,7 +897,8 @@ async fn startup_event_subscription_is_collected() {
         registry.entries(),
         &[StartupRegistryEntry::Event {
             name: "bufferOpen".to_string(),
-            callback_source: "(payload) => { console.log(payload); }".to_string(),
+            callback_source: "(payload) => {\n                console.log(payload);\n            }"
+                .to_string(),
         }]
     );
 }

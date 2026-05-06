@@ -51,7 +51,7 @@ Use this method to retrieve a typed buffer snapshot.
 
 ```ts
 const buffer = await saya.buffer.current();
-console.log(buffer.id, buffer.path, buffer.lineCount);
+console.log(buffer.id, buffer.path, buffer.lineCount, buffer.currentLine);
 ```
 
 The returned snapshot currently includes:
@@ -59,6 +59,12 @@ The returned snapshot currently includes:
 - `id`
 - `path`
 - `lineCount`
+- `cursorRow`
+- `currentLine`
+
+`cursorRow` and `currentLine` are read-only snapshot fields for plugins that
+need display context. Dired-style commands use `saya.filer.currentEntry()` when
+they need the filesystem entry associated with the cursor row.
 
 ## Window
 
@@ -97,25 +103,237 @@ console.log(mode);
 
 ## Filer
 
-The filer surface lets TypeScript plugins read a directory listing without
-opening a broad filesystem API. Use it for directory-editor plugins that need
-file entries while keeping writes and arbitrary filesystem access out of the
-runtime surface.
+The filer surface lets TypeScript plugins read a directory listing and inspect
+the active directory buffer without opening a broad filesystem API. Use it for
+directory-editor plugins that need file entries while keeping writes and
+arbitrary filesystem access out of the runtime surface.
 
-### `saya.filer.list(path)`
+> **Note:** Dired and filer operations are preview APIs. They are covered by
+> public surface guards, but command names, option shapes, and operation reports
+> can still change before the dired API is stabilized.
+> See [Dired API v1](dired-api-v1.md) for the versioned local dired contract,
+> migration notes, and plugin author anti-patterns.
 
-Use this method to read a sorted directory listing.
+Directory listings are not saved as regular files. Writable directory buffers
+use a save-time preview flow instead: plain `:write` prepares an operation
+preview and opens a confirmation prompt. Press `y` or Enter to apply only the
+latest matching preview through host-mediated filer operations. Press `n` or
+Esc to cancel without changing the filesystem. The preview message includes
+the preview ID and the high-risk operation count. `:write!` remains a legacy
+explicit confirmation path; missing, stale, or invalid previews don't mutate
+the filesystem.
+
+Confirmed writable-buffer operations run as host-side transactions. The host
+checks for path conflicts before execution, uses temporary paths to avoid
+rename collisions, runs deletes after create and rename operations, and
+refreshes directory metadata from the filesystem after success or failure. If a
+transaction partially succeeds, the diagnostic message includes structured
+counts for successful steps, failed steps, rollback results, and manual
+recovery requirements.
+
+### `saya.filer.list(path, options)`
+
+Use this method to read a sorted directory listing. The default order preserves
+the existing kind-first listing: directories, files, symlinks, and other
+entries, with each group sorted by display text.
 
 ```ts
-const entries = await saya.filer.list(".");
+const entries = await saya.filer.list(".", {
+  showHidden: false,
+  sortBy: "size",
+  filter: "notes",
+});
 console.log(entries.map((entry) => `${entry.kind}:${entry.name}`));
 ```
+
+The optional `options` object supports:
+
+- `showHidden`, as `true` to include dotfiles and `false` to hide them. The
+  default is `true` for compatibility with earlier `saya.filer.list(path)`
+  behavior.
+- `sortBy`, as `"name"`, `"kind"`, `"modifiedTime"`, or `"size"`. The default
+  is `"kind"` for compatibility with earlier listings.
+- `filter`, as a case-insensitive substring matched against `name` and
+  `displayText`. Empty strings and omitted values keep the listing unfiltered.
 
 Each entry contains:
 
 - `name`
 - `path`
 - `kind`, as `"directory"`, `"file"`, `"symlink"`, or `"other"`
+- `displayText`, with `/` for directories, `@` for symlinks, and `?` for other
+  filesystem entries
+- `size`, when host metadata is available
+- `modifiedTimeMs`, when host metadata is available
+
+### `saya.filer.currentEntry()`
+
+Use this method from a dired-style command to read the entry associated with the
+current cursor row in the active directory buffer.
+
+```ts
+const entry = await saya.filer.currentEntry();
+if (entry) {
+  await saya.commands.execute(`edit ${entry.path}`);
+}
+```
+
+The API returns `null` when the active buffer is not a directory buffer or the
+cursor row has no entry. The returned entry comes from host-side directory
+buffer metadata, not from parsing the rendered listing text. This keeps commands
+stable when the listing display changes.
+
+Each current entry contains:
+
+- `id`
+- `name`
+- `path`
+- `kind`, as `"directory"`, `"file"`, `"symlink"`, or `"other"`
+- `rootPath`
+- `displayText`
+
+### `saya.filer.createFile(path)`
+
+Use this method to create one new empty file through the host application. The
+operation fails when the target already exists.
+
+```ts
+await saya.filer.createFile(`${entry.rootPath}/notes.md`);
+await saya.commands.execute(`edit ${entry.rootPath}`);
+```
+
+### `saya.filer.createDirectory(path)`
+
+Use this method to create one directory through the host application. The
+operation fails when the target already exists.
+
+```ts
+await saya.filer.createDirectory(`${entry.rootPath}/src`);
+await saya.commands.execute(`edit ${entry.rootPath}`);
+```
+
+### `saya.filer.copy(from, to)`
+
+Use this method to copy one regular file through the host application. The
+operation fails when the source path doesn't exist, the destination path
+collides, or the source is a directory. Directory copy is intentionally not
+recursive in the preview API.
+
+```ts
+await saya.filer.copy(entry.path, `${entry.rootPath}/copy.md`);
+await saya.commands.execute(`edit ${entry.rootPath}`);
+```
+
+### `saya.filer.move(from, to)`
+
+Use this method to move one file or directory through the host application. The
+operation uses the host rename path and fails when the source path doesn't
+exist or the destination path collides.
+
+```ts
+await saya.filer.move(entry.path, `${entry.rootPath}/moved.md`);
+await saya.commands.execute(`edit ${entry.rootPath}`);
+```
+
+### `saya.filer.rename(from, to)`
+
+Use this method to rename one file or directory through the host application.
+The operation fails when the source path doesn't exist or the destination path
+collides.
+
+```ts
+await saya.filer.rename(entry.path, `${entry.rootPath}/renamed.md`);
+await saya.commands.execute(`edit ${entry.rootPath}`);
+```
+
+### `saya.filer.delete(path, options)`
+
+Use this method to delete one file or one empty directory through the host
+application. You must pass `{ confirm: true }`; the operation fails without an
+explicit confirmation flag. Recursive deletion is disabled, and
+`{ trash: true }` fails with an unsupported-backend error until a platform
+trash policy is configured.
+
+```ts
+await saya.filer.delete(entry.path, { confirm: true });
+await saya.commands.execute(`edit ${entry.rootPath}`);
+```
+
+### `saya.filer.mark(path)`
+
+Use this method to mark one entry in the active directory buffer. The path must
+match an entry from the active directory buffer metadata.
+
+```ts
+const entry = await saya.filer.currentEntry();
+if (entry) {
+  await saya.filer.mark(entry.path);
+}
+```
+
+### `saya.filer.unmark(path)`
+
+Use this method to remove one entry from the active directory mark set. The path
+must match an entry from the active directory buffer metadata.
+
+```ts
+const entry = await saya.filer.currentEntry();
+if (entry) {
+  await saya.filer.unmark(entry.path);
+}
+```
+
+### `saya.filer.clearMarks()`
+
+Use this method to remove every mark from the active directory buffer.
+
+```ts
+await saya.filer.clearMarks();
+```
+
+### `saya.filer.bulkDeletePreview()`
+
+Use this method to preview the currently marked entries before a bulk delete.
+The report contains the entries and a `previewId` derived from the current mark
+set.
+
+```ts
+const preview = await saya.filer.bulkDeletePreview();
+console.log(preview.entries.map((entry) => entry.path));
+```
+
+### `saya.filer.bulkDelete(options)`
+
+Use this method to delete the currently marked entries after previewing them.
+You must pass `{ confirm: true, previewId }` with the latest preview ID. The
+operation fails if the preview ID is missing, stale, or not confirmed.
+
+```ts
+const preview = await saya.filer.bulkDeletePreview();
+await saya.filer.bulkDelete({
+  confirm: true,
+  previewId: preview.previewId,
+});
+```
+
+Each successful operation returns a report with:
+
+- `operation`, as `"createFile"`, `"createDirectory"`, `"rename"`, `"delete"`,
+  `"copy"`, `"move"`, `"mark"`, `"unmark"`, `"clearMarks"`,
+  `"bulkDeletePreview"`, or `"bulkDelete"`
+- `path`
+- `targetPath`, for rename operations
+- `entries`, for mark and bulk operations
+- `previewId`, for bulk delete preview and confirmed bulk delete
+
+Filer operation failures surface a structured error payload in the runtime
+error message. The payload includes the operation, path, optional target path,
+error kind, and host error message. Error kinds include `"alreadyExists"`,
+`"confirmationRequired"`, `"notFound"`, and `"permissionDenied"`.
+
+Save-time directory transaction failures also include structured counts in the
+host error message so UI code and logs can distinguish successful steps,
+failed steps, rollback results, and manual recovery requirements.
 
 ## What the runtime API does not expose
 
