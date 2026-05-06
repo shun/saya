@@ -34,6 +34,8 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.numberWidth",
     "saya.options.numberwidth",
     "saya.options.laststatus",
+    "saya.options.messageheight",
+    "saya.options.messageHeight",
     "saya.options.list",
     "saya.options.listchars",
     "saya.options.foldmethod",
@@ -92,6 +94,8 @@ globalThis.saya = {
         numberWidth: 4,
         numberwidth: 4,
         laststatus: 2,
+        messageheight: 5,
+        messageHeight: 5,
         list: false,
         listchars: "tab:>-,trail:-",
         foldmethod: "manual",
@@ -318,6 +322,9 @@ defineBoolOption("cursorline", "cursorline", false);
 defineBoolOption("cul", "cursorline", false);
 defineNumberOption("laststatus", "laststatus", 2);
 defineNumberOption("ls", "laststatus", 2);
+defineNumberOption("messageheight", "messageheight", 5);
+defineNumberOption("messageHeight", "messageheight", 5);
+defineNumberOption("mh", "messageheight", 5);
 defineBoolOption("list", "list", false);
 defineStringOption("listchars", "listchars", "tab:>-,trail:-");
 defineStringOption("lcs", "listchars", "tab:>-,trail:-");
@@ -374,6 +381,8 @@ declare global {
         numberWidth: number;
         numberwidth: number;
         laststatus: number;
+        messageheight: number;
+        messageHeight: number;
         list: boolean;
         listchars: string;
         foldmethod: string;

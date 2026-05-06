@@ -92,6 +92,8 @@ pub struct WorkspaceScreenModel {
     pub panes: Vec<PaneScreenModel>,
     pub active_window_id: i32,
     pub message_line: WorkspaceMessageLineState,
+    pub message_area_height: u16,
+    pub message_scroll_offset: u16,
     pub prompt_line: Option<InputPromptView>,
     pub pager_prompt: Option<PagerPromptView>,
     pub suppressed_prompt_hints: Vec<SuppressedPromptHint>,
@@ -800,16 +802,33 @@ pub fn project_workspace(
         workspace_message_line
     };
 
+    let core_pager_prompt = input
+        .notification_prompt
+        .and_then(|prompt| prompt.pager_prompt);
+    let message_pager_prompt =
+        input
+            .session_state
+            .message_pager_prompt_kind()
+            .map(|kind| PagerPromptView {
+                kind,
+                one_shot: false,
+            });
+    let message_scroll_offset = if model_message_line.visible_text().is_some() {
+        input.session_state.message_scroll_offset()
+    } else {
+        0
+    };
+
     Ok(WorkspaceScreenModel {
         panes,
         active_window_id,
         message_line: model_message_line,
+        message_area_height: input.session_state.message_area_height(),
+        message_scroll_offset,
         prompt_line: input
             .notification_prompt
             .and_then(|prompt| prompt.input_prompt.clone()),
-        pager_prompt: input
-            .notification_prompt
-            .and_then(|prompt| prompt.pager_prompt),
+        pager_prompt: core_pager_prompt.or(message_pager_prompt),
         suppressed_prompt_hints: input
             .notification_prompt
             .map(|prompt| prompt.suppressed_prompt_hints.clone())
@@ -836,28 +855,37 @@ pub(crate) fn resolve_workspace_message_line_state(
         .map(|message| message.text.as_str())
         .or(input.core_message);
     if let Some(message) = projected_core_message {
-        candidates.push(MessageLineCandidate::legacy(
+        push_message_candidate_unless_dismissed(
+            &mut candidates,
+            input.session_state,
             MessageLineSource::CoreNotification,
             message,
-        ));
+        );
     }
     if let Some(message) = input.system_warning {
-        candidates.push(MessageLineCandidate::legacy(
+        push_message_candidate_unless_dismissed(
+            &mut candidates,
+            input.session_state,
             MessageLineSource::SystemWarning,
             message,
-        ));
+        );
     }
     if let Some(message) = input.transient_info {
-        candidates.push(MessageLineCandidate::legacy(
+        push_message_candidate_unless_dismissed(
+            &mut candidates,
+            input.session_state,
             MessageLineSource::TransientInfo,
             message,
-        ));
+        );
     }
     if let Some(error) = input.session_state.last_save_error() {
-        candidates.push(MessageLineCandidate::legacy(
+        let message = format!("保存失敗: {error}");
+        push_message_candidate_unless_dismissed(
+            &mut candidates,
+            input.session_state,
             MessageLineSource::TransientInfo,
-            format!("保存失敗: {error}"),
-        ));
+            message,
+        );
     }
 
     let state = resolve_workspace_message_line(candidates);
@@ -867,6 +895,24 @@ pub(crate) fn resolve_workspace_message_line_state(
         state.suppressed_sources()
     );
     state
+}
+
+fn push_message_candidate_unless_dismissed(
+    candidates: &mut Vec<MessageLineCandidate>,
+    session_state: &EditorSessionState,
+    source: MessageLineSource,
+    message: impl AsRef<str>,
+) {
+    let message = message.as_ref();
+    if session_state.message_pager_hides_message(message) {
+        log::debug!(
+            "[screen_model] suppressed dismissed message pager candidate: source={:?}, message_lines={}",
+            source,
+            message.lines().count()
+        );
+        return;
+    }
+    candidates.push(MessageLineCandidate::legacy(source, message));
 }
 
 fn resolve_projection_active_window(snapshot: &CoreSnapshot) -> Option<&CoreWindowInfo> {
@@ -2746,6 +2792,8 @@ mod tests {
             panes: vec![pane],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -4996,6 +5044,8 @@ mod tests {
             panes: vec![pane.clone()],
             active_window_id: 11,
             message_line: WorkspaceMessageLineState::default(),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -5015,6 +5065,8 @@ mod tests {
                     "hidden message",
                 )],
             },
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: Some(InputPromptView {
                 prompt: "prompt".to_string(),
                 input: "typed".to_string(),

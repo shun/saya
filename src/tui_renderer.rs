@@ -272,8 +272,8 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
         render_pane(f, pane.model, pane.is_active, pane.rect, text_mode);
     }
 
-    if let Some((message_line, message_rect)) = message_row_text(model).zip(layout.message_rect) {
-        f.render_widget(Paragraph::new(message_line), message_rect);
+    if let Some((message_area, message_rect)) = message_area_text(model).zip(layout.message_rect) {
+        f.render_widget(Paragraph::new(message_area), message_rect);
     }
 
     if let Some((pager_line, pager_rect)) = pager_row_text(model).zip(layout.pager_rect) {
@@ -351,7 +351,11 @@ fn compute_workspace_layout<'a>(
     );
     let prompt_rect = bottom_row_rect(size.width, &mut next_row, prompt_row_text(model));
     let pager_rect = bottom_row_rect(size.width, &mut next_row, pager_row_text(model));
-    let message_rect = bottom_row_rect(size.width, &mut next_row, message_row_text(model));
+    let message_rect = bottom_rect(
+        size.width,
+        &mut next_row,
+        Some(message_area_row_count(model)).filter(|height| *height > 0),
+    );
 
     let cursor = if command_rect.is_some() {
         None
@@ -385,39 +389,86 @@ fn compute_workspace_layout<'a>(
 }
 
 fn workspace_global_rows(model: &WorkspaceScreenModel) -> u16 {
-    u16::from(message_row_text(model).is_some())
+    message_area_row_count(model)
         + u16::from(pager_row_text(model).is_some())
         + u16::from(prompt_row_text(model).is_some())
         + u16::from(model.command_line.is_some())
 }
 
 fn bottom_row_rect<T>(width: u16, next_row: &mut u16, row: Option<T>) -> Option<Rect> {
-    row.and_then(|_| {
-        if *next_row <= 1 {
-            return None;
-        }
-        *next_row = next_row.saturating_sub(1);
-        Some(Rect {
-            x: 0,
-            y: *next_row,
-            width,
-            height: 1,
-        })
+    bottom_rect(width, next_row, row.map(|_| 1))
+}
+
+fn bottom_rect(width: u16, next_row: &mut u16, height: Option<u16>) -> Option<Rect> {
+    let height = height?.max(1);
+    if *next_row <= 1 {
+        return None;
+    }
+    let height = height.min(next_row.saturating_sub(1));
+    *next_row = next_row.saturating_sub(height);
+    Some(Rect {
+        x: 0,
+        y: *next_row,
+        width,
+        height,
     })
 }
 
-fn message_row_text(model: &WorkspaceScreenModel) -> Option<String> {
+fn message_area_row_count(model: &WorkspaceScreenModel) -> u16 {
+    let Some(lines) = message_area_lines(model) else {
+        return 0;
+    };
+    let desired = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    desired.min(model.message_area_height.max(1))
+}
+
+fn message_area_text(model: &WorkspaceScreenModel) -> Option<Text<'static>> {
+    let lines = message_area_lines(model)?;
+    let height = usize::from(message_area_row_count(model));
+    if height == 0 {
+        return None;
+    }
+    let max_offset = lines.len().saturating_sub(height);
+    let offset = usize::from(model.message_scroll_offset).min(max_offset);
+    let visible_lines = lines
+        .into_iter()
+        .skip(offset)
+        .take(height)
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    log::debug!(
+        "[tui_renderer] message area text resolved: total_lines={}, height={}, scroll_offset={}, max_offset={}",
+        visible_lines.len().saturating_add(offset),
+        height,
+        offset,
+        max_offset
+    );
+    Some(Text::from(visible_lines))
+}
+
+fn message_area_lines(model: &WorkspaceScreenModel) -> Option<Vec<String>> {
     let message = model
         .visible_message_text()
         .map(str::trim)
         .unwrap_or_default();
     let bell = model.bell.map(|bell| format!("[bell x{}]", bell.count));
-    match (message.is_empty(), bell) {
-        (false, Some(bell_marker)) => Some(format!("{message} {bell_marker}")),
-        (false, None) => Some(message.to_string()),
-        (true, Some(bell_marker)) => Some(bell_marker),
-        (true, None) => None,
+    let mut lines = message
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if let Some(bell_marker) = bell {
+        if let Some(last) = lines.last_mut() {
+            last.push(' ');
+            last.push_str(&bell_marker);
+        } else {
+            lines.push(bell_marker);
+        }
     }
+
+    if lines.is_empty() { None } else { Some(lines) }
 }
 
 fn pager_row_text(model: &WorkspaceScreenModel) -> Option<String> {
@@ -544,6 +595,8 @@ fn draw_editor_frame<B: Backend>(
                     ])
                 },
             ),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -1104,6 +1157,8 @@ mod tests {
             suppressed_prompt_hints: vec![],
             bell: None,
             command_line: None,
+            message_area_height: 5,
+            message_scroll_offset: 0,
         }
     }
 
@@ -1152,6 +1207,81 @@ mod tests {
         let model = screen_model_with_message(Some("   "));
 
         assert_eq!(render_message_line(&model), "");
+    }
+
+    #[test]
+    fn message_area_uses_default_five_rows_for_multiline_messages() {
+        let model = workspace_with_typed_message(Some("one\ntwo\nthree\nfour\nfive\nsix"));
+
+        let layout = compute_workspace_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 8,
+            },
+            &model,
+        );
+
+        assert_eq!(
+            layout.message_rect,
+            Some(Rect {
+                x: 0,
+                y: 3,
+                width: 20,
+                height: 5,
+            })
+        );
+        assert_eq!(layout.panes[0].rect.height, 3);
+    }
+
+    #[test]
+    fn message_area_height_can_be_configured_for_workspace_layout() {
+        let mut model = workspace_with_typed_message(Some("one\ntwo\nthree"));
+        model.message_area_height = 2;
+        model.panes[0].rect.height = 6;
+
+        let layout = compute_workspace_layout(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 6,
+            },
+            &model,
+        );
+
+        assert_eq!(
+            layout.message_rect,
+            Some(Rect {
+                x: 0,
+                y: 4,
+                width: 20,
+                height: 2,
+            })
+        );
+        assert_eq!(layout.panes[0].rect.height, 4);
+    }
+
+    #[test]
+    fn message_area_scroll_offset_selects_visible_tail() {
+        let mut model = workspace_with_typed_message(Some("one\ntwo\nthree\nfour"));
+        model.message_area_height = 2;
+        model.message_scroll_offset = 1;
+
+        let message = message_area_text(&model).expect("message area should render");
+        let rendered = message
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["two", "three"]);
     }
 
     #[test]
@@ -1665,6 +1795,8 @@ mod tests {
                 panes: vec![model.clone()],
                 active_window_id: model.window_id,
                 message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+                message_area_height: 5,
+                message_scroll_offset: 0,
                 prompt_line: None,
                 pager_prompt: None,
                 suppressed_prompt_hints: vec![],
@@ -2394,6 +2526,8 @@ mod tests {
             ],
             active_window_id: 20,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -2441,6 +2575,8 @@ mod tests {
             }],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -2459,6 +2595,55 @@ mod tests {
             "message/command がない時は最下段まで local status line を使うこと: {:?}",
             rows
         );
+    }
+
+    fn assert_normal_redraw_removes_stale_message_area_after_dismiss(dismiss_key: &str) {
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 8)).expect("test terminal should initialize");
+        let mut model = workspace_with_typed_message(Some("one\ntwo\nthree\nfour\nfive"));
+        model.panes[0].lines = vec!["alpha".to_string()];
+
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+            .expect("initial workspace render should succeed");
+        let with_message = format!("{}", terminal.backend());
+        assert!(
+            with_message.contains("four") && with_message.contains("five"),
+            "initial render should draw message area: {:?}",
+            with_message
+        );
+
+        model.message_line = resolve_workspace_message_line(Vec::<MessageLineCandidate>::new());
+        model.message_scroll_offset = 0;
+
+        draw_workspace_frame(
+            &mut terminal,
+            &model,
+            false,
+            RenderTextMode::StyledTrueColor,
+        )
+        .expect("dismissed workspace render should succeed");
+
+        let dismissed = format!("{}", terminal.backend());
+        assert!(
+            !dismissed.contains("four") && !dismissed.contains("five"),
+            "normal redraw after {dismiss_key} dismissal must erase stale message area rows without terminal.clear: {:?}",
+            dismissed
+        );
+        assert!(
+            dismissed.contains("test.txt") && dismissed.contains("NORMAL"),
+            "{dismiss_key} dismissed workspace should reclaim the bottom rows for the buffer/status area: {:?}",
+            dismissed
+        );
+    }
+
+    #[test]
+    fn workspace_render_normal_redraw_removes_stale_message_area_after_enter_dismiss() {
+        assert_normal_redraw_removes_stale_message_area_after_dismiss("Enter");
+    }
+
+    #[test]
+    fn workspace_render_normal_redraw_removes_stale_message_area_after_escape_dismiss() {
+        assert_normal_redraw_removes_stale_message_area_after_dismiss("Escape");
     }
 
     #[test]
@@ -2493,6 +2678,8 @@ mod tests {
             }],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -2620,6 +2807,8 @@ mod tests {
             panes: vec![pane],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],

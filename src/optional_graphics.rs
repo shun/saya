@@ -265,6 +265,8 @@ mod tests {
             }],
             active_window_id: 3,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],

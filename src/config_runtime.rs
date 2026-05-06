@@ -39,6 +39,7 @@ pub enum ConfigOptionName {
     LastStatus,
     List,
     ListChars,
+    MessageHeight,
     RelativeNumber,
     ScrollOff,
     ShiftWidth,
@@ -180,6 +181,7 @@ impl From<SayaOptionName> for ConfigOptionName {
             SayaOptionName::LastStatus => Self::LastStatus,
             SayaOptionName::List => Self::List,
             SayaOptionName::ListChars => Self::ListChars,
+            SayaOptionName::MessageHeight => Self::MessageHeight,
             SayaOptionName::RelativeNumber => Self::RelativeNumber,
             SayaOptionName::ScrollOff => Self::ScrollOff,
             SayaOptionName::ShiftWidth => Self::ShiftWidth,
@@ -520,6 +522,15 @@ fn parse_config_json(source: &str) -> Result<Vec<ConfigCommand>, String> {
         log::debug!("[config_runtime] found numberWidth option: {}", value);
         commands.push(ConfigCommand::SetOption {
             name: ConfigOptionName::NumberWidth,
+            value: ConfigOptionValue::Number(value),
+        });
+    }
+
+    // "messageHeight": <number> を検出
+    if let Some(value) = extract_json_number(trimmed, "messageHeight") {
+        log::debug!("[config_runtime] found messageHeight option: {}", value);
+        commands.push(ConfigCommand::SetOption {
+            name: ConfigOptionName::MessageHeight,
             value: ConfigOptionValue::Number(value),
         });
     }
@@ -897,6 +908,7 @@ fn saya_option_name_from_config_name(name: ConfigOptionName) -> SayaOptionName {
         ConfigOptionName::LastStatus => SayaOptionName::LastStatus,
         ConfigOptionName::List => SayaOptionName::List,
         ConfigOptionName::ListChars => SayaOptionName::ListChars,
+        ConfigOptionName::MessageHeight => SayaOptionName::MessageHeight,
         ConfigOptionName::RelativeNumber => SayaOptionName::RelativeNumber,
         ConfigOptionName::ScrollOff => SayaOptionName::ScrollOff,
         ConfigOptionName::ShiftWidth => SayaOptionName::ShiftWidth,
@@ -1333,6 +1345,7 @@ pub struct ConfigApplyState {
     pub cursorline: bool,
     pub number_width: i64,
     pub laststatus: i64,
+    pub message_height: i64,
     pub list: bool,
     pub listchars: String,
     pub foldmethod: String,
@@ -1370,6 +1383,7 @@ impl ConfigApplyState {
             cursorline: false,
             number_width: 4,
             laststatus: 2,
+            message_height: 5,
             list: false,
             listchars: "tab:>-,trail:-".to_string(),
             foldmethod: "manual".to_string(),
@@ -1570,6 +1584,16 @@ fn apply_single_command(
                     n
                 );
                 state.laststatus = *n;
+                Ok(())
+            }
+            (ConfigOptionName::MessageHeight, ConfigOptionValue::Number(n)) => {
+                validate_number_range("messageheight", *n, 1, 999)?;
+                log::debug!(
+                    "[config_runtime] setting messageheight: {} -> {}",
+                    state.message_height,
+                    n
+                );
+                state.message_height = *n;
                 Ok(())
             }
             (ConfigOptionName::List, ConfigOptionValue::Boolean(b)) => {
@@ -1974,6 +1998,7 @@ mod tests {
                 saya.options.tabSize = 4;
                 saya.options.lineNumbers = true;
                 saya.options.numberWidth = 6;
+                saya.options.messageHeight = 3;
                 saya.keymap.set("normal", "x", "dd");
                 saya.commands.register("writeCurrent", () => {
                     saya.commands.execute("write");
@@ -1993,8 +2018,8 @@ mod tests {
             } => {
                 assert_eq!(
                     commands.len(),
-                    3,
-                    "startup option は 3 件の command に正規化されること"
+                    4,
+                    "startup option は 4 件の command に正規化されること"
                 );
                 assert_eq!(
                     registry.entries(),
@@ -2010,6 +2035,10 @@ mod tests {
                         StartupRegistryEntry::Option {
                             name: SayaOptionName::NumberWidth,
                             value: SayaOptionValue::Number(6),
+                        },
+                        StartupRegistryEntry::Option {
+                            name: SayaOptionName::MessageHeight,
+                            value: SayaOptionValue::Number(3),
                         },
                         StartupRegistryEntry::Keymap {
                             mode: SayaKeyMode::Normal,
@@ -2177,6 +2206,24 @@ mod tests {
         let result = apply_config_commands(&commands, &mut state);
 
         assert_eq!(state.number_width, 6, "numberWidth が 6 に変更されること");
+        assert!(result.is_fully_applied());
+    }
+
+    #[test]
+    fn apply_message_height_command_updates_state() {
+        let commands = vec![ConfigCommand::SetOption {
+            name: ConfigOptionName::MessageHeight,
+            value: ConfigOptionValue::Number(3),
+        }];
+        let mut state = ConfigApplyState::default_state();
+        assert_eq!(state.message_height, 5, "既定値は 5 であること");
+
+        let result = apply_config_commands(&commands, &mut state);
+
+        assert_eq!(
+            state.message_height, 3,
+            "messageHeight が 3 に変更されること"
+        );
         assert!(result.is_fully_applied());
     }
 

@@ -14,6 +14,7 @@ pub enum SearchOptionCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExCommandRoute {
+    NoOp,
     SearchOption(SearchOptionCommand),
     PresentationLocal,
     CoreOwned,
@@ -47,6 +48,13 @@ pub fn apply_local_ex_command(
         return Some(message);
     }
     let message = match normalized.as_str() {
+        "messages" | "message" | "mes" => {
+            return Some(
+                session_state
+                    .reopen_message_pager()
+                    .unwrap_or_else(|| "No messages".to_string()),
+            );
+        }
         "dired-cancel" | "diredcancel" => {
             return Some(
                 match session_state.cancel_directory_buffer_operation_preview() {
@@ -87,8 +95,8 @@ pub fn parse_search_option_command(command: &str) -> Option<SearchOptionCommand>
 
 pub fn route_ex_command(command: &str) -> ExCommandRoute {
     let Some(normalized) = normalize_command(command) else {
-        log::debug!("[ex_command] routing empty ex command as core-owned no-op");
-        return ExCommandRoute::CoreOwned;
+        log::debug!("[ex_command] routing empty ex command as host no-op");
+        return ExCommandRoute::NoOp;
     };
 
     if let Some(search_option) = parse_search_option_command_normalized(&normalized) {
@@ -169,7 +177,15 @@ fn parse_search_option_command_normalized(normalized: &str) -> Option<SearchOpti
 fn is_presentation_local_command_normalized(normalized: &str) -> bool {
     matches!(
         normalized,
-        "dired-cancel" | "diredcancel" | "set number" | "set nu" | "set nonumber" | "set nonu"
+        "messages"
+            | "message"
+            | "mes"
+            | "dired-cancel"
+            | "diredcancel"
+            | "set number"
+            | "set nu"
+            | "set nonumber"
+            | "set nonu"
     ) || normalized.starts_with("set numberwidth=")
         || normalized.starts_with("set nuw=")
 }
@@ -265,6 +281,9 @@ fn current_presentation_value(
         }
         crate::option_registry::SayaOptionName::LastStatus => {
             SayaOptionValue::Number(i64::from(session_state.laststatus()))
+        }
+        crate::option_registry::SayaOptionName::MessageHeight => {
+            SayaOptionValue::Number(i64::from(session_state.message_area_height()))
         }
         crate::option_registry::SayaOptionName::List => {
             SayaOptionValue::Boolean(session_state.list())
@@ -454,6 +473,36 @@ mod tests {
             route_ex_command(":dired-cancel"),
             ExCommandRoute::PresentationLocal
         );
+    }
+
+    #[test]
+    fn route_ex_command_routes_empty_command_to_noop() {
+        assert_eq!(route_ex_command(":"), ExCommandRoute::NoOp);
+        assert_eq!(route_ex_command("   :   "), ExCommandRoute::NoOp);
+    }
+
+    #[test]
+    fn apply_local_ex_command_reopens_dismissed_message_pager_for_messages() {
+        let mut session_state = EditorSessionState::new(None);
+        assert!(session_state.sync_message_pager("one\ntwo\nthree\nfour", 2));
+        assert!(session_state.handle_message_pager_key(&crate::input_router::KeyInput::Char('G')));
+        assert!(session_state.handle_message_pager_key(&crate::input_router::KeyInput::Enter));
+        assert!(!session_state.message_pager_active());
+
+        let message = apply_local_ex_command(&mut session_state, ":messages");
+
+        assert_eq!(message, Some("one\ntwo\nthree\nfour".to_string()));
+        assert!(session_state.message_pager_active());
+        assert_eq!(session_state.message_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn route_ex_command_routes_messages_to_host_local_handler() {
+        assert_eq!(
+            route_ex_command(":messages"),
+            ExCommandRoute::PresentationLocal
+        );
+        assert_eq!(route_ex_command(":mes"), ExCommandRoute::PresentationLocal);
     }
 
     #[test]

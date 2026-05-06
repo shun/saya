@@ -97,6 +97,7 @@ pub struct StartupOptionsSnapshot {
     pub cursorline: bool,
     pub number_width: u16,
     pub laststatus: u8,
+    pub message_height: u16,
     pub list: bool,
     pub listchars: String,
     pub foldmethod: String,
@@ -164,6 +165,7 @@ impl StartupRegistrySnapshot {
                 cursorline: state.cursorline,
                 number_width: normalize_number_width(state.number_width),
                 laststatus: normalize_u8(state.laststatus),
+                message_height: normalize_message_height(state.message_height),
                 list: state.list,
                 listchars: state.listchars.clone(),
                 foldmethod: state.foldmethod.clone(),
@@ -643,6 +645,7 @@ fn startup_registry_from_registry(
             cursorline: state.cursorline,
             number_width: normalize_number_width(state.number_width),
             laststatus: normalize_u8(state.laststatus),
+            message_height: normalize_message_height(state.message_height),
             list: state.list,
             listchars: state.listchars.clone(),
             foldmethod: state.foldmethod.clone(),
@@ -724,6 +727,10 @@ fn normalize_number_width(number_width: i64) -> u16 {
     u16::try_from(number_width).unwrap_or(4).max(1)
 }
 
+fn normalize_message_height(message_height: i64) -> u16 {
+    u16::try_from(message_height).unwrap_or(5).max(1)
+}
+
 fn normalize_u16(value: i64) -> u16 {
     u16::try_from(value.max(0)).unwrap_or(u16::MAX)
 }
@@ -761,6 +768,10 @@ fn apply_startup_presentation_to_session_state(
         (
             SayaOptionName::LastStatus,
             SayaOptionValue::Number(i64::from(options.laststatus)),
+        ),
+        (
+            SayaOptionName::MessageHeight,
+            SayaOptionValue::Number(i64::from(options.message_height)),
         ),
         (SayaOptionName::List, SayaOptionValue::Boolean(options.list)),
         (

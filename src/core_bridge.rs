@@ -1937,6 +1937,30 @@ mod tests {
     }
 
     #[test]
+    fn message_handler_captures_echom_messages() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("hello\n").expect("core bridge should initialize");
+
+        bridge
+            .apply_ex_command("echom \"one\\ntwo\\nthree\\nfour\\nfive\\nsix\"")
+            .expect("echom command should complete");
+        let messages = bridge.take_pending_messages();
+
+        assert!(
+            messages.iter().any(|message| {
+                message.category == CoreMessageCategory::UserVisible
+                    && message.content.contains("one")
+                    && message.content.contains("six")
+            }),
+            "echom message should be queued: {:?}",
+            messages
+        );
+    }
+
+    #[test]
     fn dispatch_key_queues_pending_redraw_request() {
         let _lock = session_test_lock()
             .lock()

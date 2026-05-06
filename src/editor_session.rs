@@ -8,8 +8,10 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::host_io::SaveRequest;
+use crate::input_router::KeyInput;
 use crate::option_registry::{SayaOptionName, SayaOptionValue};
 use crate::theme::ResolvedTheme;
+use vim_core_rs::CorePagerPromptKind;
 
 /// 保存要求の生成に失敗した理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +164,53 @@ pub struct DirectoryBufferOperationPrompt {
     pub recovery_hint: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessagePagerAction {
+    Enter,
+    ForwardLine,
+    ForwardHalfPage,
+    ForwardPage,
+    BackwardLine,
+    BackwardHalfPage,
+    BackwardPage,
+    Top,
+    Bottom,
+    Dismiss,
+}
+
+impl MessagePagerAction {
+    fn from_key(key: &KeyInput) -> Option<Self> {
+        match key {
+            KeyInput::Enter => Some(Self::Enter),
+            KeyInput::Char('j') | KeyInput::Down => Some(Self::ForwardLine),
+            KeyInput::Char('d') => Some(Self::ForwardHalfPage),
+            KeyInput::Char(' ')
+            | KeyInput::Char('f')
+            | KeyInput::PageDown
+            | KeyInput::Ctrl('f')
+            | KeyInput::Ctrl('F') => Some(Self::ForwardPage),
+            KeyInput::Char('k') | KeyInput::Up => Some(Self::BackwardLine),
+            KeyInput::Char('u') => Some(Self::BackwardHalfPage),
+            KeyInput::Char('b') | KeyInput::PageUp | KeyInput::Ctrl('b') | KeyInput::Ctrl('B') => {
+                Some(Self::BackwardPage)
+            }
+            KeyInput::Char('g') => Some(Self::Top),
+            KeyInput::Char('G') => Some(Self::Bottom),
+            KeyInput::Escape | KeyInput::Ctrl('[') | KeyInput::Char('q') => Some(Self::Dismiss),
+            _ => None,
+        }
+    }
+}
+
+fn normalize_message_pager_key(message: &str) -> String {
+    message
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectoryBufferPreviewConfirmationError {
     Validation(Vec<DirectoryBufferPlanValidationError>),
@@ -200,6 +249,13 @@ pub enum DirectoryBufferPlanValidationError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MessagePagerState {
+    message_key: String,
+    max_offset: u16,
+    dismissed: bool,
+}
+
 /// エディタセッションの状態。保存と終了の判定に使用する。
 #[derive(Debug)]
 pub struct EditorSessionState {
@@ -217,6 +273,9 @@ pub struct EditorSessionState {
     sidescrolloff: u16,
     wrap: bool,
     laststatus: u8,
+    message_area_height: u16,
+    message_scroll_offset: u16,
+    message_pager: Option<MessagePagerState>,
     list: bool,
     listchars: String,
     markdown_render: bool,
@@ -303,6 +362,9 @@ impl EditorSessionState {
             sidescrolloff: 0,
             wrap: true,
             laststatus: 2,
+            message_area_height: 5,
+            message_scroll_offset: 0,
+            message_pager: None,
             list: false,
             listchars: "tab:>-,trail:-".to_string(),
             markdown_render: true,
@@ -858,6 +920,189 @@ impl EditorSessionState {
         self.laststatus
     }
 
+    pub fn message_area_height(&self) -> u16 {
+        self.message_area_height
+    }
+
+    pub fn message_scroll_offset(&self) -> u16 {
+        self.message_scroll_offset
+    }
+
+    pub fn sync_message_pager(&mut self, message: &str, visible_height: u16) -> bool {
+        let normalized = normalize_message_pager_key(message);
+        let line_count = normalized.lines().count();
+        let visible_height = visible_height.max(1);
+        let max_offset = u16::try_from(line_count.saturating_sub(usize::from(visible_height)))
+            .unwrap_or(u16::MAX);
+        let before_active = self.message_pager_active();
+        let before_offset = self.message_scroll_offset;
+
+        if normalized.is_empty() || line_count <= 1 {
+            self.message_pager = None;
+            self.message_scroll_offset = 0;
+            log::debug!(
+                "[editor_session] message pager cleared: reason=no_multiline_message, line_count={}, visible_height={}",
+                line_count,
+                visible_height
+            );
+            return before_active || before_offset != 0;
+        }
+
+        match self.message_pager.as_mut() {
+            Some(pager) if pager.message_key == normalized => {
+                pager.max_offset = max_offset;
+                self.message_scroll_offset = self.message_scroll_offset.min(max_offset);
+            }
+            _ => {
+                log::debug!(
+                    "[editor_session] message pager activated: line_count={}, visible_height={}, max_offset={}",
+                    line_count,
+                    visible_height,
+                    max_offset
+                );
+                self.message_scroll_offset = 0;
+                self.message_pager = Some(MessagePagerState {
+                    message_key: normalized,
+                    max_offset,
+                    dismissed: false,
+                });
+            }
+        }
+
+        before_active != self.message_pager_active() || before_offset != self.message_scroll_offset
+    }
+
+    pub fn message_pager_active(&self) -> bool {
+        self.message_pager
+            .as_ref()
+            .is_some_and(|pager| !pager.dismissed)
+    }
+
+    pub fn message_pager_prompt_kind(&self) -> Option<CorePagerPromptKind> {
+        let pager = self.message_pager.as_ref()?;
+        if pager.dismissed {
+            return None;
+        }
+        if self.message_scroll_offset >= pager.max_offset {
+            Some(CorePagerPromptKind::HitReturn)
+        } else {
+            Some(CorePagerPromptKind::More)
+        }
+    }
+
+    pub fn message_pager_hides_message(&self, message: &str) -> bool {
+        let normalized = normalize_message_pager_key(message);
+        self.message_pager.as_ref().is_some_and(|pager| {
+            pager.dismissed && !normalized.is_empty() && pager.message_key == normalized
+        })
+    }
+
+    pub fn reopen_message_pager(&mut self) -> Option<String> {
+        let pager = self.message_pager.as_mut()?;
+        pager.dismissed = false;
+        self.message_scroll_offset = 0;
+        log::debug!(
+            "[editor_session] message pager reopened: max_offset={}, message_len={}",
+            pager.max_offset,
+            pager.message_key.len()
+        );
+        Some(pager.message_key.clone())
+    }
+
+    pub fn handle_message_pager_key(&mut self, key: &KeyInput) -> bool {
+        let Some(action) = MessagePagerAction::from_key(key) else {
+            return false;
+        };
+        if !self.message_pager_active() {
+            return false;
+        }
+        let Some(pager) = self.message_pager.as_mut() else {
+            return false;
+        };
+
+        let before = self.message_scroll_offset;
+        match action {
+            MessagePagerAction::Enter => {
+                if self.message_scroll_offset >= pager.max_offset {
+                    pager.dismissed = true;
+                } else {
+                    self.message_scroll_offset = self
+                        .message_scroll_offset
+                        .saturating_add(1)
+                        .min(pager.max_offset);
+                }
+            }
+            MessagePagerAction::ForwardLine => {
+                self.message_scroll_offset = self
+                    .message_scroll_offset
+                    .saturating_add(1)
+                    .min(pager.max_offset);
+            }
+            MessagePagerAction::ForwardHalfPage => {
+                let delta = (self.message_area_height / 2).max(1);
+                self.message_scroll_offset = self
+                    .message_scroll_offset
+                    .saturating_add(delta)
+                    .min(pager.max_offset);
+            }
+            MessagePagerAction::ForwardPage => {
+                self.message_scroll_offset = self
+                    .message_scroll_offset
+                    .saturating_add(self.message_area_height.max(1))
+                    .min(pager.max_offset);
+            }
+            MessagePagerAction::BackwardLine => {
+                self.message_scroll_offset = self.message_scroll_offset.saturating_sub(1);
+            }
+            MessagePagerAction::BackwardHalfPage => {
+                let delta = (self.message_area_height / 2).max(1);
+                self.message_scroll_offset = self.message_scroll_offset.saturating_sub(delta);
+            }
+            MessagePagerAction::BackwardPage => {
+                self.message_scroll_offset = self
+                    .message_scroll_offset
+                    .saturating_sub(self.message_area_height.max(1));
+            }
+            MessagePagerAction::Top => {
+                self.message_scroll_offset = 0;
+            }
+            MessagePagerAction::Bottom => {
+                self.message_scroll_offset = pager.max_offset;
+            }
+            MessagePagerAction::Dismiss => {
+                pager.dismissed = true;
+            }
+        }
+        log::debug!(
+            "[editor_session] message pager key handled: key={:?}, action={:?}, before={}, after={}, max_offset={}, active={}",
+            key,
+            action,
+            before,
+            self.message_scroll_offset,
+            pager.max_offset,
+            !pager.dismissed
+        );
+        true
+    }
+
+    pub fn scroll_message_area_by(&mut self, delta: i16, max_offset: u16) -> bool {
+        let before = self.message_scroll_offset.min(max_offset);
+        let after = if delta < 0 {
+            before.saturating_sub(delta.unsigned_abs())
+        } else {
+            before.saturating_add(delta as u16).min(max_offset)
+        };
+        self.message_scroll_offset = after;
+        log::debug!(
+            "[editor_session] message area scroll: before={}, after={}, delta={}, max_offset={}",
+            before,
+            after,
+            delta,
+            max_offset
+        );
+        before != after
+    }
+
     pub fn list(&self) -> bool {
         self.list
     }
@@ -949,6 +1194,18 @@ impl EditorSessionState {
             }
             (SayaOptionName::LastStatus, SayaOptionValue::Number(value)) => {
                 self.laststatus = u8::try_from(value.clamp(0, 3)).unwrap_or(2);
+                Ok(())
+            }
+            (SayaOptionName::MessageHeight, SayaOptionValue::Number(value)) => {
+                let next = u16::try_from(value.max(1)).unwrap_or(u16::MAX);
+                log::debug!(
+                    "[editor_session] message area height updated: {} -> {}",
+                    self.message_area_height,
+                    next
+                );
+                self.message_area_height = next;
+                self.message_scroll_offset = 0;
+                self.message_pager = None;
                 Ok(())
             }
             (SayaOptionName::List, SayaOptionValue::Boolean(value)) => {
@@ -1703,6 +1960,135 @@ mod tests {
         state.set_number_width(0);
 
         assert_eq!(state.number_width(), 1);
+    }
+
+    #[test]
+    fn message_area_height_defaults_to_five() {
+        let state = EditorSessionState::new(None);
+
+        assert_eq!(state.message_area_height(), 5);
+        assert_eq!(state.message_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_message_area_by_clamps_to_available_range() {
+        let mut state = EditorSessionState::new(None);
+
+        assert!(state.scroll_message_area_by(2, 3));
+        assert_eq!(state.message_scroll_offset(), 2);
+        assert!(state.scroll_message_area_by(2, 3));
+        assert_eq!(state.message_scroll_offset(), 3);
+        assert!(state.scroll_message_area_by(-1, 3));
+        assert_eq!(state.message_scroll_offset(), 2);
+        assert!(state.scroll_message_area_by(-9, 3));
+        assert_eq!(state.message_scroll_offset(), 0);
+    }
+
+    #[test]
+    fn message_pager_enters_more_state_for_overflowing_message_and_uses_vim_keys() {
+        let mut state = EditorSessionState::new(None);
+
+        assert!(state.sync_message_pager("one\ntwo\nthree\nfour", 2));
+        assert!(state.message_pager_active());
+        assert_eq!(
+            state.message_pager_prompt_kind(),
+            Some(vim_core_rs::CorePagerPromptKind::More)
+        );
+
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Enter));
+        assert_eq!(state.message_scroll_offset(), 1);
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Char(' ')));
+        assert_eq!(state.message_scroll_offset(), 2);
+        assert_eq!(
+            state.message_pager_prompt_kind(),
+            Some(vim_core_rs::CorePagerPromptKind::HitReturn)
+        );
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Char('j')));
+        assert!(state.message_pager_active());
+        assert_eq!(state.message_scroll_offset(), 2);
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Enter));
+        assert!(!state.message_pager_active());
+        assert!(state.message_pager_hides_message("one\ntwo\nthree\nfour"));
+    }
+
+    #[test]
+    fn message_pager_supports_backward_keys_without_leaving_message_mode() {
+        let mut state = EditorSessionState::new(None);
+        state
+            .apply_presentation_option(SayaOptionName::MessageHeight, SayaOptionValue::Number(2))
+            .expect("message height option should apply");
+
+        assert!(state.sync_message_pager("one\ntwo\nthree\nfour\nfive\nsix", 2));
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Char('G')));
+        assert_eq!(state.message_scroll_offset(), 4);
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Char('k')));
+        assert_eq!(state.message_scroll_offset(), 3);
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Char('b')));
+        assert_eq!(state.message_scroll_offset(), 1);
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Char('g')));
+        assert_eq!(state.message_scroll_offset(), 0);
+        assert!(state.message_pager_active());
+    }
+
+    #[test]
+    fn message_pager_can_be_reopened_after_hit_return_dismisses_it() {
+        let mut state = EditorSessionState::new(None);
+        assert!(state.sync_message_pager("one\ntwo\nthree\nfour", 2));
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Char('G')));
+        assert_eq!(
+            state.message_pager_prompt_kind(),
+            Some(vim_core_rs::CorePagerPromptKind::HitReturn)
+        );
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Enter));
+        assert!(!state.message_pager_active());
+
+        let message = state
+            .reopen_message_pager()
+            .expect("dismissed message pager should be reopenable");
+
+        assert_eq!(message, "one\ntwo\nthree\nfour");
+        assert_eq!(state.message_scroll_offset(), 0);
+        assert_eq!(
+            state.message_pager_prompt_kind(),
+            Some(vim_core_rs::CorePagerPromptKind::More)
+        );
+    }
+
+    #[test]
+    fn message_pager_escape_dismisses_and_marks_current_message_hidden() {
+        let mut state = EditorSessionState::new(None);
+        assert!(state.sync_message_pager("one\ntwo\nthree\nfour", 2));
+
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Escape));
+
+        assert!(!state.message_pager_active());
+        assert!(state.message_pager_hides_message("one\ntwo\nthree\nfour"));
+    }
+
+    #[test]
+    fn message_pager_enter_dismisses_multiline_message_that_fits_visible_height() {
+        let mut state = EditorSessionState::new(None);
+        assert!(state.sync_message_pager("one\ntwo\nthree\nfour\nfive", 5));
+        assert_eq!(
+            state.message_pager_prompt_kind(),
+            Some(vim_core_rs::CorePagerPromptKind::HitReturn)
+        );
+
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Enter));
+
+        assert!(!state.message_pager_active());
+        assert!(state.message_pager_hides_message("one\ntwo\nthree\nfour\nfive"));
+    }
+
+    #[test]
+    fn message_pager_ctrl_left_bracket_dismisses_like_escape() {
+        let mut state = EditorSessionState::new(None);
+        assert!(state.sync_message_pager("one\ntwo\nthree\nfour", 2));
+
+        assert!(state.handle_message_pager_key(&crate::input_router::KeyInput::Ctrl('[')));
+
+        assert!(!state.message_pager_active());
+        assert!(state.message_pager_hides_message("one\ntwo\nthree\nfour"));
     }
 
     #[test]

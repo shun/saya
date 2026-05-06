@@ -67,6 +67,8 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             MessageLineSource::CoreNotification,
             message,
         )]),
+        message_area_height: 5,
+        message_scroll_offset: 0,
         prompt_line: None,
         pager_prompt: None,
         suppressed_prompt_hints: vec![],

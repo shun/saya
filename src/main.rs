@@ -12,8 +12,8 @@ use saya::command_line_history::{
 };
 use saya::core_host_actions::HostActionRuntime;
 use saya::core_notification_prompt::{
-    NotificationPromptProjectionState, ProjectionFrame, PromptInputAction, handle_prompt_key,
-    record_prompt_response_error,
+    NotificationPromptProjectionState, PagerPromptView, ProjectionFrame, PromptInputAction,
+    handle_prompt_key, record_prompt_response_error,
 };
 use saya::core_outcome::{
     ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
@@ -26,8 +26,8 @@ use saya::diagnostic_log::{
 };
 use saya::editor_session::{
     DirectoryBufferListingOptions, DirectoryBufferPlannedOperation,
-    DirectoryBufferPreviewConfirmationError, DirectoryBufferSortKey, QuitDecision,
-    SaveRequestError,
+    DirectoryBufferPreviewConfirmationError, DirectoryBufferSortKey, EditorSessionState,
+    QuitDecision, SaveRequestError,
 };
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
@@ -170,6 +170,7 @@ async fn main() {
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
     let mut terminal_display_redraw_plan: Option<RedrawPlan> = None;
+    let mut workspace_projection_dirty = false;
 
     let mut startup_runtime_redraw = false;
     let startup_shutdown_reason = dispatch_buffer_open_with_runtime(
@@ -218,7 +219,7 @@ async fn main() {
     }
     let initial_render = build_workspace_render_output(
         &mut outcome,
-        &session_state,
+        &mut session_state,
         &mut viewport_store,
         &mut search_refresh_store,
         &mut markdown_metadata_cache,
@@ -404,6 +405,11 @@ async fn main() {
                                         command_line_prompt = None;
                                         command_line_edit.clear();
                                         match route_ex_command(&cmd) {
+                                            ExCommandRoute::NoOp => {
+                                                log::debug!(
+                                                    "[main] empty ex command completed as no-op"
+                                                );
+                                            }
                                             ExCommandRoute::PresentationLocal => {
                                                 if let Some(message) =
                                                     apply_local_ex_command(&mut session_state, &cmd)
@@ -545,6 +551,20 @@ async fn main() {
                             {
                                 break 'main reason;
                             }
+                        } else if !handled
+                            && session_state.message_pager_active()
+                            && session_state.handle_message_pager_key(&key)
+                        {
+                            handled = true;
+                            need_redraw = true;
+                            workspace_projection_dirty = true;
+                            log::debug!(
+                                "[main] message pager consumed input: key={:?}, offset={}, active={}, workspace_projection_dirty={}",
+                                key,
+                                session_state.message_scroll_offset(),
+                                session_state.message_pager_active(),
+                                workspace_projection_dirty
+                            );
                         } else if !handled
                             && let Some(action) = startup_keymap_action_for_snapshot_input(
                                 &outcome.startup_registry.keymaps,
@@ -900,6 +920,7 @@ async fn main() {
                         Some(&mut terminal_broker),
                         &mut last_workspace_model,
                         outcome_accumulator.last_structural_refresh.as_ref(),
+                        workspace_projection_dirty,
                         command_line_prompt,
                         command_line_edit.buffer(),
                         command_line_edit.cursor_byte_index(),
@@ -915,7 +936,7 @@ async fn main() {
                 }
                 let redraw_result = build_workspace_render_output(
                     &mut outcome,
-                    &session_state,
+                    &mut session_state,
                     &mut viewport_store,
                     &mut search_refresh_store,
                     &mut markdown_metadata_cache,
@@ -962,6 +983,7 @@ async fn main() {
                             &render_output.rendered_workspace,
                         );
                         terminal_display_redraw_plan = None;
+                        workspace_projection_dirty = false;
                     }
                     Err(error) => {
                         transient_msg = Some(error.to_string());
@@ -1167,7 +1189,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         .render_workspace_result(
             build_workspace_render_output(
                 &mut outcome,
-                &session_state,
+                &mut session_state,
                 &mut viewport_store,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
@@ -1219,7 +1241,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         .render_workspace_result(
             build_workspace_render_output(
                 &mut outcome,
-                &session_state,
+                &mut session_state,
                 &mut viewport_store,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
@@ -1273,7 +1295,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         .render_workspace_result(
             build_workspace_render_output(
                 &mut outcome,
-                &session_state,
+                &mut session_state,
                 &mut viewport_store,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
@@ -4031,7 +4053,7 @@ fn apply_workspace_redraw_transaction(
 
 fn build_workspace_render_output(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &saya::editor_session::EditorSessionState,
+    session_state: &mut EditorSessionState,
     viewport_store: &mut WindowViewportStore,
     search_refresh_store: &mut WindowSearchRefreshStore,
     markdown_metadata_cache: &mut MarkdownMetadataCache,
@@ -4154,11 +4176,13 @@ fn build_workspace_render_output(
         terminal_width,
         terminal_height,
     });
-    if let (Ok(workspace), Some(cursor_col)) =
-        (projection_result.as_mut(), command_preview_cursor_col)
-        && let Some(command_line) = workspace.command_line.as_mut()
-    {
-        command_line.cursor_col = cursor_col;
+    if let Ok(workspace) = projection_result.as_mut() {
+        sync_workspace_message_pager(session_state, workspace);
+        if let Some(cursor_col) = command_preview_cursor_col
+            && let Some(command_line) = workspace.command_line.as_mut()
+        {
+            command_line.cursor_col = cursor_col;
+        }
     }
 
     match projection_result {
@@ -4208,6 +4232,45 @@ fn build_workspace_render_output(
             Err(WorkspaceRedrawError::from(error))
         }
     }
+}
+
+fn sync_workspace_message_pager(
+    session_state: &mut EditorSessionState,
+    workspace: &mut WorkspaceScreenModel,
+) {
+    let visible_message = workspace
+        .visible_message_text()
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let activation_changed =
+        session_state.sync_message_pager(&visible_message, workspace.message_area_height);
+    if session_state.message_pager_hides_message(&visible_message) {
+        workspace.message_line.visible = None;
+        workspace.message_scroll_offset = 0;
+        workspace.pager_prompt = None;
+        log::debug!(
+            "[main] hiding dismissed message pager text: message_lines={}",
+            visible_message.lines().count()
+        );
+        return;
+    }
+    workspace.message_scroll_offset = session_state.message_scroll_offset();
+    if workspace.pager_prompt.is_none()
+        && let Some(kind) = session_state.message_pager_prompt_kind()
+    {
+        workspace.pager_prompt = Some(PagerPromptView {
+            kind,
+            one_shot: false,
+        });
+    }
+    log::debug!(
+        "[main] synced message pager: active={}, offset={}, height={}, message_lines={}, activation_changed={}",
+        session_state.message_pager_active(),
+        session_state.message_scroll_offset(),
+        workspace.message_area_height,
+        visible_message.lines().count(),
+        activation_changed
+    );
 }
 
 fn sync_core_screen_size_if_changed(
@@ -4752,12 +4815,19 @@ fn render_command_line_only_redraw_if_possible(
     overlay_writer: Option<&mut dyn OverlayTerminalWriter>,
     last_workspace_model: &mut Option<WorkspaceScreenModel>,
     structural_refresh: Option<&StructuralRefreshOutcome>,
+    workspace_projection_dirty: bool,
     command_line_prompt: Option<char>,
     command_line_buffer: &str,
     command_line_cursor_byte_index: usize,
     tab_size: u16,
 ) -> CommandLineOnlyRedraw {
     if !structural_refresh_is_idle(structural_refresh) {
+        return CommandLineOnlyRedraw::NotApplicable;
+    }
+    if workspace_projection_dirty {
+        trace_redraw_diagnostic(format_args!(
+            "command-line-only redraw bypassed because workspace projection is dirty"
+        ));
         return CommandLineOnlyRedraw::NotApplicable;
     }
     let Some(workspace) = build_command_line_only_workspace(
@@ -5043,6 +5113,8 @@ mod tests {
                 saya::core_notification_prompt::MessageLineCandidate,
             >::new(
             )),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -5145,14 +5217,14 @@ mod tests {
         })
         .expect("launch should succeed");
         outcome.core_bridge.set_screen_size(24, 80);
-        let session_state = outcome.editor_session_state();
+        let mut session_state = outcome.editor_session_state();
         let mut viewport_store = WindowViewportStore::new();
         let mut search_refresh_store = WindowSearchRefreshStore::default();
         let mut markdown_metadata_cache = MarkdownMetadataCache::default();
 
         let syntax_off_workspace = build_workspace_render_output(
             &mut outcome,
-            &session_state,
+            &mut session_state,
             &mut viewport_store,
             &mut search_refresh_store,
             &mut markdown_metadata_cache,
@@ -5196,7 +5268,7 @@ mod tests {
         for _ in 0..20 {
             let workspace = build_workspace_render_output(
                 &mut outcome,
-                &session_state,
+                &mut session_state,
                 &mut viewport_store,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
@@ -8073,6 +8145,8 @@ mod tests {
                 saya::core_notification_prompt::MessageLineCandidate,
             >::new(
             )),
+            message_area_height: 5,
+            message_scroll_offset: 0,
             prompt_line: None,
             pager_prompt: None,
             suppressed_prompt_hints: vec![],
@@ -8192,6 +8266,7 @@ mod tests {
                 Some(&mut writer),
                 &mut last_workspace,
                 None,
+                false,
                 Some(':'),
                 buffer,
                 buffer.len(),
@@ -8244,6 +8319,7 @@ mod tests {
             Some(&mut writer),
             &mut last_workspace,
             None,
+            false,
             Some('/'),
             "word",
             4,
@@ -8253,6 +8329,42 @@ mod tests {
         assert_eq!(result, CommandLineOnlyRedraw::NotApplicable);
         assert_eq!(test_redraw_trace_counts(), RedrawTraceCounts::default());
         assert!(writer.cursor_styles.is_empty());
+    }
+
+    #[test]
+    fn command_line_only_render_is_not_used_when_workspace_projection_is_dirty() {
+        let _guard = redraw_trace_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reset_test_redraw_trace_counts();
+        let mut coordinator = TuiRenderCoordinator::new_for_tests(
+            OverlayAssetStore::default(),
+            OptionalGraphicsAdapter::default(),
+        );
+        let mut writer = RecordingOverlayWriter::default();
+        let mut last_workspace = Some(main_test_workspace());
+
+        let result = render_command_line_only_redraw_if_possible(
+            &mut coordinator,
+            Some(&mut writer),
+            &mut last_workspace,
+            None,
+            true,
+            Some(':'),
+            "",
+            0,
+            4,
+        );
+
+        assert_eq!(result, CommandLineOnlyRedraw::NotApplicable);
+        assert_eq!(test_redraw_trace_counts().command_line_only_overlay, 0);
+        assert!(writer.cursor_styles.is_empty());
+        assert!(
+            last_workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.command_line.is_none()),
+            "dirty workspace projection must not reuse the stale workspace for ':'"
+        );
     }
 
     #[test]
@@ -8273,6 +8385,7 @@ mod tests {
             Some(&mut writer),
             &mut last_workspace,
             None,
+            false,
             Some(':'),
             "write",
             5,

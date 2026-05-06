@@ -850,6 +850,8 @@ fn headless_workspace(
             MessageLineSource::CoreNotification,
             message,
         )]),
+        message_area_height: 5,
+        message_scroll_offset: 0,
         prompt_line: None,
         pager_prompt: None,
         suppressed_prompt_hints: vec![],
