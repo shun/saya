@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use crate::app_paths::default_init_ts_path;
 use crate::callback_registry_seed::CallbackRegistrySeed;
@@ -20,7 +21,9 @@ use crate::startup_runtime::{
 };
 use crate::swapfile::SwapfileCleanupGuard;
 use crate::theme::{ResolvedTheme, ThemeRegistry};
-use vim_core_rs::CoreSnapshot;
+use vim_core_rs::{CoreLightSnapshot, CoreSnapshot};
+
+const INITIAL_SNAPSHOT_TEXT_INLINE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub struct BootstrapOutcome {
@@ -237,16 +240,27 @@ fn prepare_launch_with_guard<R: Read>(
     let target_path = target_path_from_input_source(&request.input_source);
     let initial_text = match &request.input_source {
         InputSource::File(target_path) => {
+            let started_at = Instant::now();
             log::debug!(
                 "[bootstrap] loading target contents before terminal enter: {}",
                 target_path.display()
             );
-            fs::read_to_string(target_path).map_err(|error| BootstrapError::TargetReadFailed {
-                path: target_path.clone(),
-                message: error.to_string(),
-            })?
+            let text = fs::read_to_string(target_path).map_err(|error| {
+                BootstrapError::TargetReadFailed {
+                    path: target_path.clone(),
+                    message: error.to_string(),
+                }
+            })?;
+            log::debug!(
+                "[PERF][bootstrap] target file read: path={}, bytes={}, elapsed_ms={}",
+                target_path.display(),
+                text.len(),
+                started_at.elapsed().as_millis()
+            );
+            text
         }
         InputSource::Stdin => {
+            let started_at = Instant::now();
             log::debug!("[bootstrap] reading startup buffer contents from stdin");
             let mut initial_text = String::new();
             reader.read_to_string(&mut initial_text).map_err(|error| {
@@ -254,6 +268,11 @@ fn prepare_launch_with_guard<R: Read>(
                     message: error.to_string(),
                 }
             })?;
+            log::debug!(
+                "[PERF][bootstrap] stdin read: bytes={}, elapsed_ms={}",
+                initial_text.len(),
+                started_at.elapsed().as_millis()
+            );
             initial_text
         }
         InputSource::Empty => {
@@ -262,12 +281,18 @@ fn prepare_launch_with_guard<R: Read>(
         }
     };
 
+    let core_started_at = Instant::now();
     let mut core_bridge = if let Some(target_path) = target_path.as_ref() {
         CoreBridge::new_with_target_path(target_path, &initial_text)
     } else {
         CoreBridge::new(&initial_text)
     }
     .expect("vim-core-rs session should initialize after preflight session guard acquisition");
+    log::debug!(
+        "[PERF][bootstrap] core bridge initialized: initial_text_len={}, elapsed_ms={}",
+        initial_text.len(),
+        core_started_at.elapsed().as_millis()
+    );
 
     apply_initial_cursor(&mut core_bridge, &request.initial_cursor);
 
@@ -278,11 +303,38 @@ fn prepare_launch_with_guard<R: Read>(
         );
     }
 
+    let config_started_at = Instant::now();
     let mut warnings = Vec::new();
     let loaded_config = load_config_with_fallback(request.config_source, &mut warnings);
     let bootstrap_state = resolve_bootstrap_state(&loaded_config);
     apply_startup_core_options(&mut core_bridge, &bootstrap_state.startup_registry.options);
-    let initial_snapshot = core_bridge.snapshot();
+    log::debug!(
+        "[PERF][bootstrap] config resolved and core options applied: elapsed_ms={}",
+        config_started_at.elapsed().as_millis()
+    );
+    let snapshot_started_at = Instant::now();
+    let initial_light_snapshot = core_bridge.light_snapshot();
+    let initial_snapshot_text_len = initial_text.len();
+    let initial_snapshot_text = if initial_snapshot_text_len == 0 {
+        "\n".to_string()
+    } else if initial_snapshot_text_len <= INITIAL_SNAPSHOT_TEXT_INLINE_LIMIT {
+        initial_text
+    } else {
+        log::debug!(
+            "[bootstrap] omitting large initial snapshot text from BootstrapOutcome: text_len={}, inline_limit={}",
+            initial_snapshot_text_len,
+            INITIAL_SNAPSHOT_TEXT_INLINE_LIMIT
+        );
+        String::new()
+    };
+    let initial_snapshot =
+        snapshot_from_light_snapshot(&initial_light_snapshot, initial_snapshot_text);
+    log::debug!(
+        "[PERF][bootstrap] initial snapshot assembled from light snapshot: source_text_len={}, retained_text_len={}, elapsed_ms={}",
+        initial_snapshot_text_len,
+        initial_snapshot.text.len(),
+        snapshot_started_at.elapsed().as_millis()
+    );
     let initial_tab_size = bootstrap_state.startup_registry.options.tab_size;
     let initial_number_width = bootstrap_state.startup_registry.options.number_width;
 
@@ -313,6 +365,22 @@ fn prepare_launch_with_guard<R: Read>(
         session_guard,
         _swapfile_cleanup_guard: swapfile_cleanup_guard,
     })
+}
+
+fn snapshot_from_light_snapshot(light: &CoreLightSnapshot, text: String) -> CoreSnapshot {
+    CoreSnapshot {
+        text,
+        revision: light.revision,
+        dirty: light.dirty,
+        mode: light.mode,
+        pending_input: light.pending_input.clone(),
+        cursor_row: light.cursor_row,
+        cursor_col: light.cursor_col,
+        pending_host_actions: light.pending_host_actions,
+        buffers: light.buffers.clone(),
+        windows: light.windows.clone(),
+        pum: light.pum.clone(),
+    }
 }
 
 fn target_path_from_input_source(input_source: &InputSource) -> Option<PathBuf> {

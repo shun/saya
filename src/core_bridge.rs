@@ -1,11 +1,13 @@
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use vim_core_rs::{
-    CoreCommandError, CoreCommandOutcome, CoreEvent, CoreHostAction, CoreInputResponse,
-    CoreInputResponseError, CoreMatchType, CoreMessageCategory, CoreMessageEvent,
-    CoreMessageSeverity, CoreOptionScope, CoreSearchHighlightMode, CoreSearchQueryError,
-    CoreSessionError, CoreSnapshot, CoreSyntaxChunk, CoreVfsResponse, JobStatus, VimCoreSession,
+    CoreBufferLineRange, CoreCommandError, CoreCommandOutcome, CoreEvent, CoreHostAction,
+    CoreInputResponse, CoreInputResponseError, CoreLightSnapshot, CoreMatchType,
+    CoreMessageCategory, CoreMessageEvent, CoreMessageSeverity, CoreOptionScope,
+    CoreSearchHighlightMode, CoreSearchQueryError, CoreSessionError, CoreSessionOptions,
+    CoreSnapshot, CoreSyntaxChunk, CoreVfsResponse, JobStatus, VimCoreSession,
 };
 
 use crate::core_outcome::{
@@ -46,24 +48,55 @@ pub struct CoreBridge {
     syntax_enabled: bool,
 }
 
+fn core_session_options_from_env() -> CoreSessionOptions {
+    let debug_log_path = std::env::var_os("SAYA_VIM_CORE_LOG_FILE")
+        .or_else(|| std::env::var_os("SAYA_LOG_FILE"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    CoreSessionOptions {
+        debug_log_path,
+        ..CoreSessionOptions::default()
+    }
+}
+
 impl fmt::Debug for CoreBridge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CoreBridge")
-            .field("snapshot", &self.snapshot())
+            .field("pending_outcomes_len", &self.pending_outcomes.len())
+            .field("next_outcome_sequence", &self.next_outcome_sequence)
+            .field(
+                "active_input_correlation_id",
+                &self.active_input_correlation_id,
+            )
+            .field("pending_transport_key", &self.pending_transport_key)
+            .field("syntax_enabled", &self.syntax_enabled)
             .finish()
     }
 }
 
 impl CoreBridge {
     pub fn new(initial_text: &str) -> Result<Self, CoreSessionError> {
+        let started_at = Instant::now();
         log::debug!(
             "[core_bridge] initializing vim-core-rs session: initial_text_len={}",
             initial_text.len()
         );
-        let mut session = VimCoreSession::new(initial_text)?;
+        let mut session =
+            VimCoreSession::new_with_options(initial_text, core_session_options_from_env())?;
+        log::debug!(
+            "[PERF][core_bridge] vim-core-rs session constructed: initial_text_len={}, elapsed_ms={}",
+            initial_text.len(),
+            started_at.elapsed().as_millis()
+        );
+        let configure_started_at = Instant::now();
         configure_message_suppression(&mut session).map_err(CoreSessionError::CommandFailed)?;
         configure_initial_syntax_state(&mut session).map_err(CoreSessionError::CommandFailed)?;
-        log::debug!("[core_bridge] vim-core-rs session initialized");
+        log::debug!(
+            "[PERF][core_bridge] vim-core-rs session initialized: initial_text_len={}, configure_ms={}, total_ms={}",
+            initial_text.len(),
+            configure_started_at.elapsed().as_millis(),
+            started_at.elapsed().as_millis()
+        );
         Ok(Self {
             session,
             pending_outcomes: NormalizedOutcomeQueue::default(),
@@ -84,6 +117,7 @@ impl CoreBridge {
     }
 
     pub fn snapshot(&self) -> CoreSnapshot {
+        let started_at = Instant::now();
         let snapshot = self.session.snapshot();
         log::debug!(
             "[core_bridge] snapshot captured: revision={}, dirty={}, pending_host_actions={}",
@@ -91,7 +125,73 @@ impl CoreBridge {
             snapshot.dirty,
             snapshot.pending_host_actions
         );
+        log::debug!(
+            "[PERF][core_bridge] snapshot captured: text_len={}, buffers={}, windows={}, elapsed_ms={}",
+            snapshot.text.len(),
+            snapshot.buffers.len(),
+            snapshot.windows.len(),
+            started_at.elapsed().as_millis()
+        );
         snapshot
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.light_snapshot().revision
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.light_snapshot().dirty
+    }
+
+    pub fn mode(&self) -> vim_core_rs::CoreMode {
+        self.light_snapshot().mode
+    }
+
+    pub fn pending_input_is_pending(&self) -> bool {
+        self.light_snapshot().pending_input.is_pending()
+    }
+
+    pub fn light_snapshot(&self) -> CoreLightSnapshot {
+        let started_at = Instant::now();
+        let snapshot = self.session.light_snapshot();
+        log::debug!(
+            "[core_bridge] light snapshot captured: revision={}, dirty={}, pending_host_actions={}",
+            snapshot.revision,
+            snapshot.dirty,
+            snapshot.pending_host_actions
+        );
+        log::debug!(
+            "[PERF][core_bridge] light snapshot captured: buffers={}, windows={}, elapsed_ms={}",
+            snapshot.buffers.len(),
+            snapshot.windows.len(),
+            started_at.elapsed().as_millis()
+        );
+        snapshot
+    }
+
+    pub fn buffer_line_range(
+        &self,
+        buf_id: i32,
+        start_row: usize,
+        line_count: usize,
+    ) -> Option<CoreBufferLineRange> {
+        let started_at = Instant::now();
+        let range = self
+            .session
+            .buffer_line_range(buf_id, start_row, line_count);
+        log::debug!(
+            "[PERF][core_bridge] buffer line range fetched: buf_id={}, start_row={}, requested_lines={}, returned_lines={}, total_line_count={:?}, elapsed_ms={}",
+            buf_id,
+            start_row,
+            line_count,
+            range
+                .as_ref()
+                .map(|range| range.lines.len())
+                .unwrap_or_default(),
+            range.as_ref().map(|range| range.total_line_count),
+            started_at.elapsed().as_millis()
+        );
+        range
     }
 
     /// core がページスクロールの基準にする screen size を host 側で同期する。
@@ -328,7 +428,7 @@ impl CoreBridge {
         log::debug!(
             "[core_bridge] dispatch result: {:?}, pending_input={:?}",
             outcome,
-            self.session.snapshot().pending_input
+            self.session.pending_input()
         );
         Ok(outcome)
     }
@@ -418,8 +518,19 @@ impl CoreBridge {
             .execute_ex_command(&format!("call setline(1, [{list_expr}])"))
             .map_err(CoreSessionError::CommandFailed)?;
         self.queue_transaction_artifacts(&setline);
-        let snapshot = self.session.snapshot();
-        if snapshot.text.lines().count() > lines.len() {
+        let snapshot = self.session.light_snapshot();
+        let active_buffer_id = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.is_active)
+            .map(|buffer| buffer.id)
+            .unwrap_or(1);
+        let current_line_count = self
+            .session
+            .buffer_line_range(active_buffer_id, 0, 1)
+            .map(|range| range.total_line_count)
+            .unwrap_or(lines.len());
+        if current_line_count > lines.len() {
             let delete = self
                 .session
                 .execute_ex_command(&format!("{},$delete _", lines.len() + 1))
@@ -449,7 +560,7 @@ impl CoreBridge {
     }
 
     pub fn current_visual_selection(&mut self) -> Option<VisualSelection> {
-        let snapshot = self.session.snapshot();
+        let snapshot = self.session.light_snapshot();
         if !is_visual_mode(snapshot.mode) {
             return None;
         }
@@ -460,7 +571,7 @@ impl CoreBridge {
             .map_err(CoreSessionError::CommandFailed)
             .ok()?;
         self.queue_transaction_artifacts(&first_swap);
-        let swapped = self.session.snapshot();
+        let swapped = self.session.light_snapshot();
         let anchor = (swapped.cursor_row, swapped.cursor_col);
         let second_swap = self
             .session
@@ -691,6 +802,15 @@ impl CoreBridge {
         })
     }
 
+    pub fn has_search_highlight_activity(&self) -> bool {
+        let active = self.session.is_incsearch_active() || self.session.is_hlsearch_active();
+        log::debug!(
+            "[core_bridge] resolved search highlight activity without snapshot: active={}",
+            active
+        );
+        active
+    }
+
     pub fn get_line_syntax(
         &self,
         window_id: i32,
@@ -842,7 +962,7 @@ impl CoreBridge {
         self.session.get_search_input_pattern().is_some()
             || self.session.is_incsearch_active()
             || matches!(
-                self.session.snapshot().mode,
+                self.session.light_snapshot().mode,
                 vim_core_rs::CoreMode::CommandLine
             )
     }
@@ -851,7 +971,7 @@ impl CoreBridge {
         key == "\u{17}"
             && self.pending_transport_key.is_none()
             && matches!(
-                self.session.snapshot().mode,
+                self.session.light_snapshot().mode,
                 vim_core_rs::CoreMode::Normal
                     | vim_core_rs::CoreMode::Visual
                     | vim_core_rs::CoreMode::VisualLine
@@ -866,7 +986,7 @@ impl CoreBridge {
     fn should_handle_ctrl_c_interrupt(&self, key: &str) -> bool {
         key == "\u{3}"
             && matches!(
-                self.session.snapshot().mode,
+                self.session.light_snapshot().mode,
                 vim_core_rs::CoreMode::Normal
                     | vim_core_rs::CoreMode::Visual
                     | vim_core_rs::CoreMode::VisualLine
@@ -875,7 +995,7 @@ impl CoreBridge {
     }
 
     fn handle_ctrl_c_interrupt(&mut self) -> Result<CoreCommandOutcome, CoreSessionError> {
-        let snapshot = self.session.snapshot();
+        let snapshot = self.session.light_snapshot();
         let has_pending_input = snapshot.pending_input.is_pending();
         log::debug!(
             "[core_bridge] handling ctrl-c interrupt: dirty={}, mode={:?}, has_pending_input={}",

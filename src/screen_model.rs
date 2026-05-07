@@ -7,9 +7,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use unicode_width::UnicodeWidthChar;
-use vim_core_rs::{CoreMode, CoreSnapshot, CoreSyntaxChunk, CoreWindowInfo};
+use vim_core_rs::{
+    CoreBufferLineRange, CoreLightSnapshot, CoreMode, CoreSnapshot, CoreSyntaxChunk, CoreWindowInfo,
+};
 
 use crate::core_bridge::VisualSelection;
 use crate::core_notification_prompt::{
@@ -438,6 +441,7 @@ impl ScreenMessageState {
 /// CoreSnapshot と EditorSessionState から描画に必要な情報を選択して渡す。
 pub struct ProjectionInput<'a> {
     pub snapshot: &'a CoreSnapshot,
+    pub line_range: Option<&'a CoreBufferLineRange>,
     pub session_state: &'a EditorSessionState,
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_state: Option<&'a SearchVisibleState>,
@@ -469,6 +473,7 @@ impl<'a> ProjectionInput<'a> {
         let active_buffer_id = active_window.map(|window| window.buf_id).unwrap_or(0);
         Self {
             snapshot,
+            line_range: None,
             session_state,
             visual_selection: None,
             search_state: None,
@@ -500,6 +505,11 @@ impl<'a> ProjectionInput<'a> {
     pub fn with_viewport(mut self, viewport_top: usize, body_height: usize) -> Self {
         self.viewport_top = viewport_top;
         self.body_height = body_height.max(1);
+        self
+    }
+
+    pub fn with_line_range(mut self, line_range: Option<&'a CoreBufferLineRange>) -> Self {
+        self.line_range = line_range;
         self
     }
 
@@ -571,6 +581,8 @@ impl<'a> ProjectionInput<'a> {
 
 pub struct WorkspaceProjectionInput<'a> {
     pub snapshot: &'a CoreSnapshot,
+    pub light_snapshot: Option<&'a CoreLightSnapshot>,
+    pub line_ranges: &'a BTreeMap<i32, CoreBufferLineRange>,
     pub session_state: &'a EditorSessionState,
     pub visual_selection: Option<&'a VisualSelection>,
     pub search_states: &'a BTreeMap<i32, SearchVisibleState>,
@@ -603,6 +615,7 @@ impl PaneRect {
 ///
 /// 描画側はこの関数の戻り値だけを使い、CoreSnapshot に直接依存しない。
 pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
+    let started_at = Instant::now();
     log::debug!(
         "[screen_model] projecting: mode={:?}, dirty={}, cursor=({},{}), command_preview={:?}, core_message={:?}, system_warning={:?}, transient_info={:?}",
         input.snapshot.mode,
@@ -619,31 +632,11 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let mode_label = mode_to_label(input.snapshot.mode);
     let cursor_style = mode_to_cursor_style(input.snapshot.mode);
     let dirty = input.snapshot.dirty;
-    let rendered_lines = apply_list_projection(
-        split_text_to_lines(&input.snapshot.text, input.session_state.tab_size()),
-        input.session_state.list(),
-        input.session_state.listchars(),
-    );
-    let full_lines = apply_line_number_prefix(
-        rendered_lines,
-        input.session_state.line_numbers() || input.session_state.relative_number(),
-        input.session_state.relative_number(),
-        input.session_state.number_width(),
-        input.cursor_row,
-    );
-    trace_projection_lines("full", &full_lines, 0);
-    let lines = slice_visible_lines(&full_lines, input.viewport_top, input.body_height);
+    let lines = project_visible_input_text_lines(input);
     let line_projections = project_markdown_line_projections(input);
     trace_projection_lines("visible", &lines, input.viewport_top);
     let cursor_row = resolve_cursor_row(input.cursor_row, input.viewport_top, input.body_height);
-    let cursor_col = resolve_cursor_col(
-        &input.snapshot.text,
-        input.cursor_row,
-        input.cursor_col,
-        input.session_state.tab_size(),
-        input.session_state.line_numbers() || input.session_state.relative_number(),
-        input.session_state.number_width(),
-    );
+    let cursor_col = resolve_input_cursor_col(input, input.cursor_row, input.cursor_col);
     let visual_selection = resolve_visual_selection(input);
     let search_overlays = project_search_overlays(input, &line_projections);
     let markdown_style_ranges = project_markdown_style_ranges(input, &line_projections);
@@ -668,6 +661,18 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         syntax_chunks.len(),
         message_state.as_ref().map(|state| state.kind),
         message_line,
+    );
+    log::debug!(
+        "[PERF][screen_model] project text_len={} viewport_top={} body_height={} visible_lines={} line_projections={} elapsed_ms={}",
+        input
+            .line_range
+            .map(|range| range.lines.iter().map(String::len).sum())
+            .unwrap_or_else(|| input.snapshot.text.len()),
+        input.viewport_top,
+        input.body_height,
+        lines.len(),
+        line_projections.len(),
+        started_at.elapsed().as_millis()
     );
 
     ScreenModel {
@@ -695,7 +700,10 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
 pub fn project_workspace(
     input: &WorkspaceProjectionInput<'_>,
 ) -> Result<WorkspaceScreenModel, WorkspaceProjectionError> {
-    let active_window_id = input.snapshot.active_window_id();
+    let active_window_id = input
+        .light_snapshot
+        .and_then(CoreLightSnapshot::active_window_id)
+        .or_else(|| input.snapshot.active_window_id());
     let Some(active_window_id) = active_window_id else {
         log::debug!("[screen_model] workspace projection aborted: active window missing");
         return Err(WorkspaceProjectionError::ActiveWindowMissing);
@@ -743,6 +751,7 @@ pub fn project_workspace(
             let is_active = active_window_id == window_id;
             let pane_input = ProjectionInput::new(input.snapshot, input.session_state, None)
                 .with_window(window, rect, is_active)
+                .with_line_range(input.line_ranges.get(&window.id))
                 .with_visual_selection(if is_active {
                     input.visual_selection
                 } else {
@@ -955,42 +964,22 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
 
     let start_row = selection.start_row.max(input.viewport_top);
     let end_row = selection.end_row.min(viewport_bottom);
-    let line_start_col = line_number_offset(
-        &input.snapshot.text,
-        input.session_state.line_numbers(),
-        input.session_state.number_width(),
-    );
+    let line_start_col = line_number_offset_for_input(input, input.session_state.line_numbers());
     let start_col = if selection.mode == CoreMode::VisualLine {
         line_start_col
     } else if start_row == selection.start_row {
-        resolve_display_col_for_position(
-            &input.snapshot.text,
-            start_row,
-            selection.start_col,
-            input.session_state.tab_size(),
-            input.session_state.line_numbers() || input.session_state.relative_number(),
-            input.session_state.number_width(),
-        )
+        resolve_input_display_col_for_position(input, start_row, selection.start_col)
     } else {
         line_start_col
     };
     let end_col_exclusive = if selection.mode == CoreMode::VisualLine {
-        visible_line_end_col_exclusive(
-            &input.snapshot.text,
+        input_visible_line_end_col_exclusive(
+            input,
             end_row,
-            input.session_state.tab_size(),
             input.session_state.line_numbers() || input.session_state.relative_number(),
-            input.session_state.number_width(),
         )
     } else if end_row == selection.end_row {
-        resolve_display_col_after_inclusive_position(
-            &input.snapshot.text,
-            end_row,
-            selection.end_col,
-            input.session_state.tab_size(),
-            input.session_state.line_numbers() || input.session_state.relative_number(),
-            input.session_state.number_width(),
-        )
+        resolve_input_display_col_after_inclusive_position(input, end_row, selection.end_col)
     } else {
         u16::MAX
     };
@@ -1002,23 +991,6 @@ fn resolve_visual_selection(input: &ProjectionInput<'_>) -> Option<ScreenSelecti
         end_row: resolve_cursor_row(end_row, input.viewport_top, input.body_height),
         end_col_exclusive,
     })
-}
-
-fn slice_visible_lines(lines: &[String], viewport_top: usize, body_height: usize) -> Vec<String> {
-    let body_height = body_height.max(1);
-    let start = viewport_top.min(lines.len());
-    let end = start.saturating_add(body_height).min(lines.len());
-    let visible = lines[start..end].to_vec();
-
-    log::debug!(
-        "[screen_model] sliced visible lines: viewport_top={}, body_height={}, total_lines={}, visible_lines={}",
-        viewport_top,
-        body_height,
-        lines.len(),
-        visible.len()
-    );
-
-    visible
 }
 
 /// アクティブバッファのファイル名を解決する。
@@ -1076,53 +1048,124 @@ fn mode_to_cursor_style(mode: CoreMode) -> ScreenCursorStyle {
     style
 }
 
-/// テキストを行に分割する。
-fn split_text_to_lines(text: &str, tab_size: u16) -> Vec<String> {
-    let lines: Vec<String> = text
+fn text_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let newline_count = text.bytes().filter(|byte| *byte == b'\n').count();
+    if text.ends_with('\n') {
+        newline_count
+    } else {
+        newline_count.saturating_add(1)
+    }
+}
+
+fn input_line_count(input: &ProjectionInput<'_>) -> usize {
+    input
+        .line_range
+        .map(|range| range.total_line_count.max(1))
+        .unwrap_or_else(|| text_line_count(&input.snapshot.text).max(1))
+}
+
+fn input_line_at<'a>(input: &'a ProjectionInput<'_>, row: usize) -> &'a str {
+    if let Some(range) = input.line_range {
+        if row >= range.start_row {
+            let relative_row = row - range.start_row;
+            if let Some(line) = range.lines.get(relative_row) {
+                return line;
+            }
+        }
+        return "";
+    }
+    input.snapshot.text.split('\n').nth(row).unwrap_or("")
+}
+
+fn input_visible_rows<'a>(input: &'a ProjectionInput<'_>) -> Vec<(usize, &'a str)> {
+    let body_height = input.body_height.max(1);
+    if let Some(range) = input.line_range {
+        return range
+            .lines
+            .iter()
+            .enumerate()
+            .skip(input.viewport_top.saturating_sub(range.start_row))
+            .take(body_height)
+            .map(|(index, line)| (range.start_row.saturating_add(index), line.as_str()))
+            .collect();
+    }
+    input
+        .snapshot
+        .text
         .lines()
-        .map(|line| expand_tabs(line, usize::from(tab_size.max(1))))
-        .collect();
-    log::debug!("[screen_model] split text to {} lines", lines.len());
-    lines
-}
-
-fn apply_line_number_prefix(
-    lines: Vec<String>,
-    enabled: bool,
-    relative_number: bool,
-    configured_width: u16,
-    cursor_row: usize,
-) -> Vec<String> {
-    if !enabled && !relative_number {
-        return lines;
-    }
-
-    let width = line_number_width(lines.len(), configured_width);
-    let numbered_lines = lines
-        .into_iter()
         .enumerate()
-        .map(|(index, line)| {
-            let number = if relative_number && index != cursor_row {
-                index.abs_diff(cursor_row)
-            } else {
-                index + 1
-            };
-            format!("{:>width$} {}", number, line, width = width)
-        })
-        .collect();
-    log::debug!("[screen_model] applied line number prefix");
-    numbered_lines
+        .skip(input.viewport_top)
+        .take(body_height)
+        .collect()
 }
 
-fn apply_list_projection(lines: Vec<String>, enabled: bool, listchars: &str) -> Vec<String> {
-    if !enabled {
-        return lines;
+fn projected_input_line_number_width(input: &ProjectionInput<'_>) -> usize {
+    if input.line_range.is_none() {
+        if input.body_height == usize::MAX {
+            return line_number_width(
+                text_line_count(&input.snapshot.text),
+                input.session_state.number_width(),
+            );
+        }
+        let visible_line_upper_bound = input.viewport_top.saturating_add(input.body_height.max(1));
+        let relevant_line_count = visible_line_upper_bound.max(input.cursor_row.saturating_add(1));
+        return line_number_width(relevant_line_count, input.session_state.number_width());
     }
-    let trail = parse_listchars_trail(listchars).unwrap_or('-');
-    lines
+    let visible_line_upper_bound = input.viewport_top.saturating_add(input.body_height.max(1));
+    let relevant_line_count = visible_line_upper_bound
+        .max(input.cursor_row.saturating_add(1))
+        .max(input_line_count(input));
+    line_number_width(relevant_line_count, input.session_state.number_width())
+}
+
+fn project_visible_input_text_lines(input: &ProjectionInput<'_>) -> Vec<String> {
+    let body_height = input.body_height.max(1);
+    let tab_size = usize::from(input.session_state.tab_size().max(1));
+    let number_width = projected_input_line_number_width(input);
+    let line_numbers = input.session_state.line_numbers() || input.session_state.relative_number();
+    let trail = input
+        .session_state
+        .list()
+        .then(|| parse_listchars_trail(input.session_state.listchars()).unwrap_or('-'));
+    let visible = input_visible_rows(input)
         .into_iter()
-        .map(|line| render_list_line(&line, trail))
-        .collect()
+        .take(body_height)
+        .map(|(index, line)| {
+            let mut rendered = expand_tabs(line, tab_size);
+            if let Some(trail) = trail {
+                rendered = render_list_line(&rendered, trail);
+            }
+            if line_numbers {
+                let number = if input.session_state.relative_number() && index != input.cursor_row {
+                    index.abs_diff(input.cursor_row)
+                } else {
+                    index + 1
+                };
+                rendered = format!("{:>width$} {}", number, rendered, width = number_width);
+            }
+            rendered
+        })
+        .collect::<Vec<_>>();
+
+    log::debug!(
+        "[screen_model] projected visible input text lines: window_id={}, buffer_id={}, viewport_top={}, body_height={}, number_width={}, visible_lines={}, source={}",
+        input.window_id,
+        input.buffer_id,
+        input.viewport_top,
+        body_height,
+        number_width,
+        visible.len(),
+        if input.line_range.is_some() {
+            "line_range"
+        } else {
+            "full_snapshot"
+        }
+    );
+
+    visible
 }
 
 fn render_list_line(line: &str, trail: char) -> String {
@@ -1143,72 +1186,60 @@ fn parse_listchars_trail(listchars: &str) -> Option<char> {
     })
 }
 
-/// vim-core-rs のバイト列ベースカーソル位置を terminal の表示セル列へ変換する。
-fn resolve_cursor_col(
-    text: &str,
+fn resolve_input_cursor_col(
+    input: &ProjectionInput<'_>,
     cursor_row: usize,
     cursor_col: usize,
-    tab_size: u16,
-    line_numbers: bool,
-    number_width: u16,
 ) -> u16 {
-    let line = text.split('\n').nth(cursor_row).unwrap_or("");
+    let line = input_line_at(input, cursor_row);
     let clamped_col = cursor_col.min(line.len());
     let boundary_col = clamp_to_char_boundary(line, clamped_col);
-    let base_display_col = display_width(&line[..boundary_col], usize::from(tab_size.max(1)));
-    let line_number_offset = usize::from(line_number_offset(text, line_numbers, number_width));
+    let base_display_col = display_width(
+        &line[..boundary_col],
+        usize::from(input.session_state.tab_size().max(1)),
+    );
+    let line_number_offset = usize::from(line_number_offset_for_input(
+        input,
+        input.session_state.line_numbers() || input.session_state.relative_number(),
+    ));
     let display_col = base_display_col.saturating_add(line_number_offset);
     let display_col = u16::try_from(display_col).unwrap_or(u16::MAX);
 
     log::debug!(
-        "[screen_model] resolved cursor col: row={}, raw_col={}, boundary_col={}, base_display_col={}, line_number_offset={}, display_col={}",
+        "[screen_model] resolved input cursor col: window_id={}, row={}, raw_col={}, boundary_col={}, base_display_col={}, line_number_offset={}, display_col={}, source={}",
+        input.window_id,
         cursor_row,
         cursor_col,
         boundary_col,
         base_display_col,
         line_number_offset,
-        display_col
+        display_col,
+        if input.line_range.is_some() {
+            "line_range"
+        } else {
+            "full_snapshot"
+        }
     );
 
     display_col
 }
 
-fn resolve_display_col_for_position(
-    text: &str,
+fn resolve_input_display_col_for_position(
+    input: &ProjectionInput<'_>,
     cursor_row: usize,
     cursor_col: usize,
-    tab_size: u16,
-    line_numbers: bool,
-    number_width: u16,
 ) -> u16 {
-    resolve_cursor_col(
-        text,
-        cursor_row,
-        cursor_col,
-        tab_size,
-        line_numbers,
-        number_width,
-    )
+    resolve_input_cursor_col(input, cursor_row, cursor_col)
 }
 
-fn resolve_display_col_after_inclusive_position(
-    text: &str,
+fn resolve_input_display_col_after_inclusive_position(
+    input: &ProjectionInput<'_>,
     cursor_row: usize,
     cursor_col: usize,
-    tab_size: u16,
-    line_numbers: bool,
-    number_width: u16,
 ) -> u16 {
-    let line = text.split('\n').nth(cursor_row).unwrap_or("");
+    let line = input_line_at(input, cursor_row);
     if line.is_empty() {
-        return resolve_display_col_for_position(
-            text,
-            cursor_row,
-            cursor_col,
-            tab_size,
-            line_numbers,
-            number_width,
-        );
+        return resolve_input_display_col_for_position(input, cursor_row, cursor_col);
     }
     let clamped_col = clamp_to_char_boundary(line, cursor_col.min(line.len()));
     let next_col = line[clamped_col..]
@@ -1216,33 +1247,26 @@ fn resolve_display_col_after_inclusive_position(
         .next()
         .map(|ch| clamped_col + ch.len_utf8())
         .unwrap_or(clamped_col);
-    resolve_display_col_for_position(
-        text,
-        cursor_row,
-        next_col,
-        tab_size,
-        line_numbers,
-        number_width,
-    )
+    resolve_input_display_col_for_position(input, cursor_row, next_col)
 }
 
-fn line_number_offset(text: &str, line_numbers: bool, number_width: u16) -> u16 {
+fn line_number_offset_for_input(input: &ProjectionInput<'_>, line_numbers: bool) -> u16 {
     if line_numbers {
-        u16::try_from(line_number_width(text.lines().count(), number_width) + 1).unwrap_or(u16::MAX)
+        u16::try_from(projected_input_line_number_width(input).saturating_add(1))
+            .unwrap_or(u16::MAX)
     } else {
         0
     }
 }
 
-fn visible_line_end_col_exclusive(
-    text: &str,
+fn input_visible_line_end_col_exclusive(
+    input: &ProjectionInput<'_>,
     row: usize,
-    tab_size: u16,
     line_numbers: bool,
-    number_width: u16,
 ) -> u16 {
-    let line = text.split('\n').nth(row).unwrap_or("");
-    resolve_display_col_for_position(text, row, line.len(), tab_size, line_numbers, number_width)
+    let line = input_line_at(input, row);
+    resolve_input_display_col_for_position(input, row, line.len())
+        .max(line_number_offset_for_input(input, line_numbers))
 }
 
 fn line_number_width(line_count: usize, configured_width: u16) -> usize {
@@ -1529,13 +1553,10 @@ fn resolve_search_overlay_display_bounds(
     let start_col = if row == search_match.start_row {
         projection.map_or_else(
             || {
-                resolve_display_col_for_position(
-                    &input.snapshot.text,
+                resolve_input_display_col_for_position(
+                    input,
                     search_match.start_row - 1,
                     search_match.start_col,
-                    input.session_state.tab_size(),
-                    input.session_state.line_numbers() || input.session_state.relative_number(),
-                    input.session_state.number_width(),
                 )
             },
             |projection| projection.logical_to_display_col(search_match.start_col),
@@ -1543,10 +1564,9 @@ fn resolve_search_overlay_display_bounds(
     } else {
         projection.map_or_else(
             || {
-                line_number_offset(
-                    &input.snapshot.text,
+                line_number_offset_for_input(
+                    input,
                     input.session_state.line_numbers() || input.session_state.relative_number(),
-                    input.session_state.number_width(),
                 )
             },
             |projection| projection.line_start_col,
@@ -1555,13 +1575,10 @@ fn resolve_search_overlay_display_bounds(
     let end_col_exclusive = if row == search_match.end_row {
         projection.map_or_else(
             || {
-                resolve_display_col_for_position(
-                    &input.snapshot.text,
+                resolve_input_display_col_for_position(
+                    input,
                     search_match.end_row - 1,
                     search_match.end_col,
-                    input.session_state.tab_size(),
-                    input.session_state.line_numbers() || input.session_state.relative_number(),
-                    input.session_state.number_width(),
                 )
             },
             |projection| projection.logical_to_display_col(search_match.end_col),
@@ -1569,12 +1586,10 @@ fn resolve_search_overlay_display_bounds(
     } else {
         projection.map_or_else(
             || {
-                visible_line_end_col_exclusive(
-                    &input.snapshot.text,
+                input_visible_line_end_col_exclusive(
+                    input,
                     row - 1,
-                    input.session_state.tab_size(),
                     input.session_state.line_numbers() || input.session_state.relative_number(),
-                    input.session_state.number_width(),
                 )
             },
             |projection| projection.logical_to_display_col(projection.raw_text.len()),
@@ -1778,7 +1793,6 @@ fn project_syntax_chunks(
         .viewport_top
         .saturating_add(input.body_height.max(1))
         .saturating_sub(1);
-    let line_numbers = input.session_state.line_numbers() || input.session_state.relative_number();
     let mut projected = Vec::new();
 
     for (absolute_row, chunks) in syntax_lines {
@@ -1797,29 +1811,11 @@ fn project_syntax_chunks(
                     .find(|projection| projection.absolute_row == *absolute_row)
             });
             let start_col = markdown_projection.map_or_else(
-                || {
-                    resolve_display_col_for_position(
-                        &input.snapshot.text,
-                        *absolute_row,
-                        chunk.start_col,
-                        input.session_state.tab_size(),
-                        line_numbers,
-                        input.session_state.number_width(),
-                    )
-                },
+                || resolve_input_display_col_for_position(input, *absolute_row, chunk.start_col),
                 |projection| projection.logical_to_display_col(chunk.start_col),
             );
             let end_col_exclusive = markdown_projection.map_or_else(
-                || {
-                    resolve_display_col_for_position(
-                        &input.snapshot.text,
-                        *absolute_row,
-                        chunk.end_col,
-                        input.session_state.tab_size(),
-                        line_numbers,
-                        input.session_state.number_width(),
-                    )
-                },
+                || resolve_input_display_col_for_position(input, *absolute_row, chunk.end_col),
                 |projection| projection.logical_to_display_col(chunk.end_col),
             );
             if end_col_exclusive <= start_col {
@@ -1889,8 +1885,7 @@ fn project_tree_sitter_syntax_chunks(
         );
         return Vec::new();
     };
-    let raw_lines = input.snapshot.text.split('\n').collect::<Vec<_>>();
-    let coverage_line_count = input.snapshot.text.lines().count().max(1);
+    let coverage_line_count = input_line_count(input);
     let viewport_bottom = input
         .viewport_top
         .saturating_add(input.body_height.max(1))
@@ -1944,13 +1939,13 @@ fn project_tree_sitter_syntax_chunks(
         let end_row_inclusive = end_row_exclusive
             .saturating_sub(1)
             .min(viewport_bottom)
-            .min(raw_lines.len().saturating_sub(1));
+            .min(coverage_line_count.saturating_sub(1));
         if start_row > end_row_inclusive {
             continue;
         }
 
         for absolute_row in start_row..=end_row_inclusive {
-            let raw_line_len = raw_lines.get(absolute_row).map_or(0, |line| line.len());
+            let raw_line_len = input_line_at(input, absolute_row).len();
             let raw_start_col = if absolute_row == chunk.range.start.row {
                 chunk.range.start.col
             } else {
@@ -2027,7 +2022,7 @@ fn project_tree_sitter_chunk_display_range(
     absolute_row: usize,
     start: vim_core_rs::CoreTextPosition,
     end: vim_core_rs::CoreTextPosition,
-    line_numbers: bool,
+    _line_numbers: bool,
 ) -> Option<(u16, u16)> {
     let markdown_projection = input.markdown_document_map.and_then(|_| {
         line_projections
@@ -2035,29 +2030,11 @@ fn project_tree_sitter_chunk_display_range(
             .find(|projection| projection.absolute_row == absolute_row)
     });
     let start_col = markdown_projection.map_or_else(
-        || {
-            resolve_display_col_for_position(
-                &input.snapshot.text,
-                absolute_row,
-                start.col,
-                input.session_state.tab_size(),
-                line_numbers,
-                input.session_state.number_width(),
-            )
-        },
+        || resolve_input_display_col_for_position(input, absolute_row, start.col),
         |projection| projection.logical_to_display_col(start.col),
     );
     let end_col_exclusive = markdown_projection.map_or_else(
-        || {
-            resolve_display_col_for_position(
-                &input.snapshot.text,
-                absolute_row,
-                end.col,
-                input.session_state.tab_size(),
-                line_numbers,
-                input.session_state.number_width(),
-            )
-        },
+        || resolve_input_display_col_for_position(input, absolute_row, end.col),
         |projection| projection.logical_to_display_col(end.col),
     );
     if end_col_exclusive <= start_col {
@@ -2115,7 +2092,6 @@ fn map_tree_sitter_modifier(modifier: vim_core_rs::CoreSyntaxModifier) -> Screen
 }
 
 fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenLineProjection> {
-    let raw_lines = input.snapshot.text.split('\n').collect::<Vec<_>>();
     let markdown_document_map = if input.session_state.markdown_render() {
         input.markdown_document_map
     } else {
@@ -2128,21 +2104,29 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
     };
     let line_number_enabled =
         input.session_state.line_numbers() || input.session_state.relative_number();
-    let number_width = line_number_width(raw_lines.len(), input.session_state.number_width());
+    let number_width = projected_input_line_number_width(input);
     let line_start_col = if line_number_enabled {
         u16::try_from(number_width + 1).unwrap_or(u16::MAX)
     } else {
         0
     };
-    let viewport_start = input.viewport_top.min(raw_lines.len());
-    let viewport_end = viewport_start
-        .saturating_add(input.body_height.max(1))
-        .min(raw_lines.len());
     let raw_expansion = resolve_markdown_raw_expansion(input);
 
-    let projections = (viewport_start..viewport_end)
-        .map(|absolute_row| {
-            let raw_text = raw_lines.get(absolute_row).copied().unwrap_or("");
+    let visible_rows = if input.line_range.is_some() {
+        input_visible_rows(input)
+    } else {
+        input
+            .snapshot
+            .text
+            .split('\n')
+            .enumerate()
+            .skip(input.viewport_top)
+            .take(input.body_height.max(1))
+            .collect::<Vec<_>>()
+    };
+    let projections = visible_rows
+        .into_iter()
+        .map(|(absolute_row, raw_text)| {
             let keep_raw = raw_expansion.contains_row(absolute_row);
             project_markdown_line_projection(
                 absolute_row,
@@ -2643,7 +2627,10 @@ fn map_window_rect(
 mod tests {
     use std::path::PathBuf;
 
-    use vim_core_rs::{CoreInputRequestKind, CoreMode, CoreSyntaxChunk};
+    use vim_core_rs::{
+        CoreBufferInfo, CoreBufferRevision, CoreBufferSourceKind, CoreInputRequestKind, CoreMode,
+        CorePendingInput, CoreSnapshot, CoreSyntaxChunk, CoreWindowInfo,
+    };
 
     use super::*;
     use crate::core_bridge::CoreBridge;
@@ -3917,6 +3904,129 @@ mod tests {
     }
 
     #[test]
+    fn project_large_viewport_only_materializes_visible_lines() {
+        let large_text = (0..1_000_000)
+            .map(|line| format!("line{line}\tvalue"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let snapshot = snapshot_for_projection_text(large_text, 42, 0, 42, 54);
+        let mut session_state = EditorSessionState::new(None);
+        session_state.set_line_numbers(true);
+
+        let started_at = std::time::Instant::now();
+        let model =
+            project(&ProjectionInput::new(&snapshot, &session_state, None).with_viewport(42, 12));
+        let elapsed = started_at.elapsed();
+
+        assert_eq!(model.lines.len(), 12);
+        assert_eq!(model.lines[0], "  43 line42  value");
+        assert!(
+            elapsed.as_millis() < 40,
+            "large viewport projection should avoid full-buffer materialization: elapsed_ms={}",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn project_workspace_uses_window_line_range_without_snapshot_text() {
+        let snapshot = snapshot_for_projection_text(String::new(), 43, 4, 42, 55);
+        let mut session_state = EditorSessionState::new(None);
+        session_state.set_line_numbers(true);
+        let mut viewport_store = WindowViewportStore::new();
+        viewport_store.sync_from_windows(&snapshot.windows);
+        let mut line_ranges = BTreeMap::new();
+        line_ranges.insert(
+            1,
+            CoreBufferLineRange {
+                buffer_id: 1,
+                source_revision: CoreBufferRevision { value: 1 },
+                start_row: 42,
+                line_count: 12,
+                total_line_count: 200_469,
+                lines: (42..54)
+                    .map(|index| format!("range-line-{index}"))
+                    .collect(),
+            },
+        );
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &line_ranges,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            #[cfg(feature = "tree-sitter-syntax")]
+            tree_sitter_syntax: &BTreeMap::new(),
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 14,
+        })
+        .expect("workspace projection");
+
+        assert_eq!(model.panes[0].lines.len(), 12);
+        assert_eq!(model.panes[0].lines[0], "    43 range-line-42");
+        assert_eq!(model.panes[0].lines[11], "    54 range-line-53");
+    }
+
+    fn snapshot_for_projection_text(
+        text: String,
+        cursor_row: usize,
+        cursor_col: usize,
+        topline: usize,
+        botline: usize,
+    ) -> CoreSnapshot {
+        CoreSnapshot {
+            text,
+            revision: 1,
+            dirty: false,
+            mode: CoreMode::Normal,
+            pending_input: CorePendingInput::none(),
+            cursor_row,
+            cursor_col,
+            pending_host_actions: 0,
+            buffers: vec![CoreBufferInfo {
+                id: 1,
+                name: "large.log".to_string(),
+                source_revision: CoreBufferRevision { value: 1 },
+                dirty: false,
+                is_active: true,
+                source_kind: CoreBufferSourceKind::Local,
+                document_id: None,
+                pending_vfs_operation: None,
+                deferred_close: None,
+                last_vfs_error: None,
+            }],
+            windows: vec![CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 80,
+                height: botline.saturating_sub(topline).max(1),
+                topline,
+                botline,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row,
+                cursor_col,
+                is_active: true,
+            }],
+            pum: None,
+        }
+    }
+
+    #[test]
     fn projects_cursor_coordinates_as_u16() {
         let _lock = session_test_lock()
             .lock()
@@ -4491,6 +4601,8 @@ mod tests {
 
         let result = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4555,6 +4667,8 @@ mod tests {
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4618,6 +4732,8 @@ mod tests {
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4662,6 +4778,8 @@ mod tests {
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4724,6 +4842,8 @@ mod tests {
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4774,6 +4894,8 @@ mod tests {
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4815,6 +4937,8 @@ mod tests {
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4857,6 +4981,8 @@ mod tests {
         let markdown_document_maps = BTreeMap::new();
         let input = WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4912,6 +5038,8 @@ mod tests {
         let markdown_document_maps = BTreeMap::new();
         let input = WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,
@@ -4967,6 +5095,8 @@ mod tests {
 
         let model = project_workspace(&WorkspaceProjectionInput {
             snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &BTreeMap::new(),
             session_state: &session_state,
             visual_selection: None,
             search_states: &search_states,

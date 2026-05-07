@@ -14,6 +14,14 @@ pub struct ViewportState {
     bottom_line: usize,
     left_col: usize,
     skip_col: usize,
+    last_cursor_row: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewportSyncMode {
+    #[default]
+    Core,
+    SmoothLineMotion,
 }
 
 impl ViewportState {
@@ -105,6 +113,7 @@ impl ViewportState {
         self.bottom_line = window.botline.saturating_sub(1);
         self.left_col = window.leftcol;
         self.skip_col = window.skipcol;
+        self.last_cursor_row = Some(window.cursor_row);
         log::debug!(
             "[viewport] sync from core window: window_id={}, topline={}, botline={}, leftcol={}, skipcol={}",
             window.id,
@@ -113,6 +122,77 @@ impl ViewportState {
             window.leftcol,
             window.skipcol
         );
+    }
+
+    pub fn sync_active_cursor_movement_from_core_window(
+        &mut self,
+        window: &CoreWindowInfo,
+        total_lines: usize,
+    ) {
+        let body_height = window.height.saturating_sub(1).max(1);
+        let previous_cursor_row = self.last_cursor_row;
+        let cursor_moved = previous_cursor_row.is_some_and(|row| row != window.cursor_row);
+
+        self.left_col = window.leftcol;
+        self.skip_col = window.skipcol;
+
+        if !cursor_moved {
+            self.sync_from_core_window(window);
+            return;
+        }
+
+        let total_lines = total_lines.max(1);
+        let core_top_line = window.topline.saturating_sub(1);
+        if core_top_line == self.top_line {
+            log::debug!(
+                "[viewport] sync active cursor movement from stable core topline: window_id={}, cursor_row={}, previous_cursor_row={:?}, body_height={}, core_topline={}, top_line={}",
+                window.id,
+                window.cursor_row,
+                previous_cursor_row,
+                body_height,
+                window.topline,
+                self.top_line
+            );
+            self.sync_from_core_window(window);
+            return;
+        }
+
+        let midpoint = body_height / 2;
+        let previous_anchor = previous_cursor_row
+            .and_then(|row| row.checked_sub(self.top_line))
+            .filter(|relative_row| *relative_row < body_height);
+        let stable_band_start = body_height / 3;
+        let stable_band_end = body_height.saturating_sub(stable_band_start + 1);
+        let anchor_row = previous_anchor
+            .filter(|relative_row| {
+                *relative_row >= stable_band_start && *relative_row <= stable_band_end
+            })
+            .unwrap_or(midpoint);
+        let max_top_line = total_lines.saturating_sub(body_height);
+        let next_top_line = window
+            .cursor_row
+            .saturating_sub(anchor_row)
+            .min(max_top_line);
+
+        log::debug!(
+            "[viewport] sync active cursor movement: window_id={}, cursor_row={}, previous_cursor_row={:?}, body_height={}, total_lines={}, previous_anchor={:?}, stable_band=({},{}), anchor_row={}, core_topline={}, top_line_before={}, top_line_after={}",
+            window.id,
+            window.cursor_row,
+            previous_cursor_row,
+            body_height,
+            total_lines,
+            previous_anchor,
+            stable_band_start,
+            stable_band_end,
+            anchor_row,
+            window.topline,
+            self.top_line,
+            next_top_line
+        );
+
+        self.top_line = next_top_line;
+        self.bottom_line = self.top_line.saturating_add(body_height.saturating_sub(1));
+        self.last_cursor_row = Some(window.cursor_row);
     }
 }
 
@@ -207,6 +287,80 @@ impl WindowViewportStore {
         }
     }
 
+    pub fn sync_from_windows_for_render(
+        &mut self,
+        windows: &[CoreWindowInfo],
+        invalidated_windows: &BTreeSet<i32>,
+        line_counts_by_buffer: &BTreeMap<i32, usize>,
+        sync_mode: ViewportSyncMode,
+    ) -> ViewportSyncSummary {
+        let live_ids = windows
+            .iter()
+            .map(|window| window.id)
+            .collect::<BTreeSet<_>>();
+
+        let state_ids_before = self.states.keys().copied().collect::<BTreeSet<_>>();
+        let pruned_window_ids = state_ids_before
+            .difference(&live_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let invalidated_missing_window_ids = invalidated_windows
+            .difference(&live_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let reevaluated_window_ids = invalidated_windows
+            .intersection(&live_ids)
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        self.states.retain(|window_id, _| {
+            let is_live = live_ids.contains(window_id);
+            if !is_live {
+                log::debug!(
+                    "[viewport] prune closed window state: window_id={}",
+                    window_id
+                );
+            }
+            is_live
+        });
+
+        let mut synced_window_ids = BTreeSet::new();
+        for window in windows {
+            let state = self.get_mut_or_default(window.id);
+            if window.is_active
+                && !invalidated_windows.contains(&window.id)
+                && sync_mode == ViewportSyncMode::SmoothLineMotion
+            {
+                let total_lines = line_counts_by_buffer
+                    .get(&window.buf_id)
+                    .copied()
+                    .unwrap_or_else(|| window.botline.max(window.cursor_row.saturating_add(1)));
+                state.sync_active_cursor_movement_from_core_window(window, total_lines);
+            } else {
+                state.sync_from_core_window(window);
+            }
+            synced_window_ids.insert(window.id);
+        }
+
+        log::debug!(
+            "[viewport] render window sync summary: sync_mode={:?}, live={:?}, synced={:?}, pruned={:?}, reevaluated={:?}, invalidated_missing={:?}",
+            sync_mode,
+            live_ids,
+            synced_window_ids,
+            pruned_window_ids,
+            reevaluated_window_ids,
+            invalidated_missing_window_ids
+        );
+
+        ViewportSyncSummary {
+            live_window_ids: live_ids,
+            synced_window_ids,
+            pruned_window_ids,
+            reevaluated_window_ids,
+            invalidated_missing_window_ids,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.states.len()
     }
@@ -214,9 +368,9 @@ impl WindowViewportStore {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{ViewportState, WindowViewportStore};
+    use super::{ViewportState, ViewportSyncMode, WindowViewportStore};
     use vim_core_rs::CoreWindowInfo;
 
     #[test]
@@ -334,6 +488,195 @@ mod tests {
         assert_eq!(store.get(1).expect("window 1").top_line(), 4);
         assert_eq!(store.get(2).expect("window 2").top_line(), 19);
         assert_eq!(store.get(2).expect("window 2").left_col(), 3);
+    }
+
+    #[test]
+    fn active_cursor_movement_keeps_cursor_centered_instead_of_following_core_topline_jitter() {
+        let mut store = WindowViewportStore::new();
+        let mut line_counts = BTreeMap::new();
+        line_counts.insert(1, 1_000);
+
+        store.sync_from_windows_for_render(
+            &[CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 120,
+                height: 51,
+                topline: 1,
+                botline: 50,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 0,
+                cursor_col: 0,
+                is_active: true,
+            }],
+            &BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+
+        store.sync_from_windows_for_render(
+            &[CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 120,
+                height: 51,
+                topline: 51,
+                botline: 81,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 79,
+                cursor_col: 0,
+                is_active: true,
+            }],
+            &BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+
+        store.sync_from_windows_for_render(
+            &[CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 120,
+                height: 51,
+                topline: 131,
+                botline: 156,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 154,
+                cursor_col: 0,
+                is_active: true,
+            }],
+            &BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+
+        let viewport = store.get(1).expect("active viewport");
+        assert_eq!(
+            154usize.saturating_sub(viewport.top_line()),
+            25,
+            "cursor should remain near the body midpoint instead of inheriting core topline jitter"
+        );
+    }
+
+    #[test]
+    fn active_cursor_movement_respects_core_topline_when_cursor_moves_within_same_screen() {
+        let mut store = WindowViewportStore::new();
+        let mut line_counts = BTreeMap::new();
+        line_counts.insert(1, 1_000);
+
+        store.sync_from_windows_for_render(
+            &[CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 120,
+                height: 51,
+                topline: 76,
+                botline: 125,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 100,
+                cursor_col: 0,
+                is_active: true,
+            }],
+            &BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+
+        store.sync_from_windows_for_render(
+            &[CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 120,
+                height: 51,
+                topline: 76,
+                botline: 125,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 75,
+                cursor_col: 0,
+                is_active: true,
+            }],
+            &BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+
+        let viewport = store.get(1).expect("active viewport");
+        assert_eq!(
+            viewport.top_line(),
+            75,
+            "same-topline cursor moves, such as H/M/L or mouse positioning, should preserve core screen placement"
+        );
+    }
+
+    #[test]
+    fn core_sync_mode_preserves_page_scroll_topline_even_when_cursor_moves() {
+        let mut store = WindowViewportStore::new();
+        let mut line_counts = BTreeMap::new();
+        line_counts.insert(1, 1_000);
+
+        store.sync_from_windows_for_render(
+            &[CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 120,
+                height: 51,
+                topline: 1,
+                botline: 50,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 0,
+                cursor_col: 0,
+                is_active: true,
+            }],
+            &BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+
+        store.sync_from_windows_for_render(
+            &[CoreWindowInfo {
+                id: 1,
+                buf_id: 1,
+                row: 0,
+                col: 0,
+                width: 120,
+                height: 51,
+                topline: 32,
+                botline: 81,
+                leftcol: 0,
+                skipcol: 0,
+                cursor_row: 49,
+                cursor_col: 0,
+                is_active: true,
+            }],
+            &BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+
+        let viewport = store.get(1).expect("active viewport");
+        assert_eq!(
+            viewport.top_line(),
+            31,
+            "page and explicit scroll commands should keep core-owned topline instead of smooth-line centering"
+        );
     }
 
     #[test]

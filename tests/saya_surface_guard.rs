@@ -206,6 +206,17 @@ fn integration_editing_smoke_does_not_reintroduce_core_owned_selection_and_edit_
 }
 
 #[test]
+fn core_bridge_debug_does_not_materialize_full_snapshots() {
+    let source = std::fs::read_to_string("src/core_bridge.rs")
+        .expect("core bridge source should be readable from the repository root");
+
+    assert!(
+        !source.contains(".field(\"snapshot\", &self.snapshot())"),
+        "CoreBridge Debug must not call snapshot(), because formatting a bridge would materialize full buffer text"
+    );
+}
+
+#[test]
 fn register_behavior_remains_out_of_scope_for_saya() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");

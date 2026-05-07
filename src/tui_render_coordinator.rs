@@ -16,6 +16,7 @@ use crate::terminal_capability::{TerminalCapabilityProfile, TextStyleCapability}
 use crate::tui_renderer::TuiRenderer;
 pub use crate::tui_renderer::{RenderFrameOptions, RenderTextMode};
 use std::fmt;
+use std::time::Instant;
 
 pub struct RenderFrameRequest<'a> {
     pub workspace: &'a WorkspaceScreenModel,
@@ -334,9 +335,12 @@ impl TuiRenderCoordinator {
         projection_failure: Option<ProjectionFailureDiagnostic>,
         update_last_successful_workspace: bool,
     ) -> Result<TuiRenderOutcome, RenderFrameError> {
+        let total_started_at = Instant::now();
         let text_mode = Self::resolve_text_mode(capabilities);
         let frame_options = frame_options_from_redraw_plan(&redraw_plan);
+        let presentation_started_at = Instant::now();
         let mut rendered_workspace = Self::apply_presentation(workspace, presentation);
+        let presentation_ms = presentation_started_at.elapsed().as_millis();
         let mut overlay_results = Vec::new();
         let mut active_assets = Vec::<OverlayAssetRef>::new();
 
@@ -412,6 +416,7 @@ impl TuiRenderCoordinator {
         }
         self.asset_store.release_unused(&active_assets);
 
+        let draw_started_at = Instant::now();
         if let Some(renderer) = self.renderer.as_mut() {
             renderer
                 .draw_with_mode_and_options(&rendered_workspace, text_mode, frame_options)
@@ -419,6 +424,19 @@ impl TuiRenderCoordinator {
                     message: error.to_string(),
                 })?;
         }
+        let draw_ms = draw_started_at.elapsed().as_millis();
+        log::debug!(
+            "[PERF][tui_render_coordinator] render_workspace panes={} visible_lines={} presentation_ms={} draw_ms={} total_ms={}",
+            rendered_workspace.panes.len(),
+            rendered_workspace
+                .panes
+                .iter()
+                .map(|pane| pane.lines.len())
+                .sum::<usize>(),
+            presentation_ms,
+            draw_ms,
+            total_started_at.elapsed().as_millis()
+        );
         if update_last_successful_workspace {
             self.last_successful_workspace = Some(rendered_workspace.clone());
         } else {

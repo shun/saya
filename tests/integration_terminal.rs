@@ -334,6 +334,8 @@ fn project_workspace_from_snapshot(
     let markdown_document_maps = BTreeMap::new();
     project_workspace(&WorkspaceProjectionInput {
         snapshot,
+        light_snapshot: None,
+        line_ranges: &BTreeMap::new(),
         session_state,
         visual_selection: None,
         search_states: &search_states,
@@ -378,6 +380,8 @@ fn project_markdown_workspace_from_snapshot(
 
     project_workspace(&WorkspaceProjectionInput {
         snapshot,
+        light_snapshot: None,
+        line_ranges: &BTreeMap::new(),
         session_state,
         visual_selection: None,
         search_states: &search_states,
@@ -2257,6 +2261,8 @@ fn ctrl_w_close_on_last_window_keeps_layout_and_surfaces_message() {
     let markdown_document_maps = BTreeMap::new();
     let workspace = project_workspace(&WorkspaceProjectionInput {
         snapshot: &after,
+        light_snapshot: None,
+        line_ranges: &BTreeMap::new(),
         session_state: &session_state,
         visual_selection: None,
         search_states: &search_states,
@@ -2336,6 +2342,8 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
     let before_markdown_document_maps = BTreeMap::new();
     let before_model = project_workspace(&WorkspaceProjectionInput {
         snapshot: &before_resize,
+        light_snapshot: None,
+        line_ranges: &BTreeMap::new(),
         session_state: &session_state,
         visual_selection: None,
         search_states: &before_search_states,
@@ -2364,6 +2372,8 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
     let after_markdown_document_maps = BTreeMap::new();
     let after_model = project_workspace(&WorkspaceProjectionInput {
         snapshot: &after_resize,
+        light_snapshot: None,
+        line_ranges: &BTreeMap::new(),
         session_state: &session_state,
         visual_selection: None,
         search_states: &after_search_states,

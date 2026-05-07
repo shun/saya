@@ -33,7 +33,7 @@ use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
 use saya::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::input_loop::CrosstermEventSource;
-use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
+use saya::input_router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
 use saya::job_control::{
     start_job_control_signal_watcher, suspend_current_process_for_job_control,
 };
@@ -65,10 +65,13 @@ use saya::terminal_lifecycle::TerminalBackend;
 use saya::terminal_lifecycle::TerminalSize;
 use saya::tui_render_coordinator::{RenderFrameError, TuiRenderCoordinator};
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
-use saya::viewport::WindowViewportStore;
+use saya::viewport::{ViewportSyncMode, WindowViewportStore};
 #[cfg(test)]
 use vim_core_rs::CoreMessageEvent;
-use vim_core_rs::{CoreMode, CoreVfsError, CoreVfsErrorKind, CoreVfsRequest, CoreVfsResponse};
+use vim_core_rs::{
+    CoreBufferLineRange, CoreLightSnapshot, CoreMode, CoreSnapshot, CoreVfsError, CoreVfsErrorKind,
+    CoreVfsRequest, CoreVfsResponse,
+};
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -161,6 +164,7 @@ async fn main() {
     let mut outcome_accumulator = MainOutcomeAccumulator::default();
     let mut host_action_runtime = HostActionRuntime::default();
     let mut viewport_store = WindowViewportStore::new();
+    let mut viewport_sync_mode = ViewportSyncMode::Core;
     let mut search_refresh_store = WindowSearchRefreshStore::new();
     let mut markdown_metadata_cache = MarkdownMetadataCache::new();
     let mut command_line_prompt: Option<char> = None;
@@ -221,6 +225,7 @@ async fn main() {
         &mut outcome,
         &mut session_state,
         &mut viewport_store,
+        ViewportSyncMode::Core,
         &mut search_refresh_store,
         &mut markdown_metadata_cache,
         command_line_prompt,
@@ -247,11 +252,13 @@ async fn main() {
             }
             last_workspace_model = Some(render_output.rendered_workspace.clone());
             mark_structural_refresh_rendered(&mut outcome_accumulator);
-            trace_workspace_render_pipeline(
-                "initial",
-                &outcome.core_bridge.snapshot().text,
-                &render_output.rendered_workspace,
-            );
+            if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
+                trace_workspace_render_pipeline(
+                    "initial",
+                    &outcome.core_bridge.snapshot().text,
+                    &render_output.rendered_workspace,
+                );
+            }
         }
         Err(error) => {
             transient_msg = Some(error.to_string());
@@ -288,7 +295,7 @@ async fn main() {
                 match event {
                     UiEvent::Input(key) => {
                         let mut handled = false;
-                        let input_snapshot = outcome.core_bridge.snapshot();
+                        let input_snapshot = outcome.core_bridge.light_snapshot();
                         log::info!(
                             "[main][input] key={:?}, mode={:?}, prompt={:?}, cursor=({},{}), revision={}, keymaps={}",
                             key,
@@ -478,8 +485,7 @@ async fn main() {
                                         command_line_prompt = None;
                                         command_line_edit.clear();
                                     }
-                                    session_state
-                                        .update_dirty(outcome.core_bridge.snapshot().dirty);
+                                    session_state.update_dirty(outcome.core_bridge.dirty());
                                 }
                                 KeyInput::Backspace | KeyInput::Delete => {
                                     command_line_histories.reset_navigation();
@@ -568,7 +574,7 @@ async fn main() {
                         } else if !handled
                             && let Some(action) = startup_keymap_action_for_snapshot_input(
                                 &outcome.startup_registry.keymaps,
-                                &outcome.core_bridge.snapshot(),
+                                &outcome.core_bridge.light_snapshot(),
                                 &key,
                             )
                         {
@@ -578,7 +584,7 @@ async fn main() {
                                 key,
                                 action
                             );
-                            if outcome.core_bridge.snapshot().pending_input.is_pending() {
+                            if outcome.core_bridge.pending_input_is_pending() {
                                 let _ = outcome.core_bridge.dispatch_key("\x1b");
                                 consume_core_outcomes_from_core(
                                     &mut outcome.core_bridge,
@@ -610,8 +616,7 @@ async fn main() {
                                     {
                                         break 'main reason;
                                     }
-                                    session_state
-                                        .update_dirty(outcome.core_bridge.snapshot().dirty);
+                                    session_state.update_dirty(outcome.core_bridge.dirty());
                                 }
                                 StartupKeymapAction::RegisteredCommand(command_name) => {
                                     log::info!(
@@ -637,7 +642,7 @@ async fn main() {
                             need_redraw = true;
                         } else if !handled
                             && (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
-                            && outcome.core_bridge.snapshot().mode == CoreMode::Normal
+                            && outcome.core_bridge.mode() == CoreMode::Normal
                         {
                             if let KeyInput::Char(c) = key {
                                 command_line_prompt = Some(c);
@@ -657,10 +662,11 @@ async fn main() {
                             );
                             match intent {
                                 EditorIntent::EditKey(k) => {
-                                    let before_snapshot = outcome.core_bridge.snapshot();
+                                    viewport_sync_mode = viewport_sync_mode_for_input(&key);
+                                    let before_snapshot = outcome.core_bridge.light_snapshot();
                                     let need_redraw_before_dispatch = need_redraw;
                                     let dispatch_result = outcome.core_bridge.dispatch_key(&k);
-                                    let after_snapshot = outcome.core_bridge.snapshot();
+                                    let after_snapshot = outcome.core_bridge.light_snapshot();
                                     trace_redraw_diagnostic(format_args!(
                                         "edit key dispatched: key={:?}, result={:?}, revision {}->{}, cursor ({},{}) -> ({},{}), mode {:?}->{:?}, need_redraw_before={}",
                                         k,
@@ -697,8 +703,7 @@ async fn main() {
                                         break 'main reason;
                                     }
 
-                                    session_state
-                                        .update_dirty(outcome.core_bridge.snapshot().dirty);
+                                    session_state.update_dirty(outcome.core_bridge.dirty());
                                     trace_redraw_diagnostic(format_args!(
                                         "edit key host policy forcing redraw after dispatch: key={:?}, cursor=({},{}), revision={}, prior_need_redraw={}",
                                         k,
@@ -818,7 +823,7 @@ async fn main() {
                                 break 'main reason;
                             }
 
-                            session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+                            session_state.update_dirty(outcome.core_bridge.dirty());
                         } else {
                             log::debug!(
                                 "[main] ignoring mouse click outside editor body: column={}, row={}",
@@ -858,7 +863,7 @@ async fn main() {
                             break 'main reason;
                         }
 
-                        session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+                        session_state.update_dirty(outcome.core_bridge.dirty());
                         need_redraw = true;
                     }
                     UiEvent::Shutdown(reason) => {
@@ -938,6 +943,7 @@ async fn main() {
                     &mut outcome,
                     &mut session_state,
                     &mut viewport_store,
+                    viewport_sync_mode,
                     &mut search_refresh_store,
                     &mut markdown_metadata_cache,
                     command_line_prompt,
@@ -950,6 +956,7 @@ async fn main() {
                     terminal_width,
                     terminal_height,
                 );
+                viewport_sync_mode = ViewportSyncMode::Core;
                 let redraw_failure = redraw_result.as_ref().err().map(ToString::to_string);
                 let redraw_plan = effective_workspace_redraw_plan(
                     outcome_accumulator.last_structural_refresh.as_ref(),
@@ -977,11 +984,13 @@ async fn main() {
                         }
                         last_workspace_model = Some(render_output.rendered_workspace.clone());
                         mark_structural_refresh_rendered(&mut outcome_accumulator);
-                        trace_workspace_render_pipeline(
-                            "redraw",
-                            &outcome.core_bridge.snapshot().text,
-                            &render_output.rendered_workspace,
-                        );
+                        if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
+                            trace_workspace_render_pipeline(
+                                "redraw",
+                                &outcome.core_bridge.snapshot().text,
+                                &render_output.rendered_workspace,
+                            );
+                        }
                         terminal_display_redraw_plan = None;
                         workspace_projection_dirty = false;
                     }
@@ -1031,8 +1040,18 @@ async fn main() {
     );
 }
 
-fn current_line_from_text(text: &str, cursor_row: usize) -> String {
-    text.lines().nth(cursor_row).unwrap_or_default().to_string()
+fn viewport_sync_mode_for_input(key: &KeyInput) -> ViewportSyncMode {
+    match key {
+        KeyInput::Char('j')
+        | KeyInput::Char('k')
+        | KeyInput::Down
+        | KeyInput::Up
+        | KeyInput::ShiftedNav(NavigationKey::Down)
+        | KeyInput::ShiftedNav(NavigationKey::Up)
+        | KeyInput::CtrlNav(NavigationKey::Down)
+        | KeyInput::CtrlNav(NavigationKey::Up) => ViewportSyncMode::SmoothLineMotion,
+        _ => ViewportSyncMode::Core,
+    }
 }
 
 fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), String> {
@@ -1082,7 +1101,7 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
         &mut outcome_accumulator,
         &mut need_redraw,
     );
-    session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+    session_state.update_dirty(outcome.core_bridge.dirty());
 
     if session_state.target_path().is_none() {
         eprintln!("[main][smoke] stdin startup detected, verifying save-path restriction");
@@ -1103,7 +1122,7 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
         &mut outcome_accumulator,
         &mut need_redraw,
     );
-    session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+    session_state.update_dirty(outcome.core_bridge.dirty());
 
     let reason = process_pending_host_actions_without_runtime(
         &mut outcome,
@@ -1191,6 +1210,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut outcome,
                 &mut session_state,
                 &mut viewport_store,
+                ViewportSyncMode::Core,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
                 None,
@@ -1243,6 +1263,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut outcome,
                 &mut session_state,
                 &mut viewport_store,
+                ViewportSyncMode::Core,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
                 None,
@@ -1297,6 +1318,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 &mut outcome,
                 &mut session_state,
                 &mut viewport_store,
+                ViewportSyncMode::Core,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
                 None,
@@ -1488,7 +1510,7 @@ async fn process_pending_host_actions_with_runtime(
         }
         consume_core_outcomes_from_core(&mut outcome.core_bridge, outcome_accumulator, need_redraw);
 
-        let current_revision = outcome.core_bridge.snapshot().revision;
+        let current_revision = outcome.core_bridge.revision();
         let directives = std::mem::take(&mut outcome_accumulator.host_directives);
         if directives.is_empty() {
             break;
@@ -1669,7 +1691,7 @@ fn process_pending_host_actions_without_runtime(
             &mut need_redraw,
         );
 
-        let current_revision = outcome.core_bridge.snapshot().revision;
+        let current_revision = outcome.core_bridge.revision();
         let directives = std::mem::take(&mut outcome_accumulator.host_directives);
         if directives.is_empty() {
             break;
@@ -2833,7 +2855,7 @@ fn execute_runtime_host_command_through_core(
             );
         }
 
-        let current_revision = outcome.core_bridge.snapshot().revision;
+        let current_revision = outcome.core_bridge.revision();
         let directives = prioritize_save_family_host_directives(
             folded.effects.host_directives,
             current_revision,
@@ -3359,7 +3381,7 @@ fn startup_keymap_action_for_input(
 
 fn startup_keymap_action_for_snapshot_input(
     keymaps: &[saya::bootstrap::StartupKeymapSnapshot],
-    snapshot: &vim_core_rs::CoreSnapshot,
+    snapshot: &vim_core_rs::CoreLightSnapshot,
     key: &KeyInput,
 ) -> Option<StartupKeymapAction> {
     let mode = startup_keymap_mode_from_core_mode(snapshot.mode)?;
@@ -3426,25 +3448,37 @@ impl<'a> MainRuntimeHostSession<'a> {
 
 impl RuntimeHostSession for MainRuntimeHostSession<'_> {
     fn current_buffer_snapshot(&mut self) -> ReadonlyBufferSnapshot {
-        let snapshot = self.outcome.core_bridge.snapshot();
+        let snapshot = self.outcome.core_bridge.light_snapshot();
         let active_buffer_id = snapshot
             .buffers
             .iter()
             .find(|buffer| buffer.is_active)
             .map(|buffer| buffer.id as u64)
             .unwrap_or(1);
+        let current_line_range = self.outcome.core_bridge.buffer_line_range(
+            active_buffer_id as i32,
+            snapshot.cursor_row,
+            1,
+        );
         ReadonlyBufferSnapshot {
             id: active_buffer_id,
             path: self.session_state.target_path().cloned(),
-            line_count: buffer_line_count(&snapshot.text),
+            line_count: current_line_range
+                .as_ref()
+                .map(|range| range.total_line_count)
+                .unwrap_or(1),
             cursor_row: snapshot.cursor_row,
-            current_line: current_line_from_text(&snapshot.text, snapshot.cursor_row),
+            current_line: current_line_range
+                .and_then(|range| range.lines.into_iter().next())
+                .unwrap_or_default(),
         }
     }
 
     fn current_window_snapshot(&mut self) -> ReadonlyWindowSnapshot {
-        let snapshot = self.outcome.core_bridge.snapshot();
-        let active_window_id = resolve_runtime_current_window_id(&snapshot)
+        let snapshot = self.outcome.core_bridge.light_snapshot();
+        let active_window_id = snapshot
+            .active_window_id()
+            .map(|window_id| window_id as u64)
             .expect("runtime current window should resolve from active window id");
         ReadonlyWindowSnapshot {
             id: active_window_id,
@@ -3452,7 +3486,7 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
     }
 
     fn current_editor_snapshot(&mut self) -> ReadonlyEditorSnapshot {
-        let snapshot = self.outcome.core_bridge.snapshot();
+        let snapshot = self.outcome.core_bridge.light_snapshot();
         ReadonlyEditorSnapshot {
             mode: runtime_mode_from_core(snapshot.mode),
         }
@@ -3461,7 +3495,6 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
     fn current_filer_entry(
         &mut self,
     ) -> Result<Option<RuntimeFilerCurrentEntry>, saya::saya_live_runtime::RuntimeFilerError> {
-        let snapshot = self.outcome.core_bridge.snapshot();
         let Some(directory_buffer) = self.session_state.directory_buffer() else {
             log::debug!(
                 "[main][runtime] current filer entry requested outside directory buffer: target_path={:?}",
@@ -3469,6 +3502,7 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             );
             return Ok(None);
         };
+        let snapshot = self.outcome.core_bridge.light_snapshot();
         let Some(entry) = self
             .session_state
             .current_directory_entry(snapshot.cursor_row)
@@ -3717,7 +3751,7 @@ fn execute_runtime_filer_operation(
     };
 
     if let Some(refresh_path) = refresh_path.filter(|path| path.is_dir()) {
-        let previous_row = outcome.core_bridge.snapshot().cursor_row;
+        let previous_row = outcome.core_bridge.light_snapshot().cursor_row;
         log::debug!(
             "[main][runtime][filer] refreshing directory buffer after operation: path={}, previous_cursor_row={}",
             refresh_path.display(),
@@ -3750,13 +3784,24 @@ fn execute_runtime_filer_operation(
                     message: format!("failed to project refreshed directory buffer: {error:?}"),
                 })?;
         }
-        let refreshed = outcome.core_bridge.snapshot();
+        let refreshed = outcome.core_bridge.light_snapshot();
+        let refreshed_line_count = refreshed
+            .active_window()
+            .and_then(|window| {
+                outcome.core_bridge.buffer_line_range(
+                    window.buf_id,
+                    window.topline.saturating_sub(1),
+                    1,
+                )
+            })
+            .map(|range| range.total_line_count)
+            .unwrap_or(1);
         log::debug!(
             "[main][runtime][filer] refreshed directory buffer after operation: path={}, cursor_row_before={}, cursor_row_after={}, line_count={}",
             refresh_path.display(),
             previous_row,
             refreshed.cursor_row,
-            buffer_line_count(&refreshed.text)
+            refreshed_line_count
         );
     }
 
@@ -4055,6 +4100,7 @@ fn build_workspace_render_output(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut EditorSessionState,
     viewport_store: &mut WindowViewportStore,
+    viewport_sync_mode: ViewportSyncMode,
     search_refresh_store: &mut WindowSearchRefreshStore,
     markdown_metadata_cache: &mut MarkdownMetadataCache,
     command_line_prompt: Option<char>,
@@ -4067,7 +4113,11 @@ fn build_workspace_render_output(
     terminal_width: u16,
     terminal_height: u16,
 ) -> Result<WorkspaceScreenModel, WorkspaceRedrawError> {
-    let snapshot = outcome.core_bridge.snapshot();
+    let total_started_at = std::time::Instant::now();
+    let snapshot_started_at = std::time::Instant::now();
+    let light_snapshot = outcome.core_bridge.light_snapshot();
+    let snapshot = snapshot_from_light_snapshot(&light_snapshot, String::new());
+    let snapshot_ms = snapshot_started_at.elapsed().as_millis();
     trace_redraw_diagnostic(format_args!(
         "workspace render build started: revision={}, mode={:?}, cursor=({},{}), windows={}, command_prompt={:?}, command_buffer_len={}, structural_refresh_present={}",
         snapshot.revision,
@@ -4092,7 +4142,16 @@ fn build_workspace_render_output(
             refresh.invalidation.layout_dirty
         ));
     }
-    let visual_selection = outcome.core_bridge.current_visual_selection();
+    let visual_started_at = std::time::Instant::now();
+    let visual_selection = if matches!(
+        snapshot.mode,
+        CoreMode::Visual | CoreMode::VisualLine | CoreMode::VisualBlock
+    ) {
+        outcome.core_bridge.current_visual_selection()
+    } else {
+        None
+    };
+    let visual_ms = visual_started_at.elapsed().as_millis();
     let invalidated_windows = structural_refresh
         .as_deref()
         .map(|refresh| {
@@ -4104,13 +4163,22 @@ fn build_workspace_render_output(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let viewport_summary = viewport_store
-        .sync_from_windows_with_invalidations(&snapshot.windows, &invalidated_windows);
+    let buffer_line_counts = collect_workspace_buffer_line_counts(&outcome.core_bridge, &snapshot);
+    let viewport_summary = viewport_store.sync_from_windows_for_render(
+        &snapshot.windows,
+        &invalidated_windows,
+        &buffer_line_counts,
+        viewport_sync_mode,
+    );
     if let Some(refresh) = structural_refresh.as_deref_mut() {
         *refresh = refresh
             .clone()
             .with_viewport_sync_summary(&viewport_summary);
     }
+    let line_range_started_at = std::time::Instant::now();
+    let line_ranges =
+        collect_workspace_line_ranges(&outcome.core_bridge, &snapshot, viewport_store);
+    let line_range_ms = line_range_started_at.elapsed().as_millis();
     search_refresh_store.retain_windows(
         &snapshot
             .windows
@@ -4118,6 +4186,7 @@ fn build_workspace_render_output(
             .map(|window| window.id)
             .collect::<Vec<_>>(),
     );
+    let search_started_at = std::time::Instant::now();
     let search_states = collect_workspace_search_states(
         &mut outcome.core_bridge,
         &snapshot,
@@ -4126,26 +4195,45 @@ fn build_workspace_render_output(
         resolve_prompt_revision(command_line_prompt, command_line_buffer),
         resolve_search_mode_hint(command_line_prompt, command_line_buffer),
     )?;
+    let search_ms = search_started_at.elapsed().as_millis();
     let syntax_enabled = outcome.core_bridge.is_syntax_enabled();
+    let syntax_started_at = std::time::Instant::now();
     let syntax_lines = if syntax_enabled {
-        collect_workspace_syntax_lines(&outcome.core_bridge, &snapshot, viewport_store)
+        collect_workspace_syntax_lines(
+            &outcome.core_bridge,
+            &snapshot,
+            viewport_store,
+            &line_ranges,
+        )
     } else {
         trace_redraw_diagnostic(format_args!(
             "workspace syntax collection skipped because :syntax is off"
         ));
         BTreeMap::new()
     };
+    let syntax_ms = syntax_started_at.elapsed().as_millis();
+    #[cfg(feature = "tree-sitter-syntax")]
+    let tree_sitter_started_at = std::time::Instant::now();
     #[cfg(feature = "tree-sitter-syntax")]
     let tree_sitter_syntax = if syntax_enabled {
-        collect_workspace_tree_sitter_syntax(&mut outcome.core_bridge, &snapshot, viewport_store)
+        collect_workspace_tree_sitter_syntax(
+            &mut outcome.core_bridge,
+            &snapshot,
+            viewport_store,
+            &line_ranges,
+        )
     } else {
         trace_redraw_diagnostic(format_args!(
             "workspace Tree-sitter syntax collection skipped because :syntax is off"
         ));
         BTreeMap::new()
     };
+    #[cfg(feature = "tree-sitter-syntax")]
+    let tree_sitter_ms = tree_sitter_started_at.elapsed().as_millis();
+    let markdown_started_at = std::time::Instant::now();
     let markdown_document_maps =
         collect_workspace_markdown_document_maps(markdown_metadata_cache, session_state, &snapshot);
+    let markdown_ms = markdown_started_at.elapsed().as_millis();
     let command_preview =
         command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
     let command_preview_cursor_col = command_line_prompt.map(|prompt| {
@@ -4158,8 +4246,11 @@ fn build_workspace_render_output(
     });
     let notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
 
+    let projection_started_at = std::time::Instant::now();
     let mut projection_result = project_workspace(&WorkspaceProjectionInput {
         snapshot: &snapshot,
+        light_snapshot: Some(&light_snapshot),
+        line_ranges: &line_ranges,
         session_state,
         visual_selection: visual_selection.as_ref(),
         search_states: &search_states,
@@ -4176,6 +4267,35 @@ fn build_workspace_render_output(
         terminal_width,
         terminal_height,
     });
+    let projection_ms = projection_started_at.elapsed().as_millis();
+    log::debug!(
+        "[PERF][main] build_workspace_render_output text_len={} windows={} snapshot_ms={} line_range_ms={} line_ranges={} visible_text_bytes={} visual_ms={} search_ms={} syntax_ms={} tree_sitter_ms={} markdown_ms={} projection_ms={} total_ms={}",
+        snapshot.text.len(),
+        snapshot.windows.len(),
+        snapshot_ms,
+        line_range_ms,
+        line_ranges.len(),
+        line_ranges
+            .values()
+            .map(|range| range.lines.iter().map(String::len).sum::<usize>())
+            .sum::<usize>(),
+        visual_ms,
+        search_ms,
+        syntax_ms,
+        {
+            #[cfg(feature = "tree-sitter-syntax")]
+            {
+                tree_sitter_ms
+            }
+            #[cfg(not(feature = "tree-sitter-syntax"))]
+            {
+                0
+            }
+        },
+        markdown_ms,
+        projection_ms,
+        total_started_at.elapsed().as_millis()
+    );
     if let Ok(workspace) = projection_result.as_mut() {
         sync_workspace_message_pager(session_state, workspace);
         if let Some(cursor_col) = command_preview_cursor_col
@@ -4332,6 +4452,95 @@ fn buffer_line_count(text: &str) -> usize {
     text.lines().count().max(1)
 }
 
+fn snapshot_from_light_snapshot(light: &CoreLightSnapshot, text: String) -> CoreSnapshot {
+    CoreSnapshot {
+        text,
+        revision: light.revision,
+        dirty: light.dirty,
+        mode: light.mode,
+        pending_input: light.pending_input.clone(),
+        cursor_row: light.cursor_row,
+        cursor_col: light.cursor_col,
+        pending_host_actions: light.pending_host_actions,
+        buffers: light.buffers.clone(),
+        windows: light.windows.clone(),
+        pum: light.pum.clone(),
+    }
+}
+
+fn collect_workspace_line_ranges(
+    core_bridge: &saya::core_bridge::CoreBridge,
+    snapshot: &vim_core_rs::CoreSnapshot,
+    viewport_store: &WindowViewportStore,
+) -> BTreeMap<i32, CoreBufferLineRange> {
+    let mut line_ranges = BTreeMap::new();
+    for window in &snapshot.windows {
+        let body_height = window.height.saturating_sub(1).max(1);
+        let viewport_top = viewport_store
+            .get(window.id)
+            .map(|viewport| viewport.top_line())
+            .unwrap_or_else(|| window.topline.saturating_sub(1));
+        let requested_lines = body_height.max(1);
+        match core_bridge.buffer_line_range(window.buf_id, viewport_top, requested_lines) {
+            Some(range) => {
+                log::debug!(
+                    "[main] workspace line range collected: window_id={}, buffer_id={}, viewport_top={}, requested_lines={}, returned_lines={}, total_line_count={}, source_revision={:?}",
+                    window.id,
+                    window.buf_id,
+                    viewport_top,
+                    requested_lines,
+                    range.lines.len(),
+                    range.total_line_count,
+                    range.source_revision
+                );
+                line_ranges.insert(window.id, range);
+            }
+            None => {
+                log::debug!(
+                    "[main] workspace line range missing: window_id={}, buffer_id={}, viewport_top={}, requested_lines={}",
+                    window.id,
+                    window.buf_id,
+                    viewport_top,
+                    requested_lines
+                );
+            }
+        }
+    }
+    line_ranges
+}
+
+fn collect_workspace_buffer_line_counts(
+    core_bridge: &saya::core_bridge::CoreBridge,
+    snapshot: &vim_core_rs::CoreSnapshot,
+) -> BTreeMap<i32, usize> {
+    let mut line_counts = BTreeMap::new();
+    let mut seen_buffers = BTreeSet::new();
+    for window in &snapshot.windows {
+        if !seen_buffers.insert(window.buf_id) {
+            continue;
+        }
+        match core_bridge.buffer_line_range(window.buf_id, 0, 0) {
+            Some(range) => {
+                log::debug!(
+                    "[main] workspace buffer line count collected: buffer_id={}, total_line_count={}, source_revision={:?}",
+                    window.buf_id,
+                    range.total_line_count,
+                    range.source_revision
+                );
+                line_counts.insert(window.buf_id, range.total_line_count);
+            }
+            None => {
+                log::debug!(
+                    "[main] workspace buffer line count missing: buffer_id={}",
+                    window.buf_id
+                );
+            }
+        }
+    }
+    line_counts
+}
+
+#[cfg(test)]
 fn resolve_runtime_current_window_id(snapshot: &vim_core_rs::CoreSnapshot) -> Option<u64> {
     let active_window_id = snapshot
         .active_window_id()
@@ -4383,6 +4592,14 @@ fn collect_workspace_search_states(
     search_mode_hint: SearchModeHint,
 ) -> Result<BTreeMap<i32, SearchVisibleState>, WorkspaceRedrawError> {
     let mut search_states = BTreeMap::new();
+    if matches!(search_mode_hint, SearchModeHint::Hlsearch)
+        && !core_bridge.has_search_highlight_activity()
+    {
+        log::debug!(
+            "[main] workspace search refresh skipped because hlsearch has no active pattern"
+        );
+        return Ok(search_states);
+    }
     for window in &snapshot.windows {
         let body_height = usize::try_from(window.height.saturating_sub(1))
             .unwrap_or(1)
@@ -4460,10 +4677,14 @@ fn collect_workspace_syntax_lines(
     core_bridge: &saya::core_bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
     viewport_store: &WindowViewportStore,
+    line_ranges: &BTreeMap<i32, CoreBufferLineRange>,
 ) -> BTreeMap<i32, BTreeMap<usize, Vec<vim_core_rs::CoreSyntaxChunk>>> {
     let mut syntax_lines = BTreeMap::new();
-    let line_count = buffer_line_count(&snapshot.text);
     for window in &snapshot.windows {
+        let line_count = line_ranges
+            .get(&window.id)
+            .map(|range| range.total_line_count)
+            .unwrap_or_else(|| buffer_line_count(&snapshot.text));
         let body_height = window.height.saturating_sub(1).max(1);
         let viewport_top = viewport_store
             .get(window.id)
@@ -4518,10 +4739,14 @@ fn collect_workspace_tree_sitter_syntax(
     core_bridge: &mut saya::core_bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
     viewport_store: &WindowViewportStore,
+    line_ranges: &BTreeMap<i32, CoreBufferLineRange>,
 ) -> BTreeMap<i32, vim_core_rs::CoreTreeSitterRangeSyntax> {
     let mut syntax_by_window = BTreeMap::new();
-    let line_count = buffer_line_count(&snapshot.text);
     for window in &snapshot.windows {
+        let line_count = line_ranges
+            .get(&window.id)
+            .map(|range| range.total_line_count)
+            .unwrap_or_else(|| buffer_line_count(&snapshot.text));
         let Some(buffer) = snapshot
             .buffers
             .iter()
@@ -4552,6 +4777,16 @@ fn collect_workspace_tree_sitter_syntax(
             );
             continue;
         }
+        let filetype_hint = tree_sitter_filetype_hint(&buffer.name);
+        if filetype_hint.is_none() {
+            log::debug!(
+                "[main] Tree-sitter syntax skipped because buffer has no supported language hint: window_id={}, buffer_id={}, buffer_name={:?}",
+                window.id,
+                buffer.id,
+                buffer.name
+            );
+            continue;
+        }
         let range = vim_core_rs::CoreTextRange {
             start: vim_core_rs::CoreTextPosition {
                 row: viewport_top,
@@ -4566,7 +4801,7 @@ fn collect_workspace_tree_sitter_syntax(
             buffer_id: buffer.id,
             source_revision: Some(buffer.source_revision),
             range,
-            vim_filetype: tree_sitter_filetype_hint(&buffer.name),
+            vim_filetype: filetype_hint,
             buffer_name: (!buffer.name.is_empty()).then(|| buffer.name.clone()),
             host_language_hint: None,
             snapshot_policy: vim_core_rs::CoreTreeSitterSnapshotPolicy::default(),
@@ -5124,6 +5359,43 @@ mod tests {
     }
 
     #[test]
+    fn viewport_sync_mode_uses_smooth_line_motion_only_for_single_line_vertical_inputs() {
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::Char('j')),
+            ViewportSyncMode::SmoothLineMotion
+        );
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::Char('k')),
+            ViewportSyncMode::SmoothLineMotion
+        );
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::Down),
+            ViewportSyncMode::SmoothLineMotion
+        );
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::Up),
+            ViewportSyncMode::SmoothLineMotion
+        );
+
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::PageDown),
+            ViewportSyncMode::Core
+        );
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::PageUp),
+            ViewportSyncMode::Core
+        );
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::Ctrl('f')),
+            ViewportSyncMode::Core
+        );
+        assert_eq!(
+            viewport_sync_mode_for_input(&KeyInput::Char('H')),
+            ViewportSyncMode::Core
+        );
+    }
+
+    #[test]
     fn editor_area_mouse_click_builds_one_based_sgr_sequence() {
         let workspace = main_test_workspace();
 
@@ -5226,6 +5498,7 @@ mod tests {
             &mut outcome,
             &mut session_state,
             &mut viewport_store,
+            ViewportSyncMode::Core,
             &mut search_refresh_store,
             &mut markdown_metadata_cache,
             None,
@@ -5270,6 +5543,7 @@ mod tests {
                 &mut outcome,
                 &mut session_state,
                 &mut viewport_store,
+                ViewportSyncMode::Core,
                 &mut search_refresh_store,
                 &mut markdown_metadata_cache,
                 None,
@@ -5422,7 +5696,7 @@ mod tests {
         outcome.core_bridge.dispatch_key("i").unwrap();
         outcome.core_bridge.dispatch_key("X").unwrap();
         outcome.core_bridge.dispatch_key("\x1b").unwrap();
-        session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+        session_state.update_dirty(outcome.core_bridge.dirty());
 
         outcome
             .core_bridge
@@ -6446,7 +6720,7 @@ mod tests {
         assert_eq!(
             startup_keymap_action_for_snapshot_input(
                 &keymaps,
-                &bridge.snapshot(),
+                &bridge.light_snapshot(),
                 &KeyInput::Char('r')
             ),
             Some(StartupKeymapAction::RegisteredCommand(
@@ -6576,7 +6850,7 @@ mod tests {
         outcome.core_bridge.dispatch_key("i").unwrap();
         outcome.core_bridge.dispatch_key("X").unwrap();
         outcome.core_bridge.dispatch_key("\x1b").unwrap();
-        session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+        session_state.update_dirty(outcome.core_bridge.dirty());
 
         let effect = execute_runtime_host_command("exit", &mut outcome, &mut session_state)
             .expect("runtime quit-family command should succeed");
@@ -7866,7 +8140,7 @@ mod tests {
         let mut need_redraw = false;
         let mut runtime_presentation_intents = Vec::new();
 
-        let mode = outcome.core_bridge.snapshot().mode;
+        let mode = outcome.core_bridge.mode();
         let action = startup_keymap_action_for_input(
             &outcome.startup_registry.keymaps,
             mode,
@@ -7943,7 +8217,7 @@ mod tests {
 
         let action = startup_keymap_action_for_input(
             &outcome.startup_registry.keymaps,
-            outcome.core_bridge.snapshot().mode,
+            outcome.core_bridge.mode(),
             &KeyInput::Char('-'),
         )
         .expect("dired keymap should resolve");
