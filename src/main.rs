@@ -8299,6 +8299,67 @@ mod tests {
         std::fs::remove_file(config_path).expect("cleanup config");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn repository_dired_keymap_moves_above_current_directory_from_relative_file() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config_path = unique_path("repository-dired-up-relative-init").with_extension("ts");
+        let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-dired.ts");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+                    import {{ setupSayaDired }} from "{}";
+                    setupSayaDired();
+                "#,
+                plugin_path.display()
+            ),
+        )
+        .expect("config file");
+
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(PathBuf::from("AGENTS.md")),
+            config_source: saya::cli::ConfigSource::File(config_path.clone()),
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        for _ in 0..2 {
+            let action = startup_keymap_action_for_input(
+                &outcome.startup_registry.keymaps,
+                outcome.core_bridge.mode(),
+                &KeyInput::Char('-'),
+            )
+            .expect("dired keymap should resolve");
+            let StartupKeymapAction::RegisteredCommand(command_name) = action else {
+                panic!("dired keymap should point at a registered command");
+            };
+            let mut transient_msg = None;
+            let mut need_redraw = false;
+            let mut runtime_presentation_intents = Vec::new();
+            execute_startup_keymap_registered_command(
+                Some(&mut runtime_session),
+                &command_name,
+                &mut outcome,
+                &mut session_state,
+                &mut transient_msg,
+                &mut need_redraw,
+                &mut runtime_presentation_intents,
+            )
+            .await;
+            assert_eq!(transient_msg, None);
+        }
+
+        assert_eq!(outcome.target_path, Some(PathBuf::from("..")));
+        assert_eq!(session_state.target_path(), Some(&PathBuf::from("..")));
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+    }
+
     #[test]
     fn apply_runtime_dispatch_outcome_returns_shutdown_reason_from_runtime_intent() {
         let mut transient_msg = None;

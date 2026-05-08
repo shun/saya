@@ -107,6 +107,15 @@ export function setupSayaDired(options: SayaDiredOptions = {}): void {
     "    if (index === 0) return '/';\n" +
     "    return normalized.slice(0, index);\n" +
     "  };\n" +
+    "  const parentDirectory = (path) => {\n" +
+    "    const normalized = trimTrailingSlash(path || '.');\n" +
+    "    if (normalized === '.') return '..';\n" +
+    "    if (/^\\.\\.(\\/\\.\\.)*$/.test(normalized)) return normalized + '/..';\n" +
+    "    const index = normalized.lastIndexOf('/');\n" +
+    "    if (index < 0) return '.';\n" +
+    "    if (index === 0) return '/';\n" +
+    "    return normalized.slice(0, index);\n" +
+    "  };\n" +
     "  const joinPath = (base, name) => {\n" +
     "    const normalized = trimTrailingSlash(base || '.');\n" +
     "    if (normalized === '/') return '/' + name;\n" +
@@ -129,7 +138,7 @@ export function setupSayaDired(options: SayaDiredOptions = {}): void {
     "return async () => {\n" +
       helpers +
       "  const buffer = await saya.buffer.current();\n" +
-      "  await saya.commands.execute(`edit ${escapeEditPath(dirname(buffer.path || '.'))}`);\n" +
+      "  await saya.commands.execute(`edit ${escapeEditPath(parentDirectory(buffer.path || '.'))}`);\n" +
       "};",
   )();
 
