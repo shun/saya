@@ -634,10 +634,11 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let mode_label = mode_to_label(input.snapshot.mode);
     let cursor_style = mode_to_cursor_style(input.snapshot.mode);
     let dirty = input.snapshot.dirty;
-    let lines = project_visible_input_text_lines(input);
-    let line_projections = project_markdown_line_projections(input);
+    let markdown_display = project_markdown_display_lines(input);
+    let lines = markdown_display.lines;
+    let line_projections = markdown_display.line_projections;
     trace_projection_lines("visible", &lines, input.viewport_top);
-    let cursor_row = resolve_cursor_row(input.cursor_row, input.viewport_top, input.body_height);
+    let cursor_row = resolve_projected_cursor_row(input, &line_projections);
     let cursor_col = resolve_input_cursor_col(input, input.cursor_row, input.cursor_col);
     let visual_selection = resolve_visual_selection(input);
     let search_overlays = project_search_overlays(input, &line_projections);
@@ -1292,6 +1293,29 @@ fn resolve_cursor_row(cursor_row: usize, viewport_top: usize, body_height: usize
     );
 
     relative_row
+}
+
+fn resolve_projected_cursor_row(
+    input: &ProjectionInput<'_>,
+    line_projections: &[ScreenLineProjection],
+) -> u16 {
+    if let Some((display_row, _)) = line_projections.iter().enumerate().find(|(_, projection)| {
+        projection.absolute_row == input.cursor_row
+            && !projection_is_synthetic_display_line(projection)
+    }) {
+        let display_row = display_row.min(input.body_height.max(1).saturating_sub(1));
+        let display_row = u16::try_from(display_row).unwrap_or(u16::MAX);
+        log::debug!(
+            "[screen_model] resolved projected cursor row: absolute_row={}, viewport_top={}, display_row={}, line_projections={}",
+            input.cursor_row,
+            input.viewport_top,
+            display_row,
+            line_projections.len()
+        );
+        return display_row;
+    }
+
+    resolve_cursor_row(input.cursor_row, input.viewport_top, input.body_height)
 }
 
 fn clamp_to_char_boundary(text: &str, col: usize) -> usize {
@@ -2092,6 +2116,140 @@ fn map_tree_sitter_modifier(modifier: vim_core_rs::CoreSyntaxModifier) -> Screen
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkdownDisplayProjection {
+    lines: Vec<String>,
+    line_projections: Vec<ScreenLineProjection>,
+}
+
+fn project_markdown_display_lines(input: &ProjectionInput<'_>) -> MarkdownDisplayProjection {
+    let fallback_lines = project_visible_input_text_lines(input);
+    let line_projections = project_markdown_line_projections(input);
+    let has_expanded_source_row = has_expanded_markdown_source_row(&line_projections);
+    if !has_expanded_source_row
+        && !line_projections
+            .iter()
+            .any(projection_is_synthetic_display_line)
+    {
+        return MarkdownDisplayProjection {
+            lines: fallback_lines,
+            line_projections,
+        };
+    }
+
+    let fallback_by_absolute_row = fallback_lines
+        .iter()
+        .zip(input_visible_rows(input))
+        .map(|(line, (absolute_row, _))| (absolute_row, line.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let lines = line_projections
+        .iter()
+        .map(|projection| {
+            if projection_is_synthetic_display_line(projection) {
+                return " ".repeat(usize::from(projection.line_start_col));
+            }
+            fallback_by_absolute_row
+                .get(&projection.absolute_row)
+                .cloned()
+                .unwrap_or_else(|| projection.raw_text.clone())
+        })
+        .collect::<Vec<_>>();
+
+    log::debug!(
+        "[screen_model] markdown display lines expanded: window_id={}, fallback_lines={}, display_lines={}, line_projections={}",
+        input.window_id,
+        fallback_lines.len(),
+        lines.len(),
+        line_projections.len()
+    );
+
+    MarkdownDisplayProjection {
+        lines,
+        line_projections,
+    }
+}
+
+fn has_expanded_markdown_source_row(line_projections: &[ScreenLineProjection]) -> bool {
+    let mut seen = BTreeSet::new();
+    line_projections
+        .iter()
+        .any(|projection| !seen.insert(projection.absolute_row))
+}
+
+fn projection_is_synthetic_display_line(projection: &ScreenLineProjection) -> bool {
+    projection.raw_text.is_empty()
+        && !projection.display_text.is_empty()
+        && projection.cells.is_empty()
+}
+
+fn markdown_projection_source_text(input: &ProjectionInput<'_>) -> String {
+    if !input.snapshot.text.is_empty() {
+        return input.snapshot.text.clone();
+    }
+    let Some(range) = input.line_range else {
+        return String::new();
+    };
+    let mut source = "\n".repeat(range.start_row);
+    source.push_str(&range.lines.join("\n"));
+    log::debug!(
+        "[screen_model] markdown projection source reconstructed from line_range: window_id={}, start_row={}, lines={}, byte_len={}",
+        input.window_id,
+        range.start_row,
+        range.lines.len(),
+        source.len()
+    );
+    source
+}
+
+fn project_markdown_table_block_projections(
+    map: Option<&MarkdownDocumentMap>,
+    source_text: &str,
+    absolute_row: usize,
+    line_start_col: u16,
+) -> Option<Vec<ScreenLineProjection>> {
+    let map = map?;
+    let block = map.blocks.iter().find(|block| {
+        matches!(block.kind, MarkdownBlockKind::Table)
+            && (block.range.start.line..=block.range.end.line).contains(&absolute_row)
+    })?;
+    let rendered_rows =
+        render_markdown_table_block(source_text, block.range.start.line, block.range.end.line)?;
+    let source_lines = source_text.lines().collect::<Vec<_>>();
+    let projections = rendered_rows
+        .into_iter()
+        .enumerate()
+        .filter(|(index, rendered)| {
+            if let Some(source_line) = rendered.source_line {
+                return source_line >= absolute_row;
+            }
+            *index == 0 && absolute_row == block.range.start.line
+                || *index > block.range.end.line.saturating_sub(block.range.start.line)
+        })
+        .map(|(_, rendered)| {
+            let raw_text = rendered
+                .source_line
+                .and_then(|line| source_lines.get(line).copied())
+                .unwrap_or_default();
+            log::debug!(
+                "[screen_model] markdown table display row rendered: table_start={}, table_end={}, source_line={:?}, raw_len={}, rendered_width={}, text={:?}",
+                block.range.start.line,
+                block.range.end.line,
+                rendered.source_line,
+                raw_text.len(),
+                display_width(&rendered.text, 1),
+                rendered.text
+            );
+            project_rendered_markdown_table_line(
+                rendered.source_line.unwrap_or(block.range.start.line),
+                raw_text,
+                &rendered.text,
+                line_start_col,
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(projections)
+}
+
 fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenLineProjection> {
     let markdown_document_map = if input.session_state.markdown_render() {
         input.markdown_document_map
@@ -2125,20 +2283,52 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
             .take(input.body_height.max(1))
             .collect::<Vec<_>>()
     };
-    let projections = visible_rows
-        .into_iter()
-        .map(|(absolute_row, raw_text)| {
-            let keep_raw = raw_expansion.contains_row(absolute_row);
-            project_markdown_line_projection(
-                absolute_row,
-                raw_text,
+    let source_text = markdown_projection_source_text(input);
+    let tab_size = usize::from(input.session_state.tab_size().max(1));
+    let mut projections = Vec::new();
+    let mut visible_iter = visible_rows.into_iter().peekable();
+    while let Some((absolute_row, raw_text)) = visible_iter.next() {
+        let keep_raw = raw_expansion.contains_row(absolute_row);
+        if !keep_raw
+            && let Some(table_projections) = project_markdown_table_block_projections(
                 markdown_document_map,
-                keep_raw,
-                usize::from(input.session_state.tab_size().max(1)),
+                source_text.as_str(),
+                absolute_row,
                 line_start_col,
             )
-        })
-        .collect::<Vec<_>>();
+        {
+            let table_end = table_projections
+                .iter()
+                .filter(|projection| !projection_is_synthetic_display_line(projection))
+                .map(|projection| projection.absolute_row)
+                .max()
+                .unwrap_or(absolute_row);
+            log::debug!(
+                "[screen_model] markdown table display block projected: start_row={}, end_row={}, display_rows={}",
+                absolute_row,
+                table_end,
+                table_projections.len()
+            );
+            projections.extend(table_projections);
+            while visible_iter
+                .peek()
+                .is_some_and(|(row, _)| *row <= table_end)
+            {
+                visible_iter.next();
+            }
+            continue;
+        }
+
+        projections.push(project_markdown_line_projection(
+            absolute_row,
+            raw_text,
+            markdown_document_map,
+            source_text.as_str(),
+            keep_raw,
+            tab_size,
+            line_start_col,
+        ));
+    }
 
     log::debug!(
         "[screen_model] markdown line projections built: window_id={}, visible_rows={}, viewport_top={}, line_start_col={}, markdown_metadata_present={}, raw_expansion={:?}",
@@ -2167,6 +2357,7 @@ fn project_markdown_line_projection(
     absolute_row: usize,
     raw_text: &str,
     markdown_document_map: Option<&MarkdownDocumentMap>,
+    source_text: &str,
     keep_raw: bool,
     tab_size: usize,
     line_start_col: u16,
@@ -2180,7 +2371,7 @@ fn project_markdown_line_projection(
         Vec::new()
     } else {
         markdown_document_map
-            .map(|map| markdown_conceal_ranges_for_line(map, absolute_row, raw_text))
+            .map(|map| markdown_conceal_ranges_for_line(map, source_text, absolute_row, raw_text))
             .unwrap_or_default()
     };
     let mut display_text = String::new();
@@ -2203,6 +2394,7 @@ fn project_markdown_line_projection(
                 &mut cells,
             );
         }
+        let operation_raw_end_col = operation.raw_end_col;
         append_replacement_projection_segment(
             absolute_row,
             raw_text,
@@ -2212,7 +2404,7 @@ fn project_markdown_line_projection(
             &mut spans,
             &mut cells,
         );
-        raw_col = raw_col.max(operation.raw_end_col);
+        raw_col = raw_col.max(operation_raw_end_col);
     }
 
     if raw_col < raw_text.len() {
@@ -2337,15 +2529,16 @@ fn resolve_markdown_raw_expansion(input: &ProjectionInput<'_>) -> MarkdownRawExp
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MarkdownProjectionOperation {
     raw_start_col: usize,
     raw_end_col: usize,
-    replacement: Option<&'static str>,
+    replacement: Option<String>,
 }
 
 fn markdown_conceal_ranges_for_line(
     map: &MarkdownDocumentMap,
+    _source_text: &str,
     absolute_row: usize,
     raw_text: &str,
 ) -> Vec<MarkdownProjectionOperation> {
@@ -2447,6 +2640,323 @@ fn markdown_conceal_ranges_for_line(
     normalized
 }
 
+fn render_markdown_table_block(
+    source_text: &str,
+    start_line: usize,
+    end_line: usize,
+) -> Option<Vec<RenderedMarkdownTableLine>> {
+    let raw_rows = (start_line..=end_line)
+        .map(|line| source_text.split('\n').nth(line).unwrap_or_default())
+        .collect::<Vec<_>>();
+    let parsed_rows = raw_rows
+        .iter()
+        .map(|row| parse_markdown_table_cells(row))
+        .collect::<Vec<_>>();
+    let alignments = raw_rows
+        .get(1)
+        .and_then(|row| parse_markdown_table_delimiter(row))?;
+    let column_count = alignments.len();
+    if column_count == 0 || parsed_rows.first().map(Vec::len) != Some(column_count) {
+        return None;
+    }
+
+    let mut column_widths = vec![0usize; column_count];
+    for (row_index, cells) in parsed_rows.iter().enumerate() {
+        if row_index == 1 {
+            continue;
+        }
+        for (column_index, cell) in cells.iter().take(column_count).enumerate() {
+            for display_line in markdown_table_cell_display_lines(cell) {
+                column_widths[column_index] =
+                    column_widths[column_index].max(display_width(display_line, 1));
+            }
+        }
+    }
+
+    let mut rendered = Vec::new();
+    for (row_index, cells) in parsed_rows.iter().enumerate() {
+        if row_index == 1 {
+            rendered.push(RenderedMarkdownTableLine {
+                source_line: Some(start_line + row_index),
+                text: render_markdown_table_separator_row(&column_widths),
+            });
+            continue;
+        }
+        for text in render_markdown_table_content_rows(cells, &column_widths, &alignments) {
+            rendered.push(RenderedMarkdownTableLine {
+                source_line: Some(start_line + row_index),
+                text,
+            });
+        }
+    }
+
+    log::debug!(
+        "[screen_model] markdown table block rendered: start_line={}, end_line={}, rows={}, columns={}, widths={:?}",
+        start_line,
+        end_line,
+        rendered.len(),
+        column_count,
+        column_widths
+    );
+
+    Some(rendered)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderedMarkdownTableLine {
+    source_line: Option<usize>,
+    text: String,
+}
+
+fn project_rendered_markdown_table_line(
+    absolute_row: usize,
+    raw_text: &str,
+    display_text: &str,
+    line_start_col: u16,
+) -> ScreenLineProjection {
+    let mut cells = Vec::new();
+    let mut spans = Vec::new();
+    if !raw_text.is_empty() {
+        let display_width = display_width(display_text, 1);
+        cells.push(ScreenCellMapping {
+            display_col: line_start_col,
+            display_end_col_exclusive: u16::try_from(
+                usize::from(line_start_col).saturating_add(display_width),
+            )
+            .unwrap_or(u16::MAX),
+            raw_start_col: 0,
+            raw_end_col: raw_text.len(),
+        });
+        spans.push(ScreenDisplaySpan {
+            raw_start_col: 0,
+            raw_end_col: raw_text.len(),
+            display_start_col: line_start_col,
+            display_end_col_exclusive: u16::try_from(
+                usize::from(line_start_col).saturating_add(display_width),
+            )
+            .unwrap_or(u16::MAX),
+            kind: ScreenDisplaySpanKind::MarkdownReplacement {
+                text: display_text.to_string(),
+            },
+        });
+    }
+    ScreenLineProjection {
+        absolute_row,
+        raw_text: raw_text.to_string(),
+        display_text: display_text.to_string(),
+        spans,
+        cells,
+        line_start_col,
+    }
+}
+
+fn parse_markdown_table_cells(row: &str) -> Vec<String> {
+    let mut row = row.trim_start();
+    if let Some(stripped) = row.strip_prefix('|') {
+        row = stripped;
+    }
+    if row.ends_with('|') && !row.ends_with("\\|") {
+        row = &row[..row.len().saturating_sub(1)];
+    }
+
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut chars = row.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'|') {
+            current.push('|');
+            chars.next();
+            continue;
+        }
+        if ch == '|' {
+            cells.push(render_markdown_table_cell(current.trim()));
+            current.clear();
+            continue;
+        }
+        current.push(ch);
+    }
+    cells.push(render_markdown_table_cell(current.trim()));
+    cells
+}
+
+fn render_markdown_table_cell(cell: &str) -> String {
+    let mut rendered = String::new();
+    let mut cursor = 0usize;
+    while cursor < cell.len() {
+        if let Some(link) = parse_inline_link_at(cell, cursor) {
+            rendered.push_str(link.text);
+            cursor = link.end;
+            continue;
+        }
+        if let Some(code) = parse_inline_code_at(cell, cursor) {
+            rendered.push_str(code.text);
+            cursor = code.end;
+            continue;
+        }
+        if let Some(end) = parse_html_break_at(cell, cursor) {
+            rendered.push('\n');
+            cursor = end;
+            continue;
+        }
+        let Some(ch) = cell[cursor..].chars().next() else {
+            break;
+        };
+        if !matches!(ch, '*' | '_') {
+            rendered.push(ch);
+        }
+        cursor += ch.len_utf8();
+    }
+    rendered
+}
+
+fn parse_html_break_at(cell: &str, cursor: usize) -> Option<usize> {
+    let remaining = cell.get(cursor..)?;
+    ["<br>", "<br/>", "<br />"]
+        .iter()
+        .find_map(|tag| remaining.starts_with(tag).then_some(cursor + tag.len()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InlineTableFragment<'a> {
+    text: &'a str,
+    end: usize,
+}
+
+fn parse_inline_link_at(cell: &str, cursor: usize) -> Option<InlineTableFragment<'_>> {
+    if cell.as_bytes().get(cursor) != Some(&b'[') {
+        return None;
+    }
+    let text_end_relative = cell.get(cursor + 1..)?.find(']')?;
+    let text_end = cursor + 1 + text_end_relative;
+    if cell.as_bytes().get(text_end + 1) != Some(&b'(') {
+        return None;
+    }
+    let destination_end_relative = cell.get(text_end + 2..)?.find(')')?;
+    Some(InlineTableFragment {
+        text: cell.get(cursor + 1..text_end)?,
+        end: text_end + 2 + destination_end_relative + 1,
+    })
+}
+
+fn parse_inline_code_at(cell: &str, cursor: usize) -> Option<InlineTableFragment<'_>> {
+    if cell.as_bytes().get(cursor) != Some(&b'`') {
+        return None;
+    }
+    let end_relative = cell.get(cursor + 1..)?.find('`')?;
+    let end = cursor + 1 + end_relative + 1;
+    Some(InlineTableFragment {
+        text: cell.get(cursor + 1..end.saturating_sub(1))?,
+        end,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkdownTableAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+fn parse_markdown_table_delimiter(row: &str) -> Option<Vec<MarkdownTableAlignment>> {
+    let cells = row
+        .trim()
+        .trim_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if cells.len() < 2 {
+        return None;
+    }
+    let mut alignments = Vec::new();
+    for cell in cells {
+        let left = cell.starts_with(':');
+        let right = cell.ends_with(':');
+        let core = cell.trim_matches(':');
+        if core.is_empty() || !core.bytes().all(|byte| byte == b'-') {
+            return None;
+        }
+        alignments.push(match (left, right) {
+            (true, true) => MarkdownTableAlignment::Center,
+            (false, true) => MarkdownTableAlignment::Right,
+            _ => MarkdownTableAlignment::Left,
+        });
+    }
+    Some(alignments)
+}
+
+fn markdown_table_cell_display_lines(cell: &str) -> Vec<&str> {
+    let lines = cell.split('\n').collect::<Vec<_>>();
+    if lines.is_empty() { vec![""] } else { lines }
+}
+
+fn render_markdown_table_content_rows(
+    cells: &[String],
+    column_widths: &[usize],
+    alignments: &[MarkdownTableAlignment],
+) -> Vec<String> {
+    let cell_lines = column_widths
+        .iter()
+        .enumerate()
+        .map(|(column_index, _)| {
+            cells
+                .get(column_index)
+                .map(|cell| markdown_table_cell_display_lines(cell))
+                .unwrap_or_else(|| vec![""])
+        })
+        .collect::<Vec<_>>();
+    let row_height = cell_lines.iter().map(Vec::len).max().unwrap_or(1);
+    let mut rendered_rows = Vec::new();
+    for display_row in 0..row_height {
+        let mut rendered = String::new();
+        for (column_index, width) in column_widths.iter().enumerate() {
+            let cell = cell_lines
+                .get(column_index)
+                .and_then(|lines| lines.get(display_row))
+                .copied()
+                .unwrap_or_default();
+            let padded = pad_markdown_table_cell(
+                cell,
+                *width,
+                alignments
+                    .get(column_index)
+                    .copied()
+                    .unwrap_or(MarkdownTableAlignment::Left),
+            );
+            rendered.push('│');
+            rendered.push(' ');
+            rendered.push_str(&padded);
+            rendered.push(' ');
+        }
+        rendered.push('│');
+        rendered_rows.push(rendered);
+    }
+    rendered_rows
+}
+
+fn pad_markdown_table_cell(cell: &str, width: usize, alignment: MarkdownTableAlignment) -> String {
+    let cell_width = display_width(cell, 1);
+    let total_padding = width.saturating_sub(cell_width);
+    match alignment {
+        MarkdownTableAlignment::Right => format!("{}{}", " ".repeat(total_padding), cell),
+        MarkdownTableAlignment::Center => {
+            let left = total_padding / 2;
+            let right = total_padding.saturating_sub(left);
+            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(right))
+        }
+        MarkdownTableAlignment::Left => format!("{}{}", cell, " ".repeat(total_padding)),
+    }
+}
+
+fn render_markdown_table_separator_row(column_widths: &[usize]) -> String {
+    let mut rendered = String::new();
+    for width in column_widths {
+        rendered.push('│');
+        rendered.push_str(&"─".repeat(width.saturating_add(2)));
+    }
+    rendered.push('│');
+    rendered
+}
+
 fn heading_marker_range(raw_text: &str, level: u8) -> Option<MarkdownProjectionOperation> {
     let marker_start = raw_text
         .char_indices()
@@ -2480,7 +2990,7 @@ fn checkbox_marker_range(
     Some(MarkdownProjectionOperation {
         raw_start_col: marker_start,
         raw_end_col: marker_end,
-        replacement: Some(marker.1),
+        replacement: Some(marker.1.to_string()),
     })
 }
 
@@ -2496,7 +3006,7 @@ fn list_marker_range(raw_text: &str, ordered: bool) -> Option<MarkdownProjection
     matches!(marker, "- " | "+ " | "* ").then_some(MarkdownProjectionOperation {
         raw_start_col: marker_start,
         raw_end_col: marker_end,
-        replacement: Some("• "),
+        replacement: Some("• ".to_string()),
     })
 }
 
@@ -2568,7 +3078,7 @@ fn append_replacement_projection_segment(
         clamp_to_char_boundary(raw_text, operation.raw_start_col.min(raw_text.len()));
     let raw_end_col = clamp_to_char_boundary(raw_text, operation.raw_end_col.min(raw_text.len()));
     let display_start_col = *display_col;
-    if let Some(replacement) = operation.replacement {
+    if let Some(replacement) = operation.replacement.as_deref() {
         display_text.push_str(replacement);
         let width = display_width(replacement, 1);
         *display_col = display_col.saturating_add(width);
@@ -3393,6 +3903,165 @@ mod tests {
     }
 
     #[test]
+    fn markdown_projection_renders_table_block_with_aligned_columns_when_not_raw() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "| Name | Value |\n|---|---:|\n| *short* | 10 |\n| longer | 200 |\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(
+            model
+                .line_projections
+                .iter()
+                .map(|row| row.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "│ Name   │ Value │",
+                "│────────│───────│",
+                "│ short  │    10 │",
+                "│ longer │   200 │",
+                "",
+            ]
+        );
+        assert_eq!(
+            snapshot.text, source,
+            "Markdown table projection must not mutate the raw buffer text"
+        );
+    }
+
+    #[test]
+    fn markdown_projection_renders_html_br_inside_table_cell_as_display_line_break() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "| TH | TH |\n|---|---|\n| TD<br>aa | |\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(
+            model
+                .line_projections
+                .iter()
+                .map(|row| row.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "│ TH │ TH │",
+                "│────│────│",
+                "│ TD │    │",
+                "│ aa │    │",
+                "",
+            ]
+        );
+        assert_eq!(
+            model.lines,
+            vec![
+                "| TH | TH |".to_string(),
+                "|---|---|".to_string(),
+                "| TD<br>aa | |".to_string(),
+                "| TD<br>aa | |".to_string(),
+                "".to_string(),
+            ],
+            "display lines should expand alongside multiline table projections"
+        );
+    }
+
+    #[test]
+    fn markdown_projection_keeps_line_number_gutter_when_table_cell_br_expands_rows() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "| TH | TH |\n|---|---|\n| TD<br>aa | |\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(
+            model.lines,
+            vec![
+                "   1 | TH | TH |".to_string(),
+                "   2 |---|---|".to_string(),
+                "   3 | TD<br>aa | |".to_string(),
+                "   3 | TD<br>aa | |".to_string(),
+                "".to_string(),
+            ],
+            "expanded table display rows must keep the line-number gutter source"
+        );
+        assert_eq!(
+            model
+                .line_projections
+                .iter()
+                .map(|row| row.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "│ TH │ TH │",
+                "│────│────│",
+                "│ TD │    │",
+                "│ aa │    │",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_projection_offsets_cursor_row_after_rendered_table_expands_display_rows() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "| A | B |\n|---|---|\n| x | y |\n# After\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 3;
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.cursor_row = 3;
+
+        let model = project(&input);
+
+        assert_eq!(
+            model
+                .line_projections
+                .iter()
+                .map(|row| row.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["│ A │ B │", "│───│───│", "│ x │ y │", "# After", "",]
+        );
+        assert_eq!(
+            model.cursor_row, 3,
+            "cursor row should stay aligned when table rendering preserves source row count"
+        );
+    }
+
+    #[test]
     fn markdown_projection_respects_viewport_absolute_rows() {
         let _lock = session_test_lock()
             .lock()
@@ -3512,10 +4181,14 @@ mod tests {
 
         let model = project(&input);
 
-        assert_eq!(model.line_projections[0].display_text, "| A | B |");
-        assert_eq!(model.line_projections[1].display_text, "|---|---|");
-        assert_eq!(model.line_projections[2].display_text, "| *x* | y |");
-        assert_eq!(model.line_projections[3].display_text, "After");
+        assert_eq!(
+            model
+                .line_projections
+                .iter()
+                .map(|row| row.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["| A | B |", "|---|---|", "| *x* | y |", "After", ""]
+        );
     }
 
     #[test]
@@ -3989,6 +4662,79 @@ mod tests {
         assert_eq!(model.panes[0].lines.len(), 12);
         assert_eq!(model.panes[0].lines[0], "    43 range-line-42");
         assert_eq!(model.panes[0].lines[11], "    54 range-line-53");
+    }
+
+    #[test]
+    fn markdown_table_projection_uses_line_range_when_snapshot_text_is_empty() {
+        let mut snapshot = snapshot_for_projection_text(String::new(), 0, 0, 1, 12);
+        snapshot.buffers[0].name = "hoge.md".to_string();
+        let session_state = EditorSessionState::new(Some(PathBuf::from("tmp/hoge.md")));
+        let mut line_ranges = BTreeMap::new();
+        let source_lines = vec![
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            "| TH | TH |".to_string(),
+            "| ---- | ---- |".to_string(),
+            "| TD | TD |".to_string(),
+            "| TD | TD |".to_string(),
+            "".to_string(),
+        ];
+        line_ranges.insert(
+            1,
+            CoreBufferLineRange {
+                buffer_id: 1,
+                source_revision: CoreBufferRevision { value: 1 },
+                start_row: 0,
+                line_count: source_lines.len(),
+                total_line_count: source_lines.len(),
+                lines: source_lines.clone(),
+            },
+        );
+        let markdown_source = source_lines.join("\n");
+        let mut markdown_document_maps = BTreeMap::new();
+        markdown_document_maps.insert(1, Arc::new(MarkdownDocumentMap::parse(&markdown_source)));
+        let mut viewport_store = WindowViewportStore::new();
+        viewport_store.sync_from_windows(&snapshot.windows);
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &line_ranges,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            #[cfg(feature = "tree-sitter-syntax")]
+            tree_sitter_syntax: &BTreeMap::new(),
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 14,
+        })
+        .expect("workspace projection");
+
+        assert!(
+            model.panes[0]
+                .line_projections
+                .iter()
+                .any(|line| line.display_text == "│ TH │ TH │"),
+            "table should render from line_range-backed Markdown source"
+        );
+        assert!(
+            model.panes[0]
+                .line_projections
+                .iter()
+                .any(|line| line.display_text == "│────│────│")
+        );
     }
 
     fn snapshot_for_projection_text(

@@ -752,9 +752,9 @@ fn markdown_wysiwyg_cursor_blocks_survive_workspace_projection_and_headless_rend
         vec![
             "# Title",
             "• ✅ done",
-            "| A | B |",
-            "|---|---|",
-            "| x | y |",
+            "│ A │ B │",
+            "│───│───│",
+            "│ x │ y │",
             "tail",
             "",
         ],
