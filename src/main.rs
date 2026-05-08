@@ -4231,8 +4231,19 @@ fn build_workspace_render_output(
     #[cfg(feature = "tree-sitter-syntax")]
     let tree_sitter_ms = tree_sitter_started_at.elapsed().as_millis();
     let markdown_started_at = std::time::Instant::now();
-    let markdown_document_maps =
-        collect_workspace_markdown_document_maps(markdown_metadata_cache, session_state, &snapshot);
+    let markdown_source_text = if session_state.markdown_render()
+        && is_markdown_target_path(session_state.target_path())
+    {
+        outcome.core_bridge.buffer_text()
+    } else {
+        String::new()
+    };
+    let markdown_document_maps = collect_workspace_markdown_document_maps(
+        markdown_metadata_cache,
+        session_state,
+        &snapshot,
+        &markdown_source_text,
+    );
     let markdown_ms = markdown_started_at.elapsed().as_millis();
     let command_preview =
         command_line_prompt.map(|prompt| format!("{}{}", prompt, command_line_buffer));
@@ -4577,9 +4588,13 @@ fn trace_workspace_render_pipeline(
         .and_then(|row| active_pane.lines.get(row))
         .map(String::as_str)
         .unwrap_or("");
+    let projected_display = visible_row
+        .and_then(|row| active_pane.line_projections.get(row))
+        .map(|projection| projection.display_text.as_str())
+        .unwrap_or("");
 
-    eprintln!(
-        "[saya-trace][main][{phase}] viewport_top={viewport_top} abs_row=7 snapshot={snapshot_line:?} projected={projected_line:?}"
+    log::debug!(
+        "[saya-trace][main][{phase}] viewport_top={viewport_top} abs_row=7 snapshot={snapshot_line:?} visible={projected_line:?} display={projected_display:?}"
     );
 }
 
@@ -4700,6 +4715,20 @@ fn collect_workspace_syntax_lines(
             let lnum = i64::try_from(absolute_row.saturating_add(1)).unwrap_or(i64::MAX);
             match core_bridge.get_line_syntax(window.id, lnum) {
                 Ok(chunks) if !chunks.is_empty() => {
+                    if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
+                        log::debug!(
+                            "[saya-trace][main][syntax] window_id={} row={} lnum={} chunks={} names={:?}",
+                            window.id,
+                            absolute_row,
+                            lnum,
+                            chunks.len(),
+                            chunks
+                                .iter()
+                                .take(8)
+                                .filter_map(|chunk| chunk.name.as_deref())
+                                .collect::<Vec<_>>()
+                        );
+                    }
                     log::debug!(
                         "[main] syntax chunks collected: window_id={}, row={}, lnum={}, chunks={}",
                         window.id,
@@ -4907,8 +4936,15 @@ fn collect_workspace_markdown_document_maps(
     markdown_metadata_cache: &mut MarkdownMetadataCache,
     session_state: &saya::editor_session::EditorSessionState,
     snapshot: &vim_core_rs::CoreSnapshot,
+    source_text: &str,
 ) -> BTreeMap<i32, Arc<MarkdownDocumentMap>> {
     if !session_state.markdown_render() {
+        if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
+            log::debug!(
+                "[saya-trace][main][markdown] collected=false reason=markdownrender_off target_path={:?}",
+                session_state.target_path()
+            );
+        }
         log::debug!(
             "[main] skipping markdown metadata collection because markdownrender is off: target_path={:?}",
             session_state.target_path()
@@ -4917,6 +4953,12 @@ fn collect_workspace_markdown_document_maps(
     }
 
     if !is_markdown_target_path(session_state.target_path()) {
+        if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
+            log::debug!(
+                "[saya-trace][main][markdown] collected=false reason=not_markdown_path target_path={:?}",
+                session_state.target_path()
+            );
+        }
         log::debug!(
             "[main] skipping markdown metadata collection because target path is not markdown: target_path={:?}",
             session_state.target_path()
@@ -4944,7 +4986,7 @@ fn collect_workspace_markdown_document_maps(
             buffer_id: i64::from(active_buffer_id),
             revision: snapshot.revision,
         },
-        &snapshot.text,
+        source_text,
     );
     let maps = snapshot
         .windows
@@ -4952,6 +4994,20 @@ fn collect_workspace_markdown_document_maps(
         .filter(|window| window.buf_id == active_buffer_id)
         .map(|window| (window.id, Arc::clone(&outcome.document_map)))
         .collect::<BTreeMap<_, _>>();
+    if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
+        log::debug!(
+            "[saya-trace][main][markdown] collected=true target_path={:?} markdownrender={} active_window_id={} buffer_id={} revision={} first_line={:?} blocks={} inlines={} mapped_windows={:?}",
+            session_state.target_path(),
+            session_state.markdown_render(),
+            active_window_id,
+            active_buffer_id,
+            snapshot.revision,
+            source_text.lines().next().unwrap_or(""),
+            outcome.document_map.blocks.len(),
+            outcome.document_map.inlines.len(),
+            maps.keys().copied().collect::<Vec<_>>()
+        );
+    }
     log::debug!(
         "[main] collected workspace markdown metadata: active_window_id={}, buffer_id={}, revision={}, cache_status={:?}, mapped_windows={:?}",
         active_window_id,
@@ -5149,9 +5205,6 @@ fn trace_redraw_diagnostic(args: std::fmt::Arguments<'_>) {
     #[cfg(test)]
     record_test_redraw_trace(&message);
     log::debug!("[redraw_diagnostic] {message}");
-    if std::env::var_os("SAYA_TRACE_REDRAW").is_some() {
-        eprintln!("[saya-trace][redraw] {message}");
-    }
 }
 
 fn trace_job_control_diagnostic(args: std::fmt::Arguments<'_>) {
@@ -5339,6 +5392,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                resolved_theme: saya::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,
@@ -5463,6 +5517,7 @@ mod tests {
             &mut markdown_metadata_cache,
             &session_state,
             &outcome.core_bridge.snapshot(),
+            &outcome.core_bridge.buffer_text(),
         );
 
         assert!(
@@ -8410,6 +8465,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                resolved_theme: saya::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,

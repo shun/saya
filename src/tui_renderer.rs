@@ -5,7 +5,9 @@ use crate::screen_model::{
     ScreenTreeSitterSyntax, WorkspaceScreenModel,
 };
 use crate::terminal_lifecycle::TerminalBackend;
-use crate::theme::{ResolvedTextStyle, ResolvedThemeColor};
+use crate::theme::{
+    ResolvedTextStyle, ResolvedTheme, ResolvedThemeColor, SyntaxSemanticStyleKey, UiStyleKey,
+};
 use crossterm::{cursor, event, execute, queue, style, terminal};
 use ratatui::Terminal;
 use ratatui::prelude::*;
@@ -240,6 +242,7 @@ fn draw_workspace_frame<B: Backend>(
     force_full_clear: bool,
     text_mode: RenderTextMode,
 ) -> io::Result<()> {
+    let _color_output_guard = CrosstermColorOutputGuard::for_text_mode(text_mode);
     if force_full_clear {
         trace_redraw_diagnostic(format_args!(
             "renderer issuing terminal.clear before draw: force_full_clear=true"
@@ -252,6 +255,46 @@ fn draw_workspace_frame<B: Backend>(
     }
     terminal.draw(|f| render_workspace(f, model, text_mode))?;
     Ok(())
+}
+
+struct CrosstermColorOutputGuard {
+    restore_no_color: bool,
+}
+
+impl CrosstermColorOutputGuard {
+    fn for_text_mode(text_mode: RenderTextMode) -> Self {
+        let restore_no_color = colors_enabled(text_mode)
+            && std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+        if restore_no_color {
+            log::debug!(
+                "[tui_renderer] forcing crossterm color output for highlighted frame: text_mode={text_mode:?}, no_color_present=true"
+            );
+            log::debug!(
+                "[saya-trace][renderer][color] force_color_output=true text_mode={text_mode:?} no_color_present=true"
+            );
+            style::force_color_output(true);
+        } else {
+            log::debug!(
+                "[tui_renderer] using crossterm color output default for frame: text_mode={text_mode:?}, no_color_present={}",
+                std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+            );
+        }
+        Self { restore_no_color }
+    }
+}
+
+impl Drop for CrosstermColorOutputGuard {
+    fn drop(&mut self) {
+        if self.restore_no_color {
+            log::debug!(
+                "[tui_renderer] restoring crossterm NO_COLOR color suppression after frame"
+            );
+            log::debug!(
+                "[saya-trace][renderer][color] force_color_output=false restore_no_color=true"
+            );
+            style::force_color_output(false);
+        }
+    }
 }
 
 fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: RenderTextMode) {
@@ -271,22 +314,39 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
     for pane in &layout.panes {
         render_pane(f, pane.model, pane.is_active, pane.rect, text_mode);
     }
+    let theme = active_workspace_theme(model);
 
     if let Some((message_area, message_rect)) = message_area_text(model).zip(layout.message_rect) {
-        f.render_widget(Paragraph::new(message_area), message_rect);
+        f.render_widget(
+            Paragraph::new(message_area).style(ui_style(theme, UiStyleKey::Message, text_mode)),
+            message_rect,
+        );
     }
 
     if let Some((pager_line, pager_rect)) = pager_row_text(model).zip(layout.pager_rect) {
-        f.render_widget(Paragraph::new(pager_line), pager_rect);
+        f.render_widget(
+            Paragraph::new(pager_line).style(ui_style(theme, UiStyleKey::Message, text_mode)),
+            pager_rect,
+        );
     }
 
     if let Some((prompt_line, prompt_rect)) = prompt_row_text(model).zip(layout.prompt_rect) {
-        f.render_widget(Paragraph::new(prompt_line), prompt_rect);
+        f.render_widget(
+            Paragraph::new(prompt_line).style(ui_style(theme, UiStyleKey::Prompt, text_mode)),
+            prompt_rect,
+        );
     }
 
     if let Some((command_line, command_rect)) = model.command_line.as_ref().zip(layout.command_rect)
     {
-        f.render_widget(Paragraph::new(command_line.text.as_str()), command_rect);
+        f.render_widget(
+            Paragraph::new(command_line.text.as_str()).style(ui_style(
+                theme,
+                UiStyleKey::Prompt,
+                text_mode,
+            )),
+            command_rect,
+        );
         f.set_cursor_position((command_line.cursor_col.min(size.width), command_rect.y));
         return;
     }
@@ -294,6 +354,19 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
     if let Some((cursor_x, cursor_y)) = layout.cursor {
         f.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn active_workspace_theme(model: &WorkspaceScreenModel) -> &ResolvedTheme {
+    model
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == model.active_window_id)
+        .or_else(|| model.panes.first())
+        .map(|pane| &pane.resolved_theme)
+        .unwrap_or_else(|| {
+            static DEFAULT_THEME: std::sync::OnceLock<ResolvedTheme> = std::sync::OnceLock::new();
+            DEFAULT_THEME.get_or_init(ResolvedTheme::default)
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,20 +606,39 @@ fn render_pane(
     trace_renderer_line(model, body_rect.width);
     f.render_widget(buffer_content, body_rect);
 
-    let status_style = status_style(is_active, text_mode);
+    let status_style = status_style(is_active, text_mode, &model.resolved_theme);
     let status_bar = Paragraph::new(render_status_line(model)).style(status_style);
     f.render_widget(status_bar, status_rect);
 }
 
-fn status_style(is_active: bool, text_mode: RenderTextMode) -> Style {
+fn status_style(is_active: bool, text_mode: RenderTextMode, theme: &ResolvedTheme) -> Style {
     if text_mode == RenderTextMode::Plain {
         return Style::default();
+    }
+    let key = if is_active {
+        UiStyleKey::StatusActive
+    } else {
+        UiStyleKey::StatusInactive
+    };
+    if let Some(style) = theme.ui_style(key).cloned() {
+        return style_for_text(style, text_mode);
     }
     if is_active {
         Style::default().bg(Color::White).fg(Color::Black)
     } else {
         Style::default().bg(Color::DarkGray).fg(Color::White)
     }
+}
+
+fn ui_style(theme: &ResolvedTheme, key: UiStyleKey, text_mode: RenderTextMode) -> Style {
+    if text_mode == RenderTextMode::Plain {
+        return Style::default();
+    }
+    theme
+        .ui_style(key)
+        .cloned()
+        .map(|style| style_for_text(style, text_mode))
+        .unwrap_or_default()
 }
 
 fn render_status_line(model: &ScreenModel) -> String {
@@ -614,9 +706,6 @@ fn draw_editor_frame<B: Backend>(
 fn trace_redraw_diagnostic(args: std::fmt::Arguments<'_>) {
     let message = args.to_string();
     log::debug!("[redraw_diagnostic] {message}");
-    if std::env::var_os("SAYA_TRACE_REDRAW").is_some() {
-        eprintln!("[saya-trace][redraw] {message}");
-    }
 }
 
 fn render_buffer_text(model: &ScreenModel, width: u16, text_mode: RenderTextMode) -> Text<'static> {
@@ -655,7 +744,7 @@ fn trace_renderer_line(model: &ScreenModel, width: u16) {
     }
 
     let line = model.lines.get(6).map(String::as_str).unwrap_or("");
-    eprintln!(
+    log::debug!(
         "[saya-trace][renderer] body_width={} rel_row=7 line={line:?}",
         width
     );
@@ -670,15 +759,34 @@ fn render_line(
 ) -> Line<'static> {
     let row = u16::try_from(index).unwrap_or(u16::MAX);
     let overlays = collect_render_overlays(model, row, line);
+    let base_style = model
+        .resolved_theme
+        .ui_style(UiStyleKey::Text)
+        .cloned()
+        .unwrap_or_default();
     if overlays.is_empty() {
-        return pad_line_to_width(Line::from(line.to_string()), width);
+        let style = style_for_text(base_style, text_mode);
+        let line = if style == Style::default() {
+            Line::from(line.to_string())
+        } else {
+            Line::from(Span::styled(line.to_string(), style))
+        };
+        return pad_line_to_width(line, width);
     }
 
-    render_layered_line(line, &overlays, width, text_mode)
+    render_layered_line(
+        line,
+        &overlays,
+        width,
+        text_mode,
+        &model.resolved_theme,
+        base_style,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RenderOverlayKind {
+    Ui(UiStyleKey),
     Markdown(ResolvedTextStyle),
     Syntax(RenderSyntaxStyle),
     VisualSelection,
@@ -708,6 +816,14 @@ struct RenderOverlayRange {
 
 fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<RenderOverlayRange> {
     let mut overlays = Vec::new();
+
+    if let Some(end_col_exclusive) = line_number_gutter_end_col(line) {
+        overlays.push(RenderOverlayRange {
+            start_col: 0,
+            end_col_exclusive,
+            kind: RenderOverlayKind::Ui(UiStyleKey::Gutter),
+        });
+    }
 
     overlays.extend(
         model
@@ -785,6 +901,8 @@ fn render_layered_line(
     overlays: &[RenderOverlayRange],
     width: u16,
     text_mode: RenderTextMode,
+    theme: &ResolvedTheme,
+    base_style: ResolvedTextStyle,
 ) -> Line<'static> {
     let line_width = display_width(line);
     let mut boundaries = vec![0usize, line_width];
@@ -809,8 +927,8 @@ fn render_layered_line(
                 overlay.start_col < end_col_exclusive && overlay.end_col_exclusive > start_col
             })
             .max_by_key(|overlay| overlay_kind_rank(&overlay.kind))
-            .map(|overlay| style_for_overlay_kind(overlay.kind.clone(), text_mode))
-            .unwrap_or_default();
+            .map(|overlay| style_for_overlay_kind(overlay.kind.clone(), text_mode, theme))
+            .unwrap_or_else(|| style_for_text(base_style.clone(), text_mode));
         if style == Style::default() {
             spans.push(Span::raw(text));
         } else {
@@ -823,22 +941,32 @@ fn render_layered_line(
 
 fn overlay_kind_rank(kind: &RenderOverlayKind) -> usize {
     match kind {
-        RenderOverlayKind::Syntax(_) => 0,
-        RenderOverlayKind::Markdown(_) => 1,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => 2,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => 3,
-        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => 4,
-        RenderOverlayKind::VisualSelection => 5,
+        RenderOverlayKind::Ui(_) => 0,
+        RenderOverlayKind::Syntax(_) => 1,
+        RenderOverlayKind::Markdown(_) => 2,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Regular) => 3,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Incremental) => 4,
+        RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => 5,
+        RenderOverlayKind::VisualSelection => 6,
     }
 }
 
-fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) -> Style {
+fn style_for_overlay_kind(
+    kind: RenderOverlayKind,
+    text_mode: RenderTextMode,
+    theme: &ResolvedTheme,
+) -> Style {
     if text_mode == RenderTextMode::Plain {
         return Style::default();
     }
     match kind {
+        RenderOverlayKind::Ui(key) => theme
+            .ui_style(key)
+            .cloned()
+            .map(|style| style_for_text(style, text_mode))
+            .unwrap_or_default(),
         RenderOverlayKind::Markdown(style) => style_for_markdown(style, text_mode),
-        RenderOverlayKind::Syntax(style) => style_for_syntax(style, text_mode),
+        RenderOverlayKind::Syntax(style) => style_for_syntax(style, text_mode, theme),
         RenderOverlayKind::VisualSelection => Style::default().add_modifier(Modifier::REVERSED),
         RenderOverlayKind::Search(crate::search_query::SearchMatchKind::Current) => {
             Style::default()
@@ -855,7 +983,32 @@ fn style_for_overlay_kind(kind: RenderOverlayKind, text_mode: RenderTextMode) ->
     }
 }
 
+fn line_number_gutter_end_col(line: &str) -> Option<usize> {
+    let mut saw_digit = false;
+    let mut width = 0usize;
+    for ch in line.chars() {
+        if ch == ' ' && !saw_digit {
+            width += 1;
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            width += 1;
+            continue;
+        }
+        if ch == ' ' && saw_digit {
+            return Some(width + 1);
+        }
+        return None;
+    }
+    None
+}
+
 fn style_for_markdown(style: ResolvedTextStyle, text_mode: RenderTextMode) -> Style {
+    style_for_text(style, text_mode)
+}
+
+fn style_for_text(style: ResolvedTextStyle, text_mode: RenderTextMode) -> Style {
     let mut rendered = Style::default();
     if colors_enabled(text_mode) {
         if let Some(fg) = style.fg {
@@ -923,47 +1076,31 @@ fn tree_sitter_syntax_style(syntax: &ScreenTreeSitterSyntax) -> RenderTreeSitter
     }
 }
 
-fn style_for_syntax(style: RenderSyntaxStyle, text_mode: RenderTextMode) -> Style {
+fn style_for_syntax(
+    style: RenderSyntaxStyle,
+    text_mode: RenderTextMode,
+    theme: &ResolvedTheme,
+) -> Style {
     if let Some(tree_sitter) = style.tree_sitter {
-        return style_for_tree_sitter_syntax(tree_sitter, text_mode);
+        return style_for_tree_sitter_syntax(tree_sitter, text_mode, theme);
     }
-    style_for_syntax_family(style.vim_family, text_mode)
+    style_for_syntax_family(style.vim_family, text_mode, theme)
 }
 
 fn style_for_tree_sitter_syntax(
     syntax: RenderTreeSitterSyntaxStyle,
     text_mode: RenderTextMode,
+    theme: &ResolvedTheme,
 ) -> Style {
     if text_mode == RenderTextMode::Plain {
         return Style::default();
     }
-    let mut style = if colors_enabled(text_mode) {
-        match syntax.category {
-            ScreenSyntaxCategory::Comment => Style::default().fg(Color::DarkGray),
-            ScreenSyntaxCategory::String => Style::default().fg(Color::Green),
-            ScreenSyntaxCategory::Constant | ScreenSyntaxCategory::Number => {
-                Style::default().fg(Color::Magenta)
-            }
-            ScreenSyntaxCategory::Keyword | ScreenSyntaxCategory::Operator => {
-                Style::default().fg(Color::Cyan)
-            }
-            ScreenSyntaxCategory::Function
-            | ScreenSyntaxCategory::Constructor
-            | ScreenSyntaxCategory::Type
-            | ScreenSyntaxCategory::Variable
-            | ScreenSyntaxCategory::Property
-            | ScreenSyntaxCategory::Attribute => Style::default().fg(Color::Yellow),
-            ScreenSyntaxCategory::Markup
-            | ScreenSyntaxCategory::Tag
-            | ScreenSyntaxCategory::Label => Style::default().fg(Color::Blue),
-            ScreenSyntaxCategory::Module
-            | ScreenSyntaxCategory::Punctuation
-            | ScreenSyntaxCategory::Text
-            | ScreenSyntaxCategory::Unknown => Style::default().fg(Color::White),
-        }
-    } else {
-        Style::default()
-    };
+    let key = syntax_key_for_tree_sitter(syntax.category);
+    let mut style = theme
+        .syntax_style(key)
+        .cloned()
+        .map(|style| style_for_text(style, text_mode))
+        .unwrap_or_else(|| fallback_style_for_tree_sitter_syntax(syntax.category, text_mode));
     if syntax.definition || syntax.documentation {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -973,35 +1110,144 @@ fn style_for_tree_sitter_syntax(
     style
 }
 
+fn syntax_key_for_tree_sitter(category: ScreenSyntaxCategory) -> SyntaxSemanticStyleKey {
+    match category {
+        ScreenSyntaxCategory::Comment => SyntaxSemanticStyleKey::Comment,
+        ScreenSyntaxCategory::String => SyntaxSemanticStyleKey::String,
+        ScreenSyntaxCategory::Constant | ScreenSyntaxCategory::Number => {
+            SyntaxSemanticStyleKey::Constant
+        }
+        ScreenSyntaxCategory::Keyword | ScreenSyntaxCategory::Operator => {
+            SyntaxSemanticStyleKey::Statement
+        }
+        ScreenSyntaxCategory::Function | ScreenSyntaxCategory::Constructor => {
+            SyntaxSemanticStyleKey::Function
+        }
+        ScreenSyntaxCategory::Type => SyntaxSemanticStyleKey::Type,
+        ScreenSyntaxCategory::Punctuation => SyntaxSemanticStyleKey::Punctuation,
+        ScreenSyntaxCategory::Markup | ScreenSyntaxCategory::Tag | ScreenSyntaxCategory::Label => {
+            SyntaxSemanticStyleKey::Markup
+        }
+        ScreenSyntaxCategory::Variable
+        | ScreenSyntaxCategory::Property
+        | ScreenSyntaxCategory::Attribute => SyntaxSemanticStyleKey::Identifier,
+        ScreenSyntaxCategory::Module
+        | ScreenSyntaxCategory::Text
+        | ScreenSyntaxCategory::Unknown => SyntaxSemanticStyleKey::Default,
+    }
+}
+
+fn fallback_style_for_tree_sitter_syntax(
+    category: ScreenSyntaxCategory,
+    text_mode: RenderTextMode,
+) -> Style {
+    if !colors_enabled(text_mode) {
+        return Style::default();
+    }
+    match category {
+        ScreenSyntaxCategory::Comment => Style::default().fg(Color::DarkGray),
+        ScreenSyntaxCategory::String => Style::default().fg(Color::Green),
+        ScreenSyntaxCategory::Constant | ScreenSyntaxCategory::Number => {
+            Style::default().fg(Color::Magenta)
+        }
+        ScreenSyntaxCategory::Keyword | ScreenSyntaxCategory::Operator => {
+            Style::default().fg(Color::Cyan)
+        }
+        ScreenSyntaxCategory::Function
+        | ScreenSyntaxCategory::Constructor
+        | ScreenSyntaxCategory::Type
+        | ScreenSyntaxCategory::Variable
+        | ScreenSyntaxCategory::Property
+        | ScreenSyntaxCategory::Attribute => Style::default().fg(Color::Yellow),
+        ScreenSyntaxCategory::Markup | ScreenSyntaxCategory::Tag | ScreenSyntaxCategory::Label => {
+            Style::default().fg(Color::Blue)
+        }
+        ScreenSyntaxCategory::Module
+        | ScreenSyntaxCategory::Punctuation
+        | ScreenSyntaxCategory::Text
+        | ScreenSyntaxCategory::Unknown => Style::default().fg(Color::White),
+    }
+}
+
 fn syntax_family(name: Option<&str>) -> Option<&'static str> {
     let name = name?;
-    if name.contains("Comment") || name.contains("Todo") {
+    let normalized = name.to_ascii_lowercase();
+    if normalized.contains("comment") || normalized.contains("todo") {
         Some("comment")
-    } else if name.contains("String") || name.contains("Character") {
+    } else if normalized.contains("string") || normalized.contains("character") {
         Some("string")
-    } else if name.contains("Number")
-        || name.contains("Float")
-        || name.contains("Boolean")
-        || name.contains("Constant")
+    } else if normalized.contains("number")
+        || normalized.contains("float")
+        || normalized.contains("boolean")
+        || normalized.contains("constant")
+        || normalized.contains("char")
     {
         Some("constant")
-    } else if name.contains("Statement")
-        || name.contains("Keyword")
-        || name.contains("Conditional")
-        || name.contains("Repeat")
-        || name.contains("Operator")
+    } else if normalized.contains("operator")
+        || normalized.contains("punctuation")
+        || normalized.contains("delimiter")
+        || normalized.contains("separator")
+        || normalized.contains("sigil")
+        || normalized.contains("arrow")
+        || normalized.contains("modpathsep")
+    {
+        Some("punctuation")
+    } else if normalized.contains("statement")
+        || normalized.contains("keyword")
+        || normalized.contains("conditional")
+        || normalized.contains("repeat")
+        || normalized.contains("storage")
+        || normalized.contains("storageclass")
+        || normalized.contains("visibility")
+        || normalized.contains("preproc")
+        || normalized.contains("include")
+        || normalized.contains("define")
+        || normalized.contains("exception")
     {
         Some("statement")
-    } else if name.contains("Type") || name.contains("Identifier") || name.contains("Function") {
+    } else if normalized.contains("function")
+        || normalized.contains("func")
+        || normalized.contains("method")
+        || normalized.contains("macro")
+    {
+        Some("function")
+    } else if normalized.contains("type")
+        || normalized.contains("struct")
+        || normalized.contains("enum")
+        || normalized.contains("trait")
+        || normalized.contains("typedef")
+        || normalized.contains("modpath")
+    {
+        Some("type")
+    } else if normalized.contains("identifier") {
         Some("identifier")
     } else {
         Some("default")
     }
 }
 
-fn style_for_syntax_family(family: Option<&'static str>, text_mode: RenderTextMode) -> Style {
+fn style_for_syntax_family(
+    family: Option<&'static str>,
+    text_mode: RenderTextMode,
+    theme: &ResolvedTheme,
+) -> Style {
     if text_mode == RenderTextMode::Plain || !colors_enabled(text_mode) {
         return Style::default();
+    }
+    let key = match family {
+        Some("comment") => SyntaxSemanticStyleKey::Comment,
+        Some("string") => SyntaxSemanticStyleKey::String,
+        Some("constant") => SyntaxSemanticStyleKey::Constant,
+        Some("statement") => SyntaxSemanticStyleKey::Statement,
+        Some("identifier") => SyntaxSemanticStyleKey::Identifier,
+        Some("type") => SyntaxSemanticStyleKey::Type,
+        Some("function") => SyntaxSemanticStyleKey::Function,
+        Some("punctuation") => SyntaxSemanticStyleKey::Punctuation,
+        Some("default") | None => SyntaxSemanticStyleKey::Default,
+        Some(_) => SyntaxSemanticStyleKey::Default,
+    };
+    if let Some(style) = theme.syntax_style(key).cloned() {
+        return style_for_text(style, text_mode);
     }
     match family {
         Some("comment") => Style::default().fg(Color::DarkGray),
@@ -1009,6 +1255,9 @@ fn style_for_syntax_family(family: Option<&'static str>, text_mode: RenderTextMo
         Some("constant") => Style::default().fg(Color::Magenta),
         Some("statement") => Style::default().fg(Color::Cyan),
         Some("identifier") => Style::default().fg(Color::Yellow),
+        Some("type") => Style::default().fg(Color::Blue),
+        Some("function") => Style::default().fg(Color::Yellow),
+        Some("punctuation") => Style::default().fg(Color::White),
         Some("default") | None => Style::default().fg(Color::White),
         Some(_) => Style::default().fg(Color::White),
     }
@@ -1055,10 +1304,12 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::bootstrap::prepare_launch;
     use crate::cli::{ConfigSource, InputSource, LaunchRequest};
+    use crate::config_runtime::{StartupRegistry, StartupRegistryEntry};
     use crate::core_notification_prompt::{
         BellIndication, InputPromptStatus, InputPromptView, MessageLineCandidate,
         MessageLineSource, PagerPromptView, PromptHintSuppressionReason, SuppressedPromptHint,
@@ -1072,6 +1323,7 @@ mod tests {
     use crate::screen_model::{ScreenMarkdownStyleRange, ScreenSelection, ScreenSyntaxChunk};
     use crate::search_query::SearchMatchKind;
     use crate::session_guard::test_lock as session_test_lock;
+    use crate::theme::{ThemeRegistry, ThemeTextStyleDeclaration};
     use ratatui::backend::{CrosstermBackend, TestBackend};
     use ratatui::layout::{Position, Rect};
     use ratatui::{TerminalOptions, Viewport};
@@ -1133,6 +1385,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: message_line.map(ToString::to_string),
             command_cursor_col: None,
             is_active: true,
@@ -1179,6 +1432,46 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn theme_from_entries(entries: Vec<StartupRegistryEntry>) -> crate::theme::ResolvedTheme {
+        ThemeRegistry::from_startup_registry(&StartupRegistry::from_entries(entries)).resolve()
+    }
+
+    fn color_env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct NoColorGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl NoColorGuard {
+        fn set() -> Self {
+            let previous = std::env::var_os("NO_COLOR");
+            unsafe {
+                std::env::set_var("NO_COLOR", "1");
+            }
+            style::force_color_output(false);
+            Self { previous }
+        }
+    }
+
+    impl Drop for NoColorGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => unsafe {
+                    std::env::set_var("NO_COLOR", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("NO_COLOR");
+                },
+            }
+            style::force_color_output(
+                std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
+            );
+        }
     }
 
     #[test]
@@ -1326,6 +1619,7 @@ mod tests {
             ],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -1457,6 +1751,320 @@ mod tests {
                 .fg(Color::Rgb(0x9e, 0xce, 0x6a))
                 .add_modifier(Modifier::UNDERLINED)
                 .add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn render_buffer_text_applies_ui_text_style_without_markdown() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["let value = 1;".to_string()];
+        model.visual_selection = None;
+        model.resolved_theme = theme_from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "fg".to_string(),
+                value: "#c0caf5".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "bg".to_string(),
+                value: "#24283b".to_string(),
+            },
+            StartupRegistryEntry::ThemeUiStyle {
+                key: UiStyleKey::Text,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("fg".to_string()),
+                    bg: Some("bg".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let text = render_buffer_text(&model, 16, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "let value = 1;");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0xc0, 0xca, 0xf5))
+                .bg(Color::Rgb(0x24, 0x28, 0x3b))
+        );
+    }
+
+    #[test]
+    fn render_buffer_text_applies_ui_gutter_style_to_line_number_prefix() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["   1 let value = 1;".to_string()];
+        model.visual_selection = None;
+        model.resolved_theme = theme_from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "gutter".to_string(),
+                value: "#3b4261".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "fg".to_string(),
+                value: "#c0caf5".to_string(),
+            },
+            StartupRegistryEntry::ThemeUiStyle {
+                key: UiStyleKey::Gutter,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("gutter".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeUiStyle {
+                key: UiStyleKey::Text,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("fg".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let text = render_buffer_text(&model, 20, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "   1 ");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(Color::Rgb(0x3b, 0x42, 0x61))
+        );
+        assert_eq!(line.spans[1].content.as_ref(), "let value = 1;");
+        assert_eq!(
+            line.spans[1].style,
+            Style::default().fg(Color::Rgb(0xc0, 0xca, 0xf5))
+        );
+    }
+
+    #[test]
+    fn render_buffer_text_keeps_markdown_projection_with_line_numbers_and_ui_theme() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["   1 ## Heading".to_string()];
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "## Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 5,
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 5,
+            end_col_exclusive: 12,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#9ece6a".to_string())),
+                bold: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+        model.resolved_theme = theme_from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "fg".to_string(),
+                value: "#c0caf5".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "bg".to_string(),
+                value: "#24283b".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "gutter".to_string(),
+                value: "#3b4261".to_string(),
+            },
+            StartupRegistryEntry::ThemeUiStyle {
+                key: UiStyleKey::Text,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("fg".to_string()),
+                    bg: Some("bg".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeUiStyle {
+                key: UiStyleKey::Gutter,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("gutter".to_string()),
+                    bg: Some("bg".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let text = render_buffer_text(&model, 16, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(rendered_text_line(&text, 0), "   1 Heading    ");
+        assert_eq!(line.spans[0].content.as_ref(), "   1 ");
+        assert_eq!(line.spans[1].content.as_ref(), "Heading");
+        assert_eq!(
+            line.spans[1].style,
+            Style::default()
+                .fg(Color::Rgb(0x9e, 0xce, 0x6a))
+                .add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn render_buffer_text_applies_theme_syntax_style() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["// comment".to_string()];
+        model.visual_selection = None;
+        model.syntax_chunks = vec![ScreenSyntaxChunk {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 10,
+            syn_id: 1,
+            name: Some("Comment".to_string()),
+            tree_sitter: None,
+        }];
+        model.resolved_theme = theme_from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "comment".to_string(),
+                value: "#565f89".to_string(),
+            },
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Comment,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("comment".to_string()),
+                    italic: Some(true),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let text = render_buffer_text(&model, 12, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "// comment");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x56, 0x5f, 0x89))
+                .add_modifier(Modifier::ITALIC)
+        );
+    }
+
+    #[test]
+    fn render_buffer_text_maps_vim_syntax_groups_to_type_and_function_theme_styles() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["const std::PathBuf macro".to_string()];
+        model.visual_selection = None;
+        model.syntax_chunks = vec![
+            ScreenSyntaxChunk {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 5,
+                syn_id: 1,
+                name: Some("rustStorage".to_string()),
+                tree_sitter: None,
+            },
+            ScreenSyntaxChunk {
+                row: 0,
+                start_col: 6,
+                end_col_exclusive: 9,
+                syn_id: 2,
+                name: Some("rustModPath".to_string()),
+                tree_sitter: None,
+            },
+            ScreenSyntaxChunk {
+                row: 0,
+                start_col: 9,
+                end_col_exclusive: 11,
+                syn_id: 3,
+                name: Some("rustModPathSep".to_string()),
+                tree_sitter: None,
+            },
+            ScreenSyntaxChunk {
+                row: 0,
+                start_col: 11,
+                end_col_exclusive: 18,
+                syn_id: 4,
+                name: Some("rustType".to_string()),
+                tree_sitter: None,
+            },
+            ScreenSyntaxChunk {
+                row: 0,
+                start_col: 19,
+                end_col_exclusive: 24,
+                syn_id: 5,
+                name: Some("rustMacro".to_string()),
+                tree_sitter: None,
+            },
+        ];
+        model.resolved_theme = theme_from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "statement".to_string(),
+                value: "#bb9af7".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "function".to_string(),
+                value: "#7aa2f7".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "type".to_string(),
+                value: "#2ac3de".to_string(),
+            },
+            StartupRegistryEntry::ThemePalette {
+                name: "punctuation".to_string(),
+                value: "#737aa2".to_string(),
+            },
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Statement,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("statement".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Function,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("function".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Type,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("type".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Punctuation,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("punctuation".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let text = render_buffer_text(&model, 24, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(rendered_text_line(&text, 0), "const std::PathBuf macro");
+        assert_eq!(line.spans[0].content.as_ref(), "const");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default().fg(Color::Rgb(0xbb, 0x9a, 0xf7))
+        );
+        assert_eq!(line.spans[2].content.as_ref(), "std");
+        assert_eq!(
+            line.spans[2].style,
+            Style::default().fg(Color::Rgb(0x2a, 0xc3, 0xde))
+        );
+        assert_eq!(line.spans[3].content.as_ref(), "::");
+        assert_eq!(
+            line.spans[3].style,
+            Style::default().fg(Color::Rgb(0x73, 0x7a, 0xa2))
+        );
+        assert_eq!(line.spans[4].content.as_ref(), "PathBuf");
+        assert_eq!(
+            line.spans[4].style,
+            Style::default().fg(Color::Rgb(0x2a, 0xc3, 0xde))
+        );
+        assert_eq!(line.spans[6].content.as_ref(), "macro");
+        assert_eq!(
+            line.spans[6].style,
+            Style::default().fg(Color::Rgb(0x7a, 0xa2, 0xf7))
         );
     }
 
@@ -1626,6 +2234,74 @@ mod tests {
         assert!(
             output.contains("\u{1b}[4m"),
             "Crossterm output should include SGR 4 for underline: {output:?}"
+        );
+    }
+
+    #[test]
+    fn crossterm_backend_forces_color_sgr_for_syntax_highlight_even_when_no_color_is_set() {
+        let _lock = color_env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _no_color_guard = NoColorGuard::set();
+        let writer = CaptureWriter::default();
+        let backend = CrosstermBackend::new(writer.clone());
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 24, 4)),
+            },
+        )
+        .expect("crossterm test terminal should initialize");
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["let value = 1;".to_string()];
+        model.is_active = true;
+        model.visual_selection = None;
+        model.syntax_chunks = vec![ScreenSyntaxChunk {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 3,
+            syn_id: 1,
+            name: Some("rustKeyword".to_string()),
+            tree_sitter: None,
+        }];
+        model.resolved_theme = theme_from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "keyword".to_string(),
+                value: "#bb9af7".to_string(),
+            },
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Statement,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("keyword".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        draw_workspace_frame(
+            &mut terminal,
+            &WorkspaceScreenModel {
+                panes: vec![model.clone()],
+                active_window_id: model.window_id,
+                message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
+                message_area_height: 5,
+                message_scroll_offset: 0,
+                prompt_line: None,
+                pager_prompt: None,
+                suppressed_prompt_hints: vec![],
+                bell: None,
+                command_line: None,
+            },
+            true,
+            RenderTextMode::StyledTrueColor,
+        )
+        .expect("syntax highlight should render with forced color");
+        let bytes = writer.bytes();
+        let output = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            output.contains("\u{1b}[38;2;187;154;247"),
+            "syntax on should emit color SGR even when NO_COLOR is set: {output:?}"
         );
     }
 
@@ -2118,6 +2794,7 @@ mod tests {
                 tree_sitter: None,
             }],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -2177,6 +2854,7 @@ mod tests {
                 }),
             }],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -2230,6 +2908,7 @@ mod tests {
             }],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -2284,6 +2963,7 @@ mod tests {
             }],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -2335,6 +3015,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -2494,6 +3175,7 @@ mod tests {
                     search_overlays: vec![],
                     syntax_chunks: vec![],
                     markdown_style_ranges: vec![],
+                    resolved_theme: crate::theme::ResolvedTheme::default(),
                     message_line: None,
                     command_cursor_col: None,
                     is_active: false,
@@ -2519,6 +3201,7 @@ mod tests {
                     search_overlays: vec![],
                     syntax_chunks: vec![],
                     markdown_style_ranges: vec![],
+                    resolved_theme: crate::theme::ResolvedTheme::default(),
                     message_line: None,
                     command_cursor_col: None,
                     is_active: false,
@@ -2569,6 +3252,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                resolved_theme: crate::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,
@@ -2672,6 +3356,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                resolved_theme: crate::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,

@@ -11,7 +11,9 @@ use saya::startup_runtime::{
     StartupOptionName, StartupOptionValue, StartupRegistryEntry, collect_startup_registry,
     evaluate_startup_module, load_init_module, prepare_init_module, resolve_init_module_specifier,
 };
-use saya::theme::{MarkdownSemanticStyleKey, ThemeTextStyleDeclaration};
+use saya::theme::{
+    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
+};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -681,6 +683,49 @@ async fn startup_theme_palette_and_markdown_styles_are_collected() {
             },
         ]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_theme_ui_and_syntax_styles_are_collected() {
+    let registry = collect_startup_registry(
+        r##"
+            saya.theme.palette = {
+                fg: "#c0caf5",
+                bg: "#24283b",
+                comment: "#565f89",
+                keyword: "#bb9af7",
+            };
+            saya.theme.ui = {
+                text: { fg: "fg", bg: "bg" },
+                statusActive: { fg: "bg", bg: "fg", bold: true },
+            };
+            saya.theme.syntax = {
+                comment: { fg: "comment", italic: true },
+                statement: { fg: "keyword", bold: true },
+            };
+        "##,
+    )
+    .await
+    .expect("startup theme ui and syntax config should evaluate");
+
+    assert!(registry.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            StartupRegistryEntry::ThemeUiStyle {
+                key: UiStyleKey::Text,
+                style,
+            } if style.fg.as_deref() == Some("fg") && style.bg.as_deref() == Some("bg")
+        )
+    }));
+    assert!(registry.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Statement,
+                style,
+            } if style.fg.as_deref() == Some("keyword") && style.bold == Some(true)
+        )
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

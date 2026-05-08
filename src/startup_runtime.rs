@@ -11,7 +11,9 @@ pub use crate::config_runtime::{
 pub use crate::config_runtime::{
     SayaOptionName as StartupOptionName, SayaOptionValue as StartupOptionValue,
 };
-use crate::theme::{MarkdownSemanticStyleKey, ThemeTextStyleDeclaration};
+use crate::theme::{
+    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
+};
 
 const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.tabSize",
@@ -45,6 +47,8 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.commands.execute",
     "saya.events.on",
     "saya.theme.palette",
+    "saya.theme.ui",
+    "saya.theme.syntax",
     "saya.theme.markdown",
     "saya.log.file",
 ];
@@ -68,6 +72,8 @@ const {
     op_collect_startup_command,
     op_collect_startup_event,
     op_collect_startup_theme_palette,
+    op_collect_startup_theme_ui,
+    op_collect_startup_theme_syntax,
     op_collect_startup_theme_markdown,
     op_collect_startup_log_file,
 } = Deno.core.ops;
@@ -163,6 +169,28 @@ Object.defineProperty(globalThis.saya.theme, "markdown", {
     },
     set(value) {
         op_collect_startup_theme_markdown(JSON.stringify(value ?? {}));
+    },
+});
+
+Object.defineProperty(globalThis.saya.theme, "ui", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return {};
+    },
+    set(value) {
+        op_collect_startup_theme_ui(JSON.stringify(value ?? {}));
+    },
+});
+
+Object.defineProperty(globalThis.saya.theme, "syntax", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return {};
+    },
+    set(value) {
+        op_collect_startup_theme_syntax(JSON.stringify(value ?? {}));
     },
 });
 
@@ -426,6 +454,28 @@ declare global {
 
     interface SayaStartupThemeSurface {
         palette: Record<string, SayaThemeColor>;
+        ui: Partial<Record<
+            | "text"
+            | "gutter"
+            | "statusActive"
+            | "statusInactive"
+            | "message"
+            | "prompt",
+            SayaTextStyle
+        >>;
+        syntax: Partial<Record<
+            | "comment"
+            | "string"
+            | "constant"
+            | "statement"
+            | "identifier"
+            | "type"
+            | "function"
+            | "punctuation"
+            | "markup"
+            | "default",
+            SayaTextStyle
+        >>;
         markdown: Partial<Record<
             | "heading"
             | "heading1"
@@ -716,8 +766,50 @@ fn op_collect_startup_theme_markdown(
         let key = MarkdownSemanticStyleKey::parse(&name).ok_or_else(|| {
             JsErrorBox::generic(format!("unsupported markdown theme key: {name}"))
         })?;
-        let style = parse_theme_text_style(&name, value)?;
+        let style = parse_theme_text_style("markdown theme style", &name, value)?;
         registry.push(StartupRegistryEntry::ThemeMarkdownStyle { key, style });
+    }
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_theme_ui(
+    state: &mut OpState,
+    #[string] ui_json: String,
+) -> Result<(), JsErrorBox> {
+    let ui = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&ui_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid ui theme: {error}")))?;
+    log::debug!(
+        "[startup_runtime] collect startup ui theme: style_count={}",
+        ui.len()
+    );
+    let registry = state.borrow_mut::<StartupRegistry>();
+    for (name, value) in ui {
+        let key = UiStyleKey::parse(&name)
+            .ok_or_else(|| JsErrorBox::generic(format!("unsupported ui theme key: {name}")))?;
+        let style = parse_theme_text_style("ui theme style", &name, value)?;
+        registry.push(StartupRegistryEntry::ThemeUiStyle { key, style });
+    }
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_theme_syntax(
+    state: &mut OpState,
+    #[string] syntax_json: String,
+) -> Result<(), JsErrorBox> {
+    let syntax = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&syntax_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid syntax theme: {error}")))?;
+    log::debug!(
+        "[startup_runtime] collect startup syntax theme: style_count={}",
+        syntax.len()
+    );
+    let registry = state.borrow_mut::<StartupRegistry>();
+    for (name, value) in syntax {
+        let key = SyntaxSemanticStyleKey::parse(&name)
+            .ok_or_else(|| JsErrorBox::generic(format!("unsupported syntax theme key: {name}")))?;
+        let style = parse_theme_text_style("syntax theme style", &name, value)?;
+        registry.push(StartupRegistryEntry::ThemeSyntaxStyle { key, style });
     }
     Ok(())
 }
@@ -735,12 +827,13 @@ fn op_collect_startup_log_file(
 }
 
 fn parse_theme_text_style(
+    label: &str,
     name: &str,
     value: serde_json::Value,
 ) -> Result<ThemeTextStyleDeclaration, JsErrorBox> {
     let serde_json::Value::Object(object) = value else {
         return Err(JsErrorBox::generic(format!(
-            "markdown theme style must be an object: {name}"
+            "{label} must be an object: {name}"
         )));
     };
     let mut style = ThemeTextStyleDeclaration::default();
@@ -756,7 +849,7 @@ fn parse_theme_text_style(
             }
             other => {
                 return Err(JsErrorBox::generic(format!(
-                    "unsupported markdown theme style property: {name}.{other}"
+                    "unsupported {label} property: {name}.{other}"
                 )));
             }
         }
@@ -801,6 +894,8 @@ deno_core::extension!(
         op_collect_startup_command,
         op_collect_startup_event,
         op_collect_startup_theme_palette,
+        op_collect_startup_theme_ui,
+        op_collect_startup_theme_syntax,
         op_collect_startup_theme_markdown,
         op_collect_startup_log_file
     ],

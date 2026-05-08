@@ -30,6 +30,62 @@ pub enum MarkdownSemanticStyleKey {
     FencedCodeBlock,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UiStyleKey {
+    Text,
+    Gutter,
+    StatusActive,
+    StatusInactive,
+    Message,
+    Prompt,
+}
+
+impl UiStyleKey {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "text" => Some(Self::Text),
+            "gutter" => Some(Self::Gutter),
+            "statusActive" => Some(Self::StatusActive),
+            "statusInactive" => Some(Self::StatusInactive),
+            "message" => Some(Self::Message),
+            "prompt" => Some(Self::Prompt),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyntaxSemanticStyleKey {
+    Comment,
+    String,
+    Constant,
+    Statement,
+    Identifier,
+    Type,
+    Function,
+    Punctuation,
+    Markup,
+    Default,
+}
+
+impl SyntaxSemanticStyleKey {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "comment" => Some(Self::Comment),
+            "string" => Some(Self::String),
+            "constant" => Some(Self::Constant),
+            "statement" => Some(Self::Statement),
+            "identifier" => Some(Self::Identifier),
+            "type" => Some(Self::Type),
+            "function" => Some(Self::Function),
+            "punctuation" => Some(Self::Punctuation),
+            "markup" => Some(Self::Markup),
+            "default" => Some(Self::Default),
+            _ => None,
+        }
+    }
+}
+
 impl MarkdownSemanticStyleKey {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -102,10 +158,20 @@ impl ResolvedTextStyle {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResolvedTheme {
+    ui: BTreeMap<UiStyleKey, ResolvedTextStyle>,
+    syntax: BTreeMap<SyntaxSemanticStyleKey, ResolvedTextStyle>,
     markdown: BTreeMap<MarkdownSemanticStyleKey, ResolvedTextStyle>,
 }
 
 impl ResolvedTheme {
+    pub fn ui_style(&self, key: UiStyleKey) -> Option<&ResolvedTextStyle> {
+        self.ui.get(&key)
+    }
+
+    pub fn syntax_style(&self, key: SyntaxSemanticStyleKey) -> Option<&ResolvedTextStyle> {
+        self.syntax.get(&key)
+    }
+
     pub fn markdown_style(&self, key: MarkdownSemanticStyleKey) -> Option<&ResolvedTextStyle> {
         self.markdown.get(&key)
     }
@@ -122,6 +188,8 @@ impl ResolvedTheme {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThemeRegistry {
     palette: BTreeMap<String, String>,
+    ui: BTreeMap<UiStyleKey, ThemeTextStyleDeclaration>,
+    syntax: BTreeMap<SyntaxSemanticStyleKey, ThemeTextStyleDeclaration>,
     markdown: BTreeMap<MarkdownSemanticStyleKey, ThemeTextStyleDeclaration>,
 }
 
@@ -144,6 +212,18 @@ impl ThemeRegistry {
                     );
                     theme.markdown.insert(*key, style.clone());
                 }
+                StartupRegistryEntry::ThemeUiStyle { key, style } => {
+                    log::debug!(
+                        "[theme] collect ui style from startup registry: key={key:?}, style={style:?}"
+                    );
+                    theme.ui.insert(*key, style.clone());
+                }
+                StartupRegistryEntry::ThemeSyntaxStyle { key, style } => {
+                    log::debug!(
+                        "[theme] collect syntax style from startup registry: key={key:?}, style={style:?}"
+                    );
+                    theme.syntax.insert(*key, style.clone());
+                }
                 _ => {}
             }
         }
@@ -151,6 +231,16 @@ impl ThemeRegistry {
     }
 
     pub fn resolve(&self) -> ResolvedTheme {
+        let ui = self
+            .ui
+            .iter()
+            .map(|(key, style)| (*key, self.resolve_text_style(style)))
+            .collect::<BTreeMap<_, _>>();
+        let syntax = self
+            .syntax
+            .iter()
+            .map(|(key, style)| (*key, self.resolve_text_style(style)))
+            .collect::<BTreeMap<_, _>>();
         let mut markdown = self
             .markdown
             .iter()
@@ -162,11 +252,17 @@ impl ThemeRegistry {
             }
         }
         log::debug!(
-            "[theme] resolved theme: palette_tokens={}, markdown_styles={}",
+            "[theme] resolved theme: palette_tokens={}, ui_styles={}, syntax_styles={}, markdown_styles={}",
             self.palette.len(),
+            ui.len(),
+            syntax.len(),
             markdown.len()
         );
-        ResolvedTheme { markdown }
+        ResolvedTheme {
+            ui,
+            syntax,
+            markdown,
+        }
     }
 
     fn resolve_heading_level_style(

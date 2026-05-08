@@ -25,7 +25,7 @@ use crate::markdown_structure::{
     MarkdownBlockKind, MarkdownCheckboxState, MarkdownDocumentMap, MarkdownInlineKind,
 };
 use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
-use crate::theme::{MarkdownSemanticStyleKey, ResolvedTextStyle};
+use crate::theme::{MarkdownSemanticStyleKey, ResolvedTextStyle, ResolvedTheme};
 use crate::viewport::WindowViewportStore;
 
 /// 描画専用 view model。
@@ -61,6 +61,8 @@ pub struct ScreenModel {
     pub syntax_chunks: Vec<ScreenSyntaxChunk>,
     /// Markdown semantic presentation style ranges.
     pub markdown_style_ranges: Vec<ScreenMarkdownStyleRange>,
+    /// Renderer-ready startup theme for base UI and syntax styling.
+    pub resolved_theme: ResolvedTheme,
     /// メッセージ欄に表示する通知（エラーやガイダンス）
     pub message_line: Option<String>,
     pub command_cursor_col: Option<u16>,
@@ -691,6 +693,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         search_overlays,
         syntax_chunks,
         markdown_style_ranges,
+        resolved_theme: input.session_state.resolved_theme().clone(),
         message_line,
         command_cursor_col: None,
         is_active: input.is_active,
@@ -940,15 +943,13 @@ fn trace_projection_lines(phase: &str, lines: &[String], viewport_top: usize) {
         return;
     }
 
-    let absolute_row = 6usize;
-    let line = absolute_row
-        .checked_sub(viewport_top)
-        .and_then(|row| lines.get(row))
-        .map(String::as_str)
-        .unwrap_or("");
+    let visible_row = 0usize;
+    let absolute_row = viewport_top.saturating_add(visible_row);
+    let line = lines.get(visible_row).map(String::as_str).unwrap_or("");
 
-    eprintln!(
-        "[saya-trace][screen_model][{phase}] viewport_top={viewport_top} abs_row=7 line={line:?}"
+    log::debug!(
+        "[saya-trace][screen_model][{phase}] viewport_top={viewport_top} abs_row={} line={line:?}",
+        absolute_row + 1
     );
 }
 
@@ -2148,6 +2149,16 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
         markdown_document_map.is_some(),
         raw_expansion
     );
+    if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
+        log::debug!(
+            "[saya-trace][screen_model][markdown] window_id={} cursor_row={} active={} metadata={} raw_expansion={:?}",
+            input.window_id,
+            input.cursor_row,
+            input.is_active,
+            markdown_document_map.is_some(),
+            raw_expansion
+        );
+    }
 
     projections
 }
@@ -2771,6 +2782,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -4285,6 +4297,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -5166,6 +5179,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: crate::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,

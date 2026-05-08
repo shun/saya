@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 
 pub use crate::option_registry::{SayaOptionName, SayaOptionValue};
-use crate::theme::{MarkdownSemanticStyleKey, ThemeTextStyleDeclaration};
+use crate::theme::{
+    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
+};
 
 /// 設定評価から得られるコマンド。
 ///
@@ -147,6 +149,14 @@ pub enum StartupRegistryEntry {
     },
     ThemeMarkdownStyle {
         key: MarkdownSemanticStyleKey,
+        style: ThemeTextStyleDeclaration,
+    },
+    ThemeUiStyle {
+        key: UiStyleKey,
+        style: ThemeTextStyleDeclaration,
+    },
+    ThemeSyntaxStyle {
+        key: SyntaxSemanticStyleKey,
         style: ThemeTextStyleDeclaration,
     },
     LogFile {

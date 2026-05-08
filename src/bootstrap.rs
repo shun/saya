@@ -673,6 +673,8 @@ fn config_commands_from_registry(
             | StartupRegistryEntry::Event { .. }
             | StartupRegistryEntry::ThemePalette { .. }
             | StartupRegistryEntry::ThemeMarkdownStyle { .. }
+            | StartupRegistryEntry::ThemeUiStyle { .. }
+            | StartupRegistryEntry::ThemeSyntaxStyle { .. }
             | StartupRegistryEntry::LogFile { .. } => None,
         })
         .collect()

@@ -228,7 +228,18 @@ impl TuiRenderCoordinator {
         }
     }
 
-    fn resolve_text_mode(capabilities: &TerminalCapabilityProfile) -> RenderTextMode {
+    fn resolve_text_mode(
+        capabilities: &TerminalCapabilityProfile,
+        workspace: &WorkspaceScreenModel,
+    ) -> RenderTextMode {
+        if workspace_has_syntax_chunks(workspace)
+            && matches!(capabilities.text_style, TextStyleCapability::Monochrome)
+        {
+            log::debug!(
+                "[tui_render_coordinator] promoting monochrome terminal profile to truecolor because syntax chunks are present"
+            );
+            return RenderTextMode::StyledTrueColor;
+        }
         match capabilities.text_style {
             TextStyleCapability::Plain => RenderTextMode::Plain,
             TextStyleCapability::Monochrome => RenderTextMode::StyledMonochrome,
@@ -336,7 +347,12 @@ impl TuiRenderCoordinator {
         update_last_successful_workspace: bool,
     ) -> Result<TuiRenderOutcome, RenderFrameError> {
         let total_started_at = Instant::now();
-        let text_mode = Self::resolve_text_mode(capabilities);
+        let text_mode = Self::resolve_text_mode(capabilities, workspace);
+        log::debug!(
+            "[tui_render_coordinator] resolved render text mode: text_mode={text_mode:?}, terminal_text_style={:?}, syntax_chunks_present={}",
+            capabilities.text_style,
+            workspace_has_syntax_chunks(workspace)
+        );
         let frame_options = frame_options_from_redraw_plan(&redraw_plan);
         let presentation_started_at = Instant::now();
         let mut rendered_workspace = Self::apply_presentation(workspace, presentation);
@@ -471,6 +487,13 @@ fn frame_options_from_redraw_plan(redraw_plan: &RedrawPlan) -> RenderFrameOption
     options
 }
 
+fn workspace_has_syntax_chunks(workspace: &WorkspaceScreenModel) -> bool {
+    workspace
+        .panes
+        .iter()
+        .any(|pane| !pane.syntax_chunks.is_empty())
+}
+
 impl TuiRenderCoordinatorService for TuiRenderCoordinator {
     fn render_workspace(
         &mut self,
@@ -537,6 +560,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                resolved_theme: crate::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,

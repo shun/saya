@@ -242,6 +242,105 @@ fn startup_typescript_config_resolves_markdown_theme_for_headless_projection() {
 }
 
 #[test]
+fn startup_typescript_config_keeps_markdown_projection_with_ui_and_syntax_theme() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("theme-ui-syntax-target.md");
+    let config_path = unique_path("theme-ui-syntax-init.ts");
+    let markdown_source = "## Heading\n- [x] done\ninline `code`\n";
+    std::fs::write(&target_path, markdown_source).expect("target file");
+    std::fs::write(
+        &config_path,
+        r##"
+            saya.theme.palette = {
+                bg: "#24283b",
+                fg: "#c0caf5",
+                fgGutter: "#3b4261",
+                blue: "#7aa2f7",
+                green: "#9ece6a",
+                orange: "#ff9e64",
+                comment: "#565f89",
+            };
+            saya.theme.ui = {
+                text: { fg: "fg", bg: "bg" },
+                gutter: { fg: "fgGutter", bg: "bg" },
+            };
+            saya.theme.syntax = {
+                comment: { fg: "comment", italic: true },
+                default: { fg: "fg" },
+            };
+            saya.theme.markdown = {
+                heading: { fg: "blue", bold: true },
+                heading2: { fg: "green" },
+                inlineCode: { fg: "orange" },
+                checkboxChecked: { fg: "green", bold: true },
+            };
+        "##,
+    )
+    .expect("config file");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup with combined typescript theme config");
+
+    let markdown_map = MarkdownDocumentMap::parse(markdown_source);
+    let session_state = outcome.editor_session_state();
+    let mut input = ProjectionInput::new(&outcome.initial_snapshot, &session_state, None)
+        .with_markdown_document_map(Some(&markdown_map));
+    input.is_active = false;
+    let model = project(&input);
+
+    assert_eq!(model.line_projections[0].display_text, "Heading");
+    assert_eq!(model.line_projections[1].display_text, "• ✅ done");
+    assert!(
+        model
+            .markdown_style_ranges
+            .iter()
+            .any(|range| range.row == 0
+                && range.style.fg == Some(ResolvedThemeColor("#9ece6a".to_string()))
+                && range.style.bold),
+        "heading should stay semantically rendered when ui and syntax theme are also configured"
+    );
+    assert!(
+        model
+            .markdown_style_ranges
+            .iter()
+            .any(|range| range.row == 2
+                && range.style.fg == Some(ResolvedThemeColor("#ff9e64".to_string()))),
+        "inline code should keep markdown styling with the combined theme"
+    );
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[test]
+fn startup_markdown_projection_parses_repository_agents_md_headings() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("AGENTS.md");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path),
+        config_source: ConfigSource::Default,
+        ..LaunchRequest::default()
+    })
+    .expect("startup with repository AGENTS.md");
+
+    let markdown_map = MarkdownDocumentMap::parse(&outcome.core_bridge.snapshot().text);
+    assert!(
+        markdown_map.blocks.len() >= 2,
+        "repository AGENTS.md should expose Markdown heading blocks, got blocks={:?}",
+        markdown_map.blocks
+    );
+}
+
+#[test]
 fn startup_typescript_config_heading_level_can_disable_inherited_bold() {
     let _lock = saya::bootstrap::launch_test_lock()
         .lock()

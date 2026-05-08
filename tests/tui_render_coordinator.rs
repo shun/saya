@@ -7,8 +7,8 @@ use saya::core_outcome::{RedrawEffect, StructuralEffectSet};
 use saya::optional_graphics::{OptionalGraphicsAdapter, RecordingOverlayWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
 use saya::screen_model::{
-    CommandLineModel, PaneRect, ScreenCursorStyle, ScreenModel, WorkspaceProjectionError,
-    WorkspaceScreenModel,
+    CommandLineModel, PaneRect, ScreenCursorStyle, ScreenModel, ScreenSyntaxChunk,
+    WorkspaceProjectionError, WorkspaceScreenModel,
 };
 use saya::structural_refresh::{
     ProjectionFailureDiagnostic, ProjectionStatus, RedrawPlan, RedrawPlanSource, StructuralRefresh,
@@ -19,7 +19,7 @@ use saya::terminal_capability::{
     TerminalCapabilityProbeService, TerminalCapabilityProfile, TerminalSessionKind,
 };
 use saya::tui_render_coordinator::TuiRenderCoordinator;
-use saya::tui_renderer::RenderFrameOptions;
+use saya::tui_renderer::{RenderFrameOptions, RenderTextMode};
 
 fn capabilities_without_graphics() -> TerminalCapabilityProfile {
     TerminalCapabilityProbe::new(
@@ -58,6 +58,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            resolved_theme: saya::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -432,6 +433,83 @@ fn renderer_option_propagation_preserves_full_and_clear_before_draw() {
             full_redraw: true,
             clear_before_draw: true,
         }
+    );
+}
+
+#[test]
+fn syntax_chunks_force_color_text_mode_even_when_terminal_profile_is_monochrome() {
+    let monochrome_capabilities = TerminalCapabilityProbe::new(
+        TerminalCapabilityObservation {
+            session_kind: TerminalSessionKind::Local,
+            basic_terminal_control: true,
+            styled_text: true,
+            color_text: false,
+            truecolor: false,
+        },
+        InlineGraphicsProbeResult::Unsupported,
+    )
+    .detect();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+    let mut workspace = workspace(1, 101, "let value = 1;", "message");
+    workspace.panes[0].syntax_chunks = vec![ScreenSyntaxChunk {
+        row: 0,
+        start_col: 0,
+        end_col_exclusive: 3,
+        syn_id: 1,
+        name: Some("rustKeyword".to_string()),
+        tree_sitter: None,
+    }];
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace),
+            &monochrome_capabilities,
+            &[],
+            None,
+        )
+        .expect("syntax-highlighted workspace should render");
+
+    assert_eq!(
+        outcome.text_mode,
+        RenderTextMode::StyledTrueColor,
+        "syntax on should keep colored highlighting even when NO_COLOR made the terminal profile monochrome"
+    );
+}
+
+#[test]
+fn empty_syntax_chunks_keep_monochrome_text_mode_for_syntax_off_fast_path() {
+    let monochrome_capabilities = TerminalCapabilityProbe::new(
+        TerminalCapabilityObservation {
+            session_kind: TerminalSessionKind::Local,
+            basic_terminal_control: true,
+            styled_text: true,
+            color_text: false,
+            truecolor: false,
+        },
+        InlineGraphicsProbeResult::Unsupported,
+    )
+    .detect();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    );
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace(1, 101, "let value = 1;", "message")),
+            &monochrome_capabilities,
+            &[],
+            None,
+        )
+        .expect("plain workspace should render");
+
+    assert_eq!(
+        outcome.text_mode,
+        RenderTextMode::StyledMonochrome,
+        "syntax off should not opt into color rendering or syntax styling work"
     );
 }
 

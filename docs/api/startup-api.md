@@ -165,8 +165,9 @@ saya.events.on("bufferOpen", (payload) => {
 
 ## Theme
 
-The theme surface lets you declare Markdown presentation styles at startup
-without exposing renderer internals or Vim-compatible highlight groups.
+The theme surface lets you declare UI, syntax, and Markdown presentation styles
+at startup without exposing renderer internals or Vim-compatible highlight
+groups.
 
 ### `saya.theme.palette`
 
@@ -215,6 +216,49 @@ Level-specific heading keys inherit from `heading` and override attributes that
 they declare. Boolean attributes can also disable inherited values. For
 example, `heading2: { bold: false }` turns off `heading.bold` for level-two
 headings.
+
+### `saya.theme.ui`
+
+Use this object property to define editor UI styles. Color attributes can
+reference palette tokens or direct hex colors.
+
+```ts
+saya.theme.ui = {
+  text: {
+    fg: "fg",
+    bg: "bg",
+  },
+  statusActive: {
+    fg: "bg",
+    bg: "accent",
+    bold: true,
+  },
+};
+```
+
+The current UI keys are `text`, `gutter`, `statusActive`, `statusInactive`,
+`message`, and `prompt`.
+
+### `saya.theme.syntax`
+
+Use this object property to define broad syntax styles for non-Markdown files.
+Saya maps Vim syntax groups and tree-sitter categories into these semantic
+syntax keys.
+
+```ts
+saya.theme.syntax = {
+  comment: {
+    fg: "comment",
+    italic: true,
+  },
+  statement: {
+    fg: "accent",
+  },
+};
+```
+
+The current syntax keys are `comment`, `string`, `constant`, `statement`,
+`identifier`, `type`, `function`, `punctuation`, `markup`, and `default`.
 
 ## What the startup API does not expose
 
