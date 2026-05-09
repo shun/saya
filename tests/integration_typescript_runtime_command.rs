@@ -19,7 +19,7 @@ use saya::runtime_integration::{
 use saya::saya_live_runtime::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
     ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
-    RuntimeMode, SayaLiveRuntime,
+    RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeMode, SayaLiveRuntime,
 };
 use saya::terminal_lifecycle::TerminalBackend;
 use tokio::sync::Mutex as TokioMutex;
@@ -64,12 +64,18 @@ fn typescript_runtime_suite_scope_statement_stays_pinned_to_host_layer_integrati
 
 struct RecordingHostBridge {
     executed_commands: Arc<TokioMutex<Vec<String>>>,
+    opened_floats: Arc<TokioMutex<Vec<RuntimeFloatOpenRequest>>>,
+    focused_floats: Arc<TokioMutex<Vec<u64>>>,
+    closed_floats: Arc<TokioMutex<Vec<u64>>>,
 }
 
 impl RecordingHostBridge {
     fn new() -> Self {
         Self {
             executed_commands: Arc::new(TokioMutex::new(Vec::new())),
+            opened_floats: Arc::new(TokioMutex::new(Vec::new())),
+            focused_floats: Arc::new(TokioMutex::new(Vec::new())),
+            closed_floats: Arc::new(TokioMutex::new(Vec::new())),
         }
     }
 }
@@ -138,7 +144,9 @@ impl HostCapabilityBridge for RecordingHostBridge {
                 path: Some(PathBuf::from("wave6-runtime.md")),
                 line_count: 9,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             }
         })
     }
@@ -152,6 +160,67 @@ impl HostCapabilityBridge for RecordingHostBridge {
             ReadonlyEditorSnapshot {
                 mode: RuntimeMode::Normal,
             }
+        })
+    }
+
+    fn open_float(
+        &self,
+        request: RuntimeFloatOpenRequest,
+    ) -> BoxFuture<Result<RuntimeFloatSnapshot, RuntimeCommandError>> {
+        let opened_floats = self.opened_floats.clone();
+        Box::pin(async move {
+            opened_floats.lock().await.push(request);
+            Ok(RuntimeFloatSnapshot {
+                id: 77,
+                kind: "lines".to_string(),
+                focused: false,
+                focusable: true,
+                width: 24,
+                height: 4,
+                row: 1,
+                col: 2,
+                border: "single".to_string(),
+                z_index: 80,
+                lifecycle: "manual".to_string(),
+                replacement_group: None,
+            })
+        })
+    }
+
+    fn focus_float(&self, id: u64) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let focused_floats = self.focused_floats.clone();
+        Box::pin(async move {
+            focused_floats.lock().await.push(id);
+            Ok(true)
+        })
+    }
+
+    fn close_float(&self, id: u64) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let closed_floats = self.closed_floats.clone();
+        Box::pin(async move {
+            closed_floats.lock().await.push(id);
+            Ok(true)
+        })
+    }
+
+    fn list_float_snapshots(
+        &self,
+    ) -> BoxFuture<Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError>> {
+        Box::pin(async move {
+            Ok(vec![RuntimeFloatSnapshot {
+                id: 77,
+                kind: "lines".to_string(),
+                focused: true,
+                focusable: true,
+                width: 24,
+                height: 4,
+                row: 1,
+                col: 2,
+                border: "single".to_string(),
+                z_index: 80,
+                lifecycle: "manual".to_string(),
+                replacement_group: Some("phase8".to_string()),
+            }])
         })
     }
 }
@@ -229,7 +298,9 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
                 path: Some(PathBuf::from("headless.md")),
                 line_count: 4,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -323,7 +394,9 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
                 path: Some(PathBuf::from("boundary.md")),
                 line_count: 3,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -340,11 +413,94 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
     std::fs::remove_file(&config_path).expect("remove config");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_window_float_api_routes_typed_requests_through_host_bridge() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let config_path = unique_path("typed-window-float-api-init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.events.on("bufferOpen", async () => {
+                const float = await saya.window.openFloat({
+                    content: { kind: "lines", lines: ["phase8", "typed"] },
+                    relativeTo: { kind: "editor" },
+                    width: 24,
+                    height: 4,
+                    row: 1,
+                    col: 2,
+                    focusable: true,
+                    border: "single",
+                    zIndex: "user",
+                    lifecycle: "manual",
+                    group: "phase8",
+                });
+                if (float.id !== 77 || float.kind !== "lines") {
+                    throw new Error(`unexpected float snapshot: ${JSON.stringify(float)}`);
+                }
+                const focused = await saya.window.focus(float.id);
+                const snapshots = await saya.window.floats();
+                const closed = await saya.window.close(float.id);
+                await saya.commands.execute(
+                    `float:${float.id}:${focused}:${closed}:${snapshots[0].focused}:${snapshots[0].replacementGroup}`
+                );
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+        input_source: InputSource::Empty,
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup config should prepare callback seed");
+    let host_bridge = Arc::new(RecordingHostBridge::new());
+    let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), outcome.callback_registry)
+        .expect("runtime should initialize");
+
+    runtime
+        .dispatch_event(RuntimeEventPayload::BufferOpen(BufferEventPayload {
+            buffer: ReadonlyBufferSnapshot {
+                id: 101,
+                path: Some(PathBuf::from("phase8.md")),
+                line_count: 1,
+                cursor_row: 0,
+                cursor_col: 0,
+                current_line: String::new(),
+                text: String::new(),
+            },
+        }))
+        .expect("dispatch queued")
+        .await_result()
+        .await
+        .expect("dispatch result");
+
+    let opened = host_bridge.opened_floats.lock().await.clone();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].width, Some(24));
+    assert_eq!(opened[0].height, Some(4));
+    assert_eq!(opened[0].group.as_deref(), Some("phase8"));
+    assert_eq!(host_bridge.focused_floats.lock().await.clone(), vec![77]);
+    assert_eq!(host_bridge.closed_floats.lock().await.clone(), vec![77]);
+    assert_eq!(
+        host_bridge.executed_commands.lock().await.clone(),
+        vec!["float:77:true:true:true:phase8".to_string()]
+    );
+
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
 struct RecordingRuntimeHostSession {
     executed_commands: Vec<String>,
     transient_messages: Vec<String>,
     dispatched_follow_up_events: Vec<RuntimeEventPayload>,
     dispatched_shutdown_intents: Vec<RuntimeShutdownIntent>,
+    opened_float_requests: Vec<RuntimeFloatOpenRequest>,
+    focused_float_ids: Vec<u64>,
+    closed_float_ids: Vec<u64>,
+    float_snapshots: Vec<RuntimeFloatSnapshot>,
     buffer: ReadonlyBufferSnapshot,
     window: ReadonlyWindowSnapshot,
     editor: ReadonlyEditorSnapshot,
@@ -357,12 +513,18 @@ impl Default for RecordingRuntimeHostSession {
             transient_messages: Vec::new(),
             dispatched_follow_up_events: Vec::new(),
             dispatched_shutdown_intents: Vec::new(),
+            opened_float_requests: Vec::new(),
+            focused_float_ids: Vec::new(),
+            closed_float_ids: Vec::new(),
+            float_snapshots: Vec::new(),
             buffer: ReadonlyBufferSnapshot {
                 id: 1,
                 path: None,
                 line_count: 1,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
             window: ReadonlyWindowSnapshot { id: 1 },
             editor: ReadonlyEditorSnapshot {
@@ -380,7 +542,9 @@ impl RecordingRuntimeHostSession {
                 path: Some(PathBuf::from(path)),
                 line_count,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
             window: ReadonlyWindowSnapshot { id: 1 },
             editor: ReadonlyEditorSnapshot {
@@ -402,6 +566,48 @@ impl RuntimeHostSession for RecordingRuntimeHostSession {
 
     fn current_editor_snapshot(&mut self) -> ReadonlyEditorSnapshot {
         self.editor.clone()
+    }
+
+    fn open_float(
+        &mut self,
+        request: RuntimeFloatOpenRequest,
+    ) -> Result<RuntimeFloatSnapshot, RuntimeCommandError> {
+        self.opened_float_requests.push(request);
+        let snapshot = RuntimeFloatSnapshot {
+            id: 501,
+            kind: "lines".to_string(),
+            focused: false,
+            focusable: true,
+            width: 30,
+            height: 5,
+            row: 2,
+            col: 3,
+            border: "single".to_string(),
+            z_index: 80,
+            lifecycle: "manual".to_string(),
+            replacement_group: Some("owner-phase8".to_string()),
+        };
+        self.float_snapshots = vec![snapshot.clone()];
+        Ok(snapshot)
+    }
+
+    fn focus_float(&mut self, id: u64) -> Result<bool, RuntimeCommandError> {
+        self.focused_float_ids.push(id);
+        for snapshot in &mut self.float_snapshots {
+            snapshot.focused = snapshot.id == id;
+        }
+        Ok(true)
+    }
+
+    fn close_float(&mut self, id: u64) -> Result<bool, RuntimeCommandError> {
+        self.closed_float_ids.push(id);
+        let before = self.float_snapshots.len();
+        self.float_snapshots.retain(|snapshot| snapshot.id != id);
+        Ok(self.float_snapshots.len() != before)
+    }
+
+    fn list_float_snapshots(&mut self) -> Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError> {
+        Ok(self.float_snapshots.clone())
     }
 
     fn execute_host_command(
@@ -506,13 +712,72 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
                 path: Some(PathBuf::from("live-session.md")),
                 line_count: 4,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             }
         )]
     );
     assert!(
         host_session.dispatched_shutdown_intents.is_empty(),
         "write only の host command は shutdown intent を持たないこと"
+    );
+
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_session_owner_routes_window_float_api_through_typed_host_session() {
+    let _lock = saya::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let config_path = unique_path("live-session-owner-float-api-init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.events.on("bufferOpen", async () => {
+                const float = await saya.window.openFloat({
+                    content: { kind: "lines", lines: ["owner", "phase8"] },
+                    width: 30,
+                    height: 5,
+                    focusable: true,
+                    group: "owner-phase8",
+                });
+                await saya.window.focus(float.id);
+                const snapshots = await saya.window.floats();
+                await saya.commands.execute(`owner-float:${snapshots[0].id}:${snapshots[0].focused}`);
+                await saya.window.close(float.id);
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+        input_source: InputSource::Empty,
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup config should prepare callback seed");
+
+    let mut runtime = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+        .expect("live runtime session owner should initialize");
+    let mut host_session = RecordingRuntimeHostSession::with_buffer("owner-float.md", 2);
+
+    let dispatch_outcome = runtime
+        .dispatch(
+            RuntimeEventMapper::buffer_open(host_session.current_buffer_snapshot()),
+            &mut host_session,
+        )
+        .await;
+
+    assert!(dispatch_outcome.requires_redraw);
+    assert_eq!(host_session.opened_float_requests.len(), 1);
+    assert_eq!(host_session.opened_float_requests[0].width, Some(30));
+    assert_eq!(host_session.focused_float_ids, vec![501]);
+    assert_eq!(host_session.closed_float_ids, vec![501]);
+    assert_eq!(
+        host_session.executed_commands,
+        vec!["owner-float:501:true".to_string()]
     );
 
     std::fs::remove_file(&config_path).expect("remove config");
@@ -576,7 +841,9 @@ async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_fo
                 path: Some(PathBuf::from("live-session.md")),
                 line_count: 4,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             }
         )]
     );

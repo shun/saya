@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::callback_registry_seed::CallbackRegistrySeed;
+use crate::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
 #[cfg(test)]
 use crate::startup_runtime::{
     PreparedStartupModule, StartupModulePrepareResult, prepare_init_module,
@@ -27,8 +28,13 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.commands.execute",
     "saya.buffer.current",
     "saya.window.current",
+    "saya.window.openFloat",
+    "saya.window.close",
+    "saya.window.focus",
+    "saya.window.floats",
     "saya.editor.current",
     "saya.editor.mode",
+    "saya.workspace.findRoot",
     "saya.filer.list",
     "saya.filer.currentEntry",
     "saya.filer.createFile",
@@ -42,6 +48,7 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.filer.clearMarks",
     "saya.filer.bulkDeletePreview",
     "saya.filer.bulkDelete",
+    "saya.lsp.request",
 ];
 
 /// Formal runtime surface は read-only/command 実行に限定し、compat 文字列 DSL は含めない。
@@ -120,6 +127,20 @@ globalThis.saya = {
         current() {
             return Deno.core.ops.op_runtime_current_window();
         },
+        openFloat(options) {
+            return Deno.core.ops.op_runtime_window_open_float(
+                JSON.stringify(options ?? {}),
+            );
+        },
+        close(id) {
+            return Deno.core.ops.op_runtime_window_close_float(String(id));
+        },
+        focus(id) {
+            return Deno.core.ops.op_runtime_window_focus_float(String(id));
+        },
+        floats() {
+            return Deno.core.ops.op_runtime_window_floats();
+        },
     },
     editor: {
         current() {
@@ -128,6 +149,14 @@ globalThis.saya = {
         async mode() {
             const editor = await Deno.core.ops.op_runtime_current_editor();
             return editor.mode;
+        },
+    },
+    workspace: {
+        findRoot(path, markers = []) {
+            return Deno.core.ops.op_runtime_workspace_find_root(
+                String(path),
+                JSON.stringify(markers ?? []),
+            );
         },
     },
     filer: {
@@ -179,6 +208,11 @@ globalThis.saya = {
             );
         },
     },
+    lsp: {
+        request(payload) {
+            return Deno.core.ops.op_runtime_lsp_request(JSON.stringify(payload ?? {}));
+        },
+    },
 };
 
 Object.freeze(globalThis.saya.commands);
@@ -186,10 +220,12 @@ Object.freeze(globalThis.saya.buffer);
 Object.freeze(globalThis.saya.window);
 Object.freeze(globalThis.saya.editor);
 Object.freeze(globalThis.saya.filer);
+Object.freeze(globalThis.saya.lsp);
 Object.freeze(globalThis.saya);
 "#;
 
-const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &["commands", "buffer", "window", "editor", "filer"];
+const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] =
+    &["commands", "buffer", "window", "editor", "filer", "lsp"];
 const RUNTIME_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
 pub const RUNTIME_SAYA_TYPE_DECLARATION: &str = r#"
@@ -201,11 +237,106 @@ declare global {
         path: string | null;
         lineCount: number;
         cursorRow: number;
+        cursorCol: number;
         currentLine: string;
+        text: string;
     }
 
     interface SayaReadonlyWindowSnapshot {
         id: number;
+    }
+
+    type SayaRuntimeFloatBorder = "none" | "single" | "rounded";
+    type SayaRuntimeFloatZIndex =
+        | "hover"
+        | "user"
+        | "completion"
+        | "completionDocumentation"
+        | "blockingPrompt"
+        | number;
+    type SayaRuntimeFloatLifecycle =
+        | "manual"
+        | "closeOnCursorMove"
+        | "closeOnInsert"
+        | "closeOnBufferChange";
+
+    interface SayaRuntimeLinesFloatContent {
+        kind: "lines";
+        lines: string[];
+    }
+
+    interface SayaRuntimeBufferFloatContent {
+        kind: "buffer";
+        bufferId?: number | null;
+        windowId?: number | null;
+    }
+
+    interface SayaRuntimeTerminalFloatContent {
+        kind: "terminal";
+        command: string[];
+        closeBehavior?: "kill" | "detach" | "killOnClose" | "detachOnClose";
+    }
+
+    type SayaRuntimeFloatContent =
+        | SayaRuntimeLinesFloatContent
+        | SayaRuntimeBufferFloatContent
+        | SayaRuntimeTerminalFloatContent;
+
+    interface SayaRuntimeEditorFloatPlacement {
+        kind: "editor";
+    }
+
+    interface SayaRuntimeCursorFloatPlacement {
+        kind: "cursor";
+        windowId?: number | null;
+    }
+
+    interface SayaRuntimeWindowFloatPlacement {
+        kind: "window";
+        windowId?: number | null;
+    }
+
+    interface SayaRuntimeBufferPositionFloatPlacement {
+        kind: "bufferPosition";
+        windowId?: number | null;
+        line: number;
+        column: number;
+    }
+
+    type SayaRuntimeFloatPlacement =
+        | SayaRuntimeEditorFloatPlacement
+        | SayaRuntimeCursorFloatPlacement
+        | SayaRuntimeWindowFloatPlacement
+        | SayaRuntimeBufferPositionFloatPlacement;
+
+    interface SayaRuntimeOpenFloatOptions {
+        content: SayaRuntimeFloatContent;
+        relativeTo?: SayaRuntimeFloatPlacement;
+        width?: number;
+        height?: number;
+        row?: number;
+        col?: number;
+        anchor?: "nw" | "ne" | "sw" | "se";
+        focusable?: boolean;
+        border?: SayaRuntimeFloatBorder;
+        zIndex?: SayaRuntimeFloatZIndex;
+        lifecycle?: SayaRuntimeFloatLifecycle;
+        group?: string | null;
+    }
+
+    interface SayaReadonlyFloatSnapshot {
+        id: number;
+        kind: string;
+        focused: boolean;
+        focusable: boolean;
+        width: number;
+        height: number;
+        row: number;
+        col: number;
+        border: string;
+        zIndex: number;
+        lifecycle: string;
+        replacementGroup?: string | null;
     }
 
     interface SayaReadonlyEditorSnapshot {
@@ -222,11 +353,61 @@ declare global {
 
     interface SayaRuntimeWindowSurface {
         current(): Promise<SayaReadonlyWindowSnapshot>;
+        openFloat(options: SayaRuntimeOpenFloatOptions): Promise<SayaReadonlyFloatSnapshot>;
+        close(id: number): Promise<boolean>;
+        focus(id: number): Promise<boolean>;
+        floats(): Promise<SayaReadonlyFloatSnapshot[]>;
     }
 
     interface SayaRuntimeEditorSurface {
         current(): Promise<SayaReadonlyEditorSnapshot>;
         mode(): Promise<SayaRuntimeMode>;
+    }
+
+    interface SayaRuntimeWorkspaceSurface {
+        findRoot(path: string, markers: string[]): Promise<string | null>;
+    }
+
+    type SayaLspRuntimeSource = "lsp" | "lsif";
+    type SayaLspRuntimeTrace = "off" | "messages" | "verbose";
+    type SayaLspPositionEncoding = "utf-16" | "utf-8" | "utf-32";
+
+    interface SayaLspTextDocumentIdentifier {
+        uri: string;
+    }
+
+    interface SayaLspPosition {
+        line: number;
+        character: number;
+    }
+
+    interface SayaLspRuntimeBridgeRequest {
+        source: SayaLspRuntimeSource;
+        lspVersion: string;
+        method: string;
+        clientName: string;
+        rootUri?: string | null;
+        languageId: string;
+        trace: SayaLspRuntimeTrace;
+        positionEncoding: SayaLspPositionEncoding;
+        dumpPath: string;
+        textDocument?: SayaLspTextDocumentIdentifier | null;
+        server?: unknown;
+        position: SayaLspPosition;
+        params?: unknown;
+        buffer: SayaReadonlyBufferSnapshot;
+        editor: SayaReadonlyEditorSnapshot;
+        event?: unknown;
+    }
+
+    interface SayaLspRuntimeBridgeResponse {
+        source: SayaLspRuntimeSource;
+        method: string;
+        result: unknown;
+    }
+
+    interface SayaRuntimeLspSurface {
+        request(payload: SayaLspRuntimeBridgeRequest): Promise<SayaLspRuntimeBridgeResponse>;
     }
 
     type SayaFilerEntryKind = "directory" | "file" | "symlink" | "other";
@@ -349,7 +530,9 @@ declare global {
         buffer: SayaRuntimeBufferSurface;
         window: SayaRuntimeWindowSurface;
         editor: SayaRuntimeEditorSurface;
+        workspace: SayaRuntimeWorkspaceSurface;
         filer: SayaRuntimeFilerSurface;
+        lsp: SayaRuntimeLspSurface;
     }
 
     var saya: SayaRuntimeSurface;
@@ -365,12 +548,94 @@ pub struct ReadonlyBufferSnapshot {
     pub path: Option<PathBuf>,
     pub line_count: usize,
     pub cursor_row: usize,
+    pub cursor_col: usize,
     pub current_line: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadonlyWindowSnapshot {
     pub id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFloatOpenRequest {
+    pub content: RuntimeFloatContentRequest,
+    pub relative_to: Option<RuntimeFloatRelativeToRequest>,
+    pub width: Option<u16>,
+    pub height: Option<u16>,
+    pub row: Option<i16>,
+    pub col: Option<i16>,
+    pub anchor: Option<String>,
+    pub focusable: Option<bool>,
+    pub border: Option<String>,
+    pub z_index: Option<RuntimeFloatZIndexRequest>,
+    pub lifecycle: Option<String>,
+    pub group: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RuntimeFloatContentRequest {
+    Lines {
+        lines: Vec<String>,
+    },
+    Buffer {
+        #[serde(default)]
+        buffer_id: Option<u64>,
+        #[serde(default)]
+        window_id: Option<u64>,
+    },
+    Terminal {
+        command: Vec<String>,
+        #[serde(default)]
+        close_behavior: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RuntimeFloatRelativeToRequest {
+    Editor,
+    Cursor {
+        #[serde(default)]
+        window_id: Option<u64>,
+    },
+    Window {
+        #[serde(default)]
+        window_id: Option<u64>,
+    },
+    BufferPosition {
+        #[serde(default)]
+        window_id: Option<u64>,
+        line: usize,
+        column: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RuntimeFloatZIndexRequest {
+    Named(String),
+    Custom(i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFloatSnapshot {
+    pub id: u64,
+    pub kind: String,
+    pub focused: bool,
+    pub focusable: bool,
+    pub width: u16,
+    pub height: u16,
+    pub row: i16,
+    pub col: i16,
+    pub border: String,
+    pub z_index: i32,
+    pub lifecycle: String,
+    pub replacement_group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,26 +822,35 @@ pub enum RuntimeFilerError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeEventName {
     BufferOpen,
+    BufferChanged,
     BufferWritePost,
+    BufferClosed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEventPayload {
     BufferOpen(BufferEventPayload),
+    BufferChanged(BufferEventPayload),
     BufferWritePost(BufferEventPayload),
+    BufferClosed(BufferEventPayload),
 }
 
 impl RuntimeEventPayload {
     pub fn event_name(&self) -> RuntimeEventName {
         match self {
             Self::BufferOpen(_) => RuntimeEventName::BufferOpen,
+            Self::BufferChanged(_) => RuntimeEventName::BufferChanged,
             Self::BufferWritePost(_) => RuntimeEventName::BufferWritePost,
+            Self::BufferClosed(_) => RuntimeEventName::BufferClosed,
         }
     }
 
     pub fn buffer_payload(&self) -> &BufferEventPayload {
         match self {
-            Self::BufferOpen(payload) | Self::BufferWritePost(payload) => payload,
+            Self::BufferOpen(payload)
+            | Self::BufferChanged(payload)
+            | Self::BufferWritePost(payload)
+            | Self::BufferClosed(payload) => payload,
         }
     }
 }
@@ -626,9 +900,75 @@ pub enum RuntimeInitError {
 
 pub trait HostCapabilityBridge: Send + Sync + 'static {
     fn execute_host_command(&self, name: &str) -> BoxFuture<Result<(), RuntimeCommandError>>;
+    fn execute_lsp_request(
+        &self,
+        request: LspRuntimeBridgeRequest,
+    ) -> BoxFuture<Result<LspRuntimeBridgeResponse, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][lsp] typed LSP bridge unavailable: method={}",
+                request.method
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "lsp.request".to_string(),
+            })
+        })
+    }
     fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot>;
     fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot>;
+    fn open_float(
+        &self,
+        request: RuntimeFloatOpenRequest,
+    ) -> BoxFuture<Result<RuntimeFloatSnapshot, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][window] typed openFloat unavailable: content={:?}",
+                request.content
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "window.openFloat".to_string(),
+            })
+        })
+    }
+    fn close_float(&self, id: u64) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][window] typed close unavailable: id={}",
+                id
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "window.close".to_string(),
+            })
+        })
+    }
+    fn focus_float(&self, id: u64) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][window] typed focus unavailable: id={}",
+                id
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "window.focus".to_string(),
+            })
+        })
+    }
+    fn list_float_snapshots(
+        &self,
+    ) -> BoxFuture<Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!("[saya_live_runtime][window] typed float snapshots unavailable");
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "window.floats".to_string(),
+            })
+        })
+    }
     fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot>;
+    fn find_workspace_root(&self, path: String, markers: Vec<String>) -> BoxFuture<Option<String>> {
+        Box::pin(async move {
+            let root = find_workspace_root_path(PathBuf::from(path), &markers)?;
+            Some(root.to_string_lossy().into_owned())
+        })
+    }
     fn list_filer_entries(
         &self,
         path: PathBuf,
@@ -646,6 +986,38 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
         operation: RuntimeFilerOperation,
     ) -> BoxFuture<Result<RuntimeFilerOperationReport, RuntimeFilerError>> {
         Box::pin(async move { execute_local_filer_operation(operation) })
+    }
+}
+
+pub fn find_workspace_root_path(path: PathBuf, markers: &[String]) -> Option<PathBuf> {
+    if markers.is_empty() {
+        return None;
+    }
+    let mut current = if path.is_file() || path.extension().is_some() {
+        path.parent().map(std::path::Path::to_path_buf)?
+    } else {
+        path
+    };
+    loop {
+        for marker in markers {
+            if marker.trim().is_empty() {
+                continue;
+            }
+            if current.join(marker).exists() {
+                log::debug!(
+                    "[saya_live_runtime][workspace] root marker matched: root={}, marker={}",
+                    current.display(),
+                    marker
+                );
+                return Some(current);
+            }
+        }
+        if !current.pop() {
+            log::debug!(
+                "[saya_live_runtime][workspace] no root marker matched: markers={markers:?}"
+            );
+            return None;
+        }
     }
 }
 
@@ -671,7 +1043,9 @@ type EventCallback = Arc<
 pub struct CallbackRegistryBuilder {
     commands: Vec<(String, CommandCallback)>,
     buffer_open_handlers: Vec<EventCallback>,
+    buffer_changed_handlers: Vec<EventCallback>,
     buffer_write_post_handlers: Vec<EventCallback>,
+    buffer_closed_handlers: Vec<EventCallback>,
 }
 
 impl CallbackRegistryBuilder {
@@ -708,12 +1082,38 @@ impl CallbackRegistryBuilder {
         self
     }
 
+    pub fn on_buffer_changed<F>(&mut self, callback: F) -> &mut Self
+    where
+        F: Fn(RuntimeContext, BufferEventPayload) -> BoxFuture<Result<(), RuntimeCallbackError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        log::debug!("[saya_live_runtime] register bufferChanged handler");
+        self.buffer_changed_handlers.push(Arc::new(callback));
+        self
+    }
+
+    pub fn on_buffer_closed<F>(&mut self, callback: F) -> &mut Self
+    where
+        F: Fn(RuntimeContext, BufferEventPayload) -> BoxFuture<Result<(), RuntimeCallbackError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        log::debug!("[saya_live_runtime] register bufferClosed handler");
+        self.buffer_closed_handlers.push(Arc::new(callback));
+        self
+    }
+
     pub fn build(&self) -> CallbackRegistry {
         log::debug!(
-            "[saya_live_runtime] build callback registry: commands={}, buffer_open_handlers={}, buffer_write_post_handlers={}",
+            "[saya_live_runtime] build callback registry: commands={}, buffer_open_handlers={}, buffer_changed_handlers={}, buffer_write_post_handlers={}, buffer_closed_handlers={}",
             self.commands.len(),
             self.buffer_open_handlers.len(),
-            self.buffer_write_post_handlers.len()
+            self.buffer_changed_handlers.len(),
+            self.buffer_write_post_handlers.len(),
+            self.buffer_closed_handlers.len()
         );
 
         let mut commands = HashMap::new();
@@ -729,8 +1129,16 @@ impl CallbackRegistryBuilder {
                     self.buffer_open_handlers.clone(),
                 ),
                 (
+                    RuntimeEventName::BufferChanged,
+                    self.buffer_changed_handlers.clone(),
+                ),
+                (
                     RuntimeEventName::BufferWritePost,
                     self.buffer_write_post_handlers.clone(),
+                ),
+                (
+                    RuntimeEventName::BufferClosed,
+                    self.buffer_closed_handlers.clone(),
                 ),
             ]),
         }
@@ -788,6 +1196,69 @@ async fn op_runtime_execute_host_command(
 
 #[op2(async(deferred), fast)]
 #[serde]
+async fn op_runtime_lsp_request(
+    state: Rc<RefCell<OpState>>,
+    #[string] request_json: String,
+) -> Result<LspRuntimeBridgeResponse, JsErrorBox> {
+    let request = serde_json::from_str::<LspRuntimeBridgeRequest>(&request_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid LSP bridge request: {error}")))?;
+    if let Err(error) = request.validate() {
+        log::debug!(
+            "[saya_live_runtime][lsp] invalid typed LSP request rejected: error={:?}",
+            error
+        );
+        return Err(JsErrorBox::generic(format!(
+            "invalid LSP bridge request: {error:?}"
+        )));
+    }
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!(
+        "[saya_live_runtime][lsp] runtime op typed LSP request: source={:?}, method={}, client={}, document={}",
+        request.source,
+        request.method,
+        request.client_name,
+        request
+            .text_document
+            .as_ref()
+            .map(|document| document.uri.as_str())
+            .unwrap_or("<none>")
+    );
+    match bridge.execute_lsp_request(request).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            log::debug!(
+                "[saya_live_runtime][lsp] typed LSP request failed: error={:?}",
+                error
+            );
+            Err(runtime_command_error_to_js_error(error))
+        }
+    }
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_workspace_find_root(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+    #[string] markers_json: String,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let markers = serde_json::from_str::<Vec<String>>(&markers_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid workspace root markers: {error}")))?;
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!(
+        "[saya_live_runtime][workspace] runtime op findRoot: path={}, markers={:?}",
+        path,
+        markers
+    );
+    Ok(bridge
+        .find_workspace_root(path, markers)
+        .await
+        .map(serde_json::Value::String)
+        .unwrap_or(serde_json::Value::Null))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
 async fn op_runtime_current_buffer(
     state: Rc<RefCell<OpState>>,
 ) -> Result<ReadonlyBufferSnapshot, JsErrorBox> {
@@ -804,6 +1275,79 @@ async fn op_runtime_current_window(
     let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
     log::debug!("[saya_live_runtime] runtime op current_window");
     Ok(bridge.current_window().await)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_window_open_float(
+    state: Rc<RefCell<OpState>>,
+    #[string] request_json: String,
+) -> Result<RuntimeFloatSnapshot, JsErrorBox> {
+    let request =
+        serde_json::from_str::<RuntimeFloatOpenRequest>(&request_json).map_err(|error| {
+            JsErrorBox::generic(format!("invalid window.openFloat options: {error}"))
+        })?;
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!(
+        "[saya_live_runtime][window] runtime op openFloat: content={:?}, size=({:?},{:?}), group={:?}",
+        request.content,
+        request.width,
+        request.height,
+        request.group
+    );
+    bridge
+        .open_float(request)
+        .await
+        .map_err(runtime_command_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_window_close_float(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| JsErrorBox::generic(format!("invalid window.close id: {error}")))?;
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][window] runtime op close: id={}", id);
+    let closed = bridge
+        .close_float(id)
+        .await
+        .map_err(runtime_command_error_to_js_error)?;
+    Ok(serde_json::Value::Bool(closed))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_window_focus_float(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| JsErrorBox::generic(format!("invalid window.focus id: {error}")))?;
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][window] runtime op focus: id={}", id);
+    let focused = bridge
+        .focus_float(id)
+        .await
+        .map_err(runtime_command_error_to_js_error)?;
+    Ok(serde_json::Value::Bool(focused))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_window_floats(
+    state: Rc<RefCell<OpState>>,
+) -> Result<Vec<RuntimeFloatSnapshot>, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][window] runtime op floats");
+    bridge
+        .list_float_snapshots()
+        .await
+        .map_err(runtime_command_error_to_js_error)
 }
 
 #[op2(async(deferred), fast)]
@@ -1069,8 +1613,14 @@ deno_core::extension!(
     live_saya_extension,
     ops = [
         op_runtime_execute_host_command,
+        op_runtime_lsp_request,
+        op_runtime_workspace_find_root,
         op_runtime_current_buffer,
         op_runtime_current_window,
+        op_runtime_window_open_float,
+        op_runtime_window_close_float,
+        op_runtime_window_focus_float,
+        op_runtime_window_floats,
         op_runtime_current_editor,
         op_runtime_filer_list,
         op_runtime_filer_current_entry,
@@ -1524,7 +2074,9 @@ fn runtime_callback_error_from_script_message(message: &str) -> RuntimeCallbackE
 fn runtime_event_name_from_seed(name: &str) -> Result<RuntimeEventName, RuntimeInitError> {
     match name {
         "bufferOpen" => Ok(RuntimeEventName::BufferOpen),
+        "bufferChanged" => Ok(RuntimeEventName::BufferChanged),
         "bufferWritePost" => Ok(RuntimeEventName::BufferWritePost),
+        "bufferClosed" => Ok(RuntimeEventName::BufferClosed),
         other => Err(RuntimeInitError::UnsupportedEvent {
             name: other.to_string(),
         }),
@@ -1534,7 +2086,9 @@ fn runtime_event_name_from_seed(name: &str) -> Result<RuntimeEventName, RuntimeI
 fn runtime_event_name_to_script(event: RuntimeEventName) -> &'static str {
     match event {
         RuntimeEventName::BufferOpen => "bufferOpen",
+        RuntimeEventName::BufferChanged => "bufferChanged",
         RuntimeEventName::BufferWritePost => "bufferWritePost",
+        RuntimeEventName::BufferClosed => "bufferClosed",
     }
 }
 
@@ -1964,6 +2518,25 @@ impl RuntimeWindowApi {
     pub async fn current(&self) -> ReadonlyWindowSnapshot {
         self.bridge.current_window().await
     }
+
+    pub async fn open_float(
+        &self,
+        request: RuntimeFloatOpenRequest,
+    ) -> Result<RuntimeFloatSnapshot, RuntimeCommandError> {
+        self.bridge.open_float(request).await
+    }
+
+    pub async fn close(&self, id: u64) -> Result<bool, RuntimeCommandError> {
+        self.bridge.close_float(id).await
+    }
+
+    pub async fn focus(&self, id: u64) -> Result<bool, RuntimeCommandError> {
+        self.bridge.focus_float(id).await
+    }
+
+    pub async fn floats(&self) -> Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError> {
+        self.bridge.list_float_snapshots().await
+    }
 }
 
 pub struct RuntimeEditorApi {
@@ -2384,7 +2957,9 @@ mod tests {
                     path: Some(PathBuf::from("notes.md")),
                     line_count: 3,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 }
             })
         }
@@ -2511,7 +3086,9 @@ mod tests {
                 path: Some(PathBuf::from("article.md")),
                 line_count: 8,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         });
 
@@ -2580,7 +3157,9 @@ mod tests {
                     path: Some(PathBuf::from("typed.md")),
                     line_count: 5,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch should succeed");
@@ -2641,7 +3220,9 @@ mod tests {
                     path: None,
                     line_count: 1,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch should queue");
@@ -2689,7 +3270,9 @@ mod tests {
                     path: Some(PathBuf::from("typed-payload.md")),
                     line_count: 12,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -2724,7 +3307,9 @@ mod tests {
                     path: Some(PathBuf::from("write-post.md")),
                     line_count: 14,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -2762,7 +3347,9 @@ mod tests {
                     path: Some(PathBuf::from("unknown-command.md")),
                     line_count: 2,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -2800,7 +3387,9 @@ mod tests {
                     path: Some(PathBuf::from("script-failure.md")),
                     line_count: 6,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch queued")
@@ -2840,7 +3429,9 @@ mod tests {
                     path: Some(PathBuf::from("seed.md")),
                     line_count: 4,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch should be queued");
@@ -2882,7 +3473,9 @@ mod tests {
                     path: Some(PathBuf::from("ordered.md")),
                     line_count: 9,
                     cursor_row: 0,
+                    cursor_col: 0,
                     current_line: String::new(),
+                    text: String::new(),
                 },
             }))
             .expect("dispatch queued")

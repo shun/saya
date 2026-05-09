@@ -565,6 +565,7 @@ mod tests {
                 command_cursor_col: None,
                 is_active: true,
             }],
+            floats: vec![],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
                 MessageLineSource::CoreNotification,

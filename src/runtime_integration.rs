@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::callback_registry_seed::CallbackRegistrySeed;
+use crate::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
 use crate::presentation_effect::RuntimePresentationIntent;
 use crate::runtime_message::runtime_callback_failure_message;
 use crate::runtime_refresh::runtime_dispatch_requests_redraw;
@@ -12,7 +13,8 @@ use crate::saya_live_runtime::{
     RuntimeCommandError, RuntimeDispatchError, RuntimeDispatchReport, RuntimeEventPayload,
     RuntimeFilerCurrentEntry, RuntimeFilerEntry, RuntimeFilerError, RuntimeFilerErrorKind,
     RuntimeFilerListOptions, RuntimeFilerOperation, RuntimeFilerOperationKind,
-    RuntimeFilerOperationReport, RuntimeInitError, RuntimeMode, SayaLiveRuntime,
+    RuntimeFilerOperationReport, RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeInitError,
+    RuntimeMode, SayaLiveRuntime,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -40,6 +42,42 @@ pub enum RuntimeShutdownIntent {
 pub trait RuntimeHostSession {
     fn current_buffer_snapshot(&mut self) -> ReadonlyBufferSnapshot;
     fn current_window_snapshot(&mut self) -> ReadonlyWindowSnapshot;
+    fn open_float(
+        &mut self,
+        request: RuntimeFloatOpenRequest,
+    ) -> Result<RuntimeFloatSnapshot, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][window] openFloat unsupported by host session: content={:?}",
+            request.content
+        );
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "window.openFloat".to_string(),
+        })
+    }
+    fn close_float(&mut self, id: u64) -> Result<bool, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][window] close unsupported by host session: id={}",
+            id
+        );
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "window.close".to_string(),
+        })
+    }
+    fn focus_float(&mut self, id: u64) -> Result<bool, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][window] focus unsupported by host session: id={}",
+            id
+        );
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "window.focus".to_string(),
+        })
+    }
+    fn list_float_snapshots(&mut self) -> Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError> {
+        log::debug!("[runtime_integration][window] float snapshots unsupported by host session");
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "window.floats".to_string(),
+        })
+    }
     fn current_editor_snapshot(&mut self) -> ReadonlyEditorSnapshot;
     fn current_filer_entry(
         &mut self,
@@ -70,6 +108,15 @@ pub trait RuntimeHostSession {
         &mut self,
         name: &str,
     ) -> Result<RuntimeCommandEffect, RuntimeCommandError>;
+    fn execute_lsp_request(
+        &mut self,
+        request: LspRuntimeBridgeRequest,
+    ) -> Result<LspRuntimeBridgeResponse, RuntimeCommandError> {
+        Err(RuntimeCommandError::CommandFailed {
+            name: "lsp.request".to_string(),
+            message: format!("LSP bridge is not configured for method {}", request.method),
+        })
+    }
 }
 
 pub struct RuntimeEventMapper;
@@ -83,6 +130,14 @@ impl RuntimeEventMapper {
         RuntimeEventPayload::BufferWritePost(crate::saya_live_runtime::BufferEventPayload {
             buffer,
         })
+    }
+
+    pub fn buffer_changed(buffer: ReadonlyBufferSnapshot) -> RuntimeEventPayload {
+        RuntimeEventPayload::BufferChanged(crate::saya_live_runtime::BufferEventPayload { buffer })
+    }
+
+    pub fn buffer_closed(buffer: ReadonlyBufferSnapshot) -> RuntimeEventPayload {
+        RuntimeEventPayload::BufferClosed(crate::saya_live_runtime::BufferEventPayload { buffer })
     }
 }
 
@@ -125,7 +180,9 @@ impl Default for CachedRuntimeSnapshots {
                 path: None,
                 line_count: 1,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
             window: ReadonlyWindowSnapshot { id: 1 },
             editor: ReadonlyEditorSnapshot {
@@ -150,6 +207,26 @@ struct RuntimeFilerListRequest {
     path: std::path::PathBuf,
     options: RuntimeFilerListOptions,
     reply: oneshot::Sender<Result<Vec<RuntimeFilerEntry>, RuntimeFilerError>>,
+}
+
+struct RuntimeFloatOpenChannelRequest {
+    request: RuntimeFloatOpenRequest,
+    reply: oneshot::Sender<Result<RuntimeFloatSnapshot, RuntimeCommandError>>,
+}
+
+struct RuntimeFloatIdChannelRequest {
+    id: u64,
+    operation: &'static str,
+    reply: oneshot::Sender<Result<bool, RuntimeCommandError>>,
+}
+
+struct RuntimeFloatSnapshotsChannelRequest {
+    reply: oneshot::Sender<Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError>>,
+}
+
+struct RuntimeLspRequest {
+    request: LspRuntimeBridgeRequest,
+    reply: oneshot::Sender<Result<LspRuntimeBridgeResponse, RuntimeCommandError>>,
 }
 
 fn runtime_filer_operation_parts(
@@ -213,8 +290,13 @@ fn runtime_filer_operation_parts(
 struct ChannelBackedHostBridge {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
     command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
+    lsp_request_sender: mpsc::UnboundedSender<RuntimeLspRequest>,
     filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
     filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
+    float_open_sender: mpsc::UnboundedSender<RuntimeFloatOpenChannelRequest>,
+    float_focus_sender: mpsc::UnboundedSender<RuntimeFloatIdChannelRequest>,
+    float_close_sender: mpsc::UnboundedSender<RuntimeFloatIdChannelRequest>,
+    float_snapshots_sender: mpsc::UnboundedSender<RuntimeFloatSnapshotsChannelRequest>,
 }
 
 impl HostCapabilityBridge for ChannelBackedHostBridge {
@@ -244,6 +326,29 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
         })
     }
 
+    fn execute_lsp_request(
+        &self,
+        request: LspRuntimeBridgeRequest,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<LspRuntimeBridgeResponse, RuntimeCommandError>>
+    {
+        let lsp_request_sender = self.lsp_request_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            lsp_request_sender
+                .send(RuntimeLspRequest { request, reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "lsp.request".to_string(),
+                    message: "host LSP request channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "lsp.request".to_string(),
+                    message: "host LSP request reply channel closed".to_string(),
+                })?
+        })
+    }
+
     fn current_buffer(&self) -> crate::saya_live_runtime::BoxFuture<ReadonlyBufferSnapshot> {
         let snapshots = self.snapshots.clone();
         Box::pin(async move {
@@ -263,6 +368,103 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
                 .expect("runtime snapshots mutex should not poison")
                 .window
                 .clone()
+        })
+    }
+
+    fn open_float(
+        &self,
+        request: RuntimeFloatOpenRequest,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<RuntimeFloatSnapshot, RuntimeCommandError>>
+    {
+        let float_open_sender = self.float_open_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            float_open_sender
+                .send(RuntimeFloatOpenChannelRequest { request, reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.openFloat".to_string(),
+                    message: "host float open channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.openFloat".to_string(),
+                    message: "host float open reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn close_float(
+        &self,
+        id: u64,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<bool, RuntimeCommandError>> {
+        let float_close_sender = self.float_close_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            float_close_sender
+                .send(RuntimeFloatIdChannelRequest {
+                    id,
+                    operation: "window.close",
+                    reply,
+                })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.close".to_string(),
+                    message: "host float close channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.close".to_string(),
+                    message: "host float close reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn focus_float(
+        &self,
+        id: u64,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<bool, RuntimeCommandError>> {
+        let float_focus_sender = self.float_focus_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            float_focus_sender
+                .send(RuntimeFloatIdChannelRequest {
+                    id,
+                    operation: "window.focus",
+                    reply,
+                })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.focus".to_string(),
+                    message: "host float focus channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.focus".to_string(),
+                    message: "host float focus reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn list_float_snapshots(
+        &self,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError>>
+    {
+        let float_snapshots_sender = self.float_snapshots_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            float_snapshots_sender
+                .send(RuntimeFloatSnapshotsChannelRequest { reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.floats".to_string(),
+                    message: "host float snapshots channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "window.floats".to_string(),
+                    message: "host float snapshots reply channel closed".to_string(),
+                })?
         })
     }
 
@@ -354,10 +556,20 @@ pub struct RuntimeSessionOwner {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
     _command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
     command_receiver: mpsc::UnboundedReceiver<RuntimeHostCommandRequest>,
+    _lsp_request_sender: mpsc::UnboundedSender<RuntimeLspRequest>,
+    lsp_request_receiver: mpsc::UnboundedReceiver<RuntimeLspRequest>,
     _filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
     filer_operation_receiver: mpsc::UnboundedReceiver<RuntimeFilerOperationRequest>,
     _filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
     filer_list_receiver: mpsc::UnboundedReceiver<RuntimeFilerListRequest>,
+    _float_open_sender: mpsc::UnboundedSender<RuntimeFloatOpenChannelRequest>,
+    float_open_receiver: mpsc::UnboundedReceiver<RuntimeFloatOpenChannelRequest>,
+    _float_focus_sender: mpsc::UnboundedSender<RuntimeFloatIdChannelRequest>,
+    float_focus_receiver: mpsc::UnboundedReceiver<RuntimeFloatIdChannelRequest>,
+    _float_close_sender: mpsc::UnboundedSender<RuntimeFloatIdChannelRequest>,
+    float_close_receiver: mpsc::UnboundedReceiver<RuntimeFloatIdChannelRequest>,
+    _float_snapshots_sender: mpsc::UnboundedSender<RuntimeFloatSnapshotsChannelRequest>,
+    float_snapshots_receiver: mpsc::UnboundedReceiver<RuntimeFloatSnapshotsChannelRequest>,
 }
 
 impl RuntimeSessionOwner {
@@ -369,13 +581,23 @@ impl RuntimeSessionOwner {
         );
         let snapshots = Arc::new(Mutex::new(CachedRuntimeSnapshots::default()));
         let (command_sender, command_receiver) = mpsc::unbounded_channel();
+        let (lsp_request_sender, lsp_request_receiver) = mpsc::unbounded_channel();
         let (filer_operation_sender, filer_operation_receiver) = mpsc::unbounded_channel();
         let (filer_list_sender, filer_list_receiver) = mpsc::unbounded_channel();
+        let (float_open_sender, float_open_receiver) = mpsc::unbounded_channel();
+        let (float_focus_sender, float_focus_receiver) = mpsc::unbounded_channel();
+        let (float_close_sender, float_close_receiver) = mpsc::unbounded_channel();
+        let (float_snapshots_sender, float_snapshots_receiver) = mpsc::unbounded_channel();
         let bridge = Arc::new(ChannelBackedHostBridge {
             snapshots: snapshots.clone(),
             command_sender: command_sender.clone(),
+            lsp_request_sender: lsp_request_sender.clone(),
             filer_operation_sender: filer_operation_sender.clone(),
             filer_list_sender: filer_list_sender.clone(),
+            float_open_sender: float_open_sender.clone(),
+            float_focus_sender: float_focus_sender.clone(),
+            float_close_sender: float_close_sender.clone(),
+            float_snapshots_sender: float_snapshots_sender.clone(),
         });
         let runtime = SayaLiveRuntime::spawn_from_seed(bridge, seed)?;
         Ok(Self {
@@ -383,10 +605,20 @@ impl RuntimeSessionOwner {
             snapshots,
             _command_sender: command_sender,
             command_receiver,
+            _lsp_request_sender: lsp_request_sender,
+            lsp_request_receiver,
             _filer_operation_sender: filer_operation_sender,
             filer_operation_receiver,
             _filer_list_sender: filer_list_sender,
             filer_list_receiver,
+            _float_open_sender: float_open_sender,
+            float_open_receiver,
+            _float_focus_sender: float_focus_sender,
+            float_focus_receiver,
+            _float_close_sender: float_close_sender,
+            float_close_receiver,
+            _float_snapshots_sender: float_snapshots_sender,
+            float_snapshots_receiver,
         })
     }
 
@@ -536,6 +768,21 @@ impl RuntimeSessionOwner {
                         }
                     }
                 }
+                request = self.lsp_request_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] LSP request channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][lsp] servicing runtime LSP request during event dispatch: method={}",
+                        request.request.method
+                    );
+                    let result = host_session.execute_lsp_request(request.request);
+                    if result.is_ok() {
+                        self.refresh_cached_snapshots(host_session);
+                    }
+                    let _ = request.reply.send(result);
+                }
                 request = self.filer_operation_receiver.recv() => {
                     let Some(request) = request else {
                         log::debug!("[runtime_integration] filer operation channel closed while dispatch was in flight");
@@ -576,6 +823,78 @@ impl RuntimeSessionOwner {
                             let _ = request.reply.send(Err(error));
                         }
                     }
+                }
+                request = self.float_open_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float open channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime openFloat request during event dispatch: content={:?}",
+                        request.request.content
+                    );
+                    match host_session.open_float(request.request) {
+                        Ok(snapshot) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(snapshot));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.float_focus_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float focus channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime {} request during event dispatch: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    match host_session.focus_float(request.id) {
+                        Ok(focused) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= focused;
+                            let _ = request.reply.send(Ok(focused));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.float_close_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float close channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime {} request during event dispatch: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    match host_session.close_float(request.id) {
+                        Ok(closed) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= closed;
+                            let _ = request.reply.send(Ok(closed));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.float_snapshots_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float snapshots channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime floats snapshot request during event dispatch"
+                    );
+                    let _ = request.reply.send(host_session.list_float_snapshots());
                 }
             }
         }
@@ -678,6 +997,21 @@ impl RuntimeSessionOwner {
                         }
                     }
                 }
+                request = self.lsp_request_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] LSP request channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][lsp] servicing runtime LSP request during command execution: method={}",
+                        request.request.method
+                    );
+                    let result = host_session.execute_lsp_request(request.request);
+                    if result.is_ok() {
+                        self.refresh_cached_snapshots(host_session);
+                    }
+                    let _ = request.reply.send(result);
+                }
                 request = self.filer_operation_receiver.recv() => {
                     let Some(request) = request else {
                         log::debug!("[runtime_integration] filer operation channel closed while runtime command was in flight");
@@ -718,6 +1052,78 @@ impl RuntimeSessionOwner {
                             let _ = request.reply.send(Err(error));
                         }
                     }
+                }
+                request = self.float_open_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float open channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime openFloat request during command execution: content={:?}",
+                        request.request.content
+                    );
+                    match host_session.open_float(request.request) {
+                        Ok(snapshot) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(snapshot));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.float_focus_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float focus channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime {} request during command execution: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    match host_session.focus_float(request.id) {
+                        Ok(focused) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= focused;
+                            let _ = request.reply.send(Ok(focused));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.float_close_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float close channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime {} request during command execution: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    match host_session.close_float(request.id) {
+                        Ok(closed) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= closed;
+                            let _ = request.reply.send(Ok(closed));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.float_snapshots_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] float snapshots channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][window] servicing runtime floats snapshot request during command execution"
+                    );
+                    let _ = request.reply.send(host_session.list_float_snapshots());
                 }
             }
         }

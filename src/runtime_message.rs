@@ -57,7 +57,9 @@ fn runtime_command_error_message(error: &RuntimeCommandError) -> String {
 fn runtime_event_name_label(event: &RuntimeEventName) -> &'static str {
     match event {
         RuntimeEventName::BufferOpen => "bufferOpen",
+        RuntimeEventName::BufferChanged => "bufferChanged",
         RuntimeEventName::BufferWritePost => "bufferWritePost",
+        RuntimeEventName::BufferClosed => "bufferClosed",
     }
 }
 

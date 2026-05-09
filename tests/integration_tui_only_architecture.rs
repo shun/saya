@@ -407,6 +407,7 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             command_cursor_col: None,
             is_active: true,
         }],
+        floats: vec![],
         active_window_id: 7,
         message_line: resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
             MessageLineSource::SystemWarning,
@@ -539,6 +540,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             command_cursor_col: None,
             is_active: true,
         }],
+        floats: vec![],
         active_window_id: 1,
         message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
         message_area_height: 5,

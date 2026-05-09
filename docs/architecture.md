@@ -79,6 +79,9 @@ This layer includes these key modules.
 - `bootstrap.rs`
 - `event_loop.rs`
 - `editor_session.rs`
+- `lsp_session.rs`
+- `lsp_transport.rs`
+- `lsif_index.rs`
 - `markdown_structure.rs`
 - `screen_model.rs`
 - `tui_renderer.rs`
@@ -96,6 +99,14 @@ The TypeScript layer exists in two phases.
 This layer must stay isolated from the TUI main loop. The repository already
 tests worker-boundary execution and phase separation, even though full live
 integration is still incomplete.
+
+The LSP preview follows this boundary. TypeScript startup code declares server
+configuration through `plugins/saya-lsp-client.ts`, and runtime callbacks send
+typed requests through `saya.lsp.request`. The Rust application layer owns the
+host-side process boundary in `lsp_session.rs` and `lsp_transport.rs`, including
+language server process spawning, `Content-Length` framing, response routing,
+timeouts, shutdown, diagnostic redaction, and LSIF index lookup. TypeScript
+plugins don't receive raw process handles or broad filesystem access.
 
 ### Layer 4: User configuration and future extensions
 
@@ -151,6 +162,12 @@ design pages for flow-level details. Use
 structure that supports this architecture.
 Use [Theme API design](design/theme-api.md) for the proposed TypeScript-first
 theme model for Markdown presentation, palettes, and plugin-provided themes.
+Use [Floating windows design](design/floating-windows.md) for the proposed
+application-layer model for hover, completion, terminal, and buffer-backed
+floating surfaces.
+Use [LSP preview](api/lsp-preview.md) for the current LSP setup surface,
+runtime boundary, supported feature matrix, LSIF limitations, and headless
+verification commands.
 
 ## Next steps
 
@@ -159,4 +176,6 @@ these pages.
 
 1. Read [Boot flow design](design/boot-flow.md).
 2. Read [Editing flow design](design/editing-flow.md).
-3. Read [TypeScript runtime design](design/typescript-runtime.md).
+3. Read [Floating windows design](design/floating-windows.md).
+4. Read [TypeScript runtime design](design/typescript-runtime.md).
+5. Read [LSP preview](api/lsp-preview.md).

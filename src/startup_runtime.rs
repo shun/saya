@@ -382,6 +382,10 @@ declare global {
         id: number;
         path: string | null;
         lineCount: number;
+        cursorRow: number;
+        cursorCol: number;
+        currentLine: string;
+        text: string;
     }
 
     interface SayaBufferEventPayload {
@@ -436,7 +440,7 @@ declare global {
 
     interface SayaStartupEventsSurface {
         on(
-            name: "bufferOpen" | "bufferWritePost",
+            name: "bufferOpen" | "bufferChanged" | "bufferWritePost" | "bufferClosed",
             callback: (payload: SayaBufferEventPayload) => unknown,
         ): void;
     }

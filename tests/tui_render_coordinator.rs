@@ -63,6 +63,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             command_cursor_col: None,
             is_active: true,
         }],
+        floats: vec![],
         active_window_id: window_id,
         message_line: resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
             MessageLineSource::CoreNotification,

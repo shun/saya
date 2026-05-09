@@ -21,6 +21,7 @@ use crate::core_notification_prompt::{
     resolve_workspace_message_line,
 };
 use crate::editor_session::EditorSessionState;
+use crate::floating_window::FloatingScreenModel;
 use crate::markdown_structure::{
     MarkdownBlockKind, MarkdownCheckboxState, MarkdownDocumentMap, MarkdownInlineKind,
 };
@@ -95,6 +96,7 @@ pub struct CommandLineModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceScreenModel {
     pub panes: Vec<PaneScreenModel>,
+    pub floats: Vec<FloatingScreenModel>,
     pub active_window_id: i32,
     pub message_line: WorkspaceMessageLineState,
     pub message_area_height: u16,
@@ -834,6 +836,7 @@ pub fn project_workspace(
 
     Ok(WorkspaceScreenModel {
         panes,
+        floats: Vec::new(),
         active_window_id,
         message_line: model_message_line,
         message_area_height: input.session_state.message_area_height(),
@@ -3299,6 +3302,7 @@ mod tests {
         };
         let mut workspace = WorkspaceScreenModel {
             panes: vec![pane],
+            floats: vec![],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
             message_area_height: 5,
@@ -5932,6 +5936,7 @@ mod tests {
         };
         let base = WorkspaceScreenModel {
             panes: vec![pane.clone()],
+            floats: vec![],
             active_window_id: 11,
             message_line: WorkspaceMessageLineState::default(),
             message_area_height: 5,
@@ -5944,6 +5949,7 @@ mod tests {
         };
         let with_prompt_and_messages = WorkspaceScreenModel {
             panes: vec![pane],
+            floats: vec![],
             active_window_id: 11,
             message_line: WorkspaceMessageLineState {
                 visible: Some(MessageLineCandidate::legacy(

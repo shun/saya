@@ -10,6 +10,9 @@ use saya::command_line_history::{
     history_direction_for_key, load_histories_from_default_cache,
     record_history_and_save_to_default_cache, save_histories_to_default_cache,
 };
+use saya::completion_float::{
+    CompletionFloatInputOutcome, CompletionFloatManager, completion_menu_request_from_json,
+};
 use saya::core_host_actions::HostActionRuntime;
 use saya::core_notification_prompt::{
     NotificationPromptProjectionState, PagerPromptView, ProjectionFrame, PromptInputAction,
@@ -31,12 +34,24 @@ use saya::editor_session::{
 };
 use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
 use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
+use saya::floating_window::{
+    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingFit, FloatingInputOutcome,
+    FloatingLifecycle, FloatingLifecycleEvent, FloatingMouseOutcome, FloatingPlacement,
+    FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager, FloatingZIndex,
+};
 use saya::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::input_loop::CrosstermEventSource;
 use saya::input_router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
 use saya::job_control::{
     start_job_control_signal_watcher, suspend_current_process_for_job_control,
 };
+use saya::lsp_float::{
+    LspDiagnosticFloatRequest, LspDiagnosticStore, LspHoverFloatRequest, LspLocationListRequest,
+    LspSymbolOutlineRequest, file_uri_to_path, open_lsp_diagnostic_float, open_lsp_hover_float,
+    open_lsp_location_list_float, open_lsp_symbol_outline_float,
+};
+use saya::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
+use saya::lsp_session::LspSessionManager;
 use saya::markdown_structure::{MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey};
 use saya::optional_graphics::{OptionalGraphicsAdapter, OverlayTerminalWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
@@ -49,7 +64,9 @@ use saya::saya_live_runtime::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
     RuntimeFilerCurrentEntry, RuntimeFilerEntry, RuntimeFilerEntryKind, RuntimeFilerError,
     RuntimeFilerErrorKind, RuntimeFilerListOptions, RuntimeFilerOperation,
-    RuntimeFilerOperationKind, RuntimeFilerOperationReport, RuntimeFilerSortKey, RuntimeMode,
+    RuntimeFilerOperationKind, RuntimeFilerOperationReport, RuntimeFilerSortKey,
+    RuntimeFloatContentRequest, RuntimeFloatOpenRequest, RuntimeFloatRelativeToRequest,
+    RuntimeFloatSnapshot, RuntimeFloatZIndexRequest, RuntimeMode,
 };
 use saya::screen_model::{
     CommandLineModel, ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput,
@@ -61,6 +78,9 @@ use saya::structural_refresh::{
     RedrawPlan, RedrawPlanSource, StructuralRefresh, StructuralRefreshOutcome,
 };
 use saya::terminal_capability::TerminalCapabilityProbe;
+use saya::terminal_float::{
+    TerminalFloatCloseBehavior, TerminalFloatManager, TerminalFloatSpawnRequest,
+};
 use saya::terminal_lifecycle::TerminalBackend;
 use saya::terminal_lifecycle::TerminalSize;
 use saya::tui_render_coordinator::{RenderFrameError, TuiRenderCoordinator};
@@ -172,6 +192,11 @@ async fn main() {
     let mut command_line_histories = load_histories_from_default_cache();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
+    let mut floating_window_manager = FloatingWindowManager::default();
+    let mut completion_float_manager = CompletionFloatManager::default();
+    let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+    let lsp_session_manager = LspSessionManager::default();
+    let mut terminal_float_manager = TerminalFloatManager::default();
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
     let mut terminal_display_redraw_plan: Option<RedrawPlan> = None;
     let mut workspace_projection_dirty = false;
@@ -184,6 +209,7 @@ async fn main() {
         &mut transient_msg,
         &mut startup_runtime_redraw,
         &mut runtime_presentation_intents,
+        Some(&lsp_session_manager),
     )
     .await;
 
@@ -237,6 +263,8 @@ async fn main() {
         transient_msg.as_deref(),
         terminal_width,
         terminal_height,
+        Some(&mut floating_window_manager),
+        Some(&mut terminal_float_manager),
     );
     let initial_render_failure = initial_render.as_ref().err().map(ToString::to_string);
     match render_coordinator.render_workspace_result_with_structural_refresh(
@@ -316,6 +344,7 @@ async fn main() {
                                 &mut need_redraw,
                                 runtime_session.as_mut(),
                                 &mut runtime_presentation_intents,
+                                Some(&lsp_session_manager),
                             )
                             .await
                         {
@@ -351,6 +380,7 @@ async fn main() {
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
+                                        Some(&lsp_session_manager),
                                     )
                                     .await
                                     {
@@ -552,12 +582,158 @@ async fn main() {
                                 runtime_session.as_mut(),
                                 &mut need_redraw,
                                 &mut runtime_presentation_intents,
+                                Some(&lsp_session_manager),
                             )
                             .await
                             {
                                 break 'main reason;
                             }
-                        } else if !handled
+                        }
+
+                        if !handled {
+                            if let Some(effect) = handle_terminal_float_key(
+                                &floating_window_manager,
+                                &mut terminal_float_manager,
+                                &key,
+                            ) {
+                                match effect {
+                                    FloatingWindowKeyHandling::Consumed => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                    }
+                                    FloatingWindowKeyHandling::Closed { id } => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                        log::debug!(
+                                            "[main][terminal_float] terminal float closed from focused input: id={}",
+                                            id.0
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !handled {
+                            if let Some(effect) = handle_core_window_float_key(
+                                &mut floating_window_manager,
+                                &mut outcome.core_bridge,
+                                &key,
+                            ) {
+                                match effect {
+                                    FloatingWindowKeyHandling::Consumed => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                        consume_core_outcomes_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
+                                            &mut need_redraw,
+                                        );
+
+                                        if let Some(reason) =
+                                            process_pending_host_actions_with_runtime(
+                                                &mut outcome,
+                                                &mut outcome_accumulator,
+                                                &mut session_state,
+                                                &mut transient_msg,
+                                                &mut system_warning,
+                                                &mut host_action_runtime,
+                                                runtime_session.as_mut(),
+                                                &mut need_redraw,
+                                                &mut runtime_presentation_intents,
+                                                Some(&lsp_session_manager),
+                                            )
+                                            .await
+                                        {
+                                            break 'main reason;
+                                        }
+                                        session_state.update_dirty(outcome.core_bridge.dirty());
+                                    }
+                                    FloatingWindowKeyHandling::Closed { id } => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                        log::debug!(
+                                            "[main] core-window float closed from focused input: id={}",
+                                            id.0
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !handled {
+                            let active_window_id = input_snapshot
+                                .active_window_id()
+                                .or_else(|| {
+                                    last_workspace_model
+                                        .as_ref()
+                                        .map(|workspace| workspace.active_window_id)
+                                })
+                                .or_else(|| outcome.core_bridge.snapshot().active_window_id())
+                                .unwrap_or(0);
+                            if let Some(effect) = handle_completion_float_key(
+                                &mut completion_float_manager,
+                                &mut floating_window_manager,
+                                &key,
+                                active_window_id,
+                            ) {
+                                match effect {
+                                    FloatingWindowKeyHandling::Consumed => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                    }
+                                    FloatingWindowKeyHandling::Closed { id } => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                        log::debug!(
+                                            "[main] completion float closed from focused input: id={}",
+                                            id.0
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !handled {
+                            let active_window_id = input_snapshot
+                                .active_window_id()
+                                .or_else(|| {
+                                    last_workspace_model
+                                        .as_ref()
+                                        .map(|workspace| workspace.active_window_id)
+                                })
+                                .or_else(|| outcome.core_bridge.snapshot().active_window_id())
+                                .unwrap_or(0);
+                            if let Some(effect) = handle_floating_window_key(
+                                &mut floating_window_manager,
+                                &key,
+                                active_window_id,
+                            ) {
+                                match effect {
+                                    FloatingWindowKeyHandling::Consumed => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                    }
+                                    FloatingWindowKeyHandling::Closed { id } => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                        log::debug!(
+                                            "[main] floating window closed from focused input: id={}",
+                                            id.0
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !handled
                             && session_state.message_pager_active()
                             && session_state.handle_message_pager_key(&key)
                         {
@@ -611,6 +787,7 @@ async fn main() {
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
+                                        Some(&lsp_session_manager),
                                     )
                                     .await
                                     {
@@ -629,9 +806,14 @@ async fn main() {
                                         &command_name,
                                         &mut outcome,
                                         &mut session_state,
+                                        &mut floating_window_manager,
+                                        &mut completion_float_manager,
+                                        &mut lsp_diagnostic_store,
+                                        &mut terminal_float_manager,
                                         &mut transient_msg,
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
+                                        Some(&lsp_session_manager),
                                     )
                                     .await
                                     {
@@ -667,6 +849,13 @@ async fn main() {
                                     let need_redraw_before_dispatch = need_redraw;
                                     let dispatch_result = outcome.core_bridge.dispatch_key(&k);
                                     let after_snapshot = outcome.core_bridge.light_snapshot();
+                                    if apply_floating_lifecycle_after_core_edit(
+                                        &mut floating_window_manager,
+                                        &before_snapshot,
+                                        &after_snapshot,
+                                    ) {
+                                        workspace_projection_dirty = true;
+                                    }
                                     trace_redraw_diagnostic(format_args!(
                                         "edit key dispatched: key={:?}, result={:?}, revision {}->{}, cursor ({},{}) -> ({},{}), mode {:?}->{:?}, need_redraw_before={}",
                                         k,
@@ -697,6 +886,7 @@ async fn main() {
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
+                                        Some(&lsp_session_manager),
                                     )
                                     .await
                                     {
@@ -728,6 +918,7 @@ async fn main() {
                                                 &mut transient_msg,
                                                 &mut need_redraw,
                                                 &mut runtime_presentation_intents,
+                                                Some(&lsp_session_manager),
                                             )
                                             .await
                                         {
@@ -791,7 +982,18 @@ async fn main() {
                             column,
                             row
                         );
-                        if let Some(sequence) =
+                        let (terminal_width, terminal_height) = current_terminal_size();
+                        let mouse_focus = focus_floating_window_from_mouse_click(
+                            &mut floating_window_manager,
+                            last_workspace_model.as_ref(),
+                            column,
+                            row,
+                            terminal_width,
+                            terminal_height,
+                        );
+                        if matches!(mouse_focus, FloatingMouseOutcome::Focused { .. }) {
+                            workspace_projection_dirty = true;
+                        } else if let Some(sequence) =
                             mouse_click_to_sgr_sequence(last_workspace_model.as_ref(), column, row)
                         {
                             log::debug!(
@@ -817,6 +1019,7 @@ async fn main() {
                                 runtime_session.as_mut(),
                                 &mut need_redraw,
                                 &mut runtime_presentation_intents,
+                                Some(&lsp_session_manager),
                             )
                             .await
                             {
@@ -857,6 +1060,7 @@ async fn main() {
                             runtime_session.as_mut(),
                             &mut need_redraw,
                             &mut runtime_presentation_intents,
+                            Some(&lsp_session_manager),
                         )
                         .await
                         {
@@ -955,6 +1159,8 @@ async fn main() {
                     transient_msg.as_deref(),
                     terminal_width,
                     terminal_height,
+                    Some(&mut floating_window_manager),
+                    Some(&mut terminal_float_manager),
                 );
                 viewport_sync_mode = ViewportSyncMode::Core;
                 let redraw_failure = redraw_result.as_ref().err().map(ToString::to_string);
@@ -1038,6 +1244,78 @@ async fn main() {
         shutdown_sequence.steps(),
         shutdown_sequence.is_complete()
     );
+}
+
+fn apply_floating_lifecycle_after_core_edit(
+    floating_window_manager: &mut FloatingWindowManager,
+    before: &CoreLightSnapshot,
+    after: &CoreLightSnapshot,
+) -> bool {
+    let restore_window_id = after
+        .active_window_id()
+        .or_else(|| before.active_window_id());
+    let mut closed = Vec::new();
+    if before.cursor_row != after.cursor_row
+        || before.cursor_col != after.cursor_col
+        || before.active_window_id() != after.active_window_id()
+    {
+        if let Some(window_id) = restore_window_id {
+            closed.extend(
+                floating_window_manager
+                    .apply_lifecycle_event(
+                        FloatingLifecycleEvent::CursorMoved {
+                            window_id,
+                            row: after.cursor_row,
+                            col: after.cursor_col,
+                        },
+                        Some(window_id),
+                    )
+                    .closed,
+            );
+        }
+    }
+    if before.mode != CoreMode::Insert
+        && after.mode == CoreMode::Insert
+        && let Some(window_id) = restore_window_id
+    {
+        closed.extend(
+            floating_window_manager
+                .apply_lifecycle_event(
+                    FloatingLifecycleEvent::InsertStarted { window_id },
+                    Some(window_id),
+                )
+                .closed,
+        );
+    }
+    if before.revision != after.revision {
+        closed.extend(
+            floating_window_manager
+                .apply_lifecycle_event(
+                    FloatingLifecycleEvent::BufferChanged {
+                        buffer_id: after
+                            .buffers
+                            .iter()
+                            .find(|buffer| buffer.is_active)
+                            .map(|buffer| buffer.id)
+                            .unwrap_or(0),
+                        revision: after.revision,
+                    },
+                    restore_window_id,
+                )
+                .closed,
+        );
+    }
+    let did_close = !closed.is_empty();
+    if did_close {
+        log::debug!(
+            "[main][floating_window] lifecycle closed float(s) after core edit: closed={:?}, cursor=({},{}), revision={}",
+            closed.iter().map(|id| id.0).collect::<Vec<_>>(),
+            after.cursor_row,
+            after.cursor_col,
+            after.revision
+        );
+    }
+    did_close
 }
 
 fn viewport_sync_mode_for_input(key: &KeyInput) -> ViewportSyncMode {
@@ -1222,6 +1500,8 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 None,
                 terminal_width,
                 terminal_height,
+                None,
+                None,
             ),
             &capability_profile,
             &runtime_presentation_intents,
@@ -1275,6 +1555,8 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 None,
                 terminal_width,
                 terminal_height,
+                None,
+                None,
             ),
             &capability_profile,
             &runtime_presentation_intents,
@@ -1330,6 +1612,8 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 None,
                 resized_width,
                 resized_height,
+                None,
+                None,
             ),
             &capability_profile,
             &runtime_presentation_intents,
@@ -1395,6 +1679,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         None,
         &mut save_redraw,
         &mut runtime_presentation_intents,
+        None,
     )
     .await;
     if save_shutdown.is_some() {
@@ -1436,6 +1721,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         None,
         &mut quit_redraw,
         &mut runtime_presentation_intents,
+        None,
     )
     .await
     .ok_or_else(|| "PTY quit should produce a shutdown reason".to_string())?;
@@ -1467,6 +1753,7 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
         None,
         &mut force_quit_redraw,
         &mut runtime_presentation_intents,
+        None,
     )
     .await
     .ok_or_else(|| "PTY force quit should produce a shutdown reason".to_string())?;
@@ -1502,6 +1789,7 @@ async fn process_pending_host_actions_with_runtime(
     mut runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsp_session_manager: Option<&LspSessionManager>,
 ) -> Option<ShutdownReason> {
     let mut shutdown_reason = None;
     loop {
@@ -1528,6 +1816,7 @@ async fn process_pending_host_actions_with_runtime(
                         runtime_session.as_deref_mut(),
                         need_redraw,
                         runtime_presentation_intents,
+                        lsp_session_manager,
                     )
                     .await
                     {
@@ -1809,6 +2098,7 @@ async fn handle_write_host_action_with_runtime(
     runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsp_session_manager: Option<&LspSessionManager>,
 ) -> Option<ShutdownReason> {
     let snapshot = outcome.core_bridge.snapshot();
     log::debug!(
@@ -1833,6 +2123,7 @@ async fn handle_write_host_action_with_runtime(
             transient_msg,
             need_redraw,
             runtime_presentation_intents,
+            lsp_session_manager,
         )
         .await;
     }
@@ -1922,6 +2213,7 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
     need_redraw: &mut bool,
     runtime_session: Option<&mut RuntimeSessionOwner>,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsp_session_manager: Option<&LspSessionManager>,
 ) -> Option<Option<ShutdownReason>> {
     let action = directory_operation_confirmation_key_action(key, session_state)?;
     *need_redraw = true;
@@ -1945,6 +2237,7 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
                         transient_msg,
                         need_redraw,
                         runtime_presentation_intents,
+                        lsp_session_manager,
                     )
                     .await,
                 );
@@ -2733,15 +3026,140 @@ enum MainHostCommand {
     SaveThenQuit,
     CancelDirectoryPreview,
     Edit(std::path::PathBuf),
+    BufferWindowFloat(String),
+    TerminalFloat(String),
+    TerminalCloseFloat(String),
+    CompletionMenuFloat(String),
+    LspHoverFloat(String),
+    LspDiagnosticFloat(String),
+    LspLocationListFloat(String),
+    LspSymbolOutlineFloat(String),
+    LspGotoDefinition(String),
+    LspPublishDiagnostics(String),
+    LspNextDiagnostic,
+    LspPreviousDiagnostic,
+    LspStatus(String),
 }
 
 fn parse_main_host_command(command: &str) -> Option<MainHostCommand> {
+    if let Some(command) = parse_buffer_float_host_command(command) {
+        return Some(command);
+    }
+    if let Some(command) = parse_terminal_float_host_command(command) {
+        return Some(command);
+    }
+    if let Some(command) = parse_completion_float_host_command(command) {
+        return Some(command);
+    }
+    if let Some(command) = parse_lsp_float_host_command(command) {
+        return Some(command);
+    }
     let normalized = normalize_main_host_command(command)?;
     match normalized.as_str() {
         "w" | "write" => Some(MainHostCommand::Save),
         "wq" | "x" | "xit" | "exit" => Some(MainHostCommand::SaveThenQuit),
         "dired-cancel" | "diredcancel" => Some(MainHostCommand::CancelDirectoryPreview),
         _ => parse_runtime_edit_command(&normalized).map(MainHostCommand::Edit),
+    }
+}
+
+fn parse_buffer_float_host_command(command: &str) -> Option<MainHostCommand> {
+    let trimmed = command.trim();
+    let trimmed = trimmed.strip_prefix(':').unwrap_or(trimmed).trim();
+    let payload = trimmed
+        .strip_prefix("buffer.floatWindow ")
+        .or_else(|| trimmed.strip_prefix("buffer.windowFloat "))
+        .map(str::trim);
+    payload
+        .filter(|payload| !payload.is_empty())
+        .map(|payload| MainHostCommand::BufferWindowFloat(payload.to_string()))
+}
+
+fn parse_terminal_float_host_command(command: &str) -> Option<MainHostCommand> {
+    let trimmed = command.trim();
+    let trimmed = trimmed.strip_prefix(':').unwrap_or(trimmed).trim();
+    let payload = trimmed
+        .strip_prefix("terminal.float ")
+        .or_else(|| trimmed.strip_prefix("terminal.openFloat "))
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::TerminalFloat(payload.to_string()));
+    }
+    let payload = trimmed
+        .strip_prefix("terminal.closeFloat ")
+        .or_else(|| trimmed.strip_prefix("terminal.detachFloat "))
+        .map(str::trim);
+    payload
+        .filter(|payload| !payload.is_empty())
+        .map(|payload| MainHostCommand::TerminalCloseFloat(payload.to_string()))
+}
+
+fn parse_completion_float_host_command(command: &str) -> Option<MainHostCommand> {
+    let trimmed = command.trim();
+    let trimmed = trimmed.strip_prefix(':').unwrap_or(trimmed).trim();
+    let payload = trimmed
+        .strip_prefix("completion.floatMenu ")
+        .or_else(|| trimmed.strip_prefix("completion.menuFloat "))
+        .map(str::trim);
+    payload
+        .filter(|payload| !payload.is_empty())
+        .map(|payload| MainHostCommand::CompletionMenuFloat(payload.to_string()))
+}
+
+fn parse_lsp_float_host_command(command: &str) -> Option<MainHostCommand> {
+    let trimmed = command.trim();
+    let trimmed = trimmed.strip_prefix(':').unwrap_or(trimmed).trim();
+    let payload = trimmed
+        .strip_prefix("lsp.floatHover ")
+        .or_else(|| trimmed.strip_prefix("lsp.hoverFloat "))
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspHoverFloat(payload.to_string()));
+    }
+    let payload = trimmed
+        .strip_prefix("lsp.floatDiagnostics ")
+        .or_else(|| trimmed.strip_prefix("lsp.diagnosticFloat "))
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspDiagnosticFloat(payload.to_string()));
+    }
+    let payload = trimmed
+        .strip_prefix("lsp.floatLocations ")
+        .or_else(|| trimmed.strip_prefix("lsp.locationsFloat "))
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspLocationListFloat(payload.to_string()));
+    }
+    let payload = trimmed
+        .strip_prefix("lsp.floatSymbols ")
+        .or_else(|| trimmed.strip_prefix("lsp.symbolsFloat "))
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspSymbolOutlineFloat(payload.to_string()));
+    }
+    let payload = trimmed
+        .strip_prefix("lsp.gotoDefinition ")
+        .or_else(|| trimmed.strip_prefix("lsp.definitionGoto "))
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspGotoDefinition(payload.to_string()));
+    }
+    let payload = trimmed
+        .strip_prefix("lsp.publishDiagnostics ")
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspPublishDiagnostics(payload.to_string()));
+    }
+    let payload = trimmed.strip_prefix("lsp.status ").map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspStatus(payload.to_string()));
+    }
+    match trimmed {
+        "lsp.nextDiagnostic" => Some(MainHostCommand::LspNextDiagnostic),
+        "lsp.previousDiagnostic" | "lsp.prevDiagnostic" => {
+            Some(MainHostCommand::LspPreviousDiagnostic)
+        }
+        _ => None,
     }
 }
 
@@ -2980,6 +3398,26 @@ fn execute_runtime_host_command(
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    execute_runtime_host_command_with_floats(
+        command,
+        outcome,
+        session_state,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+fn execute_runtime_host_command_with_floats(
+    command: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    completion_float_manager: Option<&mut CompletionFloatManager>,
+    lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     match parse_main_host_command(command) {
         Some(MainHostCommand::Save) => {
             execute_runtime_host_command_through_core(":w", outcome, session_state)
@@ -3034,10 +3472,816 @@ fn execute_runtime_host_command(
             outcome.target_path = Some(path);
             Ok(effect)
         }
+        Some(MainHostCommand::CompletionMenuFloat(payload)) => {
+            execute_completion_menu_float_host_command(
+                &payload,
+                outcome,
+                floating_window_manager,
+                completion_float_manager,
+            )
+        }
+        Some(MainHostCommand::BufferWindowFloat(payload)) => {
+            execute_buffer_window_float_host_command(&payload, outcome, floating_window_manager)
+        }
+        Some(MainHostCommand::TerminalFloat(payload)) => execute_terminal_float_host_command(
+            &payload,
+            floating_window_manager,
+            terminal_float_manager,
+        ),
+        Some(MainHostCommand::TerminalCloseFloat(payload)) => {
+            execute_terminal_close_float_host_command(
+                &payload,
+                floating_window_manager,
+                terminal_float_manager,
+            )
+        }
+        Some(MainHostCommand::LspHoverFloat(payload)) => {
+            execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager)
+        }
+        Some(MainHostCommand::LspDiagnosticFloat(payload)) => {
+            execute_lsp_diagnostic_float_host_command(&payload, outcome, floating_window_manager)
+        }
+        Some(MainHostCommand::LspLocationListFloat(payload)) => {
+            execute_lsp_location_list_float_host_command(&payload, outcome, floating_window_manager)
+        }
+        Some(MainHostCommand::LspSymbolOutlineFloat(payload)) => {
+            execute_lsp_symbol_outline_float_host_command(
+                &payload,
+                outcome,
+                floating_window_manager,
+            )
+        }
+        Some(MainHostCommand::LspGotoDefinition(payload)) => {
+            execute_lsp_goto_definition_host_command(&payload, outcome, session_state)
+        }
+        Some(MainHostCommand::LspPublishDiagnostics(payload)) => {
+            execute_lsp_publish_diagnostics_host_command(
+                &payload,
+                outcome,
+                floating_window_manager,
+                lsp_diagnostic_store,
+            )
+        }
+        Some(MainHostCommand::LspNextDiagnostic) => execute_lsp_cycle_diagnostic_host_command(
+            outcome,
+            floating_window_manager,
+            lsp_diagnostic_store,
+            true,
+        ),
+        Some(MainHostCommand::LspPreviousDiagnostic) => execute_lsp_cycle_diagnostic_host_command(
+            outcome,
+            floating_window_manager,
+            lsp_diagnostic_store,
+            false,
+        ),
+        Some(MainHostCommand::LspStatus(payload)) => execute_lsp_status_host_command(&payload),
         None => Err(RuntimeCommandError::UnknownCommand {
             name: command.to_string(),
         }),
     }
+}
+
+fn execute_buffer_window_float_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "buffer.floatWindow".to_string(),
+        message: "floating window manager is not available".to_string(),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "buffer.floatWindow".to_string(),
+            message: format!("invalid buffer float payload: {error}"),
+        })?;
+    let snapshot = outcome.core_bridge.light_snapshot();
+    let requested_window_id = value
+        .get("windowId")
+        .or_else(|| value.get("window_id"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|id| id as i32);
+    let requested_buffer_id = value
+        .get("bufferId")
+        .or_else(|| value.get("buffer_id"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|id| id as i32);
+    let (window_id, buffer_id) = resolve_buffer_float_backing_window(
+        "buffer.floatWindow",
+        &snapshot,
+        requested_window_id,
+        requested_buffer_id,
+    )?;
+    let width = value
+        .get("width")
+        .and_then(serde_json::Value::as_u64)
+        .map(|width| width as u16)
+        .unwrap_or(60)
+        .max(1);
+    let height = value
+        .get("height")
+        .and_then(serde_json::Value::as_u64)
+        .map(|height| height as u16)
+        .unwrap_or(12)
+        .max(1);
+    let row = value
+        .get("row")
+        .and_then(serde_json::Value::as_i64)
+        .map(|row| row as i16)
+        .unwrap_or(1);
+    let col = value
+        .get("col")
+        .or_else(|| value.get("column"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|col| col as i16)
+        .unwrap_or(2);
+    let border = match value
+        .get("border")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("single")
+    {
+        "none" | "borderless" => FloatingBorder::None,
+        _ => FloatingBorder::Single,
+    };
+    let id = manager.open_core_window(
+        window_id,
+        FloatingPlacement {
+            relative_to: FloatingRelativeTo::Editor,
+            anchor: FloatingAnchor::NorthWest,
+            row,
+            col,
+            fit: FloatingFit::TruncateToGrid,
+        },
+        FloatingSize { width, height },
+        FloatingChrome { border },
+        FloatingZIndex::User,
+        true,
+    );
+    manager.focus_float(id);
+    log::debug!(
+        "[main][buffer_float] buffer float host command applied: float_id={}, window_id={}, buffer_id={}, size=({},{})",
+        id.0,
+        window_id,
+        buffer_id,
+        width,
+        height
+    );
+    Ok(RuntimeCommandEffect::default())
+}
+
+fn resolve_buffer_float_backing_window(
+    command_name: &str,
+    snapshot: &CoreLightSnapshot,
+    requested_window_id: Option<i32>,
+    requested_buffer_id: Option<i32>,
+) -> Result<(i32, i32), RuntimeCommandError> {
+    let chosen_window_id = match (requested_window_id, requested_buffer_id) {
+        (Some(window_id), _) => window_id,
+        (None, Some(buffer_id)) => {
+            let Some(window) = snapshot.windows.iter().find(|window| window.buf_id == buffer_id)
+            else {
+                log::debug!(
+                    "[main][buffer_float] rejected unbacked buffer float because hidden core-window creation is unavailable: command={}, buffer_id={}",
+                    command_name,
+                    buffer_id
+                );
+                return Err(RuntimeCommandError::CommandFailed {
+                    name: command_name.to_string(),
+                    message: format!(
+                        "hidden core-window creation is not available for buffer-backed floats: buffer_id={buffer_id}"
+                    ),
+                });
+            };
+            window.id
+        }
+        (None, None) => snapshot.active_window_id().ok_or_else(|| {
+            log::debug!(
+                "[main][buffer_float] rejected buffer float because active window is unavailable: command={}",
+                command_name
+            );
+            RuntimeCommandError::CommandFailed {
+                name: command_name.to_string(),
+                message: "active window is not available".to_string(),
+            }
+        })?,
+    };
+    let Some(window) = snapshot.window(chosen_window_id) else {
+        log::debug!(
+            "[main][buffer_float] rejected buffer float because backing window is missing: command={}, window_id={}, requested_buffer_id={:?}",
+            command_name,
+            chosen_window_id,
+            requested_buffer_id
+        );
+        return Err(RuntimeCommandError::CommandFailed {
+            name: command_name.to_string(),
+            message: format!("window not found: window_id={chosen_window_id}"),
+        });
+    };
+    if let Some(buffer_id) = requested_buffer_id
+        && window.buf_id != buffer_id
+    {
+        log::debug!(
+            "[main][buffer_float] rejected buffer float because requested window does not display requested buffer: command={}, window_id={}, window_buffer_id={}, requested_buffer_id={}",
+            command_name,
+            chosen_window_id,
+            window.buf_id,
+            buffer_id
+        );
+        return Err(RuntimeCommandError::CommandFailed {
+            name: command_name.to_string(),
+            message: format!(
+                "backing window {chosen_window_id} displays buffer {}, not requested buffer {buffer_id}; hidden core-window creation is not available",
+                window.buf_id
+            ),
+        });
+    }
+    log::debug!(
+        "[main][buffer_float] resolved existing backing window for buffer float: command={}, window_id={}, buffer_id={}, requested_window_id={:?}, requested_buffer_id={:?}",
+        command_name,
+        chosen_window_id,
+        window.buf_id,
+        requested_window_id,
+        requested_buffer_id
+    );
+    Ok((chosen_window_id, window.buf_id))
+}
+
+fn execute_terminal_float_host_command(
+    payload: &str,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let floating_manager =
+        floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "terminal.float".to_string(),
+            message: "floating window manager is not available".to_string(),
+        })?;
+    let terminal_manager =
+        terminal_float_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "terminal.float".to_string(),
+            message: "terminal float manager is not available".to_string(),
+        })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "terminal.float".to_string(),
+            message: format!("invalid terminal float payload: {error}"),
+        })?;
+    let command = value
+        .get("command")
+        .or_else(|| value.get("cmd"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|command| !command.trim().is_empty())
+        .ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "terminal.float".to_string(),
+            message: "terminal command is required".to_string(),
+        })?
+        .to_string();
+    let args = value
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let width = value
+        .get("width")
+        .and_then(serde_json::Value::as_u64)
+        .map(|width| width as u16)
+        .unwrap_or(80)
+        .max(1);
+    let height = value
+        .get("height")
+        .and_then(serde_json::Value::as_u64)
+        .map(|height| height as u16)
+        .unwrap_or(16)
+        .max(1);
+    let row = value
+        .get("row")
+        .and_then(serde_json::Value::as_i64)
+        .map(|row| row as i16)
+        .unwrap_or(1);
+    let col = value
+        .get("col")
+        .or_else(|| value.get("column"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|col| col as i16)
+        .unwrap_or(2);
+    let border = match value
+        .get("border")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("single")
+    {
+        "none" | "borderless" => FloatingBorder::None,
+        _ => FloatingBorder::Single,
+    };
+    let close_behavior = match value
+        .get("closeBehavior")
+        .or_else(|| value.get("close_behavior"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("kill")
+    {
+        "detach" | "detachOnClose" | "detach-on-close" => TerminalFloatCloseBehavior::DetachOnClose,
+        _ => TerminalFloatCloseBehavior::KillOnClose,
+    };
+    let terminal_id = terminal_manager
+        .spawn(TerminalFloatSpawnRequest {
+            command: command.clone(),
+            args: args.clone(),
+            width,
+            height,
+            close_behavior,
+        })
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "terminal.float".to_string(),
+            message: format!("failed to spawn terminal float: {error:?}"),
+        })?;
+    let float_id = floating_manager.open_terminal(
+        terminal_id,
+        FloatingPlacement {
+            relative_to: FloatingRelativeTo::Editor,
+            anchor: FloatingAnchor::NorthWest,
+            row,
+            col,
+            fit: FloatingFit::TruncateToGrid,
+        },
+        FloatingSize {
+            width: width.saturating_add(if matches!(border, FloatingBorder::Single) {
+                2
+            } else {
+                0
+            }),
+            height: height.saturating_add(if matches!(border, FloatingBorder::Single) {
+                2
+            } else {
+                0
+            }),
+        },
+        FloatingChrome { border },
+        FloatingZIndex::User,
+        true,
+    );
+    floating_manager.focus_float(float_id);
+    log::debug!(
+        "[main][terminal_float] terminal float host command applied: float_id={}, terminal_id={}, command={}, args={:?}, size=({},{}), close_behavior={:?}",
+        float_id.0,
+        terminal_id,
+        command,
+        args,
+        width,
+        height,
+        close_behavior
+    );
+    Ok(RuntimeCommandEffect::default())
+}
+
+fn execute_terminal_close_float_host_command(
+    payload: &str,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let floating_manager =
+        floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "terminal.closeFloat".to_string(),
+            message: "floating window manager is not available".to_string(),
+        })?;
+    let terminal_manager =
+        terminal_float_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "terminal.closeFloat".to_string(),
+            message: "terminal float manager is not available".to_string(),
+        })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "terminal.closeFloat".to_string(),
+            message: format!("invalid terminal close payload: {error}"),
+        })?;
+    let terminal_id = value
+        .get("terminalId")
+        .or_else(|| value.get("terminal_id"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| floating_manager.focused_terminal_id())
+        .ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "terminal.closeFloat".to_string(),
+            message: "terminal id is required when no terminal float is focused".to_string(),
+        })?;
+    let float_id = floating_manager
+        .focused_float_id()
+        .filter(|_| floating_manager.focused_terminal_id() == Some(terminal_id));
+    if let Some(float_id) = float_id {
+        floating_manager.close(float_id);
+    }
+    terminal_manager.close_view(terminal_id).map_err(|error| {
+        RuntimeCommandError::CommandFailed {
+            name: "terminal.closeFloat".to_string(),
+            message: format!("failed to close terminal float: {error:?}"),
+        }
+    })?;
+    log::debug!(
+        "[main][terminal_float] terminal float close host command applied: float_id={:?}, terminal_id={}",
+        float_id.map(|id| id.0),
+        terminal_id
+    );
+    Ok(RuntimeCommandEffect::default())
+}
+
+fn execute_completion_menu_float_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    completion_float_manager: Option<&mut CompletionFloatManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let floating_manager =
+        floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "completion.floatMenu".to_string(),
+            message: "floating window manager is not available".to_string(),
+        })?;
+    let completion_manager =
+        completion_float_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "completion.floatMenu".to_string(),
+            message: "completion float manager is not available".to_string(),
+        })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "completion.floatMenu".to_string(),
+            message: format!("invalid completion float payload: {error}"),
+        })?;
+    let snapshot = outcome.core_bridge.light_snapshot();
+    let window_id = snapshot.active_window_id().unwrap_or(1);
+    let request = completion_menu_request_from_json(
+        window_id,
+        snapshot.cursor_row,
+        snapshot.cursor_col,
+        &value,
+    )
+    .map_err(|message| RuntimeCommandError::CommandFailed {
+        name: "completion.floatMenu".to_string(),
+        message,
+    })?;
+    let opened = completion_manager.open_menu(floating_manager, request);
+    if let Some(opened) = opened {
+        floating_manager.focus_float(opened.menu_id);
+    }
+    log::debug!(
+        "[main][completion_float] completion menu host command applied: opened={:?}, documentation={:?}, window_id={}, cursor=({}, {})",
+        opened.map(|opened| opened.menu_id.0),
+        opened.and_then(|opened| opened.documentation_id.map(|id| id.0)),
+        window_id,
+        snapshot.cursor_row,
+        snapshot.cursor_col
+    );
+    Ok(RuntimeCommandEffect {
+        transient_message: opened
+            .is_none()
+            .then(|| "No completion candidates".to_string()),
+        follow_up_events: Vec::new(),
+        shutdown_intent: None,
+        presentation_intents: Vec::new(),
+    })
+}
+
+fn execute_lsp_hover_float_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "lsp.floatHover".to_string(),
+        message: "floating window manager is not available".to_string(),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.floatHover".to_string(),
+            message: format!("invalid LSP hover float payload: {error}"),
+        })?;
+    let snapshot = outcome.core_bridge.light_snapshot();
+    let window_id = snapshot.active_window_id().unwrap_or(1);
+    let response = value
+        .get("response")
+        .or_else(|| value.get("result"))
+        .cloned()
+        .unwrap_or(value);
+    let id = open_lsp_hover_float(
+        manager,
+        LspHoverFloatRequest {
+            window_id,
+            cursor_row: snapshot.cursor_row,
+            cursor_col: snapshot.cursor_col,
+            response,
+        },
+    );
+    log::debug!(
+        "[main][lsp_float] hover float host command applied: opened={:?}, window_id={}, cursor=({}, {})",
+        id.map(|id| id.0),
+        window_id,
+        snapshot.cursor_row,
+        snapshot.cursor_col
+    );
+    Ok(RuntimeCommandEffect {
+        transient_message: id.is_none().then(|| "No LSP hover content".to_string()),
+        follow_up_events: Vec::new(),
+        shutdown_intent: None,
+        presentation_intents: Vec::new(),
+    })
+}
+
+fn execute_lsp_diagnostic_float_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "lsp.floatDiagnostics".to_string(),
+        message: "floating window manager is not available".to_string(),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.floatDiagnostics".to_string(),
+            message: format!("invalid LSP diagnostic float payload: {error}"),
+        })?;
+    let snapshot = outcome.core_bridge.light_snapshot();
+    let window_id = snapshot.active_window_id().unwrap_or(1);
+    let line = value
+        .get("line")
+        .and_then(serde_json::Value::as_u64)
+        .map(|line| line as usize)
+        .unwrap_or(snapshot.cursor_row);
+    let column = value
+        .get("column")
+        .and_then(serde_json::Value::as_u64)
+        .map(|column| column as usize)
+        .unwrap_or(snapshot.cursor_col);
+    let diagnostics = value
+        .get("diagnostics")
+        .or_else(|| value.pointer("/params/diagnostics"))
+        .cloned()
+        .unwrap_or(value);
+    let id = open_lsp_diagnostic_float(
+        manager,
+        LspDiagnosticFloatRequest {
+            window_id,
+            line,
+            column,
+            diagnostics,
+        },
+    );
+    log::debug!(
+        "[main][lsp_float] diagnostic float host command applied: opened={:?}, window_id={}, position=({}, {})",
+        id.map(|id| id.0),
+        window_id,
+        line,
+        column
+    );
+    Ok(RuntimeCommandEffect {
+        transient_message: id.is_none().then(|| "No LSP diagnostics".to_string()),
+        follow_up_events: Vec::new(),
+        shutdown_intent: None,
+        presentation_intents: Vec::new(),
+    })
+}
+
+fn execute_lsp_location_list_float_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "lsp.floatLocations".to_string(),
+        message: "floating window manager is not available".to_string(),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.floatLocations".to_string(),
+            message: format!("invalid LSP locations float payload: {error}"),
+        })?;
+    let snapshot = outcome.core_bridge.light_snapshot();
+    let window_id = snapshot.active_window_id().unwrap_or(1);
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Locations")
+        .to_string();
+    let response = value
+        .get("response")
+        .or_else(|| value.get("result"))
+        .cloned()
+        .unwrap_or(value);
+    let id = open_lsp_location_list_float(
+        manager,
+        LspLocationListRequest {
+            window_id,
+            title,
+            response,
+        },
+    );
+    log::debug!(
+        "[main][lsp_float] location list float host command applied: opened={:?}, window_id={}",
+        id.map(|id| id.0),
+        window_id
+    );
+    Ok(RuntimeCommandEffect {
+        transient_message: id.is_none().then(|| "No LSP locations".to_string()),
+        follow_up_events: Vec::new(),
+        shutdown_intent: None,
+        presentation_intents: Vec::new(),
+    })
+}
+
+fn execute_lsp_symbol_outline_float_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "lsp.floatSymbols".to_string(),
+        message: "floating window manager is not available".to_string(),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.floatSymbols".to_string(),
+            message: format!("invalid LSP symbols float payload: {error}"),
+        })?;
+    let snapshot = outcome.core_bridge.light_snapshot();
+    let window_id = snapshot.active_window_id().unwrap_or(1);
+    let response = value
+        .get("response")
+        .or_else(|| value.get("result"))
+        .cloned()
+        .unwrap_or(value);
+    let id = open_lsp_symbol_outline_float(
+        manager,
+        LspSymbolOutlineRequest {
+            window_id,
+            response,
+        },
+    );
+    log::debug!(
+        "[main][lsp_float] symbol outline float host command applied: opened={:?}, window_id={}",
+        id.map(|id| id.0),
+        window_id
+    );
+    Ok(RuntimeCommandEffect {
+        transient_message: id.is_none().then(|| "No LSP symbols".to_string()),
+        follow_up_events: Vec::new(),
+        shutdown_intent: None,
+        presentation_intents: Vec::new(),
+    })
+}
+
+fn execute_lsp_goto_definition_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.gotoDefinition".to_string(),
+            message: format!("invalid LSP definition payload: {error}"),
+        })?;
+    let location =
+        first_lsp_location(&value).ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "lsp.gotoDefinition".to_string(),
+            message: "No LSP definition target".to_string(),
+        })?;
+    let uri = location
+        .get("uri")
+        .or_else(|| location.get("targetUri"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "lsp.gotoDefinition".to_string(),
+            message: "LSP definition target is missing a URI".to_string(),
+        })?;
+    let path = file_uri_to_path(uri).ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "lsp.gotoDefinition".to_string(),
+        message: format!("unsupported LSP definition URI: {uri}"),
+    })?;
+    let line = location
+        .pointer("/range/start/line")
+        .or_else(|| location.pointer("/targetSelectionRange/start/line"))
+        .or_else(|| location.pointer("/targetRange/start/line"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    let mut effect = execute_runtime_host_command_with_floats(
+        &format!("edit {}", path.display()),
+        outcome,
+        session_state,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    let line_command = format!(":{}", line.saturating_add(1));
+    outcome
+        .core_bridge
+        .apply_ex_command(&line_command)
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.gotoDefinition".to_string(),
+            message: format!("failed to move to LSP definition line: {error:?}"),
+        })?;
+    effect.transient_message = Some(format!("LSP definition: {}:{}", path.display(), line + 1));
+    log::debug!(
+        "[main][lsp] definition navigation applied: path={}, line={}",
+        path.display(),
+        line
+    );
+    Ok(effect)
+}
+
+fn execute_lsp_publish_diagnostics_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.publishDiagnostics".to_string(),
+            message: format!("invalid LSP diagnostics payload: {error}"),
+        })?;
+    if let Some(store) = lsp_diagnostic_store {
+        store.replace_from_lsp_value(&value);
+    }
+    execute_lsp_diagnostic_float_host_command(payload, outcome, floating_window_manager)
+}
+
+fn execute_lsp_cycle_diagnostic_host_command(
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
+    next: bool,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let store = lsp_diagnostic_store.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "lsp.diagnosticNavigation".to_string(),
+        message: "LSP diagnostic store is not available".to_string(),
+    })?;
+    let diagnostic = if next {
+        store.next_diagnostic()
+    } else {
+        store.previous_diagnostic()
+    }
+    .cloned();
+    let Some(diagnostic) = diagnostic else {
+        return Ok(RuntimeCommandEffect {
+            transient_message: Some("No LSP diagnostics".to_string()),
+            follow_up_events: Vec::new(),
+            shutdown_intent: None,
+            presentation_intents: Vec::new(),
+        });
+    };
+    let payload = serde_json::json!({
+        "line": diagnostic.line,
+        "column": diagnostic.column,
+        "diagnostics": [{
+            "severity": diagnostic.severity,
+            "message": diagnostic.message,
+        }],
+    })
+    .to_string();
+    let mut effect =
+        execute_lsp_diagnostic_float_host_command(&payload, outcome, floating_window_manager)?;
+    effect.transient_message = Some(format!(
+        "LSP diagnostic: {}:{} {}",
+        diagnostic.line + 1,
+        diagnostic.column + 1,
+        diagnostic.message
+    ));
+    Ok(effect)
+}
+
+fn first_lsp_location(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    let result = value
+        .pointer("/response/result")
+        .or_else(|| value.pointer("/result"))
+        .or_else(|| value.get("response"))
+        .unwrap_or(value);
+    match result {
+        serde_json::Value::Array(items) => items.first(),
+        serde_json::Value::Object(_) => Some(result),
+        _ => None,
+    }
+}
+
+fn execute_lsp_status_host_command(
+    payload: &str,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.status".to_string(),
+            message: format!("invalid LSP status payload: {error}"),
+        })?;
+    let message = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Language server is not ready")
+        .to_string();
+    log::info!("[main][lsp] status: {message}");
+    Ok(RuntimeCommandEffect {
+        transient_message: Some(message),
+        follow_up_events: Vec::new(),
+        shutdown_intent: None,
+        presentation_intents: Vec::new(),
+    })
 }
 
 fn escape_runtime_edit_path(path: &std::path::Path) -> String {
@@ -3258,11 +4502,13 @@ async fn dispatch_buffer_open_with_runtime(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsp_session_manager: Option<&LspSessionManager>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         return None;
     };
-    let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
+    let mut host_session =
+        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsp_session_manager);
     let payload = RuntimeEventMapper::buffer_open(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
     apply_runtime_dispatch_outcome(
@@ -3280,11 +4526,13 @@ async fn dispatch_buffer_write_post_with_runtime(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsp_session_manager: Option<&LspSessionManager>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         return None;
     };
-    let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
+    let mut host_session =
+        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsp_session_manager);
     let payload = RuntimeEventMapper::buffer_write_post(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
     apply_runtime_dispatch_outcome(
@@ -3336,9 +4584,14 @@ async fn execute_startup_keymap_registered_command(
     command_name: &str,
     outcome: &mut saya::bootstrap::BootstrapOutcome,
     session_state: &mut saya::editor_session::EditorSessionState,
+    floating_window_manager: &mut FloatingWindowManager,
+    completion_float_manager: &mut CompletionFloatManager,
+    lsp_diagnostic_store: &mut LspDiagnosticStore,
+    terminal_float_manager: &mut TerminalFloatManager,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsp_session_manager: Option<&LspSessionManager>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         log::info!(
@@ -3353,7 +4606,15 @@ async fn execute_startup_keymap_registered_command(
         "[main][keymap] executing startup registered command: command={}",
         command_name
     );
-    let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
+    let mut host_session = MainRuntimeHostSession::new_with_floating_windows(
+        outcome,
+        session_state,
+        floating_window_manager,
+        completion_float_manager,
+        lsp_diagnostic_store,
+        terminal_float_manager,
+        lsp_session_manager,
+    );
     let dispatch_outcome = runtime_session
         .execute_command(command_name, &mut host_session)
         .await;
@@ -3429,9 +4690,335 @@ fn startup_keymap_lhs_from_input(key: &KeyInput) -> Option<String> {
     }
 }
 
+fn execute_runtime_window_open_float(
+    request: RuntimeFloatOpenRequest,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<RuntimeFloatSnapshot, RuntimeCommandError> {
+    let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "window.openFloat".to_string(),
+        message: "floating window manager is not available".to_string(),
+    })?;
+    let size = FloatingSize {
+        width: request.width.unwrap_or(60).max(1),
+        height: request.height.unwrap_or(12).max(1),
+    };
+    let chrome = FloatingChrome {
+        border: runtime_float_border(request.border.as_deref()),
+    };
+    let placement = runtime_float_placement(&request, outcome)?;
+    let zindex = runtime_float_zindex(request.z_index.as_ref());
+    let lifecycle = runtime_float_lifecycle(request.lifecycle.as_deref());
+    let focusable = request.focusable.unwrap_or(false);
+    let replacement_group = request.group.clone();
+
+    let id = match request.content.clone() {
+        RuntimeFloatContentRequest::Lines { lines } => manager
+            .open_static_lines_with_lifecycle_and_replacement_group(
+                lines,
+                lifecycle,
+                replacement_group,
+                placement,
+                size,
+                chrome,
+                zindex,
+                focusable,
+            ),
+        RuntimeFloatContentRequest::Buffer {
+            buffer_id,
+            window_id,
+        } => {
+            let snapshot = outcome.core_bridge.light_snapshot();
+            let (window_id, _buffer_id) = resolve_buffer_float_backing_window(
+                "window.openFloat",
+                &snapshot,
+                window_id.map(|id| id as i32),
+                buffer_id.map(|id| id as i32),
+            )?;
+            manager.open_core_window_with_lifecycle(
+                window_id,
+                lifecycle,
+                replacement_group,
+                placement,
+                size,
+                chrome,
+                zindex,
+                focusable,
+            )
+        }
+        RuntimeFloatContentRequest::Terminal {
+            command,
+            close_behavior,
+        } => {
+            let terminal_manager =
+                terminal_float_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+                    name: "window.openFloat".to_string(),
+                    message: "terminal float manager is not available".to_string(),
+                })?;
+            let (command, args) = runtime_terminal_command_parts(command).ok_or_else(|| {
+                RuntimeCommandError::CommandFailed {
+                    name: "window.openFloat".to_string(),
+                    message: "terminal float command must not be empty".to_string(),
+                }
+            })?;
+            let terminal_size = runtime_terminal_content_size(size, chrome);
+            let terminal_id = terminal_manager
+                .spawn(TerminalFloatSpawnRequest {
+                    command,
+                    args,
+                    width: terminal_size.width,
+                    height: terminal_size.height,
+                    close_behavior: runtime_terminal_close_behavior(close_behavior.as_deref()),
+                })
+                .map_err(|error| RuntimeCommandError::CommandFailed {
+                    name: "window.openFloat".to_string(),
+                    message: format!("failed to spawn terminal float: {error:?}"),
+                })?;
+            manager.open_terminal_with_lifecycle(
+                terminal_id,
+                lifecycle,
+                replacement_group,
+                placement,
+                size,
+                chrome,
+                zindex,
+                focusable,
+            )
+        }
+    };
+
+    if focusable {
+        manager.focus_float(id);
+    }
+    log::debug!(
+        "[main][runtime_window] openFloat applied: float_id={}, content={:?}, focusable={}, size=({},{})",
+        id.0,
+        request.content,
+        focusable,
+        size.width,
+        size.height
+    );
+    let focused_float_id = manager.focused_float_id();
+    manager
+        .debug_window(id)
+        .map(|window| runtime_float_snapshot(window, focused_float_id))
+        .ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "window.openFloat".to_string(),
+            message: format!("opened float is missing: id={}", id.0),
+        })
+}
+
+fn execute_runtime_window_close_float(
+    id: u64,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<bool, RuntimeCommandError> {
+    let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "window.close".to_string(),
+        message: "floating window manager is not available".to_string(),
+    })?;
+    let float_id = FloatingWindowId(id);
+    let terminal_id = manager
+        .window_content(float_id)
+        .and_then(|content| match content {
+            saya::floating_window::FloatingContentRef::Terminal { terminal_id } => {
+                Some(*terminal_id)
+            }
+            _ => None,
+        });
+    let closed = manager.close(float_id);
+    if closed
+        && let (Some(terminal_id), Some(terminal_manager)) = (terminal_id, terminal_float_manager)
+    {
+        let _ = terminal_manager.close_view(terminal_id);
+    }
+    log::debug!(
+        "[main][runtime_window] close applied: float_id={}, closed={}, terminal_id={:?}",
+        id,
+        closed,
+        terminal_id
+    );
+    Ok(closed)
+}
+
+fn runtime_float_snapshots(manager: &FloatingWindowManager) -> Vec<RuntimeFloatSnapshot> {
+    let focused_float_id = manager.focused_float_id();
+    manager
+        .windows()
+        .iter()
+        .map(|window| runtime_float_snapshot(window, focused_float_id))
+        .collect()
+}
+
+fn runtime_float_snapshot(
+    window: &saya::floating_window::FloatingWindow,
+    focused_float_id: Option<FloatingWindowId>,
+) -> RuntimeFloatSnapshot {
+    RuntimeFloatSnapshot {
+        id: window.id.0,
+        kind: runtime_float_content_kind(&window.content).to_string(),
+        focused: focused_float_id == Some(window.id),
+        focusable: window.focusable,
+        width: window.size.width,
+        height: window.size.height,
+        row: window.placement.row,
+        col: window.placement.col,
+        border: runtime_float_border_label(window.chrome.border).to_string(),
+        z_index: window.zindex,
+        lifecycle: runtime_float_lifecycle_label(window.lifecycle).to_string(),
+        replacement_group: window.replacement_group.clone(),
+    }
+}
+
+fn runtime_float_content_kind(content: &saya::floating_window::FloatingContentRef) -> &'static str {
+    match content {
+        saya::floating_window::FloatingContentRef::CoreWindow { .. } => "buffer",
+        saya::floating_window::FloatingContentRef::ScratchBuffer { .. } => "buffer",
+        saya::floating_window::FloatingContentRef::Terminal { .. } => "terminal",
+        saya::floating_window::FloatingContentRef::StaticLines { .. } => "lines",
+        saya::floating_window::FloatingContentRef::CompletionMenu { .. } => "completionMenu",
+    }
+}
+
+fn runtime_float_border_label(border: FloatingBorder) -> &'static str {
+    match border {
+        FloatingBorder::None => "none",
+        FloatingBorder::Single => "single",
+    }
+}
+
+fn runtime_float_lifecycle_label(lifecycle: FloatingLifecycle) -> &'static str {
+    match lifecycle {
+        FloatingLifecycle::Manual => "manual",
+        FloatingLifecycle::CloseOnCursorMove => "closeOnCursorMove",
+        FloatingLifecycle::CloseOnInsert => "closeOnInsert",
+        FloatingLifecycle::CloseOnBufferChange => "closeOnBufferChange",
+        FloatingLifecycle::ReplaceByGroup(_) => "replaceByGroup",
+    }
+}
+
+fn runtime_float_border(border: Option<&str>) -> FloatingBorder {
+    match border.unwrap_or("single") {
+        "none" | "borderless" => FloatingBorder::None,
+        _ => FloatingBorder::Single,
+    }
+}
+
+fn runtime_float_lifecycle(lifecycle: Option<&str>) -> FloatingLifecycle {
+    match lifecycle.unwrap_or("manual") {
+        "closeOnCursorMove" | "close-on-cursor-move" => FloatingLifecycle::CloseOnCursorMove,
+        "closeOnInsert" | "close-on-insert" => FloatingLifecycle::CloseOnInsert,
+        "closeOnBufferChange" | "close-on-buffer-change" => FloatingLifecycle::CloseOnBufferChange,
+        _ => FloatingLifecycle::Manual,
+    }
+}
+
+fn runtime_float_zindex(zindex: Option<&RuntimeFloatZIndexRequest>) -> FloatingZIndex {
+    match zindex {
+        Some(RuntimeFloatZIndexRequest::Custom(value)) => FloatingZIndex::Custom(*value),
+        Some(RuntimeFloatZIndexRequest::Named(name)) => match name.as_str() {
+            "hover" => FloatingZIndex::Hover,
+            "completion" => FloatingZIndex::Completion,
+            "completionDocumentation" | "completion-documentation" => {
+                FloatingZIndex::CompletionDocumentation
+            }
+            "blockingPrompt" | "blocking-prompt" => FloatingZIndex::BlockingPrompt,
+            _ => FloatingZIndex::User,
+        },
+        None => FloatingZIndex::User,
+    }
+}
+
+fn runtime_float_placement(
+    request: &RuntimeFloatOpenRequest,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+) -> Result<FloatingPlacement, RuntimeCommandError> {
+    let row = request.row.unwrap_or(1);
+    let col = request.col.unwrap_or(2);
+    let relative_to = match request.relative_to.as_ref() {
+        Some(RuntimeFloatRelativeToRequest::Cursor { window_id }) => FloatingRelativeTo::Cursor {
+            window_id: runtime_float_window_id(*window_id, outcome)?,
+        },
+        Some(RuntimeFloatRelativeToRequest::Window { window_id }) => FloatingRelativeTo::Window {
+            window_id: runtime_float_window_id(*window_id, outcome)?,
+        },
+        Some(RuntimeFloatRelativeToRequest::BufferPosition {
+            window_id,
+            line,
+            column,
+        }) => FloatingRelativeTo::BufferPosition {
+            window_id: runtime_float_window_id(*window_id, outcome)?,
+            line: *line,
+            column: *column,
+        },
+        _ => FloatingRelativeTo::Editor,
+    };
+    Ok(FloatingPlacement {
+        relative_to,
+        anchor: runtime_float_anchor(request.anchor.as_deref()),
+        row,
+        col,
+        fit: FloatingFit::TruncateToGrid,
+    })
+}
+
+fn runtime_float_anchor(anchor: Option<&str>) -> FloatingAnchor {
+    match anchor.unwrap_or("nw") {
+        "ne" => FloatingAnchor::NorthEast,
+        "sw" => FloatingAnchor::SouthWest,
+        "se" => FloatingAnchor::SouthEast,
+        _ => FloatingAnchor::NorthWest,
+    }
+}
+
+fn runtime_float_window_id(
+    requested: Option<u64>,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+) -> Result<i32, RuntimeCommandError> {
+    requested
+        .map(|id| id as i32)
+        .or_else(|| outcome.core_bridge.light_snapshot().active_window_id())
+        .ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "window.openFloat".to_string(),
+            message: "active window is not available".to_string(),
+        })
+}
+
+fn runtime_terminal_command_parts(command: Vec<String>) -> Option<(String, Vec<String>)> {
+    let mut parts = command.into_iter();
+    let command = parts.next()?.trim().to_string();
+    if command.is_empty() {
+        return None;
+    }
+    Some((command, parts.collect()))
+}
+
+fn runtime_terminal_content_size(size: FloatingSize, chrome: FloatingChrome) -> FloatingSize {
+    match chrome.border {
+        FloatingBorder::Single => FloatingSize {
+            width: size.width.saturating_sub(2).max(1),
+            height: size.height.saturating_sub(2).max(1),
+        },
+        FloatingBorder::None => size,
+    }
+}
+
+fn runtime_terminal_close_behavior(close_behavior: Option<&str>) -> TerminalFloatCloseBehavior {
+    match close_behavior.unwrap_or("kill") {
+        "detach" | "detachOnClose" | "detach-on-close" => TerminalFloatCloseBehavior::DetachOnClose,
+        _ => TerminalFloatCloseBehavior::KillOnClose,
+    }
+}
+
 struct MainRuntimeHostSession<'a> {
     outcome: &'a mut saya::bootstrap::BootstrapOutcome,
     session_state: &'a mut saya::editor_session::EditorSessionState,
+    floating_window_manager: Option<&'a mut FloatingWindowManager>,
+    completion_float_manager: Option<&'a mut CompletionFloatManager>,
+    lsp_diagnostic_store: Option<&'a mut LspDiagnosticStore>,
+    terminal_float_manager: Option<&'a mut TerminalFloatManager>,
+    lsp_session_manager: Option<&'a LspSessionManager>,
 }
 
 impl<'a> MainRuntimeHostSession<'a> {
@@ -3442,6 +5029,47 @@ impl<'a> MainRuntimeHostSession<'a> {
         Self {
             outcome,
             session_state,
+            floating_window_manager: None,
+            completion_float_manager: None,
+            lsp_diagnostic_store: None,
+            terminal_float_manager: None,
+            lsp_session_manager: None,
+        }
+    }
+
+    fn new_with_lsp_session(
+        outcome: &'a mut saya::bootstrap::BootstrapOutcome,
+        session_state: &'a mut saya::editor_session::EditorSessionState,
+        lsp_session_manager: Option<&'a LspSessionManager>,
+    ) -> Self {
+        Self {
+            outcome,
+            session_state,
+            floating_window_manager: None,
+            completion_float_manager: None,
+            lsp_diagnostic_store: None,
+            terminal_float_manager: None,
+            lsp_session_manager,
+        }
+    }
+
+    fn new_with_floating_windows(
+        outcome: &'a mut saya::bootstrap::BootstrapOutcome,
+        session_state: &'a mut saya::editor_session::EditorSessionState,
+        floating_window_manager: &'a mut FloatingWindowManager,
+        completion_float_manager: &'a mut CompletionFloatManager,
+        lsp_diagnostic_store: &'a mut LspDiagnosticStore,
+        terminal_float_manager: &'a mut TerminalFloatManager,
+        lsp_session_manager: Option<&'a LspSessionManager>,
+    ) -> Self {
+        Self {
+            outcome,
+            session_state,
+            floating_window_manager: Some(floating_window_manager),
+            completion_float_manager: Some(completion_float_manager),
+            lsp_diagnostic_store: Some(lsp_diagnostic_store),
+            terminal_float_manager: Some(terminal_float_manager),
+            lsp_session_manager,
         }
     }
 }
@@ -3468,9 +5096,11 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
                 .map(|range| range.total_line_count)
                 .unwrap_or(1),
             cursor_row: snapshot.cursor_row,
+            cursor_col: snapshot.cursor_col,
             current_line: current_line_range
                 .and_then(|range| range.lines.into_iter().next())
                 .unwrap_or_default(),
+            text: self.outcome.core_bridge.buffer_text(),
         }
     }
 
@@ -3483,6 +5113,46 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
         ReadonlyWindowSnapshot {
             id: active_window_id,
         }
+    }
+
+    fn open_float(
+        &mut self,
+        request: RuntimeFloatOpenRequest,
+    ) -> Result<RuntimeFloatSnapshot, RuntimeCommandError> {
+        execute_runtime_window_open_float(
+            request,
+            self.outcome,
+            self.floating_window_manager.as_deref_mut(),
+            self.terminal_float_manager.as_deref_mut(),
+        )
+    }
+
+    fn close_float(&mut self, id: u64) -> Result<bool, RuntimeCommandError> {
+        execute_runtime_window_close_float(
+            id,
+            self.floating_window_manager.as_deref_mut(),
+            self.terminal_float_manager.as_deref_mut(),
+        )
+    }
+
+    fn focus_float(&mut self, id: u64) -> Result<bool, RuntimeCommandError> {
+        let manager = self.floating_window_manager.as_deref_mut().ok_or_else(|| {
+            RuntimeCommandError::CommandFailed {
+                name: "window.focus".to_string(),
+                message: "floating window manager is not available".to_string(),
+            }
+        })?;
+        Ok(manager.focus_float(FloatingWindowId(id)))
+    }
+
+    fn list_float_snapshots(&mut self) -> Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError> {
+        let manager = self.floating_window_manager.as_deref().ok_or_else(|| {
+            RuntimeCommandError::CommandFailed {
+                name: "window.floats".to_string(),
+                message: "floating window manager is not available".to_string(),
+            }
+        })?;
+        Ok(runtime_float_snapshots(manager))
     }
 
     fn current_editor_snapshot(&mut self) -> ReadonlyEditorSnapshot {
@@ -3591,7 +5261,41 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             "[main][host_command] executing runtime host command through application session owner: {}",
             name
         );
-        execute_runtime_host_command(name, self.outcome, self.session_state)
+        execute_runtime_host_command_with_floats(
+            name,
+            self.outcome,
+            self.session_state,
+            self.floating_window_manager.as_deref_mut(),
+            self.completion_float_manager.as_deref_mut(),
+            self.lsp_diagnostic_store.as_deref_mut(),
+            self.terminal_float_manager.as_deref_mut(),
+        )
+    }
+
+    fn execute_lsp_request(
+        &mut self,
+        request: LspRuntimeBridgeRequest,
+    ) -> Result<LspRuntimeBridgeResponse, RuntimeCommandError> {
+        let Some(manager) = self.lsp_session_manager else {
+            return Err(RuntimeCommandError::CommandFailed {
+                name: "lsp.request".to_string(),
+                message: format!(
+                    "LSP transport is not configured for runtime method {}",
+                    request.method
+                ),
+            });
+        };
+        log::info!(
+            "[main][lsp] executing runtime LSP request through session manager: method={}, language={}, document={}",
+            request.method,
+            request.language_id,
+            request
+                .text_document
+                .as_ref()
+                .map(|document| document.uri.as_str())
+                .unwrap_or("<none>")
+        );
+        manager.execute_blocking(request)
     }
 }
 
@@ -4112,6 +5816,8 @@ fn build_workspace_render_output(
     transient_msg: Option<&str>,
     terminal_width: u16,
     terminal_height: u16,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
 ) -> Result<WorkspaceScreenModel, WorkspaceRedrawError> {
     let total_started_at = std::time::Instant::now();
     let snapshot_started_at = std::time::Instant::now();
@@ -4314,6 +6020,18 @@ fn build_workspace_render_output(
         {
             command_line.cursor_col = cursor_col;
         }
+        if let Some(manager) = floating_window_manager {
+            refresh_buffer_backed_float_lines(manager, &outcome.core_bridge, &light_snapshot);
+            if let Some(terminal_manager) = terminal_float_manager {
+                refresh_terminal_float_lines(manager, terminal_manager);
+            }
+            apply_workspace_floating_window_models(
+                workspace,
+                terminal_width,
+                terminal_height,
+                manager,
+            );
+        }
     }
 
     match projection_result {
@@ -4363,6 +6081,267 @@ fn build_workspace_render_output(
             Err(WorkspaceRedrawError::from(error))
         }
     }
+}
+
+fn apply_workspace_floating_window_models(
+    workspace: &mut WorkspaceScreenModel,
+    terminal_width: u16,
+    terminal_height: u16,
+    manager: &FloatingWindowManager,
+) {
+    let pane_rects = workspace
+        .panes
+        .iter()
+        .map(|pane| (pane.window_id, pane.rect))
+        .collect::<Vec<_>>();
+    let cursors = workspace
+        .panes
+        .iter()
+        .map(|pane| (pane.window_id, pane.cursor_row, pane.cursor_col))
+        .collect::<Vec<_>>();
+    workspace.floats = manager.resolve_screen_models_with_cursors(
+        terminal_width,
+        terminal_height,
+        &pane_rects,
+        &cursors,
+        Some(workspace.active_window_id),
+    );
+    log::trace!(
+        "[main][floating_window] applied workspace floats: floats={}, terminal=({},{}), active_window_id={}",
+        workspace.floats.len(),
+        terminal_width,
+        terminal_height,
+        workspace.active_window_id
+    );
+}
+
+fn refresh_buffer_backed_float_lines(
+    manager: &mut FloatingWindowManager,
+    core_bridge: &saya::core_bridge::CoreBridge,
+    snapshot: &CoreLightSnapshot,
+) {
+    for request in manager.core_window_float_view_requests() {
+        let Some(window) = snapshot.window(request.window_id) else {
+            log::debug!(
+                "[main][buffer_float] skipping core-window float refresh because window is missing: float_id={}, window_id={}",
+                request.float_id.0,
+                request.window_id
+            );
+            continue;
+        };
+        let start_row = window.topline.saturating_sub(1);
+        let Some(range) = core_bridge.buffer_line_range(
+            window.buf_id,
+            start_row,
+            usize::from(request.content_height),
+        ) else {
+            log::debug!(
+                "[main][buffer_float] skipping core-window float refresh because buffer range is missing: float_id={}, window_id={}, buffer_id={}",
+                request.float_id.0,
+                request.window_id,
+                window.buf_id
+            );
+            continue;
+        };
+        let returned = range.lines.len();
+        let _ = manager.replace_core_window_lines(request.float_id, range.lines);
+        log::trace!(
+            "[main][buffer_float] refreshed core-window float lines: float_id={}, window_id={}, buffer_id={}, start_row={}, requested_lines={}, returned_lines={}",
+            request.float_id.0,
+            request.window_id,
+            window.buf_id,
+            start_row,
+            request.content_height,
+            returned
+        );
+    }
+}
+
+fn refresh_terminal_float_lines(
+    manager: &mut FloatingWindowManager,
+    terminal_manager: &mut TerminalFloatManager,
+) {
+    terminal_manager.drain();
+    for request in manager.terminal_float_view_requests() {
+        let mut lines = terminal_manager.rendered_lines(request.terminal_id);
+        lines.truncate(usize::from(request.content_height));
+        let returned = lines.len();
+        let _ = manager.replace_terminal_lines(request.float_id, lines);
+        log::trace!(
+            "[main][terminal_float] refreshed terminal float lines: float_id={}, terminal_id={}, requested_lines={}, returned_lines={}",
+            request.float_id.0,
+            request.terminal_id,
+            request.content_height,
+            returned
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatingWindowKeyHandling {
+    Consumed,
+    Closed { id: FloatingWindowId },
+}
+
+fn handle_completion_float_key(
+    completion_manager: &mut CompletionFloatManager,
+    floating_manager: &mut FloatingWindowManager,
+    key: &KeyInput,
+    restore_window_id: i32,
+) -> Option<FloatingWindowKeyHandling> {
+    match completion_manager.handle_key(floating_manager, key, Some(restore_window_id)) {
+        CompletionFloatInputOutcome::Selected {
+            menu_id,
+            selected_index,
+        } => {
+            log::debug!(
+                "[main] completion selection updated from focused input: menu_id={}, selected_index={}",
+                menu_id.0,
+                selected_index
+            );
+            Some(FloatingWindowKeyHandling::Consumed)
+        }
+        CompletionFloatInputOutcome::Accepted { menu_id, label } => {
+            log::debug!(
+                "[main] completion candidate accepted from focused input: menu_id={}, label={:?}",
+                menu_id.0,
+                label
+            );
+            Some(FloatingWindowKeyHandling::Closed { id: menu_id })
+        }
+        CompletionFloatInputOutcome::Closed { menu_id } => {
+            Some(FloatingWindowKeyHandling::Closed { id: menu_id })
+        }
+        CompletionFloatInputOutcome::Ignored => None,
+    }
+}
+
+fn handle_core_window_float_key(
+    manager: &mut FloatingWindowManager,
+    core_bridge: &mut saya::core_bridge::CoreBridge,
+    key: &KeyInput,
+) -> Option<FloatingWindowKeyHandling> {
+    let window_id = manager.focused_core_window_id()?;
+    let EditorIntent::EditKey(core_key) = resolve_intent(key) else {
+        log::debug!(
+            "[main][buffer_float] focused core-window float ignored application command key: key={:?}, window_id={}",
+            key,
+            window_id
+        );
+        return None;
+    };
+    let before = core_bridge.light_snapshot();
+    if before.active_window_id() != Some(window_id)
+        && let Err(error) = core_bridge.switch_to_window(window_id)
+    {
+        log::debug!(
+            "[main][buffer_float] failed to focus core window before dispatch: window_id={}, key={:?}, error={:?}",
+            window_id,
+            key,
+            error
+        );
+        return None;
+    }
+    let dispatch_result = core_bridge.dispatch_key(&core_key);
+    let after = core_bridge.light_snapshot();
+    log::debug!(
+        "[main][buffer_float] dispatched key to focused core-window float: window_id={}, key={:?}, core_key={:?}, result={:?}, revision {}->{}, cursor ({},{}) -> ({},{}), mode {:?}->{:?}",
+        window_id,
+        key,
+        core_key,
+        dispatch_result,
+        before.revision,
+        after.revision,
+        before.cursor_row,
+        before.cursor_col,
+        after.cursor_row,
+        after.cursor_col,
+        before.mode,
+        after.mode
+    );
+    Some(FloatingWindowKeyHandling::Consumed)
+}
+
+fn handle_terminal_float_key(
+    manager: &FloatingWindowManager,
+    terminal_manager: &mut TerminalFloatManager,
+    key: &KeyInput,
+) -> Option<FloatingWindowKeyHandling> {
+    let terminal_id = manager.focused_terminal_id()?;
+    let result = match key {
+        KeyInput::PageUp => terminal_manager.scroll(terminal_id, -8),
+        KeyInput::PageDown => terminal_manager.scroll(terminal_id, 8),
+        _ => terminal_manager.write_key(terminal_id, key),
+    };
+    match result {
+        Ok(()) => {
+            log::debug!(
+                "[main][terminal_float] focused terminal float consumed key: terminal_id={}, key={:?}",
+                terminal_id,
+                key
+            );
+            Some(FloatingWindowKeyHandling::Consumed)
+        }
+        Err(error) => {
+            log::debug!(
+                "[main][terminal_float] focused terminal float failed to consume key: terminal_id={}, key={:?}, error={:?}",
+                terminal_id,
+                key,
+                error
+            );
+            None
+        }
+    }
+}
+
+fn handle_floating_window_key(
+    manager: &mut FloatingWindowManager,
+    key: &KeyInput,
+    restore_window_id: i32,
+) -> Option<FloatingWindowKeyHandling> {
+    match manager.handle_focused_static_lines_key_with_restore(key, Some(restore_window_id)) {
+        FloatingInputOutcome::Consumed => Some(FloatingWindowKeyHandling::Consumed),
+        FloatingInputOutcome::Closed { id } => Some(FloatingWindowKeyHandling::Closed { id }),
+        FloatingInputOutcome::Ignored => None,
+    }
+}
+
+fn focus_floating_window_from_mouse_click(
+    manager: &mut FloatingWindowManager,
+    workspace: Option<&WorkspaceScreenModel>,
+    column: u16,
+    row: u16,
+    terminal_width: u16,
+    terminal_height: u16,
+) -> FloatingMouseOutcome {
+    let Some(workspace) = workspace else {
+        log::debug!(
+            "[main] floating mouse focus skipped because no workspace model is available: column={}, row={}",
+            column,
+            row
+        );
+        return FloatingMouseOutcome::PassThrough;
+    };
+    let pane_rects = workspace
+        .panes
+        .iter()
+        .map(|pane| (pane.window_id, pane.rect))
+        .collect::<Vec<_>>();
+    let outcome = manager.focus_topmost_at(
+        column,
+        row,
+        terminal_width,
+        terminal_height,
+        &pane_rects,
+        Some(workspace.active_window_id),
+    );
+    log::debug!(
+        "[main] floating mouse focus resolved: column={}, row={}, outcome={:?}",
+        column,
+        row,
+        outcome
+    );
+    outcome
 }
 
 fn sync_workspace_message_pager(
@@ -5369,6 +7348,25 @@ mod tests {
         std::env::temp_dir().join(format!("saya-main-test-{name}-{nanos}"))
     }
 
+    fn unique_repo_relative_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        PathBuf::from("tmp").join(format!("saya-main-test-{name}-{nanos}"))
+    }
+
+    fn wait_for_test_condition(mut predicate: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if predicate() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(predicate(), "condition did not become true before timeout");
+    }
+
     fn main_test_workspace() -> WorkspaceScreenModel {
         WorkspaceScreenModel {
             panes: vec![saya::screen_model::ScreenModel {
@@ -5397,6 +7395,7 @@ mod tests {
                 command_cursor_col: None,
                 is_active: true,
             }],
+            floats: vec![],
             active_window_id: 1,
             message_line: saya::core_notification_prompt::resolve_workspace_message_line(Vec::<
                 saya::core_notification_prompt::MessageLineCandidate,
@@ -5410,6 +7409,165 @@ mod tests {
             bell: None,
             command_line: None,
         }
+    }
+
+    #[test]
+    fn workspace_render_ignores_saya_float_demo_env() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("SAYA_FLOAT_DEMO");
+        unsafe {
+            std::env::set_var("SAYA_FLOAT_DEMO", "1");
+        }
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut viewport_store = WindowViewportStore::new();
+        let mut search_refresh_store = WindowSearchRefreshStore::default();
+        let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+        let mut floating_window_manager = FloatingWindowManager::default();
+
+        let workspace = build_workspace_render_output(
+            &mut outcome,
+            &mut session_state,
+            &mut viewport_store,
+            ViewportSyncMode::Core,
+            &mut search_refresh_store,
+            &mut markdown_metadata_cache,
+            None,
+            "",
+            0,
+            None,
+            None,
+            None,
+            None,
+            80,
+            24,
+            Some(&mut floating_window_manager),
+            None,
+        )
+        .expect("workspace should render");
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("SAYA_FLOAT_DEMO", value);
+            },
+            None => unsafe {
+                std::env::remove_var("SAYA_FLOAT_DEMO");
+            },
+        }
+        assert!(
+            workspace.floats.is_empty(),
+            "production render must not inject demo floats from SAYA_FLOAT_DEMO"
+        );
+        assert!(floating_window_manager.is_empty());
+    }
+
+    #[test]
+    fn generic_floating_window_ignored_key_does_not_consume_colon_command_prompt() {
+        let mut manager = FloatingWindowManager::default();
+        let id = manager.open_static_lines(
+            vec!["demo".to_string()],
+            FloatingPlacement::editor_at(1, 1),
+            FloatingSize {
+                width: 10,
+                height: 3,
+            },
+            FloatingChrome::borderless(),
+            FloatingZIndex::Hover,
+            true,
+        );
+        assert!(manager.focus_float(id));
+
+        let handling = handle_floating_window_key(&mut manager, &KeyInput::Char(':'), 1);
+
+        assert_eq!(handling, None);
+        assert_eq!(
+            manager.focus(),
+            Some(saya::floating_window::WorkspaceFocus::Float { float_id: id }),
+            "ignored keys must leave float focus unchanged but pass through to later handlers"
+        );
+    }
+
+    #[test]
+    fn floating_window_key_close_restores_active_pane_focus() {
+        let mut manager = FloatingWindowManager::default();
+        let id = manager.open_static_lines(
+            vec!["demo".to_string()],
+            FloatingPlacement::editor_at(1, 1),
+            FloatingSize {
+                width: 10,
+                height: 3,
+            },
+            FloatingChrome::borderless(),
+            FloatingZIndex::Hover,
+            true,
+        );
+        assert!(manager.focus_float(id));
+
+        let handling = handle_floating_window_key(&mut manager, &KeyInput::Escape, 9);
+
+        assert_eq!(handling, Some(FloatingWindowKeyHandling::Closed { id }));
+        assert_eq!(
+            manager.focus(),
+            Some(saya::floating_window::WorkspaceFocus::Pane { window_id: 9 }),
+            "closed float should restore the active pane focus through the main routing helper"
+        );
+    }
+
+    #[test]
+    fn floating_window_mouse_focus_helper_focuses_float_before_core_mouse_dispatch() {
+        let workspace = main_test_workspace();
+        let mut manager = FloatingWindowManager::default();
+        let id = manager.open_static_lines(
+            vec!["demo".to_string()],
+            FloatingPlacement::editor_at(1, 1),
+            FloatingSize {
+                width: 10,
+                height: 3,
+            },
+            FloatingChrome::borderless(),
+            FloatingZIndex::Hover,
+            true,
+        );
+
+        let outcome =
+            focus_floating_window_from_mouse_click(&mut manager, Some(&workspace), 2, 2, 80, 24);
+
+        assert_eq!(outcome, FloatingMouseOutcome::Focused { id });
+        assert_eq!(
+            manager.focus(),
+            Some(saya::floating_window::WorkspaceFocus::Float { float_id: id })
+        );
+    }
+
+    #[test]
+    fn floating_window_mouse_focus_helper_passes_through_non_mouse_float() {
+        let workspace = main_test_workspace();
+        let mut manager = FloatingWindowManager::default();
+        let id = manager.open_static_lines(
+            vec!["demo".to_string()],
+            FloatingPlacement::editor_at(1, 1),
+            FloatingSize {
+                width: 10,
+                height: 3,
+            },
+            FloatingChrome::borderless(),
+            FloatingZIndex::Hover,
+            true,
+        );
+        assert!(manager.set_mouse_enabled(id, false));
+
+        let outcome =
+            focus_floating_window_from_mouse_click(&mut manager, Some(&workspace), 2, 2, 80, 24);
+
+        assert_eq!(outcome, FloatingMouseOutcome::PassThrough);
+        assert_eq!(manager.focus(), None);
     }
 
     #[test]
@@ -5565,6 +7723,8 @@ mod tests {
             None,
             80,
             24,
+            None,
+            None,
         )
         .expect("syntax-off workspace should render");
         assert!(
@@ -5610,6 +7770,8 @@ mod tests {
                 None,
                 80,
                 24,
+                None,
+                None,
             )
             .expect("syntax-on workspace should render");
             if workspace_has_syntax_chunks(&workspace) {
@@ -6738,7 +8900,934 @@ mod tests {
                 "/tmp/project"
             )))
         );
+        assert_eq!(
+            parse_main_host_command(r#"lsp.floatHover {"result":{"contents":"hover"}}"#),
+            Some(MainHostCommand::LspHoverFloat(
+                r#"{"result":{"contents":"hover"}}"#.to_string()
+            ))
+        );
+        assert_eq!(
+            parse_main_host_command(r#"lsp.floatDiagnostics {"diagnostics":[]}"#),
+            Some(MainHostCommand::LspDiagnosticFloat(
+                r#"{"diagnostics":[]}"#.to_string()
+            ))
+        );
+        assert_eq!(
+            parse_main_host_command(r#"completion.floatMenu {"candidates":["alpha"]}"#),
+            Some(MainHostCommand::CompletionMenuFloat(
+                r#"{"candidates":["alpha"]}"#.to_string()
+            ))
+        );
+        assert_eq!(
+            parse_main_host_command(r#"buffer.floatWindow {"width":20}"#),
+            Some(MainHostCommand::BufferWindowFloat(
+                r#"{"width":20}"#.to_string()
+            ))
+        );
+        assert_eq!(
+            parse_main_host_command(r#"terminal.float {"command":"sh"}"#),
+            Some(MainHostCommand::TerminalFloat(
+                r#"{"command":"sh"}"#.to_string()
+            ))
+        );
+        assert_eq!(
+            parse_main_host_command(r#"terminal.closeFloat {"terminalId":1}"#),
+            Some(MainHostCommand::TerminalCloseFloat(
+                r#"{"terminalId":1}"#.to_string()
+            ))
+        );
         assert_eq!(parse_main_host_command("set number"), None);
+    }
+
+    #[test]
+    fn runtime_lsp_hover_float_host_command_opens_replacing_cursor_relative_float() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+
+        execute_runtime_host_command_with_floats(
+            r#"lsp.floatHover {"result":{"contents":"old hover"}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("first hover should open");
+        execute_runtime_host_command_with_floats(
+            r#"lsp.floatHover {"result":{"contents":"new hover"}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("second hover should replace first");
+
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        let floats = floating_window_manager.resolve_screen_models_with_cursors(
+            80,
+            24,
+            &[(
+                active_window_id,
+                saya::screen_model::PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 24,
+                },
+            )],
+            &[(active_window_id, 0, 0)],
+            Some(active_window_id),
+        );
+        assert_eq!(floats.len(), 1);
+        assert_eq!(floats[0].lines, vec!["new hover"]);
+    }
+
+    #[test]
+    fn runtime_lsp_feature_host_commands_render_lists_and_navigate_definition() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("lsp-definition-target").with_extension("rs");
+        std::fs::write(&target_path, "fn target() {}\nfn caller() {}\n")
+            .expect("definition target should be written");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+
+        execute_runtime_host_command_with_floats(
+            &format!(
+                r#"lsp.gotoDefinition {{"response":{{"result":{{"uri":"file://{}","range":{{"start":{{"line":1,"character":0}}}}}}}}}}"#,
+                target_path.display()
+            ),
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("definition navigation should apply");
+        assert_eq!(session_state.target_path(), Some(&target_path));
+        assert_eq!(outcome.core_bridge.light_snapshot().cursor_row, 1);
+
+        execute_runtime_host_command_with_floats(
+            r#"lsp.floatLocations {"title":"References","response":{"result":[{"uri":"file:///workspace/src/main.rs","range":{"start":{"line":4,"character":1}}},{"uri":"file:///workspace/src/lib.rs","range":{"start":{"line":9,"character":3}}}]}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("references list should open");
+        execute_runtime_host_command_with_floats(
+            r#"lsp.floatSymbols {"response":{"result":[{"name":"main","kind":12,"range":{"start":{"line":0,"character":0}},"children":[{"name":"child","kind":6,"range":{"start":{"line":2,"character":2}}}]}]}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("symbol outline should open");
+
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        let floats = floating_window_manager.resolve_screen_models(
+            100,
+            30,
+            &[(
+                active_window_id,
+                saya::screen_model::PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 30,
+                },
+            )],
+            Some(active_window_id),
+        );
+        let rendered_lines = floats
+            .iter()
+            .flat_map(|float| float.lines.iter().cloned())
+            .collect::<Vec<_>>();
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("src/main.rs:5:2")),
+            "references should render line and column in a headless float: {rendered_lines:?}"
+        );
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("main") && line.contains("Function")),
+            "document symbols should render a selectable outline: {rendered_lines:?}"
+        );
+        assert!(
+            rendered_lines.iter().any(|line| line.contains("child")),
+            "nested document symbols should be rendered: {rendered_lines:?}"
+        );
+
+        std::fs::remove_file(target_path).expect("cleanup definition target");
+    }
+
+    #[test]
+    fn runtime_lsp_diagnostics_publish_and_cycle_open_diagnostic_floats() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+
+        execute_runtime_host_command_with_floats(
+            r#"lsp.publishDiagnostics {"params":{"uri":"file:///workspace/src/main.rs","diagnostics":[{"severity":1,"message":"first error","range":{"start":{"line":2,"character":4}}},{"severity":2,"message":"second warning","range":{"start":{"line":5,"character":1}}}]}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            Some(&mut lsp_diagnostic_store),
+            None,
+        )
+        .expect("diagnostics should publish");
+        assert!(!lsp_diagnostic_store.is_empty());
+
+        execute_runtime_host_command_with_floats(
+            "lsp.nextDiagnostic",
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            Some(&mut lsp_diagnostic_store),
+            None,
+        )
+        .expect("next diagnostic should open");
+        execute_runtime_host_command_with_floats(
+            "lsp.nextDiagnostic",
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            Some(&mut lsp_diagnostic_store),
+            None,
+        )
+        .expect("next diagnostic should cycle");
+
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        let floats = floating_window_manager.resolve_screen_models(
+            80,
+            24,
+            &[(
+                active_window_id,
+                saya::screen_model::PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 24,
+                },
+            )],
+            Some(active_window_id),
+        );
+        assert_eq!(floats.len(), 1);
+        assert_eq!(floats[0].lines, vec!["Warning: second warning"]);
+        assert!(matches!(
+            floating_window_manager
+                .debug_window(floats[0].id)
+                .expect("diagnostic float should exist")
+                .placement
+                .relative_to,
+            FloatingRelativeTo::BufferPosition {
+                line: 5,
+                column: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn runtime_completion_float_host_command_opens_focusable_menu_and_routes_selection() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+
+        execute_runtime_host_command_with_floats(
+            r#"completion.floatMenu {"selectedIndex":0,"maxVisibleItems":2,"candidates":[{"label":"alpha","kind":"Text","documentation":"Alpha docs"},{"label":"beta","detail":"detail","kind":"Text","documentation":"Beta docs"}]}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            Some(&mut completion_float_manager),
+            None,
+            None,
+        )
+        .expect("completion menu should open");
+
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        let menu_id = floating_window_manager
+            .focused_float_id()
+            .expect("completion menu should take focus");
+        assert_eq!(
+            handle_completion_float_key(
+                &mut completion_float_manager,
+                &mut floating_window_manager,
+                &KeyInput::Down,
+                active_window_id,
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            floating_window_manager
+                .debug_window(menu_id)
+                .expect("menu should stay open after selection")
+                .lines,
+            vec!["  [Text] alpha", "> [Text] beta - detail"]
+        );
+    }
+
+    #[test]
+    fn runtime_buffer_float_host_command_opens_core_window_float_and_renders_buffer_lines() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("buffer-float-render").with_extension("txt");
+        std::fs::write(&target_path, "alpha\nbeta\ngamma\n").expect("target file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .expect("active window");
+
+        execute_runtime_host_command_with_floats(
+            r#"buffer.floatWindow {"width":24,"height":4,"border":"none"}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("buffer float should open");
+
+        assert_eq!(
+            floating_window_manager.focused_core_window_id(),
+            Some(active_window_id)
+        );
+        refresh_buffer_backed_float_lines(
+            &mut floating_window_manager,
+            &outcome.core_bridge,
+            &outcome.core_bridge.light_snapshot(),
+        );
+        let floats = floating_window_manager.resolve_screen_models(
+            80,
+            24,
+            &[(
+                active_window_id,
+                saya::screen_model::PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 24,
+                },
+            )],
+            Some(active_window_id),
+        );
+
+        assert_eq!(floats.len(), 1);
+        assert_eq!(
+            floats[0].content,
+            saya::floating_window::FloatingContentRef::CoreWindow {
+                window_id: active_window_id
+            }
+        );
+        assert_eq!(floats[0].lines, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn runtime_window_open_float_api_opens_static_lines_float_through_application_host() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let request = RuntimeFloatOpenRequest {
+            content: RuntimeFloatContentRequest::Lines {
+                lines: vec!["phase8".to_string(), "runtime-api".to_string()],
+            },
+            relative_to: Some(RuntimeFloatRelativeToRequest::Editor),
+            width: Some(24),
+            height: Some(4),
+            row: Some(1),
+            col: Some(2),
+            anchor: Some("nw".to_string()),
+            focusable: Some(true),
+            border: Some("single".to_string()),
+            z_index: Some(RuntimeFloatZIndexRequest::Named("user".to_string())),
+            lifecycle: Some("manual".to_string()),
+            group: Some("phase8:api".to_string()),
+        };
+
+        let snapshot = execute_runtime_window_open_float(
+            request,
+            &mut outcome,
+            Some(&mut floating_window_manager),
+            None,
+        )
+        .expect("runtime window openFloat should open a float");
+
+        assert_eq!(snapshot.kind, "lines");
+        assert!(snapshot.focused);
+        assert_eq!(snapshot.replacement_group.as_deref(), Some("phase8:api"));
+        assert_eq!(
+            floating_window_manager
+                .debug_window(FloatingWindowId(snapshot.id))
+                .expect("float should exist")
+                .lines,
+            vec!["phase8", "runtime-api"]
+        );
+    }
+
+    #[test]
+    fn runtime_buffer_float_uses_existing_backing_window_without_switching_active_window() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let first_path = unique_path("buffer-float-backed-first").with_extension("txt");
+        std::fs::write(&first_path, "first\n").expect("first target file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(first_path.clone()),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let first_snapshot = outcome.core_bridge.light_snapshot();
+        let first_buffer_id = first_snapshot
+            .active_window()
+            .expect("first active window")
+            .buf_id;
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":split")
+            .expect("split should create a backing window");
+        outcome
+            .core_bridge
+            .apply_ex_command(":enew")
+            .expect("enew should create a second active buffer");
+        let second_snapshot = outcome.core_bridge.light_snapshot();
+        let active_window_id = second_snapshot
+            .active_window_id()
+            .expect("second active window");
+        let active_buffer_id = second_snapshot
+            .active_window()
+            .expect("second active window info")
+            .buf_id;
+        assert_ne!(
+            first_buffer_id, active_buffer_id,
+            "test setup requires a non-active buffer"
+        );
+        let backing_window_id = second_snapshot
+            .windows
+            .iter()
+            .find(|window| window.buf_id == first_buffer_id)
+            .expect("first buffer should still have an inactive backing window")
+            .id;
+        assert_ne!(
+            backing_window_id, active_window_id,
+            "test setup requires an inactive backing window"
+        );
+
+        let request = RuntimeFloatOpenRequest {
+            content: RuntimeFloatContentRequest::Buffer {
+                buffer_id: Some(first_buffer_id as u64),
+                window_id: None,
+            },
+            relative_to: Some(RuntimeFloatRelativeToRequest::Editor),
+            width: Some(24),
+            height: Some(4),
+            row: Some(1),
+            col: Some(2),
+            anchor: Some("nw".to_string()),
+            focusable: Some(true),
+            border: Some("single".to_string()),
+            z_index: Some(RuntimeFloatZIndexRequest::Named("user".to_string())),
+            lifecycle: Some("manual".to_string()),
+            group: Some("phase10:buffer".to_string()),
+        };
+
+        let snapshot = execute_runtime_window_open_float(
+            request,
+            &mut outcome,
+            Some(&mut floating_window_manager),
+            None,
+        )
+        .expect("backed buffer float should use the existing core window");
+
+        assert_eq!(snapshot.kind, "buffer");
+        assert_eq!(
+            floating_window_manager.focused_core_window_id(),
+            Some(backing_window_id)
+        );
+        let after = outcome.core_bridge.light_snapshot();
+        assert_eq!(after.active_window_id(), Some(active_window_id));
+        assert_eq!(
+            after.active_window().map(|window| window.buf_id),
+            Some(active_buffer_id),
+            "buffer float opening must not switch the active core window buffer"
+        );
+    }
+
+    #[test]
+    fn runtime_buffer_float_rejects_unbacked_buffer_without_partial_float() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let before = outcome.core_bridge.light_snapshot();
+        let active_window_id = before.active_window_id();
+        let active_buffer_id = before.active_window().map(|window| window.buf_id);
+        let unbacked_buffer_id = before
+            .buffers
+            .iter()
+            .map(|buffer| buffer.id)
+            .max()
+            .unwrap_or(0)
+            + 10_000;
+
+        let request = RuntimeFloatOpenRequest {
+            content: RuntimeFloatContentRequest::Buffer {
+                buffer_id: Some(unbacked_buffer_id as u64),
+                window_id: None,
+            },
+            relative_to: Some(RuntimeFloatRelativeToRequest::Editor),
+            width: Some(24),
+            height: Some(4),
+            row: Some(1),
+            col: Some(2),
+            anchor: Some("nw".to_string()),
+            focusable: Some(true),
+            border: Some("single".to_string()),
+            z_index: Some(RuntimeFloatZIndexRequest::Named("user".to_string())),
+            lifecycle: Some("manual".to_string()),
+            group: Some("phase10:unbacked-buffer".to_string()),
+        };
+
+        let error = execute_runtime_window_open_float(
+            request,
+            &mut outcome,
+            Some(&mut floating_window_manager),
+            None,
+        )
+        .expect_err("unbacked buffer float should be rejected");
+
+        assert!(matches!(
+            error,
+            RuntimeCommandError::CommandFailed { ref name, ref message }
+                if name == "window.openFloat"
+                    && message.contains("hidden core-window creation is not available")
+        ));
+        let after = outcome.core_bridge.light_snapshot();
+        assert_eq!(after.active_window_id(), active_window_id);
+        assert_eq!(
+            after.active_window().map(|window| window.buf_id),
+            active_buffer_id
+        );
+        assert!(floating_window_manager.is_empty());
+    }
+
+    #[test]
+    fn runtime_window_open_float_api_opens_pty_terminal_float_and_renders_output() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        let request = RuntimeFloatOpenRequest {
+            content: RuntimeFloatContentRequest::Terminal {
+                command: vec![
+                    "sh".to_string(),
+                    "-lc".to_string(),
+                    "printf 'phase9-runtime-terminal\\n'".to_string(),
+                ],
+                close_behavior: Some("killOnClose".to_string()),
+            },
+            relative_to: Some(RuntimeFloatRelativeToRequest::Editor),
+            width: Some(34),
+            height: Some(6),
+            row: Some(1),
+            col: Some(2),
+            anchor: Some("nw".to_string()),
+            focusable: Some(true),
+            border: Some("single".to_string()),
+            z_index: Some(RuntimeFloatZIndexRequest::Named("user".to_string())),
+            lifecycle: Some("manual".to_string()),
+            group: Some("phase9:pty-api".to_string()),
+        };
+
+        let snapshot = execute_runtime_window_open_float(
+            request,
+            &mut outcome,
+            Some(&mut floating_window_manager),
+            Some(&mut terminal_float_manager),
+        )
+        .expect("runtime window openFloat should open a PTY terminal float");
+
+        assert_eq!(snapshot.kind, "terminal");
+        assert!(snapshot.focused);
+        wait_for_test_condition(|| {
+            refresh_terminal_float_lines(&mut floating_window_manager, &mut terminal_float_manager);
+            floating_window_manager
+                .debug_window(FloatingWindowId(snapshot.id))
+                .expect("terminal float should exist")
+                .lines
+                .iter()
+                .any(|line| line.contains("phase9-runtime-terminal"))
+        });
+
+        assert!(
+            execute_runtime_window_close_float(
+                snapshot.id,
+                Some(&mut floating_window_manager),
+                Some(&mut terminal_float_manager),
+            )
+            .expect("terminal float should close")
+        );
+    }
+
+    #[test]
+    fn runtime_terminal_float_host_command_opens_pty_float_and_renders_output() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+
+        execute_runtime_host_command_with_floats(
+            r#"terminal.float {"command":"sh","args":["-lc","printf 'phase7-main-terminal\n'"],"width":30,"height":4,"border":"single"}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            Some(&mut terminal_float_manager),
+        )
+        .expect("terminal float should open");
+
+        let terminal_id = floating_window_manager
+            .focused_terminal_id()
+            .expect("terminal float should take focus");
+        wait_for_test_condition(|| {
+            refresh_terminal_float_lines(&mut floating_window_manager, &mut terminal_float_manager);
+            floating_window_manager
+                .debug_window(
+                    floating_window_manager
+                        .focused_float_id()
+                        .expect("terminal float should stay focused"),
+                )
+                .expect("terminal float should exist")
+                .lines
+                .iter()
+                .any(|line| line.contains("phase7-main-terminal"))
+        });
+
+        assert_eq!(
+            floating_window_manager.focused_terminal_id(),
+            Some(terminal_id)
+        );
+    }
+
+    #[test]
+    fn focused_terminal_float_routes_input_through_main_key_handler() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        let terminal_id = terminal_float_manager
+            .spawn(TerminalFloatSpawnRequest {
+                command: "sh".to_string(),
+                args: vec![
+                    "-lc".to_string(),
+                    "read line; printf \"main-echo:%s\\n\" \"$line\"; sleep 30".to_string(),
+                ],
+                width: 32,
+                height: 4,
+                close_behavior: TerminalFloatCloseBehavior::KillOnClose,
+            })
+            .expect("terminal session should spawn");
+        let float_id = floating_window_manager.open_terminal(
+            terminal_id,
+            FloatingPlacement::editor_at(1, 2),
+            FloatingSize {
+                width: 36,
+                height: 6,
+            },
+            FloatingChrome {
+                border: FloatingBorder::Single,
+            },
+            FloatingZIndex::User,
+            true,
+        );
+        floating_window_manager.focus_float(float_id);
+
+        assert_eq!(
+            handle_terminal_float_key(
+                &floating_window_manager,
+                &mut terminal_float_manager,
+                &KeyInput::Char('o'),
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            handle_terminal_float_key(
+                &floating_window_manager,
+                &mut terminal_float_manager,
+                &KeyInput::Char('k'),
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            handle_terminal_float_key(
+                &floating_window_manager,
+                &mut terminal_float_manager,
+                &KeyInput::Enter,
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+
+        wait_for_test_condition(|| {
+            refresh_terminal_float_lines(&mut floating_window_manager, &mut terminal_float_manager);
+            floating_window_manager
+                .debug_window(float_id)
+                .expect("terminal float should exist")
+                .lines
+                .iter()
+                .any(|line| line.contains("main-echo:ok"))
+        });
+        terminal_float_manager
+            .kill(terminal_id)
+            .expect("cleanup terminal session");
+    }
+
+    #[test]
+    fn focused_buffer_float_routes_edit_keys_through_core_and_preserves_dirty_state() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("buffer-float-edit").with_extension("txt");
+        std::fs::write(&target_path, "hello\n").expect("target file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut manager = FloatingWindowManager::default();
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .expect("active window");
+        let id = manager.open_core_window(
+            active_window_id,
+            FloatingPlacement::editor_at(1, 1),
+            FloatingSize {
+                width: 20,
+                height: 4,
+            },
+            FloatingChrome::borderless(),
+            FloatingZIndex::User,
+            true,
+        );
+        assert!(manager.focus_float(id));
+
+        assert_eq!(
+            handle_core_window_float_key(
+                &mut manager,
+                &mut outcome.core_bridge,
+                &KeyInput::Char('i')
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            handle_core_window_float_key(
+                &mut manager,
+                &mut outcome.core_bridge,
+                &KeyInput::Char('Z')
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            handle_core_window_float_key(&mut manager, &mut outcome.core_bridge, &KeyInput::Escape),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+
+        let snapshot = outcome.core_bridge.snapshot();
+        assert!(
+            snapshot.dirty,
+            "buffer-float edits must preserve dirty state"
+        );
+        assert!(
+            snapshot.text.starts_with("Zhello"),
+            "edit key should be routed through vim-core-rs: {:?}",
+            snapshot.text
+        );
+        assert_eq!(
+            manager.focus(),
+            Some(saya::floating_window::WorkspaceFocus::Float { float_id: id }),
+            "editing Escape should leave insert mode through core, not close the buffer float"
+        );
+    }
+
+    #[test]
+    fn focused_buffer_float_routes_normal_movement_and_page_scroll_through_core_window() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("buffer-float-scroll").with_extension("txt");
+        let text = (0..40)
+            .map(|index| format!("line-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&target_path, text).expect("target file");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::File(target_path),
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        outcome.core_bridge.set_screen_size(6, 80);
+        let mut manager = FloatingWindowManager::default();
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .expect("active window");
+        let id = manager.open_core_window(
+            active_window_id,
+            FloatingPlacement::editor_at(1, 1),
+            FloatingSize {
+                width: 20,
+                height: 4,
+            },
+            FloatingChrome::borderless(),
+            FloatingZIndex::User,
+            true,
+        );
+        assert!(manager.focus_float(id));
+
+        assert_eq!(
+            handle_core_window_float_key(
+                &mut manager,
+                &mut outcome.core_bridge,
+                &KeyInput::Char('j')
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        let after_move = outcome.core_bridge.light_snapshot();
+        assert_eq!(after_move.cursor_row, 1);
+        let before_scroll_topline = after_move
+            .window(active_window_id)
+            .expect("active window after movement")
+            .topline;
+
+        assert_eq!(
+            handle_core_window_float_key(
+                &mut manager,
+                &mut outcome.core_bridge,
+                &KeyInput::Ctrl('f')
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        let after_scroll = outcome.core_bridge.light_snapshot();
+        let after_scroll_topline = after_scroll
+            .window(active_window_id)
+            .expect("active window after scroll")
+            .topline;
+
+        assert!(
+            after_scroll_topline > before_scroll_topline,
+            "focused buffer-float page scroll should update the backing core window viewport: {before_scroll_topline} -> {after_scroll_topline}"
+        );
     }
 
     #[test]
@@ -6804,6 +9893,7 @@ mod tests {
         let snapshot = host_session.current_buffer_snapshot();
 
         assert_eq!(snapshot.cursor_row, 1);
+        assert_eq!(snapshot.cursor_col, 0);
         assert_eq!(snapshot.current_line, "src/");
         std::fs::remove_file(target_path).expect("cleanup");
     }
@@ -7084,14 +10174,23 @@ mod tests {
         let mut transient_msg = None;
         let mut need_redraw = false;
         let mut runtime_presentation_intents = Vec::new();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
         let shutdown = execute_startup_keymap_registered_command(
             Some(runtime_session),
             command_name,
             outcome,
             session_state,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
+            None,
         )
         .await;
 
@@ -7108,14 +10207,23 @@ mod tests {
         let mut transient_msg = None;
         let mut need_redraw = false;
         let mut runtime_presentation_intents = Vec::new();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
         let shutdown = execute_startup_keymap_registered_command(
             Some(runtime_session),
             command_name,
             outcome,
             session_state,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
+            None,
         )
         .await;
 
@@ -8210,14 +11318,23 @@ mod tests {
         let StartupKeymapAction::RegisteredCommand(command_name) = action else {
             panic!("dired keymap should point at a registered command");
         };
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
         execute_startup_keymap_registered_command(
             Some(&mut runtime_session),
             &command_name,
             &mut outcome,
             &mut session_state,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
+            None,
         )
         .await;
 
@@ -8279,14 +11396,23 @@ mod tests {
         let StartupKeymapAction::RegisteredCommand(command_name) = action else {
             panic!("dired keymap should point at a registered command");
         };
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
         execute_startup_keymap_registered_command(
             Some(&mut runtime_session),
             &command_name,
             &mut outcome,
             &mut session_state,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
+            None,
         )
         .await;
 
@@ -8305,6 +11431,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config_path = unique_path("repository-dired-up-relative-init").with_extension("ts");
+        let root_path = unique_repo_relative_path("repository-dired-up-relative");
+        let child_path = root_path.join("child");
+        let target_path = child_path.join("file.txt");
+        std::fs::create_dir_all(&child_path).expect("child directory");
+        std::fs::write(&target_path, "relative\n").expect("relative test file");
         let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-dired.ts");
         std::fs::write(
             &config_path,
@@ -8319,7 +11450,7 @@ mod tests {
         .expect("config file");
 
         let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(PathBuf::from("AGENTS.md")),
+            input_source: saya::cli::InputSource::File(target_path.clone()),
             config_source: saya::cli::ConfigSource::File(config_path.clone()),
             ..saya::cli::LaunchRequest::default()
         })
@@ -8341,23 +11472,39 @@ mod tests {
             let mut transient_msg = None;
             let mut need_redraw = false;
             let mut runtime_presentation_intents = Vec::new();
+            let mut floating_window_manager = FloatingWindowManager::default();
+            let mut completion_float_manager = CompletionFloatManager::default();
+            let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+            let mut terminal_float_manager = TerminalFloatManager::default();
             execute_startup_keymap_registered_command(
                 Some(&mut runtime_session),
                 &command_name,
                 &mut outcome,
                 &mut session_state,
+                &mut floating_window_manager,
+                &mut completion_float_manager,
+                &mut lsp_diagnostic_store,
+                &mut terminal_float_manager,
                 &mut transient_msg,
                 &mut need_redraw,
                 &mut runtime_presentation_intents,
+                None,
             )
             .await;
-            assert_eq!(transient_msg, None);
+            assert!(
+                matches!(
+                    transient_msg.as_deref(),
+                    None | Some("E301: Oops, lost the swap file!!!")
+                ),
+                "dired up should not surface unrelated runtime errors: {transient_msg:?}"
+            );
         }
 
-        assert_eq!(outcome.target_path, Some(PathBuf::from("..")));
-        assert_eq!(session_state.target_path(), Some(&PathBuf::from("..")));
+        assert_eq!(outcome.target_path, Some(root_path.clone()));
+        assert_eq!(session_state.target_path(), Some(&root_path));
 
         std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup relative root directory");
     }
 
     #[test]
@@ -8531,6 +11678,7 @@ mod tests {
                 command_cursor_col: None,
                 is_active: true,
             }],
+            floats: vec![],
             active_window_id: 1,
             message_line: saya::core_notification_prompt::resolve_workspace_message_line(Vec::<
                 saya::core_notification_prompt::MessageLineCandidate,

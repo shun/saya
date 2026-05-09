@@ -48,8 +48,19 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("commands"));
     assert!(declaration.contains("buffer"));
     assert!(declaration.contains("window"));
+    assert!(declaration.contains("SayaRuntimeOpenFloatOptions"));
+    assert!(declaration.contains("SayaReadonlyFloatSnapshot"));
+    assert!(declaration.contains("openFloat"));
+    assert!(declaration.contains("close(id: number)"));
+    assert!(declaration.contains("focus(id: number)"));
+    assert!(declaration.contains("floats()"));
     assert!(declaration.contains("editor"));
     assert!(declaration.contains("filer"));
+    assert!(declaration.contains("lsp"));
+    assert!(declaration.contains("SayaRuntimeLspSurface"));
+    assert!(declaration.contains("SayaLspRuntimeBridgeRequest"));
+    assert!(declaration.contains("SayaLspRuntimeBridgeResponse"));
+    assert!(declaration.contains("positionEncoding"));
     assert!(declaration.contains("SayaRuntimeFilerSurface"));
     assert!(declaration.contains("SayaFilerListOptions"));
     assert!(declaration.contains("filter?: string | null"));
@@ -76,8 +87,16 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("interface SayaDirectoryBufferOperationPrompt"));
     assert!(declaration.contains("interface SayaDirectoryBufferApplyReport"));
     assert!(declaration.contains("cursorRow"));
+    assert!(declaration.contains("cursorCol"));
     assert!(declaration.contains("currentLine"));
     assert!(declaration.contains("SayaRuntimeSurface"));
+
+    for forbidden in ["renderer", "FloatingScreenModel", "rawTerminal", "drawCell"] {
+        assert!(
+            !declaration.contains(forbidden),
+            "runtime float API must not expose raw renderer access: {forbidden}"
+        );
+    }
 }
 
 #[test]

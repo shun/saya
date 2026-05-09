@@ -194,6 +194,26 @@ impl CoreBridge {
         range
     }
 
+    pub fn switch_to_window(&mut self, window_id: i32) -> Result<(), CoreSessionError> {
+        log::debug!("[core_bridge] switching active window: window_id={window_id}");
+        self.session
+            .switch_to_window(window_id)
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.drain_pending_host_actions_from_session();
+        self.drain_pending_events_from_session();
+        Ok(())
+    }
+
+    pub fn switch_to_buffer(&mut self, buffer_id: i32) -> Result<(), CoreSessionError> {
+        log::debug!("[core_bridge] switching active buffer: buffer_id={buffer_id}");
+        self.session
+            .switch_to_buffer(buffer_id)
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.drain_pending_host_actions_from_session();
+        self.drain_pending_events_from_session();
+        Ok(())
+    }
+
     /// core がページスクロールの基準にする screen size を host 側で同期する。
     pub fn set_screen_size(&mut self, rows: i32, cols: i32) {
         log::debug!(

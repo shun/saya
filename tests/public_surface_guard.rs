@@ -89,6 +89,18 @@ fn startup_surface_excludes_compatibility_string_apis() {
 fn runtime_surface_excludes_compatibility_string_apis() {
     let surface = runtime_public_surface_paths();
 
+    for expected in [
+        "saya.window.openFloat",
+        "saya.window.close",
+        "saya.window.focus",
+        "saya.window.floats",
+    ] {
+        assert!(
+            surface.contains(&expected),
+            "runtime surface should expose typed floating-window API: {expected}"
+        );
+    }
+
     for forbidden in FORBIDDEN_COMPAT_STRING_APIS {
         assert!(
             !surface.contains(forbidden),
@@ -190,7 +202,7 @@ fn main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
     for expected in [
         "StructuralRefresh::from_folded_effects(&effects.structural)",
         "last_structural_refresh",
-        "sync_from_windows_with_invalidations",
+        "sync_from_windows_for_render",
         "with_viewport_sync_summary",
         "projection_summary()",
         "with_projection_summary",

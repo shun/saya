@@ -1,3 +1,4 @@
+use crate::floating_window::{FloatingBorder, FloatingScreenModel};
 #[cfg(test)]
 use crate::screen_model::PaneRect;
 use crate::screen_model::{
@@ -337,7 +338,8 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
         );
     }
 
-    if let Some((command_line, command_rect)) = model.command_line.as_ref().zip(layout.command_rect)
+    let command_cursor = if let Some((command_line, command_rect)) =
+        model.command_line.as_ref().zip(layout.command_rect)
     {
         f.render_widget(
             Paragraph::new(command_line.text.as_str()).style(ui_style(
@@ -347,12 +349,68 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
             )),
             command_rect,
         );
-        f.set_cursor_position((command_line.cursor_col.min(size.width), command_rect.y));
+        Some((command_line.cursor_col.min(size.width), command_rect.y))
+    } else {
+        None
+    };
+
+    render_floats(f, &model.floats, text_mode, theme);
+
+    if let Some((cursor_x, cursor_y)) = command_cursor {
+        f.set_cursor_position((cursor_x, cursor_y));
         return;
     }
 
     if let Some((cursor_x, cursor_y)) = layout.cursor {
         f.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+fn render_floats(
+    f: &mut Frame<'_>,
+    floats: &[FloatingScreenModel],
+    text_mode: RenderTextMode,
+    theme: &ResolvedTheme,
+) {
+    let mut sorted = floats.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|float| (float.zindex, float.creation_order));
+
+    for float in sorted {
+        let rect = Rect {
+            x: float.rect.x,
+            y: float.rect.y,
+            width: float.rect.width,
+            height: float.rect.height,
+        };
+        log::debug!(
+            "[tui_renderer] rendering float: id={}, rect=({},{},{},{}), lines={}, border={:?}, zindex={}, creation_order={}",
+            float.id.0,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            float.lines.len(),
+            float.chrome.border,
+            float.zindex,
+            float.creation_order
+        );
+        f.render_widget(Clear, rect);
+        let text = Text::from(
+            float
+                .lines
+                .iter()
+                .map(|line| Line::from(line.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let paragraph = match float.chrome.border {
+            FloatingBorder::None => {
+                Paragraph::new(text).style(ui_style(theme, UiStyleKey::Message, text_mode))
+            }
+            FloatingBorder::Single => Paragraph::new(text)
+                .style(ui_style(theme, UiStyleKey::Message, text_mode))
+                .block(Block::bordered()),
+        };
+        f.render_widget(paragraph, rect);
     }
 }
 
@@ -670,6 +728,7 @@ fn draw_editor_frame<B: Backend>(
         terminal,
         &WorkspaceScreenModel {
             panes: vec![model.clone()],
+            floats: vec![],
             active_window_id: model.window_id,
             message_line: model.message_line.as_deref().map_or_else(
                 || {
@@ -1316,6 +1375,9 @@ mod tests {
         resolve_workspace_message_line,
     };
     use crate::editor_session::EditorSessionState;
+    use crate::floating_window::{
+        FloatingBorder, FloatingChrome, FloatingContentRef, FloatingScreenModel, FloatingWindowId,
+    };
     use crate::markdown_structure::MarkdownDocumentMap;
     use crate::screen_model::{
         ProjectionInput, ScreenLineProjection, ScreenSearchOverlay, project,
@@ -1395,6 +1457,7 @@ mod tests {
     fn workspace_with_typed_message(message_line: Option<&str>) -> WorkspaceScreenModel {
         WorkspaceScreenModel {
             panes: vec![screen_model_with_message(None)],
+            floats: vec![],
             active_window_id: 1,
             message_line: message_line.map_or_else(
                 || resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
@@ -2282,6 +2345,7 @@ mod tests {
             &mut terminal,
             &WorkspaceScreenModel {
                 panes: vec![model.clone()],
+                floats: vec![],
                 active_window_id: model.window_id,
                 message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
                 message_area_height: 5,
@@ -2469,6 +2533,7 @@ mod tests {
             &mut terminal,
             &WorkspaceScreenModel {
                 panes: vec![model.clone()],
+                floats: vec![],
                 active_window_id: model.window_id,
                 message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
                 message_area_height: 5,
@@ -3207,6 +3272,7 @@ mod tests {
                     is_active: false,
                 },
             ],
+            floats: vec![],
             active_window_id: 20,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
             message_area_height: 5,
@@ -3224,6 +3290,117 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position(Position::new(22, 1));
+    }
+
+    #[test]
+    fn workspace_render_composes_floats_above_panes_by_zindex() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 6)).expect("test terminal should initialize");
+        let mut model = workspace_with_typed_message(None);
+        model.panes[0].rect = PaneRect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 4,
+        };
+        model.panes[0].lines = vec!["underneath".to_string()];
+        model.floats = vec![
+            FloatingScreenModel {
+                id: FloatingWindowId(1),
+                content: FloatingContentRef::StaticLines { content_id: 1 },
+                rect: PaneRect {
+                    x: 1,
+                    y: 0,
+                    width: 10,
+                    height: 2,
+                },
+                lines: vec!["low".to_string()],
+                focusable: false,
+                mouse: false,
+                chrome: FloatingChrome {
+                    border: FloatingBorder::None,
+                },
+                zindex: 40,
+                creation_order: 1,
+            },
+            FloatingScreenModel {
+                id: FloatingWindowId(2),
+                content: FloatingContentRef::StaticLines { content_id: 2 },
+                rect: PaneRect {
+                    x: 1,
+                    y: 0,
+                    width: 10,
+                    height: 2,
+                },
+                lines: vec!["top".to_string()],
+                focusable: false,
+                mouse: false,
+                chrome: FloatingChrome {
+                    border: FloatingBorder::None,
+                },
+                zindex: 100,
+                creation_order: 2,
+            },
+        ];
+
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::Plain)
+            .expect("workspace render should succeed");
+
+        let rendered = terminal.backend().buffer().content();
+        let first_row = rendered
+            .iter()
+            .take(20)
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert_eq!(
+            &first_row[1..4],
+            "top",
+            "topmost float should overwrite the overlapping pane text: {first_row:?}"
+        );
+        assert!(
+            !first_row.contains("under"),
+            "pane text must not remain under the resolved float area: {first_row:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_render_draws_bordered_static_line_float() {
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 6)).expect("test terminal should initialize");
+        let mut model = workspace_with_typed_message(None);
+        model.floats = vec![FloatingScreenModel {
+            id: FloatingWindowId(1),
+            content: FloatingContentRef::StaticLines { content_id: 1 },
+            rect: PaneRect {
+                x: 1,
+                y: 1,
+                width: 10,
+                height: 3,
+            },
+            lines: vec!["hover".to_string()],
+            focusable: false,
+            mouse: false,
+            chrome: FloatingChrome {
+                border: FloatingBorder::Single,
+            },
+            zindex: 40,
+            creation_order: 1,
+        }];
+
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::Plain)
+            .expect("workspace render should succeed");
+
+        let rendered = format!("{}", terminal.backend());
+
+        assert!(
+            rendered.contains("┌────────┐"),
+            "bordered float should draw a single border: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("│hover"),
+            "bordered float should draw content inside the border: {rendered:?}"
+        );
     }
 
     #[test]
@@ -3257,6 +3434,7 @@ mod tests {
                 command_cursor_col: None,
                 is_active: true,
             }],
+            floats: vec![],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
             message_area_height: 5,
@@ -3361,6 +3539,7 @@ mod tests {
                 command_cursor_col: None,
                 is_active: true,
             }],
+            floats: vec![],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
             message_area_height: 5,
@@ -3490,6 +3669,7 @@ mod tests {
         pane.rect.height = 3;
         let model = WorkspaceScreenModel {
             panes: vec![pane],
+            floats: vec![],
             active_window_id: 1,
             message_line: resolve_workspace_message_line(Vec::<MessageLineCandidate>::new()),
             message_area_height: 5,

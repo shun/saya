@@ -330,7 +330,7 @@ fn runtime_surface_excludes_filesystem_and_network_capabilities() {
 
     assert_eq!(
         surface,
-        &["commands", "buffer", "window", "editor", "filer"]
+        &["commands", "buffer", "window", "editor", "filer", "lsp"]
     );
     assert_eq!(
         runtime_forbidden_surface_names(),
@@ -391,7 +391,9 @@ async fn runtime_does_not_expose_filesystem_or_network() {
                 path: Some(PathBuf::from("surface-guard.md")),
                 line_count: 1,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -416,7 +418,9 @@ impl HostCapabilityBridge for NoopHostBridge {
                 path: None,
                 line_count: 0,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             }
         })
     }

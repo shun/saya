@@ -123,6 +123,15 @@ impl StartupRegistry {
     }
 }
 
+impl IntoIterator for StartupRegistry {
+    type Item = StartupRegistryEntry;
+    type IntoIter = std::vec::IntoIter<StartupRegistryEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
 /// startup phase で記録する capability entry。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupRegistryEntry {

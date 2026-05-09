@@ -23,6 +23,8 @@ top-level areas.
 - `saya.buffer`
 - `saya.window`
 - `saya.editor`
+- `saya.workspace`
+- `saya.lsp`
 - `saya.filer`
 
 ## Commands
@@ -40,6 +42,78 @@ await saya.commands.execute("write");
 
 Commands may resolve to a registered runtime callback or to a host-side
 command implementation, depending on the current registry and host bridge.
+
+## Workspace
+
+The workspace surface exposes narrow project-root detection for runtime
+callbacks that need a workspace boundary without broad filesystem access.
+
+### `saya.workspace.findRoot(path, markers)`
+
+Use this method to find the nearest ancestor of `path` that contains one of the
+named marker files or directories.
+
+```ts
+const root = await saya.workspace.findRoot(buffer.path, [
+  "go.mod",
+  "Cargo.toml",
+  ".git",
+]);
+```
+
+The method returns a path string when a marker matches and `null` when no
+marker is found. The LSP preview plugin uses this API to resolve per-server
+workspace roots from marker lists such as `go.mod`, `Cargo.toml`, and `.git`.
+
+## LSP
+
+The LSP surface exposes one typed host bridge for preview LSP and LSIF
+requests. It is intentionally narrower than a general process or filesystem
+API. Runtime code describes the request, and the Rust host owns process
+lifecycle, JSON-RPC framing, document synchronization, diagnostic logging, and
+LSIF index lookup.
+
+> **Note:** This is a preview feature currently under active development.
+> See [LSP preview](lsp-preview.md) for setup examples, the feature support
+> matrix, LSIF limitations, and verification commands.
+
+### `saya.lsp.request(payload)`
+
+Use this method to send a validated LSP or LSIF bridge request to the host.
+Most users call it indirectly through `setupSayaLspClient()` from
+`plugins/saya-lsp-client.ts`.
+
+```ts
+const response = await saya.lsp.request({
+  source: "lsp",
+  lspVersion: "3.17",
+  method: "textDocument/hover",
+  clientName: "gopls",
+  rootUri: "file:///workspace",
+  languageId: "go",
+  trace: "messages",
+  positionEncoding: "utf-16",
+  dumpPath: "",
+  textDocument: { uri: "file:///workspace/main.go" },
+  server: {
+    name: "gopls",
+    command: "gopls",
+    args: ["serve"],
+    env: {},
+    cwd: null,
+    rootMarkers: ["go.mod", ".git"],
+    initializationOptions: {},
+  },
+  position: { line: 0, character: 0 },
+  params: {},
+  buffer: await saya.buffer.current(),
+  editor: await saya.editor.current(),
+});
+```
+
+The method returns `{ source, method, result }` when the host completes the
+request. Invalid payloads and host failures surface as command errors with
+user-safe messages.
 
 ## Buffer
 
@@ -68,7 +142,9 @@ they need the filesystem entry associated with the cursor row.
 
 ## Window
 
-The window surface lets you read the current window snapshot.
+The window surface lets you read the current window snapshot and manage
+floating windows through typed host-mediated requests. Runtime code never
+receives raw renderer access.
 
 ### `saya.window.current()`
 
@@ -77,6 +153,95 @@ Use this method to retrieve a typed window snapshot.
 ```ts
 const windowState = await saya.window.current();
 console.log(windowState.id);
+```
+
+### `saya.window.openFloat(options)`
+
+Use this method to open a floating surface. The host owns placement, focus,
+lifecycle, rendering composition, and terminal process state.
+
+```ts
+const float = await saya.window.openFloat({
+  content: { kind: "lines", lines: ["Type information", "from a plugin"] },
+  relativeTo: { kind: "cursor" },
+  width: 60,
+  height: 12,
+  row: 1,
+  col: 2,
+  focusable: true,
+  border: "single",
+  zIndex: "hover",
+  lifecycle: "closeOnCursorMove",
+  group: "plugin:hover",
+});
+```
+
+The method returns a read-only float snapshot with `id`, `kind`, `focused`,
+`focusable`, `width`, `height`, `row`, `col`, `border`, `zIndex`,
+`lifecycle`, and `replacementGroup`.
+
+Supported content kinds are:
+
+- `lines`: Static read-only lines.
+- `buffer`: A buffer-backed view using an existing host window, or a buffer ID
+  that is already visible in an existing host window.
+- `terminal`: A PTY-backed terminal surface with an explicit command array.
+
+For buffer floats, `windowId` binds the float to that existing host window. If
+you pass only `bufferId`, the host selects an existing window that already
+displays that buffer. The host rejects buffer IDs that are not backed by a
+current core window because hidden core-window creation is not part of the
+runtime API yet.
+
+For terminal floats, pass the command as an array. The host owns the PTY,
+parses terminal output, routes focused key input to the terminal session, and
+applies the close policy when the float closes.
+
+```ts
+const terminal = await saya.window.openFloat({
+  content: {
+    kind: "terminal",
+    command: ["sh", "-lc", "git status"],
+    closeBehavior: "killOnClose",
+  },
+  width: 90,
+  height: 20,
+  focusable: true,
+  border: "single",
+  zIndex: "user",
+});
+```
+
+### `saya.window.focus(id)`
+
+Use this method to focus a focusable float.
+
+```ts
+const focused = await saya.window.focus(float.id);
+```
+
+The method returns `true` when the host focused the float.
+
+### `saya.window.close(id)`
+
+Use this method to close a float.
+
+```ts
+const closed = await saya.window.close(float.id);
+```
+
+The method returns `true` when the host closed the float. Closing a terminal
+float applies the terminal close policy chosen when the float was opened.
+
+### `saya.window.floats()`
+
+Use this method to retrieve read-only snapshots for the currently open floats.
+
+```ts
+const floats = await saya.window.floats();
+for (const float of floats) {
+  console.log(float.id, float.kind, float.focused);
+}
 ```
 
 ## Editor

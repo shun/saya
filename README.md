@@ -29,9 +29,11 @@ pages.
 - [Architecture](docs/architecture.md)
 - [Boot flow design](docs/design/boot-flow.md)
 - [Editing flow design](docs/design/editing-flow.md)
+- [Floating windows design](docs/design/floating-windows.md)
 - [TypeScript runtime design](docs/design/typescript-runtime.md)
 - [Startup API](docs/api/startup-api.md)
 - [Runtime API](docs/api/runtime-api.md)
+- [LSP preview](docs/api/lsp-preview.md)
 - [Testing](docs/testing.md)
 - [Status](docs/status.md)
 

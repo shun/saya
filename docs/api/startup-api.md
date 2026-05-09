@@ -69,6 +69,102 @@ writable directory listing.
 > See [Dired API v1](dired-api-v1.md) for the versioned local dired contract,
 > migration notes, and plugin author anti-patterns.
 
+### Preview LSP setup
+
+The repository includes `plugins/saya-lsp-client.ts` as a preview TypeScript
+plugin. Import it from `init.ts` when you want LSP commands, normal-mode
+keymaps, document synchronization events, and language server definitions to be
+registered at startup.
+
+> **Note:** This is a preview feature currently under active development.
+> See [LSP preview](lsp-preview.md) for the runtime boundary, the `gopls`
+> example, supported features, LSIF limitations, and headless verification
+> commands.
+
+```ts
+import { setupSayaLspClient } from "./plugins/saya-lsp-client.ts";
+
+setupSayaLspClient({
+  languageIdByExtension: {
+    go: "go",
+    rs: "rust",
+  },
+  servers: [
+    {
+      name: "gopls",
+      command: "gopls",
+      args: ["serve"],
+      languages: ["go"],
+      filePatterns: ["**/*.go"],
+      rootMarkers: ["go.mod", ".git"],
+      initializationOptions: {
+        semanticTokens: true,
+      },
+    },
+    {
+      name: "rust-analyzer",
+      command: "rust-analyzer",
+      languages: ["rust"],
+      filePatterns: ["**/*.rs"],
+      rootMarkers: ["Cargo.toml", ".git"],
+    },
+  ],
+});
+```
+
+`setupSayaLspClient()` keeps language server configuration in TypeScript. Each
+server definition names the executable command, optional arguments,
+initialization options, language IDs, file patterns, and workspace root markers.
+At runtime, the plugin selects the matching server for the current buffer,
+detects the workspace root through the narrow runtime workspace API, and sends
+the selected server definition through `saya.lsp.request`.
+
+The default command names are:
+
+- `lsp.initialize`
+- `lsp.initialized`
+- `lsp.hover`
+- `lsp.definition`
+- `lsp.references`
+- `lsp.documentSymbol`
+- `lsp.nextDiagnostic`
+- `lsp.previousDiagnostic`
+- `lsp.shutdown`
+- `lsif.hover`
+- `lsif.definition`
+
+The default normal-mode keymaps are:
+
+- `K` for hover
+- `gd` for definition
+- `gR` for references
+- `gO` for document symbols
+- `]d` for next diagnostic
+- `[d` for previous diagnostic
+- `gK` for LSIF hover when LSIF is enabled
+- `gD` for LSIF definition when LSIF is enabled
+
+For a non-Go server, use the same shape with a different command and marker set.
+
+```ts
+setupSayaLspClient({
+  servers: {
+    python: {
+      name: "pyright",
+      command: "pyright-langserver",
+      args: ["--stdio"],
+      languages: ["python"],
+      filePatterns: ["**/*.py"],
+      rootMarkers: ["pyproject.toml", "setup.py", ".git"],
+    },
+  },
+});
+```
+
+Invalid command names, non-`file://` root URIs, empty language IDs, empty
+server commands, and malformed server definitions fail during startup
+evaluation with a configuration error.
+
 ## Namespace
 
 The startup surface lives under the global `saya` object and exposes these

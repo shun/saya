@@ -578,7 +578,9 @@ impl HostCapabilityBridge for RecordingHostBridge {
                 path: Some(PathBuf::from("runtime.md")),
                 line_count: 2,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             }
         })
     }
@@ -636,7 +638,9 @@ async fn runtime_event_dispatch_executes_registered_command_headlessly() {
                 path: Some(PathBuf::from("runtime.md")),
                 line_count: 2,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -709,7 +713,9 @@ async fn runtime_surface_is_frozen_and_does_not_expose_registration_apis() {
                 path: Some(PathBuf::from("surface.md")),
                 line_count: 1,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -761,7 +767,9 @@ async fn runtime_callback_failure_projects_as_message_without_corrupting_session
                 path: Some(PathBuf::from("runtime-failure.md")),
                 line_count: 2,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         }))
         .expect("dispatch queued")
@@ -848,7 +856,9 @@ async fn runtime_callback_completion_requests_projection_refresh_after_host_save
                 path: Some(target_path.clone()),
                 line_count: 2,
                 cursor_row: 0,
+                cursor_col: 0,
                 current_line: String::new(),
+                text: String::new(),
             },
         }))
         .expect("dispatch queued")
