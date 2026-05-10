@@ -677,6 +677,7 @@ async fn main() {
                             if let Some(effect) = handle_completion_float_key(
                                 &mut completion_float_manager,
                                 &mut floating_window_manager,
+                                &mut outcome.core_bridge,
                                 &key,
                                 active_window_id,
                             ) {
@@ -3035,6 +3036,8 @@ enum MainHostCommand {
     LspLocationListFloat(String),
     LspSymbolOutlineFloat(String),
     LspGotoDefinition(String),
+    LspWorkspaceEditPreview(String),
+    LspCodeActionsFloat(String),
     LspPublishDiagnostics(String),
     LspNextDiagnostic,
     LspPreviousDiagnostic,
@@ -3143,6 +3146,18 @@ fn parse_lsp_float_host_command(command: &str) -> Option<MainHostCommand> {
         .map(str::trim);
     if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
         return Some(MainHostCommand::LspGotoDefinition(payload.to_string()));
+    }
+    let payload = trimmed
+        .strip_prefix("lsp.previewWorkspaceEdit ")
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspWorkspaceEditPreview(
+            payload.to_string(),
+        ));
+    }
+    let payload = trimmed.strip_prefix("lsp.floatCodeActions ").map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspCodeActionsFloat(payload.to_string()));
     }
     let payload = trimmed
         .strip_prefix("lsp.publishDiagnostics ")
@@ -3513,6 +3528,16 @@ fn execute_runtime_host_command_with_floats(
         }
         Some(MainHostCommand::LspGotoDefinition(payload)) => {
             execute_lsp_goto_definition_host_command(&payload, outcome, session_state)
+        }
+        Some(MainHostCommand::LspWorkspaceEditPreview(payload)) => {
+            execute_lsp_workspace_edit_preview_host_command(
+                &payload,
+                outcome,
+                floating_window_manager,
+            )
+        }
+        Some(MainHostCommand::LspCodeActionsFloat(payload)) => {
+            execute_lsp_code_actions_float_host_command(&payload, outcome, floating_window_manager)
         }
         Some(MainHostCommand::LspPublishDiagnostics(payload)) => {
             execute_lsp_publish_diagnostics_host_command(
@@ -4188,6 +4213,81 @@ fn execute_lsp_goto_definition_host_command(
     Ok(effect)
 }
 
+fn execute_lsp_workspace_edit_preview_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.previewWorkspaceEdit".to_string(),
+            message: format!("invalid LSP workspace edit preview payload: {error}"),
+        })?;
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Workspace edit preview");
+    let edit = value
+        .pointer("/response/result")
+        .or_else(|| value.get("response"))
+        .or_else(|| value.get("result"))
+        .unwrap_or(&value);
+    let lines = workspace_edit_preview_lines(title, edit);
+    let response = serde_json::json!({
+        "result": {
+            "contents": lines.join("\n")
+        }
+    });
+    let payload = serde_json::json!({ "response": response }).to_string();
+    let mut effect =
+        execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager)?;
+    effect.transient_message = Some(format!(
+        "{title}: {} change(s)",
+        lines.len().saturating_sub(1)
+    ));
+    log::debug!(
+        "[main][lsp] workspace edit preview displayed: title={}, lines={}",
+        title,
+        lines.len()
+    );
+    Ok(effect)
+}
+
+fn execute_lsp_code_actions_float_host_command(
+    payload: &str,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    floating_window_manager: Option<&mut FloatingWindowManager>,
+) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "lsp.floatCodeActions".to_string(),
+            message: format!("invalid LSP code action payload: {error}"),
+        })?;
+    let actions = value
+        .pointer("/response/result")
+        .or_else(|| value.get("response"))
+        .or_else(|| value.get("result"))
+        .unwrap_or(&value);
+    let lines = code_action_preview_lines(actions);
+    let response = serde_json::json!({
+        "result": {
+            "contents": lines.join("\n")
+        }
+    });
+    let payload = serde_json::json!({ "response": response }).to_string();
+    let mut effect =
+        execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager)?;
+    effect.transient_message = Some(format!(
+        "LSP code actions: {} action(s)",
+        lines.len().saturating_sub(1)
+    ));
+    log::debug!(
+        "[main][lsp] code action float displayed: lines={}",
+        lines.len()
+    );
+    Ok(effect)
+}
+
 fn execute_lsp_publish_diagnostics_host_command(
     payload: &str,
     outcome: &mut saya::bootstrap::BootstrapOutcome,
@@ -4260,6 +4360,81 @@ fn first_lsp_location(value: &serde_json::Value) -> Option<&serde_json::Value> {
         serde_json::Value::Object(_) => Some(result),
         _ => None,
     }
+}
+
+fn workspace_edit_preview_lines(title: &str, edit: &serde_json::Value) -> Vec<String> {
+    let mut lines = vec![title.to_string()];
+    if let Some(changes) = edit.get("changes").and_then(serde_json::Value::as_object) {
+        for (uri, edits) in changes {
+            let count = edits
+                .as_array()
+                .map(|items| items.len())
+                .unwrap_or_default();
+            lines.push(format!("{uri}: {count} edit(s)"));
+        }
+    }
+    if let Some(document_changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    {
+        for change in document_changes {
+            let uri = change
+                .pointer("/textDocument/uri")
+                .or_else(|| change.get("uri"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown>");
+            if let Some(edits) = change.get("edits").and_then(serde_json::Value::as_array) {
+                lines.push(format!("{uri}: {} edit(s)", edits.len()));
+            } else if let Some(kind) = change.get("kind").and_then(serde_json::Value::as_str) {
+                lines.push(format!("{kind}: {uri}"));
+            }
+        }
+    }
+    if lines.len() == 1 && edit.as_array().is_some() {
+        lines.push(format!(
+            "current document: {} edit(s)",
+            edit.as_array().map(|items| items.len()).unwrap_or_default()
+        ));
+    }
+    if lines.len() == 1 {
+        lines.push("No workspace edits".to_string());
+    }
+    lines
+}
+
+fn code_action_preview_lines(actions: &serde_json::Value) -> Vec<String> {
+    let mut lines = vec!["Code actions".to_string()];
+    match actions {
+        serde_json::Value::Array(items) => {
+            for action in items {
+                let title = action
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<untitled>");
+                let kind = action
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("action");
+                lines.push(format!("{kind}: {title}"));
+            }
+        }
+        serde_json::Value::Object(_) => {
+            let title = actions
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<untitled>");
+            let kind = actions
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("action");
+            lines.push(format!("{kind}: {title}"));
+        }
+        _ => {}
+    }
+    if lines.len() == 1 {
+        lines.push("No code actions".to_string());
+    }
+    lines
 }
 
 fn execute_lsp_status_host_command(
@@ -6186,6 +6361,7 @@ enum FloatingWindowKeyHandling {
 fn handle_completion_float_key(
     completion_manager: &mut CompletionFloatManager,
     floating_manager: &mut FloatingWindowManager,
+    core_bridge: &mut saya::core_bridge::CoreBridge,
     key: &KeyInput,
     restore_window_id: i32,
 ) -> Option<FloatingWindowKeyHandling> {
@@ -6202,6 +6378,16 @@ fn handle_completion_float_key(
             Some(FloatingWindowKeyHandling::Consumed)
         }
         CompletionFloatInputOutcome::Accepted { menu_id, label } => {
+            if !label.is_empty() {
+                if let Err(error) = core_bridge.dispatch_key(&label) {
+                    log::debug!(
+                        "[main] completion candidate insertion failed: menu_id={}, label={:?}, error={:?}",
+                        menu_id.0,
+                        label,
+                        error
+                    );
+                }
+            }
             log::debug!(
                 "[main] completion candidate accepted from focused input: menu_id={}, label={:?}",
                 menu_id.0,
@@ -8913,6 +9099,18 @@ mod tests {
             ))
         );
         assert_eq!(
+            parse_main_host_command(r#"lsp.previewWorkspaceEdit {"title":"Rename"}"#),
+            Some(MainHostCommand::LspWorkspaceEditPreview(
+                r#"{"title":"Rename"}"#.to_string()
+            ))
+        );
+        assert_eq!(
+            parse_main_host_command(r#"lsp.floatCodeActions {"response":{"result":[]}}"#),
+            Some(MainHostCommand::LspCodeActionsFloat(
+                r#"{"response":{"result":[]}}"#.to_string()
+            ))
+        );
+        assert_eq!(
             parse_main_host_command(r#"completion.floatMenu {"candidates":["alpha"]}"#),
             Some(MainHostCommand::CompletionMenuFloat(
                 r#"{"candidates":["alpha"]}"#.to_string()
@@ -9051,6 +9249,26 @@ mod tests {
             None,
         )
         .expect("symbol outline should open");
+        execute_runtime_host_command_with_floats(
+            r#"lsp.previewWorkspaceEdit {"title":"Rename preview","response":{"result":{"changes":{"file:///workspace/src/main.rs":[{"range":{"start":{"line":4,"character":1},"end":{"line":4,"character":5}},"newText":"renamed"}]}}}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("workspace edit preview should open");
+        execute_runtime_host_command_with_floats(
+            r#"lsp.floatCodeActions {"response":{"result":[{"title":"Organize Imports","kind":"source.organizeImports"},{"title":"Fix issue","kind":"quickfix"}]}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            None,
+            None,
+        )
+        .expect("code action float should open");
 
         let active_window_id = outcome
             .core_bridge
@@ -9090,6 +9308,12 @@ mod tests {
         assert!(
             rendered_lines.iter().any(|line| line.contains("child")),
             "nested document symbols should be rendered: {rendered_lines:?}"
+        );
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("source.organizeImports: Organize Imports")),
+            "code actions should render actionable titles: {rendered_lines:?}"
         );
 
         std::fs::remove_file(target_path).expect("cleanup definition target");
@@ -9216,6 +9440,7 @@ mod tests {
             handle_completion_float_key(
                 &mut completion_float_manager,
                 &mut floating_window_manager,
+                &mut outcome.core_bridge,
                 &KeyInput::Down,
                 active_window_id,
             ),
@@ -9228,6 +9453,54 @@ mod tests {
                 .lines,
             vec!["  [Text] alpha", "> [Text] beta - detail"]
         );
+    }
+
+    #[test]
+    fn runtime_completion_float_accept_inserts_selected_candidate() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        outcome
+            .core_bridge
+            .dispatch_key("i")
+            .expect("enter insert mode before accepting completion");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+
+        execute_runtime_host_command_with_floats(
+            r#"completion.floatMenu {"selectedIndex":0,"candidates":[{"label":"alpha","kind":"Text"}]}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            Some(&mut completion_float_manager),
+            None,
+            None,
+        )
+        .expect("completion menu should open");
+
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        assert!(matches!(
+            handle_completion_float_key(
+                &mut completion_float_manager,
+                &mut floating_window_manager,
+                &mut outcome.core_bridge,
+                &KeyInput::Enter,
+                active_window_id,
+            ),
+            Some(FloatingWindowKeyHandling::Closed { .. })
+        ));
+        assert_eq!(outcome.core_bridge.buffer_text(), "alpha\n");
     }
 
     #[test]

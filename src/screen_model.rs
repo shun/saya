@@ -28,6 +28,7 @@ use crate::markdown_structure::{
 use crate::search_query::{SearchMatchKind, SearchQueryMode, SearchVisibleState};
 use crate::theme::{MarkdownSemanticStyleKey, ResolvedTextStyle, ResolvedTheme};
 use crate::viewport::WindowViewportStore;
+use crate::visual_line_layout::{RawByteCol, VisualLineLayout};
 
 /// 描画専用 view model。
 ///
@@ -1128,7 +1129,7 @@ fn projected_input_line_number_width(input: &ProjectionInput<'_>) -> usize {
 
 fn project_visible_input_text_lines(input: &ProjectionInput<'_>) -> Vec<String> {
     let body_height = input.body_height.max(1);
-    let tab_size = usize::from(input.session_state.tab_size().max(1));
+    let tab_size = input.session_state.tab_size().max(1);
     let number_width = projected_input_line_number_width(input);
     let line_numbers = input.session_state.line_numbers() || input.session_state.relative_number();
     let trail = input
@@ -1139,7 +1140,11 @@ fn project_visible_input_text_lines(input: &ProjectionInput<'_>) -> Vec<String> 
         .into_iter()
         .take(body_height)
         .map(|(index, line)| {
-            let mut rendered = expand_tabs(line, tab_size);
+            // VisualLineLayout を用いて Vim 互換の content-col 起算でタブを展開する。
+            // ガター(行番号)はレイアウト計算後に prefix として連結するだけなので、
+            // layout 構築時の gutter_width は 0 を渡してコンテンツ表示テキストのみ得る。
+            let layout = VisualLineLayout::build(line, tab_size, 0);
+            let mut rendered = layout.display_text().to_string();
             if let Some(trail) = trail {
                 rendered = render_list_line(&rendered, trail);
             }
@@ -1199,24 +1204,26 @@ fn resolve_input_cursor_col(
     let line = input_line_at(input, cursor_row);
     let clamped_col = cursor_col.min(line.len());
     let boundary_col = clamp_to_char_boundary(line, clamped_col);
-    let base_display_col = display_width(
-        &line[..boundary_col],
-        usize::from(input.session_state.tab_size().max(1)),
-    );
-    let line_number_offset = usize::from(line_number_offset_for_input(
+    let line_number_offset = line_number_offset_for_input(
         input,
         input.session_state.line_numbers() || input.session_state.relative_number(),
-    ));
-    let display_col = base_display_col.saturating_add(line_number_offset);
-    let display_col = u16::try_from(display_col).unwrap_or(u16::MAX);
+    );
+    // VisualLineLayout を単一の真実として参照し、レンダリング側と
+    // 完全に同じ raw↔display 写像でカーソル列を解決する。
+    let layout = VisualLineLayout::build(
+        line,
+        input.session_state.tab_size().max(1),
+        line_number_offset,
+    );
+    let display_col = layout.raw_to_screen(RawByteCol(boundary_col)).get();
 
     log::debug!(
-        "[screen_model] resolved input cursor col: window_id={}, row={}, raw_col={}, boundary_col={}, base_display_col={}, line_number_offset={}, display_col={}, source={}",
+        "[screen_model] resolved input cursor col: window_id={}, row={}, raw_col={}, boundary_col={}, content_width={}, line_number_offset={}, display_col={}, source={}",
         input.window_id,
         cursor_row,
         cursor_col,
         boundary_col,
-        base_display_col,
+        layout.content_width().get(),
         line_number_offset,
         display_col,
         if input.line_range.is_some() {
@@ -1327,25 +1334,6 @@ fn clamp_to_char_boundary(text: &str, col: usize) -> usize {
         boundary -= 1;
     }
     boundary
-}
-
-fn expand_tabs(line: &str, tab_size: usize) -> String {
-    let mut expanded = String::new();
-    let mut display_col = 0usize;
-
-    for ch in line.chars() {
-        if ch == '\t' {
-            let spaces = next_tab_stop(display_col, tab_size) - display_col;
-            expanded.push_str(&" ".repeat(spaces));
-            display_col += spaces;
-            continue;
-        }
-
-        expanded.push(ch);
-        display_col += char_display_width(ch);
-    }
-
-    expanded
 }
 
 fn display_width(text: &str, tab_size: usize) -> usize {
@@ -2382,15 +2370,22 @@ fn project_markdown_line_projection(
     let mut cells = Vec::new();
     let mut display_col = usize::from(line_start_col);
     let mut raw_col = 0usize;
+    // 行全体のレイアウトを 1 度だけ構築し、raw 区間ごとに同じ写像を共有する。
+    // タブ stop は content_col 起算で計算され、ガターはレンダリング時に
+    // line_start_col として加算されるだけ。
+    let layout = VisualLineLayout::build(
+        raw_text,
+        u16::try_from(tab_size.max(1)).unwrap_or(u16::MAX),
+        line_start_col,
+    );
 
     for operation in conceal_ranges {
         if operation.raw_start_col > raw_col {
             append_raw_projection_segment(
                 absolute_row,
-                raw_text,
+                &layout,
                 raw_col,
                 operation.raw_start_col,
-                tab_size,
                 &mut display_col,
                 &mut display_text,
                 &mut spans,
@@ -2413,10 +2408,9 @@ fn project_markdown_line_projection(
     if raw_col < raw_text.len() {
         append_raw_projection_segment(
             absolute_row,
-            raw_text,
+            &layout,
             raw_col,
             raw_text.len(),
-            tab_size,
             &mut display_col,
             &mut display_text,
             &mut spans,
@@ -3015,41 +3009,48 @@ fn list_marker_range(raw_text: &str, ordered: bool) -> Option<MarkdownProjection
 
 fn append_raw_projection_segment(
     absolute_row: usize,
-    raw_text: &str,
+    layout: &VisualLineLayout,
     raw_start_col: usize,
     raw_end_col: usize,
-    tab_size: usize,
     display_col: &mut usize,
     display_text: &mut String,
     spans: &mut Vec<ScreenDisplaySpan>,
     cells: &mut Vec<ScreenCellMapping>,
 ) {
+    let raw_text = layout.raw_text();
     let raw_start_col = clamp_to_char_boundary(raw_text, raw_start_col.min(raw_text.len()));
     let raw_end_col = clamp_to_char_boundary(raw_text, raw_end_col.min(raw_text.len()));
     if raw_end_col <= raw_start_col {
         return;
     }
     let display_start_col = *display_col;
-    let mut raw_col = raw_start_col;
-    for ch in raw_text[raw_start_col..raw_end_col].chars() {
-        let next_raw_col = raw_col + ch.len_utf8();
-        let rendered = if ch == '\t' {
-            let width = next_tab_stop(*display_col, tab_size).saturating_sub(*display_col);
-            " ".repeat(width)
+    for cell in layout.cells() {
+        let cell_raw_start = cell.raw_start().get();
+        let cell_raw_end = cell.raw_end().get();
+        if cell_raw_end <= raw_start_col {
+            continue;
+        }
+        if cell_raw_start >= raw_end_col {
+            break;
+        }
+        let width = usize::from(cell.content_width());
+        let ch = raw_text[cell_raw_start..cell_raw_end]
+            .chars()
+            .next()
+            .expect("layout cell must cover at least one char");
+        if ch == '\t' {
+            display_text.extend(std::iter::repeat_n(' ', width));
         } else {
-            ch.to_string()
-        };
-        let width = display_width(&rendered, tab_size);
-        display_text.push_str(&rendered);
+            display_text.push(ch);
+        }
         cells.push(ScreenCellMapping {
             display_col: u16::try_from(*display_col).unwrap_or(u16::MAX),
             display_end_col_exclusive: u16::try_from(display_col.saturating_add(width))
                 .unwrap_or(u16::MAX),
-            raw_start_col: raw_col,
-            raw_end_col: next_raw_col,
+            raw_start_col: cell_raw_start,
+            raw_end_col: cell_raw_end,
         });
         *display_col = display_col.saturating_add(width);
-        raw_col = next_raw_col;
     }
     spans.push(ScreenDisplaySpan {
         raw_start_col,
@@ -3805,13 +3806,15 @@ mod tests {
         let model = project(&input);
         let row = &model.line_projections[0];
 
+        // タブ stop は Vim 互換に raw text 上の content col 起算で計算する。
+        // raw="# a\tb" だと '\t' は content_col=3 にあり、tab_size=4 なら次の
+        // tab stop は 4 → 幅 1 セル。コンセルされた "# " は表示 0 cell として消費。
         assert_eq!(row.raw_text, "# a\tb");
-        assert_eq!(row.display_text, "a   b");
+        assert_eq!(row.display_text, "a b");
         assert_eq!(row.logical_to_display_col(3), 1);
-        assert_eq!(row.logical_to_display_col(4), 4);
+        assert_eq!(row.logical_to_display_col(4), 2);
         assert_eq!(row.display_to_logical_col(1), Some(3));
-        assert_eq!(row.display_to_logical_col(3), Some(3));
-        assert_eq!(row.display_to_logical_col(4), Some(4));
+        assert_eq!(row.display_to_logical_col(2), Some(4));
     }
 
     #[test]
@@ -4993,6 +4996,58 @@ mod tests {
 
         assert_eq!(model.lines[0], "    a");
         assert_eq!(model.cursor_col, 4);
+    }
+
+    #[test]
+    fn cursor_col_aligns_with_projected_cell_for_indented_line_with_gutter() {
+        // 真因: タブ展開のセマンティクスがレンダリング(cells)とカーソル算出で食い違うバグ。
+        // Vim 流（col-0 起算でタブは常に tab_size 全幅、ガターは単なる左パディング）に揃え、
+        // `cursor_col` と「同じ raw_col のセル `display_col`」が一致することを保証する。
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // バッファ: 行頭タブ + "hello" / カーソルを l キーで raw_col=1 ('h') へ移動。
+        let mut bridge = CoreBridge::new("\thello\n").expect("core bridge");
+        bridge.dispatch_key("l").expect("move right onto h");
+        let snapshot = bridge.snapshot();
+        // ガター幅 5 ("   1 ") 相当: number_width=4, line_numbers=true, tab_size=8。
+        let session_state = EditorSessionState::new_with_tab_size_and_line_numbers_and_number_width(
+            None, 8, true, 4,
+        );
+
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+        // 'h' のセルを cells から探す（raw_start_col == 1）。
+        let projection = model
+            .line_projections
+            .iter()
+            .find(|projection| projection.absolute_row == 0)
+            .expect("line projection for row 0 exists");
+        let h_cell = projection
+            .cells
+            .iter()
+            .find(|cell| cell.raw_start_col == 1)
+            .copied()
+            .expect("cell mapping for raw byte 1 ('h') exists");
+
+        // 期待: tab_size=8 で行頭タブが 8 cells 幅 → 'h' はコンテンツ列 8 = 画面列 13(=5+8)。
+        assert_eq!(
+            projection.line_start_col, 5,
+            "gutter width must be 5 ('   1 ')"
+        );
+        assert_eq!(
+            h_cell.display_col, 13,
+            "rendered 'h' must land at screen col 13 (gutter 5 + tab 8)"
+        );
+
+        // 真の整合性チェック: カーソル列 == 'h' のセル列。
+        assert_eq!(
+            model.cursor_col, h_cell.display_col,
+            "cursor must land on the same screen column where 'h' is rendered \
+             (cursor_col={}, cell.display_col={}, gutter={})",
+            model.cursor_col, h_cell.display_col, projection.line_start_col,
+        );
     }
 
     #[test]

@@ -5,6 +5,14 @@ export interface SayaLspCommandNames {
   definition?: string;
   references?: string;
   documentSymbol?: string;
+  completion?: string;
+  completionResolve?: string;
+  signatureHelp?: string;
+  formatting?: string;
+  rangeFormatting?: string;
+  rename?: string;
+  codeAction?: string;
+  codeActionResolve?: string;
   nextDiagnostic?: string;
   previousDiagnostic?: string;
   shutdown?: string;
@@ -17,6 +25,12 @@ export interface SayaLspKeymap {
   definition?: string;
   references?: string;
   documentSymbol?: string;
+  completion?: string;
+  signatureHelp?: string;
+  formatting?: string;
+  rangeFormatting?: string;
+  rename?: string;
+  codeAction?: string;
   nextDiagnostic?: string;
   previousDiagnostic?: string;
   lsifHover?: string;
@@ -35,6 +49,10 @@ export interface SayaLspClientOptions {
   trace?: "off" | "messages" | "verbose";
   positionEncoding?: "utf-16" | "utf-8" | "utf-32";
   enableBufferEvents?: boolean;
+  completionTriggerCharacters?: string[];
+  formattingOptions?: SayaLspFormattingOptions;
+  renameNewName?: string;
+  codeActionKinds?: string[];
   lsif?: SayaLsifClientOptions;
 }
 
@@ -57,6 +75,14 @@ export interface SayaLsifClientOptions {
   enabled?: boolean;
   bridgeCommand?: string;
   dumpPath?: string;
+}
+
+export interface SayaLspFormattingOptions {
+  tabSize?: number;
+  insertSpaces?: boolean;
+  trimTrailingWhitespace?: boolean;
+  insertFinalNewline?: boolean;
+  trimFinalNewlines?: boolean;
 }
 
 export interface SayaLspJsonRpcRequest {
@@ -121,6 +147,30 @@ function lspMethodForCommand(kind) {
   if (kind === "documentSymbol") {
     return "textDocument/documentSymbol";
   }
+  if (kind === "completion") {
+    return "textDocument/completion";
+  }
+  if (kind === "completionResolve") {
+    return "completionItem/resolve";
+  }
+  if (kind === "signatureHelp") {
+    return "textDocument/signatureHelp";
+  }
+  if (kind === "formatting") {
+    return "textDocument/formatting";
+  }
+  if (kind === "rangeFormatting") {
+    return "textDocument/rangeFormatting";
+  }
+  if (kind === "rename") {
+    return "textDocument/rename";
+  }
+  if (kind === "codeAction") {
+    return "textDocument/codeAction";
+  }
+  if (kind === "codeActionResolve") {
+    return "codeAction/resolve";
+  }
   return "shutdown";
 }
 
@@ -132,6 +182,14 @@ function defaultCommandNames(commands = {}) {
   names.definition = commands.definition ?? "lsp.definition";
   names.references = commands.references ?? "lsp.references";
   names.documentSymbol = commands.documentSymbol ?? "lsp.documentSymbol";
+  names.completion = commands.completion ?? "lsp.completion";
+  names.completionResolve = commands.completionResolve ?? "lsp.completionResolve";
+  names.signatureHelp = commands.signatureHelp ?? "lsp.signatureHelp";
+  names.formatting = commands.formatting ?? "lsp.formatting";
+  names.rangeFormatting = commands.rangeFormatting ?? "lsp.rangeFormatting";
+  names.rename = commands.rename ?? "lsp.rename";
+  names.codeAction = commands.codeAction ?? "lsp.codeAction";
+  names.codeActionResolve = commands.codeActionResolve ?? "lsp.codeActionResolve";
   names.nextDiagnostic = commands.nextDiagnostic ?? "lsp.nextDiagnostic";
   names.previousDiagnostic = commands.previousDiagnostic ?? "lsp.previousDiagnostic";
   names.shutdown = commands.shutdown ?? "lsp.shutdown";
@@ -431,14 +489,27 @@ function createRuntimeBridgeCallbackSource(
   servers,
   trace,
   positionEncoding,
+  completionTriggerCharacters,
+  formattingOptions,
+  renameNewName,
+  codeActionKinds,
   dumpPath,
 ) {
   return new Function(
     "return async (payload) => {\n" +
-      "  const toFileUri = (path) => {\n" +
+      "  const toFileUri = (path, rootUri = null) => {\n" +
       "    if (!path) return null;\n" +
       "    if (String(path).startsWith('file://')) return String(path);\n" +
-      "    const raw = String(path).startsWith('/') ? String(path) : '/' + String(path);\n" +
+      "    const rawPath = String(path);\n" +
+      "    if (!rawPath.startsWith('/') && rootUri && String(rootUri).startsWith('file://')) {\n" +
+      "      const parts = [];\n" +
+      "      for (const part of rawPath.replace(/\\\\/g, '/').split('/')) {\n" +
+      "        if (!part || part === '.') continue;\n" +
+      "        if (part === '..') parts.pop(); else parts.push(part);\n" +
+      "      }\n" +
+      "      return String(rootUri).replace(/\\/+$/, '') + '/' + parts.map((part) => encodeURIComponent(part)).join('/');\n" +
+      "    }\n" +
+      "    const raw = rawPath.startsWith('/') ? rawPath : '/' + rawPath;\n" +
       "    const parts = [];\n" +
       "    for (const part of raw.split('/')) {\n" +
       "      if (!part || part === '.') continue;\n" +
@@ -560,13 +631,13 @@ function createRuntimeBridgeCallbackSource(
       "    if (fallbackRootUri) return fallbackRootUri;\n" +
       "    if (saya.workspace && typeof saya.workspace.findRoot === 'function' && buffer.path && server.rootMarkers && server.rootMarkers.length > 0) {\n" +
       "      const root = await saya.workspace.findRoot(String(buffer.path), server.rootMarkers);\n" +
-      "      if (root) return toFileUri(root);\n" +
+      "      if (root != null) return toFileUri(root);\n" +
       "    }\n" +
       "    return null;\n" +
       "  };\n" +
       "  const buildDocumentParams = (method, uri, buffer, languageId, rootUri, server, positionEncoding) => {\n" +
       "    if (method === 'initialize') {\n" +
-      "      return { processId: null, rootUri, capabilities: { general: { positionEncodings: ['utf-16', 'utf-8', 'utf-32'] }, textDocument: { hover: {}, definition: {}, references: {}, documentSymbol: {}, publishDiagnostics: {} } }, initializationOptions: server.initializationOptions ?? null };\n" +
+      "      return { processId: null, rootUri, capabilities: { general: { positionEncodings: ['utf-16', 'utf-8', 'utf-32'] }, textDocument: { hover: {}, definition: {}, references: {}, documentSymbol: {}, completion: { completionItem: { documentationFormat: ['markdown', 'plaintext'], resolveSupport: { properties: ['documentation', 'detail', 'additionalTextEdits'] } } }, signatureHelp: { signatureInformation: { documentationFormat: ['markdown', 'plaintext'], parameterInformation: { labelOffsetSupport: true } } }, formatting: {}, rangeFormatting: {}, rename: { prepareSupport: true }, codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ['quickfix', 'refactor', 'source', 'source.organizeImports'] } }, resolveSupport: { properties: ['edit', 'command'] } }, publishDiagnostics: {} } }, initializationOptions: server.initializationOptions ?? null };\n" +
       "    }\n" +
       "    if (method === 'initialized' || method === 'shutdown') return null;\n" +
       "    if (!uri) return null;\n" +
@@ -589,11 +660,48 @@ function createRuntimeBridgeCallbackSource(
       "      documents[uri] = { version: current.version, open: false };\n" +
       "      return { textDocument: { uri } };\n" +
       "    }\n" +
-      "    if (method === 'textDocument/hover' || method === 'textDocument/definition' || method === 'textDocument/references') {\n" +
+      "    if (method === 'textDocument/completion') {\n" +
+      "      const triggerCharacters = " +
+      quoteRuntimeValue(completionTriggerCharacters ?? [".", ":", ">", "/"]) +
+      ";\n" +
+      "      const previousCharacter = String(buffer.currentLine ?? '').slice(0, Number(buffer.cursorCol) || 0).slice(-1);\n" +
+      "      const context = triggerCharacters.includes(previousCharacter) ? { triggerKind: 2, triggerCharacter: previousCharacter } : { triggerKind: 1 };\n" +
+      "      return { textDocument: { uri }, position, context };\n" +
+      "    }\n" +
+      "    if (method === 'textDocument/hover' || method === 'textDocument/definition' || method === 'textDocument/references' || method === 'textDocument/signatureHelp') {\n" +
       "      return { textDocument: { uri }, position };\n" +
       "    }\n" +
       "    if (method === 'textDocument/documentSymbol') {\n" +
       "      return { textDocument: { uri } };\n" +
+      "    }\n" +
+      "    if (method === 'textDocument/formatting') {\n" +
+      "      return { textDocument: { uri }, options: " +
+      quoteRuntimeValue(formattingOptions ?? {}) +
+      " };\n" +
+      "    }\n" +
+      "    if (method === 'textDocument/rangeFormatting') {\n" +
+      "      const lineCount = Math.max(1, Number(buffer.lineCount) || String(documentText(buffer)).split(/\\r\\n|\\r|\\n/).length);\n" +
+      "      const range = eventPayload && eventPayload.range ? eventPayload.range : { start: position, end: { line: lineCount - 1, character: 0 } };\n" +
+      "      return { textDocument: { uri }, range, options: " +
+      quoteRuntimeValue(formattingOptions ?? {}) +
+      " };\n" +
+      "    }\n" +
+      "    if (method === 'textDocument/rename') {\n" +
+      "      const newName = eventPayload && typeof eventPayload.newName === 'string' ? eventPayload.newName : " +
+      quoteRuntimeValue(renameNewName ?? "") +
+      ";\n" +
+      "      return { textDocument: { uri }, position, newName };\n" +
+      "    }\n" +
+      "    if (method === 'textDocument/codeAction') {\n" +
+      "      const diagnostics = eventPayload && Array.isArray(eventPayload.diagnostics) ? eventPayload.diagnostics : [];\n" +
+      "      const only = eventPayload && Array.isArray(eventPayload.only) ? eventPayload.only : " +
+      quoteRuntimeValue(codeActionKinds ?? ["quickfix", "refactor", "source.organizeImports"]) +
+      ";\n" +
+      "      const range = eventPayload && eventPayload.range ? eventPayload.range : { start: position, end: position };\n" +
+      "      return { textDocument: { uri }, range, context: { diagnostics, only } };\n" +
+      "    }\n" +
+      "    if (method === 'completionItem/resolve' || method === 'codeAction/resolve') {\n" +
+      "      return eventPayload && eventPayload.item ? eventPayload.item : (eventPayload ?? {});\n" +
       "    }\n" +
       "    return null;\n" +
       "  };\n" +
@@ -610,6 +718,26 @@ function createRuntimeBridgeCallbackSource(
       "      await executeUiCommand('lsp.floatLocations', { title: 'References', response });\n" +
       "    } else if (responseMethod === 'textDocument/documentSymbol') {\n" +
       "      await executeUiCommand('lsp.floatSymbols', { response });\n" +
+      "    } else if (responseMethod === 'textDocument/completion') {\n" +
+      "      const result = response?.result ?? response;\n" +
+      "      const items = Array.isArray(result) ? result : (Array.isArray(result?.items) ? result.items : []);\n" +
+      "      await executeUiCommand('completion.floatMenu', { candidates: items, selectedIndex: 0 });\n" +
+      "    } else if (responseMethod === 'completionItem/resolve') {\n" +
+      "      await executeUiCommand('completion.floatMenu', { candidates: [response?.result ?? response], selectedIndex: 0 });\n" +
+      "    } else if (responseMethod === 'textDocument/signatureHelp') {\n" +
+      "      const result = response?.result ?? response;\n" +
+      "      const signatures = Array.isArray(result?.signatures) ? result.signatures : [];\n" +
+      "      const active = Math.max(0, Math.min(Number(result?.activeSignature) || 0, Math.max(0, signatures.length - 1)));\n" +
+      "      const signature = signatures[active];\n" +
+      "      const label = signature?.label ?? '';\n" +
+      "      const doc = typeof signature?.documentation === 'string' ? signature.documentation : (signature?.documentation?.value ?? '');\n" +
+      "      await executeUiCommand('lsp.floatHover', { response: { result: { contents: [label, doc].filter(Boolean).join('\\n') } } });\n" +
+      "    } else if (responseMethod === 'textDocument/formatting' || responseMethod === 'textDocument/rangeFormatting') {\n" +
+      "      await executeUiCommand('lsp.previewWorkspaceEdit', { title: 'Formatting preview', response });\n" +
+      "    } else if (responseMethod === 'textDocument/rename') {\n" +
+      "      await executeUiCommand('lsp.previewWorkspaceEdit', { title: 'Rename preview', response });\n" +
+      "    } else if (responseMethod === 'textDocument/codeAction' || responseMethod === 'codeAction/resolve') {\n" +
+      "      await executeUiCommand('lsp.floatCodeActions', { response });\n" +
       "    } else if (responseMethod === 'textDocument/publishDiagnostics') {\n" +
       "      await executeUiCommand('lsp.publishDiagnostics', response.result ?? response);\n" +
       "    }\n" +
@@ -629,7 +757,6 @@ function createRuntimeBridgeCallbackSource(
       "  const eventPayload = payload ?? null;\n" +
       "  const buffer = eventPayload && eventPayload.buffer ? eventPayload.buffer : await saya.buffer.current();\n" +
       "  const editor = await saya.editor.current();\n" +
-      "  const uri = toFileUri(buffer.path);\n" +
       "  const languageByExtension = " +
       quoteRuntimeValue(languageIdByExtension ?? {}) +
       ";\n" +
@@ -648,6 +775,7 @@ function createRuntimeBridgeCallbackSource(
       ") : " +
       quoteRuntimeValue(rootUri) +
       ";\n" +
+      "  const uri = toFileUri(buffer.path, resolvedRootUri);\n" +
       "  const effectiveLanguageId = selectedServer && selectedServer.languages && selectedServer.languages.length > 0 && !languageByExtension[extensionOf(buffer.path)] ? selectedServer.languages[0] : selectedLanguageId;\n" +
       "  const position = lspPositionFromSayaCursor(buffer.currentLine ?? '', buffer.cursorRow, buffer.cursorCol ?? 0, effectivePositionEncoding);\n" +
       "  const params = buildDocumentParams(method, uri, buffer, effectiveLanguageId, resolvedRootUri, selectedServer ?? {}, effectivePositionEncoding);\n" +
@@ -818,6 +946,22 @@ export function setupSayaLspClient(options = {}) {
   const trace = options.trace ?? "off";
   const positionEncoding = options.positionEncoding ?? "utf-16";
   const servers = normalizeLspServers(options, commandNames);
+  const completionTriggerCharacters = options.completionTriggerCharacters ?? [
+    ".",
+    ":",
+    ">",
+    "/",
+  ];
+  const formattingOptions = options.formattingOptions ?? {
+    tabSize: 4,
+    insertSpaces: true,
+  };
+  const renameNewName = options.renameNewName ?? "";
+  const codeActionKinds = options.codeActionKinds ?? [
+    "quickfix",
+    "refactor",
+    "source.organizeImports",
+  ];
   const enableBufferEvents = options.enableBufferEvents ?? true;
   const lsifEnabled = options.lsif?.enabled ?? false;
   const lsifBridgeCommand = options.lsif?.bridgeCommand ?? "lsif.request";
@@ -830,6 +974,14 @@ export function setupSayaLspClient(options = {}) {
     "definition",
     "references",
     "documentSymbol",
+    "completion",
+    "completionResolve",
+    "signatureHelp",
+    "formatting",
+    "rangeFormatting",
+    "rename",
+    "codeAction",
+    "codeActionResolve",
     "shutdown",
   ]) {
     saya.commands.register(
@@ -845,6 +997,10 @@ export function setupSayaLspClient(options = {}) {
         servers,
         trace,
         positionEncoding,
+        completionTriggerCharacters,
+        formattingOptions,
+        renameNewName,
+        codeActionKinds,
         "",
       ),
     );
@@ -871,6 +1027,10 @@ export function setupSayaLspClient(options = {}) {
         servers,
         trace,
         positionEncoding,
+        completionTriggerCharacters,
+        formattingOptions,
+        renameNewName,
+        codeActionKinds,
         "",
       ),
     );
@@ -887,6 +1047,10 @@ export function setupSayaLspClient(options = {}) {
         servers,
         trace,
         positionEncoding,
+        completionTriggerCharacters,
+        formattingOptions,
+        renameNewName,
+        codeActionKinds,
         "",
       ),
     );
@@ -903,6 +1067,10 @@ export function setupSayaLspClient(options = {}) {
         servers,
         trace,
         positionEncoding,
+        completionTriggerCharacters,
+        formattingOptions,
+        renameNewName,
+        codeActionKinds,
         "",
       ),
     );
@@ -919,6 +1087,10 @@ export function setupSayaLspClient(options = {}) {
         servers,
         trace,
         positionEncoding,
+        completionTriggerCharacters,
+        formattingOptions,
+        renameNewName,
+        codeActionKinds,
         "",
       ),
     );
@@ -939,6 +1111,36 @@ export function setupSayaLspClient(options = {}) {
     "normal",
     options.keymap?.documentSymbol ?? "gO",
     saya.commands.execute(commandNames.documentSymbol),
+  );
+  saya.keymap.set(
+    "insert",
+    options.keymap?.completion ?? "<C-Space>",
+    saya.commands.execute(commandNames.completion),
+  );
+  saya.keymap.set(
+    "insert",
+    options.keymap?.signatureHelp ?? "<C-k>",
+    saya.commands.execute(commandNames.signatureHelp),
+  );
+  saya.keymap.set(
+    "normal",
+    options.keymap?.formatting ?? "gq",
+    saya.commands.execute(commandNames.formatting),
+  );
+  saya.keymap.set(
+    "visual",
+    options.keymap?.rangeFormatting ?? "gq",
+    saya.commands.execute(commandNames.rangeFormatting),
+  );
+  saya.keymap.set(
+    "normal",
+    options.keymap?.rename ?? "grn",
+    saya.commands.execute(commandNames.rename),
+  );
+  saya.keymap.set(
+    "normal",
+    options.keymap?.codeAction ?? "gra",
+    saya.commands.execute(commandNames.codeAction),
   );
   saya.keymap.set(
     "normal",
@@ -965,6 +1167,10 @@ export function setupSayaLspClient(options = {}) {
         servers,
         trace,
         positionEncoding,
+        completionTriggerCharacters,
+        formattingOptions,
+        renameNewName,
+        codeActionKinds,
         lsifDumpPath,
       ),
     );
@@ -981,6 +1187,10 @@ export function setupSayaLspClient(options = {}) {
         servers,
         trace,
         positionEncoding,
+        completionTriggerCharacters,
+        formattingOptions,
+        renameNewName,
+        codeActionKinds,
         lsifDumpPath,
       ),
     );

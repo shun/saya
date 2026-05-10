@@ -222,6 +222,53 @@ Object.freeze(globalThis.saya.editor);
 Object.freeze(globalThis.saya.filer);
 Object.freeze(globalThis.saya.lsp);
 Object.freeze(globalThis.saya);
+
+// プラグインの console.* をすべて diagnostic logger に流す。
+// raw-mode の TUI で stdout に書くと画面が破壊されるため、
+// console.log を呼ぶプラグインがあっても安全になるようここで防ぐ。
+(function setupSayaRuntimeConsole() {
+    function stringifyArg(value) {
+        if (typeof value === "string") {
+            return value;
+        }
+        if (value instanceof Error) {
+            return value.stack ?? value.message ?? String(value);
+        }
+        try {
+            return JSON.stringify(value);
+        } catch (_error) {
+            return String(value);
+        }
+    }
+    function emit(level, args) {
+        const message = Array.from(args).map(stringifyArg).join(" ");
+        try {
+            Deno.core.ops.op_runtime_console_log(level, message);
+        } catch (_error) {
+            // logger 不在時は静かに捨てる（端末に書かない）。
+        }
+    }
+    const consoleProxy = {
+        log: function () { emit("log", arguments); },
+        info: function () { emit("info", arguments); },
+        debug: function () { emit("debug", arguments); },
+        warn: function () { emit("warn", arguments); },
+        error: function () { emit("error", arguments); },
+        trace: function () { emit("debug", arguments); },
+        dir: function () { emit("debug", arguments); },
+        group: function () {},
+        groupCollapsed: function () {},
+        groupEnd: function () {},
+        time: function () {},
+        timeEnd: function () {},
+        assert: function () {},
+        count: function () {},
+        countReset: function () {},
+        clear: function () {},
+        table: function (value) { emit("debug", [value]); },
+    };
+    globalThis.console = consoleProxy;
+})();
 "#;
 
 const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] =
@@ -993,6 +1040,11 @@ pub fn find_workspace_root_path(path: PathBuf, markers: &[String]) -> Option<Pat
     if markers.is_empty() {
         return None;
     }
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
     let mut current = if path.is_file() || path.extension().is_some() {
         path.parent().map(std::path::Path::to_path_buf)?
     } else {
@@ -1609,6 +1661,20 @@ async fn op_runtime_filer_bulk_delete(
         .map_err(runtime_filer_error_to_js_error)
 }
 
+/// Plugin から呼ばれた `console.log` / `console.warn` / `console.error` 等を
+/// stdout にそのまま吐かせると raw-mode の TUI 画面が破壊されるため、
+/// すべて diagnostic logger 経由（log::debug! / log::warn! / log::error!）に
+/// 流す。レベルは `level` 引数で受ける（"log"/"info"/"debug"/"warn"/"error"）。
+#[op2(fast)]
+fn op_runtime_console_log(#[string] level: &str, #[string] message: &str) {
+    match level {
+        "error" => log::error!("[saya-runtime-console] {message}"),
+        "warn" => log::warn!("[saya-runtime-console] {message}"),
+        "info" | "log" => log::info!("[saya-runtime-console] {message}"),
+        _ => log::debug!("[saya-runtime-console] {message}"),
+    }
+}
+
 deno_core::extension!(
     live_saya_extension,
     ops = [
@@ -1634,7 +1700,8 @@ deno_core::extension!(
         op_runtime_filer_unmark,
         op_runtime_filer_clear_marks,
         op_runtime_filer_bulk_delete_preview,
-        op_runtime_filer_bulk_delete
+        op_runtime_filer_bulk_delete,
+        op_runtime_console_log
     ],
     options = {
         bridge: Arc<dyn HostCapabilityBridge>,
@@ -2838,8 +2905,8 @@ mod tests {
         BufferEventPayload, CallbackRegistryBuilder, HostCapabilityBridge, ReadonlyBufferSnapshot,
         ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
         RuntimeFilerError, RuntimeFilerErrorKind, RuntimeFilerOperationKind, RuntimeMode,
-        SayaLiveRuntime, SayaStartupPhaseEvaluator, SayaStartupPhaseRunner, runtime_filer_io_error,
-        spawn_startup_runtime_prepare_runner,
+        SayaLiveRuntime, SayaStartupPhaseEvaluator, SayaStartupPhaseRunner,
+        find_workspace_root_path, runtime_filer_io_error, spawn_startup_runtime_prepare_runner,
     };
 
     fn unique_path(name: &str) -> PathBuf {
@@ -2848,6 +2915,27 @@ mod tests {
             .expect("time went backwards")
             .as_nanos();
         std::env::temp_dir().join(format!("saya-live-runtime-{name}-{nanos}"))
+    }
+
+    #[test]
+    fn workspace_root_detection_returns_absolute_root_for_relative_buffer_paths() {
+        let _lock = crate::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = unique_path("relative-workspace-root");
+        let nested = root.join("tmp");
+        std::fs::create_dir_all(&nested).expect("nested workspace dir");
+        std::fs::create_dir(root.join(".git")).expect("root marker");
+        std::fs::write(nested.join("main.go"), "package main\n").expect("source file");
+        let expected_root = std::fs::canonicalize(&root).expect("canonical root");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&root).expect("enter workspace root");
+
+        let detected = find_workspace_root_path(PathBuf::from("tmp/main.go"), &[".git".into()]);
+
+        std::env::set_current_dir(previous_dir).expect("restore current dir");
+        std::fs::remove_dir_all(&root).expect("cleanup workspace root");
+        assert_eq!(detected, Some(expected_root));
     }
 
     #[test]

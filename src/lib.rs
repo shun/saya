@@ -32,6 +32,7 @@ pub mod option_registry;
 pub mod optional_graphics;
 pub mod overlay_asset_store;
 pub mod presentation_effect;
+pub mod process_pool;
 pub mod runtime_integration;
 pub mod runtime_message;
 pub mod runtime_refresh;
@@ -53,6 +54,7 @@ pub mod tui_render_coordinator;
 pub mod tui_renderer;
 pub mod ui_surface;
 pub mod viewport;
+pub mod visual_line_layout;
 
 pub use saya_live_runtime::RUNTIME_SAYA_TYPE_DECLARATION;
 pub use startup_runtime::STARTUP_SAYA_TYPE_DECLARATION;

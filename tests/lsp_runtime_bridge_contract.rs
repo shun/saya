@@ -220,6 +220,77 @@ async fn lsp_preview_plugin_uses_typed_runtime_bridge_and_records_exact_request_
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn lsp_preview_plugin_resolves_relative_buffer_paths_against_root_uri() {
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-lsp-client.ts");
+    let config_path = unique_path("relative-uri");
+    let source = format!(
+        r#"
+            import {{ setupSayaLspClient }} from {specifier:?};
+            setupSayaLspClient({{
+                clientName: "saya-relative-uri",
+                rootUri: "file:///workspace",
+                languageId: "rust",
+                enableBufferEvents: false,
+            }});
+        "#,
+        specifier = plugin_path.to_string_lossy()
+    );
+    std::fs::write(&config_path, source).expect("LSP relative URI config should be written");
+    let prepared = prepare_init_module(
+        &config_path,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).as_path(),
+    );
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!("LSP relative URI startup module should prepare");
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("LSP relative URI startup registry should collect");
+    let bridge = Arc::new(RecordingLspBridge::new(Ok(lsp_success_response(
+        "textDocument/hover",
+    ))));
+    *bridge.buffer.lock().expect("recording bridge buffer lock") = ReadonlyBufferSnapshot {
+        id: 404,
+        path: Some(PathBuf::from("src/main.rs")),
+        line_count: 1,
+        cursor_row: 0,
+        cursor_col: 0,
+        current_line: "fn main() {}".to_string(),
+        text: "fn main() {}\n".to_string(),
+    };
+    let runtime = SayaLiveRuntime::spawn_from_seed(
+        bridge.clone(),
+        CallbackRegistrySeed::from_startup_registry(&registry),
+    )
+    .expect("runtime should spawn from LSP relative URI registry");
+
+    runtime
+        .execute_command("lsp.hover")
+        .expect("lsp.hover command should queue")
+        .await_result()
+        .await
+        .expect("lsp.hover command should complete through typed bridge");
+
+    let requests = bridge.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .text_document
+            .as_ref()
+            .map(|document| document.uri.as_str()),
+        Some("file:///workspace/src/main.rs")
+    );
+    assert_eq!(
+        requests[0]
+            .params
+            .as_ref()
+            .and_then(|params| params.pointer("/textDocument/uri"))
+            .and_then(serde_json::Value::as_str),
+        Some("file:///workspace/src/main.rs")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn lsp_preview_plugin_routes_feature_responses_to_editor_ui_commands() {
     let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-lsp-client.ts");
     let config_path = unique_path("feature-response-ui");
@@ -298,6 +369,231 @@ async fn lsp_preview_plugin_routes_feature_responses_to_editor_ui_commands() {
             .await_result()
             .await
             .expect("LSP feature UI command should complete");
+
+        let host_commands = bridge.recorded_host_commands();
+        assert_eq!(
+            host_commands.len(),
+            1,
+            "{command} should issue exactly one UI host command"
+        );
+        assert!(
+            host_commands[0].starts_with(expected_prefix),
+            "{command} should route to {expected_prefix}, got {host_commands:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lsp_preview_plugin_exposes_daily_coding_commands_with_lsp_317_request_shapes() {
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-lsp-client.ts");
+    let config_path = unique_path("daily-coding-commands");
+    let source = format!(
+        r#"
+            import {{ setupSayaLspClient }} from {specifier:?};
+            setupSayaLspClient({{
+                clientName: "saya-daily-coding",
+                rootUri: "file:///workspace",
+                languageId: "rust",
+                enableBufferEvents: false,
+                formattingOptions: {{
+                    tabSize: 2,
+                    insertSpaces: true,
+                    trimTrailingWhitespace: true,
+                }},
+                renameNewName: "renamed_symbol",
+                codeActionKinds: ["quickfix", "source.organizeImports"],
+                commands: {{
+                    completion: "code.complete",
+                    completionResolve: "code.complete.resolve",
+                    signatureHelp: "code.signature",
+                    formatting: "code.format",
+                    rangeFormatting: "code.rangeFormat",
+                    rename: "code.rename",
+                    codeAction: "code.action",
+                    codeActionResolve: "code.action.resolve",
+                }},
+            }});
+        "#,
+        specifier = plugin_path.to_string_lossy()
+    );
+    std::fs::write(&config_path, source).expect("LSP daily coding config should be written");
+    let prepared = prepare_init_module(
+        &config_path,
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).as_path(),
+    );
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!("LSP daily coding startup module should prepare");
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("LSP daily coding startup registry should collect");
+
+    for (command, method, result, expected_prefix) in [
+        (
+            "code.complete",
+            "textDocument/completion",
+            json!({
+                "items": [
+                    {
+                        "label": "println!",
+                        "kind": 3,
+                        "detail": "macro",
+                        "documentation": { "kind": "markdown", "value": "Prints a line." }
+                    }
+                ]
+            }),
+            "completion.floatMenu ",
+        ),
+        (
+            "code.complete.resolve",
+            "completionItem/resolve",
+            json!({
+                "label": "println!",
+                "detail": "resolved macro",
+                "documentation": "Resolved docs"
+            }),
+            "completion.floatMenu ",
+        ),
+        (
+            "code.signature",
+            "textDocument/signatureHelp",
+            json!({
+                "activeSignature": 0,
+                "signatures": [
+                    {
+                        "label": "fn call(value: i32)",
+                        "documentation": "signature docs"
+                    }
+                ]
+            }),
+            "lsp.floatHover ",
+        ),
+        (
+            "code.format",
+            "textDocument/formatting",
+            json!([
+                {
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 10 }
+                    },
+                    "newText": "fn main() {}"
+                }
+            ]),
+            "lsp.previewWorkspaceEdit ",
+        ),
+        (
+            "code.rangeFormat",
+            "textDocument/rangeFormatting",
+            json!([]),
+            "lsp.previewWorkspaceEdit ",
+        ),
+        (
+            "code.rename",
+            "textDocument/rename",
+            json!({
+                "changes": {
+                    "file:///workspace/src/main.rs": [
+                        {
+                            "range": {
+                                "start": { "line": 4, "character": 0 },
+                                "end": { "line": 4, "character": 4 }
+                            },
+                            "newText": "renamed_symbol"
+                        }
+                    ]
+                }
+            }),
+            "lsp.previewWorkspaceEdit ",
+        ),
+        (
+            "code.action",
+            "textDocument/codeAction",
+            json!([
+                {
+                    "title": "Organize Imports",
+                    "kind": "source.organizeImports"
+                }
+            ]),
+            "lsp.floatCodeActions ",
+        ),
+        (
+            "code.action.resolve",
+            "codeAction/resolve",
+            json!({
+                "title": "Apply quick fix",
+                "kind": "quickfix",
+                "edit": { "changes": {} }
+            }),
+            "lsp.floatCodeActions ",
+        ),
+    ] {
+        let bridge = Arc::new(RecordingLspBridge::new(Ok(LspRuntimeBridgeResponse {
+            source: LspRuntimeBridgeSource::Lsp,
+            method: method.to_string(),
+            result,
+        })));
+        if method == "textDocument/completion" {
+            *bridge.buffer.lock().expect("recording bridge buffer lock") = ReadonlyBufferSnapshot {
+                id: 202,
+                path: Some(PathBuf::from("/workspace/src/main.rs")),
+                line_count: 1,
+                cursor_row: 0,
+                cursor_col: "module.".len(),
+                current_line: "module.".to_string(),
+                text: "module.\n".to_string(),
+            };
+        }
+        let runtime = SayaLiveRuntime::spawn_from_seed(
+            bridge.clone(),
+            CallbackRegistrySeed::from_startup_registry(&registry),
+        )
+        .expect("runtime should spawn from LSP daily coding registry");
+
+        runtime
+            .execute_command(command)
+            .expect("LSP daily coding command should queue")
+            .await_result()
+            .await
+            .expect("LSP daily coding command should complete");
+
+        let requests = bridge.recorded_requests();
+        assert_eq!(requests.len(), 1, "{command} should send one request");
+        let request = &requests[0];
+        assert_eq!(request.source, LspRuntimeBridgeSource::Lsp);
+        assert_eq!(request.protocol_version, "3.17");
+        assert_eq!(request.method, method);
+        assert_eq!(
+            request
+                .text_document
+                .as_ref()
+                .map(|document| document.uri.as_str()),
+            Some("file:///workspace/src/main.rs")
+        );
+        assert!(
+            request.params.is_some(),
+            "{method} should include protocol params"
+        );
+        if method == "textDocument/completion" {
+            assert_eq!(
+                request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.pointer("/context/triggerKind"))
+                    .and_then(serde_json::Value::as_u64),
+                Some(2),
+                "completion requests should carry trigger-character context"
+            );
+            assert_eq!(
+                request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.pointer("/context/triggerCharacter"))
+                    .and_then(serde_json::Value::as_str),
+                Some("."),
+                "completion requests should include the trigger character"
+            );
+        }
 
         let host_commands = bridge.recorded_host_commands();
         assert_eq!(

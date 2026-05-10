@@ -40,7 +40,7 @@ pub fn run_terminal_input_loop<S: TerminalEventSource>(
             break;
         }
 
-        log::debug!(
+        log::trace!(
             "[input_loop] polling terminal events: timeout_ms={}",
             INPUT_POLL_INTERVAL.as_millis()
         );
@@ -54,7 +54,7 @@ pub fn run_terminal_input_loop<S: TerminalEventSource>(
         };
 
         if !event_ready {
-            log::debug!("[input_loop] poll timed out without event");
+            log::trace!("[input_loop] poll timed out without event");
             continue;
         }
 
