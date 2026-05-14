@@ -1,9 +1,10 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use saya::lsif_index::LsifIndexCache;
 use saya::lsp_runtime_bridge::{
     LspRuntimeBridgeRequest, LspRuntimeBridgeSource, LspRuntimePosition, LspRuntimeTextDocument,
 };
-use saya::lsp_session::LspSessionManager;
 use saya::saya_live_runtime::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, RuntimeCommandError, RuntimeMode,
 };
@@ -67,6 +68,17 @@ fn lsif_request(dump_path: &std::path::Path, method: &str, uri: &str) -> LspRunt
     }
 }
 
+fn new_diagnostic_events() -> Arc<Mutex<Vec<String>>> {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+fn collect_events(events: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    events
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
 #[test]
 fn lsif_bridge_resolves_hover_and_definition_from_index_edges() {
     let dump_path = unique_path("hover-definition");
@@ -94,30 +106,29 @@ fn lsif_bridge_resolves_hover_and_definition_from_index_edges() {
         ),
     )
     .expect("LSIF fixture should be written");
-    let manager = LspSessionManager::default();
+    let mut cache = LsifIndexCache::default();
+    let events = new_diagnostic_events();
 
-    let hover = manager
-        .execute_blocking(lsif_request(
-            &dump_path,
-            "textDocument/hover",
-            &document_uri,
-        ))
+    let hover = cache
+        .execute_request(
+            lsif_request(&dump_path, "textDocument/hover", &document_uri),
+            &events,
+        )
         .expect("LSIF hover should resolve");
     assert_eq!(hover.source, LspRuntimeBridgeSource::Lsif);
     assert_eq!(hover.result["contents"]["value"], "indexed hover");
 
-    let definition = manager
-        .execute_blocking(lsif_request(
-            &dump_path,
-            "textDocument/definition",
-            &document_uri,
-        ))
+    let definition = cache
+        .execute_request(
+            lsif_request(&dump_path, "textDocument/definition", &document_uri),
+            &events,
+        )
         .expect("LSIF definition should resolve");
     assert_eq!(definition.source, LspRuntimeBridgeSource::Lsif);
     assert_eq!(definition.result[0]["uri"], definition_uri);
     assert_eq!(definition.result[0]["range"]["start"]["line"], 4);
 
-    let events = manager.diagnostic_events();
+    let events = collect_events(&events);
     assert!(
         events
             .iter()
@@ -147,31 +158,30 @@ fn lsif_bridge_invalidates_cached_index_when_dump_file_changes() {
         .expect("LSIF fixture should be written");
     };
     write_fixture("first hover");
-    let manager = LspSessionManager::default();
+    let mut cache = LsifIndexCache::default();
+    let events = new_diagnostic_events();
 
-    let first = manager
-        .execute_blocking(lsif_request(
-            &dump_path,
-            "textDocument/hover",
-            &document_uri,
-        ))
+    let first = cache
+        .execute_request(
+            lsif_request(&dump_path, "textDocument/hover", &document_uri),
+            &events,
+        )
         .expect("first LSIF hover should resolve");
     assert_eq!(first.result["contents"]["value"], "first hover");
 
     write_fixture("second hover with longer text");
-    let second = manager
-        .execute_blocking(lsif_request(
-            &dump_path,
-            "textDocument/hover",
-            &document_uri,
-        ))
+    let second = cache
+        .execute_request(
+            lsif_request(&dump_path, "textDocument/hover", &document_uri),
+            &events,
+        )
         .expect("second LSIF hover should resolve after dump change");
     assert_eq!(
         second.result["contents"]["value"],
         "second hover with longer text"
     );
 
-    let events = manager.diagnostic_events();
+    let events = collect_events(&events);
     assert!(
         events
             .iter()
@@ -194,14 +204,14 @@ fn lsif_bridge_reports_missing_lookup_without_lsp_fallback() {
         ),
     )
     .expect("LSIF fixture should be written");
-    let manager = LspSessionManager::default();
+    let mut cache = LsifIndexCache::default();
+    let events = new_diagnostic_events();
 
-    let error = manager
-        .execute_blocking(lsif_request(
-            &dump_path,
-            "textDocument/hover",
-            &document_uri,
-        ))
+    let error = cache
+        .execute_request(
+            lsif_request(&dump_path, "textDocument/hover", &document_uri),
+            &events,
+        )
         .expect_err("missing LSIF hover should return a bridge error");
     match error {
         RuntimeCommandError::CommandFailed { message, .. } => {

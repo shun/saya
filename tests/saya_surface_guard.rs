@@ -330,7 +330,7 @@ fn runtime_surface_excludes_filesystem_and_network_capabilities() {
 
     assert_eq!(
         surface,
-        &["commands", "buffer", "window", "editor", "filer", "lsp"]
+        &["commands", "buffer", "window", "editor", "filer", "lsif", "process"]
     );
     assert_eq!(
         runtime_forbidden_surface_names(),

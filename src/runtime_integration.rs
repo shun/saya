@@ -108,13 +108,16 @@ pub trait RuntimeHostSession {
         &mut self,
         name: &str,
     ) -> Result<RuntimeCommandEffect, RuntimeCommandError>;
-    fn execute_lsp_request(
+    fn execute_lsif_request(
         &mut self,
         request: LspRuntimeBridgeRequest,
     ) -> Result<LspRuntimeBridgeResponse, RuntimeCommandError> {
         Err(RuntimeCommandError::CommandFailed {
-            name: "lsp.request".to_string(),
-            message: format!("LSP bridge is not configured for method {}", request.method),
+            name: "lsif.request".to_string(),
+            message: format!(
+                "LSIF bridge is not configured for method {}",
+                request.method
+            ),
         })
     }
 }
@@ -224,7 +227,7 @@ struct RuntimeFloatSnapshotsChannelRequest {
     reply: oneshot::Sender<Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError>>,
 }
 
-struct RuntimeLspRequest {
+struct RuntimeLsifRequest {
     request: LspRuntimeBridgeRequest,
     reply: oneshot::Sender<Result<LspRuntimeBridgeResponse, RuntimeCommandError>>,
 }
@@ -290,7 +293,7 @@ fn runtime_filer_operation_parts(
 struct ChannelBackedHostBridge {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
     command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
-    lsp_request_sender: mpsc::UnboundedSender<RuntimeLspRequest>,
+    lsif_request_sender: mpsc::UnboundedSender<RuntimeLsifRequest>,
     filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
     filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
     float_open_sender: mpsc::UnboundedSender<RuntimeFloatOpenChannelRequest>,
@@ -326,25 +329,25 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
         })
     }
 
-    fn execute_lsp_request(
+    fn execute_lsif_request(
         &self,
         request: LspRuntimeBridgeRequest,
     ) -> crate::saya_live_runtime::BoxFuture<Result<LspRuntimeBridgeResponse, RuntimeCommandError>>
     {
-        let lsp_request_sender = self.lsp_request_sender.clone();
+        let lsif_request_sender = self.lsif_request_sender.clone();
         Box::pin(async move {
             let (reply, receiver) = oneshot::channel();
-            lsp_request_sender
-                .send(RuntimeLspRequest { request, reply })
+            lsif_request_sender
+                .send(RuntimeLsifRequest { request, reply })
                 .map_err(|_| RuntimeCommandError::CommandFailed {
-                    name: "lsp.request".to_string(),
-                    message: "host LSP request channel closed".to_string(),
+                    name: "lsif.request".to_string(),
+                    message: "host LSIF request channel closed".to_string(),
                 })?;
             receiver
                 .await
                 .map_err(|_| RuntimeCommandError::CommandFailed {
-                    name: "lsp.request".to_string(),
-                    message: "host LSP request reply channel closed".to_string(),
+                    name: "lsif.request".to_string(),
+                    message: "host LSIF request reply channel closed".to_string(),
                 })?
         })
     }
@@ -556,8 +559,8 @@ pub struct RuntimeSessionOwner {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
     _command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
     command_receiver: mpsc::UnboundedReceiver<RuntimeHostCommandRequest>,
-    _lsp_request_sender: mpsc::UnboundedSender<RuntimeLspRequest>,
-    lsp_request_receiver: mpsc::UnboundedReceiver<RuntimeLspRequest>,
+    _lsif_request_sender: mpsc::UnboundedSender<RuntimeLsifRequest>,
+    lsif_request_receiver: mpsc::UnboundedReceiver<RuntimeLsifRequest>,
     _filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
     filer_operation_receiver: mpsc::UnboundedReceiver<RuntimeFilerOperationRequest>,
     _filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
@@ -581,7 +584,7 @@ impl RuntimeSessionOwner {
         );
         let snapshots = Arc::new(Mutex::new(CachedRuntimeSnapshots::default()));
         let (command_sender, command_receiver) = mpsc::unbounded_channel();
-        let (lsp_request_sender, lsp_request_receiver) = mpsc::unbounded_channel();
+        let (lsif_request_sender, lsif_request_receiver) = mpsc::unbounded_channel();
         let (filer_operation_sender, filer_operation_receiver) = mpsc::unbounded_channel();
         let (filer_list_sender, filer_list_receiver) = mpsc::unbounded_channel();
         let (float_open_sender, float_open_receiver) = mpsc::unbounded_channel();
@@ -591,7 +594,7 @@ impl RuntimeSessionOwner {
         let bridge = Arc::new(ChannelBackedHostBridge {
             snapshots: snapshots.clone(),
             command_sender: command_sender.clone(),
-            lsp_request_sender: lsp_request_sender.clone(),
+            lsif_request_sender: lsif_request_sender.clone(),
             filer_operation_sender: filer_operation_sender.clone(),
             filer_list_sender: filer_list_sender.clone(),
             float_open_sender: float_open_sender.clone(),
@@ -605,8 +608,8 @@ impl RuntimeSessionOwner {
             snapshots,
             _command_sender: command_sender,
             command_receiver,
-            _lsp_request_sender: lsp_request_sender,
-            lsp_request_receiver,
+            _lsif_request_sender: lsif_request_sender,
+            lsif_request_receiver,
             _filer_operation_sender: filer_operation_sender,
             filer_operation_receiver,
             _filer_list_sender: filer_list_sender,
@@ -768,16 +771,16 @@ impl RuntimeSessionOwner {
                         }
                     }
                 }
-                request = self.lsp_request_receiver.recv() => {
+                request = self.lsif_request_receiver.recv() => {
                     let Some(request) = request else {
-                        log::debug!("[runtime_integration] LSP request channel closed while dispatch was in flight");
+                        log::debug!("[runtime_integration] LSIF request channel closed while dispatch was in flight");
                         break;
                     };
                     log::info!(
-                        "[runtime_integration][lsp] servicing runtime LSP request during event dispatch: method={}",
+                        "[runtime_integration][lsif] servicing runtime LSIF request during event dispatch: method={}",
                         request.request.method
                     );
-                    let result = host_session.execute_lsp_request(request.request);
+                    let result = host_session.execute_lsif_request(request.request);
                     if result.is_ok() {
                         self.refresh_cached_snapshots(host_session);
                     }
@@ -997,16 +1000,16 @@ impl RuntimeSessionOwner {
                         }
                     }
                 }
-                request = self.lsp_request_receiver.recv() => {
+                request = self.lsif_request_receiver.recv() => {
                     let Some(request) = request else {
-                        log::debug!("[runtime_integration] LSP request channel closed while runtime command was in flight");
+                        log::debug!("[runtime_integration] LSIF request channel closed while runtime command was in flight");
                         break;
                     };
                     log::info!(
-                        "[runtime_integration][lsp] servicing runtime LSP request during command execution: method={}",
+                        "[runtime_integration][lsif] servicing runtime LSIF request during command execution: method={}",
                         request.request.method
                     );
-                    let result = host_session.execute_lsp_request(request.request);
+                    let result = host_session.execute_lsif_request(request.request);
                     if result.is_ok() {
                         self.refresh_cached_snapshots(host_session);
                     }

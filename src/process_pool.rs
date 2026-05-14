@@ -14,7 +14,7 @@
 //!   `AlreadyReading` を返す（パイプのバイト順序を破壊するバグを防ぐ）。
 //! - エラーは意味的に分離した `enum` で返し、文字列化を排除する。
 //!
-//! 本モジュールは LSP / JSON-RPC の知識を一切持たない汎用基盤である。
+//! 本モジュールは特定プロトコルの知識を一切持たない汎用基盤である。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
 
-use deno_core::{JsRuntime, OpState, RuntimeOptions, op2};
+use deno_core::{JsBuffer, JsRuntime, OpState, RuntimeOptions, op2};
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 
 use crate::callback_registry_seed::CallbackRegistrySeed;
 use crate::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
+use crate::process_pool::{ProcessPool, ProcessPoolError, ProcessSpec, StdioMode};
 #[cfg(test)]
 use crate::startup_runtime::{
     PreparedStartupModule, StartupModulePrepareResult, prepare_init_module,
@@ -48,7 +49,8 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.filer.clearMarks",
     "saya.filer.bulkDeletePreview",
     "saya.filer.bulkDelete",
-    "saya.lsp.request",
+    "saya.lsif.request",
+    "saya.process.spawn",
 ];
 
 /// Formal runtime surface は read-only/command 実行に限定し、compat 文字列 DSL は含めない。
@@ -208,19 +210,78 @@ globalThis.saya = {
             );
         },
     },
-    lsp: {
+    lsif: {
         request(payload) {
-            return Deno.core.ops.op_runtime_lsp_request(JSON.stringify(payload ?? {}));
+            return Deno.core.ops.op_runtime_lsif_request(JSON.stringify(payload ?? {}));
+        },
+    },
+    // Phase A.2: 汎用プロセス I/O。Rust 側の op_process_* を Object.freeze
+    // で凍結したラッパ越しに公開する。LSP / DAP / linter / formatter 等
+    // のプラグインから利用される基盤。
+    process: {
+        async spawn(spec) {
+            const normalized = {
+                command: String(spec?.command ?? ""),
+                args: Array.isArray(spec?.args) ? spec.args.map((arg) => String(arg)) : [],
+                env: spec?.env ?? {},
+                cwd: spec?.cwd === undefined ? null : (spec.cwd === null ? null : String(spec.cwd)),
+                stdin: typeof spec?.stdin === "string" ? spec.stdin : "null",
+                stdout: typeof spec?.stdout === "string" ? spec.stdout : "null",
+                stderr: typeof spec?.stderr === "string" ? spec.stderr : "null",
+            };
+            const handle = await Deno.core.ops.op_process_spawn(JSON.stringify(normalized));
+            return makeProcessHandle(handle);
         },
     },
 };
+
+function makeProcessHandle(id) {
+    // 0 byte 読み = EOF を `null` に正規化するヘルパ。Rust 側 op は
+    // fast path を維持するため `0` を返す（read(2) 相当の慣例）。
+    async function readInto(buf, op) {
+        if (!(buf instanceof Uint8Array)) {
+            throw new TypeError("read buffer must be Uint8Array");
+        }
+        const n = await op(id, buf);
+        return n === 0 ? null : n;
+    }
+    const handle = {
+        id,
+        stdin: Object.freeze({
+            async write(buf) {
+                if (!(buf instanceof Uint8Array)) {
+                    throw new TypeError("stdin write buffer must be Uint8Array");
+                }
+                return await Deno.core.ops.op_process_write_stdin(id, buf);
+            },
+        }),
+        stdout: Object.freeze({
+            read(buf) {
+                return readInto(buf, Deno.core.ops.op_process_read_stdout);
+            },
+        }),
+        stderr: Object.freeze({
+            read(buf) {
+                return readInto(buf, Deno.core.ops.op_process_read_stderr);
+            },
+        }),
+        async kill() {
+            await Deno.core.ops.op_process_kill(id);
+        },
+        async wait() {
+            return await Deno.core.ops.op_process_wait(id);
+        },
+    };
+    return Object.freeze(handle);
+}
 
 Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.buffer);
 Object.freeze(globalThis.saya.window);
 Object.freeze(globalThis.saya.editor);
 Object.freeze(globalThis.saya.filer);
-Object.freeze(globalThis.saya.lsp);
+Object.freeze(globalThis.saya.lsif);
+Object.freeze(globalThis.saya.process);
 Object.freeze(globalThis.saya);
 
 // プラグインの console.* をすべて diagnostic logger に流す。
@@ -271,8 +332,9 @@ Object.freeze(globalThis.saya);
 })();
 "#;
 
-const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] =
-    &["commands", "buffer", "window", "editor", "filer", "lsp"];
+const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &[
+    "commands", "buffer", "window", "editor", "filer", "lsif", "process",
+];
 const RUNTIME_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
 pub const RUNTIME_SAYA_TYPE_DECLARATION: &str = r#"
@@ -415,46 +477,76 @@ declare global {
         findRoot(path: string, markers: string[]): Promise<string | null>;
     }
 
-    type SayaLspRuntimeSource = "lsp" | "lsif";
-    type SayaLspRuntimeTrace = "off" | "messages" | "verbose";
-    type SayaLspPositionEncoding = "utf-16" | "utf-8" | "utf-32";
+    type SayaLsifRuntimeSource = "lsif";
+    type SayaLsifPositionEncoding = "utf-16" | "utf-8" | "utf-32";
 
-    interface SayaLspTextDocumentIdentifier {
+    interface SayaLsifTextDocumentIdentifier {
         uri: string;
     }
 
-    interface SayaLspPosition {
+    interface SayaLsifPosition {
         line: number;
         character: number;
     }
 
-    interface SayaLspRuntimeBridgeRequest {
-        source: SayaLspRuntimeSource;
+    interface SayaLsifRuntimeBridgeRequest {
+        source: SayaLsifRuntimeSource;
         lspVersion: string;
         method: string;
         clientName: string;
         rootUri?: string | null;
         languageId: string;
-        trace: SayaLspRuntimeTrace;
-        positionEncoding: SayaLspPositionEncoding;
+        positionEncoding: SayaLsifPositionEncoding;
         dumpPath: string;
-        textDocument?: SayaLspTextDocumentIdentifier | null;
-        server?: unknown;
-        position: SayaLspPosition;
+        textDocument?: SayaLsifTextDocumentIdentifier | null;
+        position: SayaLsifPosition;
         params?: unknown;
         buffer: SayaReadonlyBufferSnapshot;
         editor: SayaReadonlyEditorSnapshot;
         event?: unknown;
     }
 
-    interface SayaLspRuntimeBridgeResponse {
-        source: SayaLspRuntimeSource;
+    interface SayaLsifRuntimeBridgeResponse {
+        source: SayaLsifRuntimeSource;
         method: string;
         result: unknown;
     }
 
-    interface SayaRuntimeLspSurface {
-        request(payload: SayaLspRuntimeBridgeRequest): Promise<SayaLspRuntimeBridgeResponse>;
+    interface SayaRuntimeLsifSurface {
+        request(payload: SayaLsifRuntimeBridgeRequest): Promise<SayaLsifRuntimeBridgeResponse>;
+    }
+
+    type SayaProcessStdioMode = "inherit" | "null" | "piped";
+
+    interface SayaProcessSpec {
+        command: string;
+        args?: string[];
+        env?: Record<string, string>;
+        cwd?: string | null;
+        stdin?: SayaProcessStdioMode;
+        stdout?: SayaProcessStdioMode;
+        stderr?: SayaProcessStdioMode;
+    }
+
+    interface SayaProcessReader {
+        read(buf: Uint8Array): Promise<number | null>;
+    }
+
+    interface SayaProcessWriter {
+        write(buf: Uint8Array): Promise<number>;
+    }
+
+    interface SayaProcessHandle {
+        readonly id: number;
+        readonly stdin: SayaProcessWriter;
+        readonly stdout: SayaProcessReader;
+        readonly stderr: SayaProcessReader;
+        kill(): Promise<void>;
+        wait(): Promise<number>;
+    }
+
+    interface SayaRuntimeProcessSurface {
+        spawn(spec: SayaProcessSpec): Promise<SayaProcessHandle>;
     }
 
     type SayaFilerEntryKind = "directory" | "file" | "symlink" | "other";
@@ -579,7 +671,8 @@ declare global {
         editor: SayaRuntimeEditorSurface;
         workspace: SayaRuntimeWorkspaceSurface;
         filer: SayaRuntimeFilerSurface;
-        lsp: SayaRuntimeLspSurface;
+        lsif: SayaRuntimeLsifSurface;
+        process: SayaRuntimeProcessSurface;
     }
 
     var saya: SayaRuntimeSurface;
@@ -947,17 +1040,17 @@ pub enum RuntimeInitError {
 
 pub trait HostCapabilityBridge: Send + Sync + 'static {
     fn execute_host_command(&self, name: &str) -> BoxFuture<Result<(), RuntimeCommandError>>;
-    fn execute_lsp_request(
+    fn execute_lsif_request(
         &self,
         request: LspRuntimeBridgeRequest,
     ) -> BoxFuture<Result<LspRuntimeBridgeResponse, RuntimeCommandError>> {
         Box::pin(async move {
             log::debug!(
-                "[saya_live_runtime][lsp] typed LSP bridge unavailable: method={}",
+                "[saya_live_runtime][lsif] typed LSIF bridge unavailable: method={}",
                 request.method
             );
             Err(RuntimeCommandError::UnknownCommand {
-                name: "lsp.request".to_string(),
+                name: "lsif.request".to_string(),
             })
         })
     }
@@ -1216,6 +1309,11 @@ impl CallbackRegistry {
 #[derive(Clone)]
 struct LiveRuntimeOpState {
     bridge: Arc<dyn HostCapabilityBridge>,
+    /// Phase A.2: 汎用プロセス I/O (`saya.process.*`) op の共有プール。
+    ///
+    /// Bootstrap script の `saya.process.spawn(...)` ラッパおよびテスト
+    /// 用 `Deno.core.ops.op_process_*` から参照される。
+    process_pool: Arc<crate::process_pool::ProcessPool>,
 }
 
 #[derive(Debug, Default)]
@@ -1248,25 +1346,24 @@ async fn op_runtime_execute_host_command(
 
 #[op2(async(deferred), fast)]
 #[serde]
-async fn op_runtime_lsp_request(
+async fn op_runtime_lsif_request(
     state: Rc<RefCell<OpState>>,
     #[string] request_json: String,
 ) -> Result<LspRuntimeBridgeResponse, JsErrorBox> {
     let request = serde_json::from_str::<LspRuntimeBridgeRequest>(&request_json)
-        .map_err(|error| JsErrorBox::generic(format!("invalid LSP bridge request: {error}")))?;
+        .map_err(|error| JsErrorBox::generic(format!("invalid LSIF bridge request: {error}")))?;
     if let Err(error) = request.validate() {
         log::debug!(
-            "[saya_live_runtime][lsp] invalid typed LSP request rejected: error={:?}",
+            "[saya_live_runtime][lsif] invalid typed LSIF request rejected: error={:?}",
             error
         );
         return Err(JsErrorBox::generic(format!(
-            "invalid LSP bridge request: {error:?}"
+            "invalid LSIF bridge request: {error:?}"
         )));
     }
     let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
     log::debug!(
-        "[saya_live_runtime][lsp] runtime op typed LSP request: source={:?}, method={}, client={}, document={}",
-        request.source,
+        "[saya_live_runtime][lsif] runtime op typed LSIF request: method={}, client={}, document={}",
         request.method,
         request.client_name,
         request
@@ -1275,11 +1372,11 @@ async fn op_runtime_lsp_request(
             .map(|document| document.uri.as_str())
             .unwrap_or("<none>")
     );
-    match bridge.execute_lsp_request(request).await {
+    match bridge.execute_lsif_request(request).await {
         Ok(response) => Ok(response),
         Err(error) => {
             log::debug!(
-                "[saya_live_runtime][lsp] typed LSP request failed: error={:?}",
+                "[saya_live_runtime][lsif] typed LSIF request failed: error={:?}",
                 error
             );
             Err(runtime_command_error_to_js_error(error))
@@ -1675,11 +1772,271 @@ fn op_runtime_console_log(#[string] level: &str, #[string] message: &str) {
     }
 }
 
+/// `op_process_*` で TS から渡される `ProcessSpec` の JSON 表現。
+///
+/// `saya.process.spawn(...)` ラッパが Object を `JSON.stringify` して
+/// 渡すため、ここでは serde で受けて内部の `ProcessSpec` に変換する。
+/// `command` 以外のフィールドはオプショナルで、未指定時は安全側
+/// (`StdioMode::Null`) にフォールバックする。
+#[derive(Debug, Deserialize)]
+struct RuntimeProcessSpec {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    stdin: Option<RuntimeStdioMode>,
+    #[serde(default)]
+    stdout: Option<RuntimeStdioMode>,
+    #[serde(default)]
+    stderr: Option<RuntimeStdioMode>,
+}
+
+/// TS 側 `"inherit" | "null" | "piped"` を `StdioMode` に対応付ける。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeStdioMode {
+    Inherit,
+    Null,
+    Piped,
+}
+
+impl From<RuntimeStdioMode> for StdioMode {
+    fn from(value: RuntimeStdioMode) -> Self {
+        match value {
+            RuntimeStdioMode::Inherit => StdioMode::Inherit,
+            RuntimeStdioMode::Null => StdioMode::Null,
+            RuntimeStdioMode::Piped => StdioMode::Piped,
+        }
+    }
+}
+
+impl RuntimeProcessSpec {
+    fn into_process_spec(self) -> ProcessSpec {
+        ProcessSpec {
+            command: self.command,
+            args: self.args,
+            env: self.env,
+            cwd: self.cwd.map(PathBuf::from),
+            stdin: self.stdin.map(StdioMode::from).unwrap_or(StdioMode::Null),
+            stdout: self.stdout.map(StdioMode::from).unwrap_or(StdioMode::Null),
+            stderr: self.stderr.map(StdioMode::from).unwrap_or(StdioMode::Null),
+        }
+    }
+}
+
+/// `ProcessPoolError` を `JsErrorBox` へ正規化するヘルパ。
+///
+/// op 戻り値の `Err(JsErrorBox)` は JS 側で `Error.message` として観測
+/// できる文字列のみを保持できるため、enum バリアントの情報を `Display`
+/// 経由で文字列化する。LSP プラグイン (Phase B) は `error.message` の
+/// 先頭プレフィクスでバリアントを判定する設計を取れるよう、`Display`
+/// 実装側でラベルを揃えている。
+fn process_pool_error_to_js_error(error: ProcessPoolError) -> JsErrorBox {
+    JsErrorBox::generic(error.to_string())
+}
+
+/// Phase A.2: 子プロセスを spawn し、ハンドル ID を返す。
+///
+/// `spec_json` は `RuntimeProcessSpec` の JSON 表現。`stdin`/`stdout`/
+/// `stderr` の各フィールドは `"inherit" | "null" | "piped"` のいずれか
+/// を取り、未指定時は `null` (= `/dev/null`) にフォールバックする。
+///
+/// 戻り値は `u32` のハンドル ID（1 始まり、`AtomicU32` 連番）。失敗時
+/// は `ProcessPoolError` を `Display` 経由で文字列化した `JsErrorBox`
+/// を返す。
+#[op2(async(deferred), fast)]
+#[smi]
+async fn op_process_spawn(
+    state: Rc<RefCell<OpState>>,
+    #[string] spec_json: String,
+) -> Result<u32, JsErrorBox> {
+    log::debug!(
+        "[saya_live_runtime][process] op_process_spawn: spec_len={}",
+        spec_json.len()
+    );
+    let runtime_spec = serde_json::from_str::<RuntimeProcessSpec>(&spec_json).map_err(|error| {
+        log::debug!(
+            "[saya_live_runtime][process] op_process_spawn rejected: invalid spec json: {error}"
+        );
+        JsErrorBox::generic(format!("invalid process spec: {error}"))
+    })?;
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .process_pool
+        .clone();
+    let process_spec = runtime_spec.into_process_spec();
+    log::debug!(
+        "[saya_live_runtime][process] op_process_spawn dispatching: command={:?}, args_len={}",
+        process_spec.command,
+        process_spec.args.len()
+    );
+    let handle = pool
+        .spawn(process_spec)
+        .await
+        .map_err(process_pool_error_to_js_error)?;
+    log::debug!(
+        "[saya_live_runtime][process] op_process_spawn ok: handle={handle}"
+    );
+    Ok(handle)
+}
+
+/// Phase A.2: stdin に `buf` を書き込む（zero-copy）。
+///
+/// `JsBuffer` は V8 ArrayBuffer の `V8Slice` を保持しており、`as_ref()`
+/// で `&[u8]` を取り出して `pool.write_stdin` に渡すことで kernel への
+/// 単一コピーで到達する（中間 `Vec<u8>` を作らない）。戻り値は書き込ん
+/// だバイト数（常に `buf.len()` と一致）。
+///
+/// `JsBuffer` を引数に取る async op は deno_core の fast path に乗らな
+/// いため、`fast` 属性は付けない（deferred なら通常 path で十分）。
+#[op2(async(deferred))]
+#[smi]
+async fn op_process_write_stdin(
+    state: Rc<RefCell<OpState>>,
+    #[smi] handle: u32,
+    #[buffer] buf: JsBuffer,
+) -> Result<u32, JsErrorBox> {
+    let bytes = buf.as_ref();
+    log::trace!(
+        "[saya_live_runtime][process] op_process_write_stdin: handle={handle}, bytes={}",
+        bytes.len()
+    );
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .process_pool
+        .clone();
+    let written = pool
+        .write_stdin(handle, bytes)
+        .await
+        .map_err(process_pool_error_to_js_error)?;
+    log::trace!(
+        "[saya_live_runtime][process] op_process_write_stdin ok: handle={handle}, written={written}"
+    );
+    Ok(written as u32)
+}
+
+/// Phase A.2: stdout から `buf` に最大 `buf.len()` バイト読み出す（zero-copy）。
+///
+/// `JsBuffer` の `as_mut()` 経由で V8 ArrayBuffer の backing store に
+/// 直接書き込む。戻り値は読み込みバイト数で、`0` は EOF を表す（TS
+/// 側 `saya.process` ラッパで `null` に正規化される）。
+#[op2(async(deferred))]
+#[smi]
+async fn op_process_read_stdout(
+    state: Rc<RefCell<OpState>>,
+    #[smi] handle: u32,
+    #[buffer] mut buf: JsBuffer,
+) -> Result<u32, JsErrorBox> {
+    let capacity = buf.as_ref().len();
+    log::trace!(
+        "[saya_live_runtime][process] op_process_read_stdout: handle={handle}, capacity={capacity}"
+    );
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .process_pool
+        .clone();
+    let outcome = pool
+        .read_stdout(handle, buf.as_mut())
+        .await
+        .map_err(process_pool_error_to_js_error)?;
+    let n = outcome.unwrap_or(0);
+    log::trace!(
+        "[saya_live_runtime][process] op_process_read_stdout ok: handle={handle}, bytes={n}"
+    );
+    Ok(n as u32)
+}
+
+/// Phase A.2: stderr から `buf` に最大 `buf.len()` バイト読み出す。
+///
+/// 動作仕様は `op_process_read_stdout` と同等。`0` は EOF を表す。
+#[op2(async(deferred))]
+#[smi]
+async fn op_process_read_stderr(
+    state: Rc<RefCell<OpState>>,
+    #[smi] handle: u32,
+    #[buffer] mut buf: JsBuffer,
+) -> Result<u32, JsErrorBox> {
+    let capacity = buf.as_ref().len();
+    log::trace!(
+        "[saya_live_runtime][process] op_process_read_stderr: handle={handle}, capacity={capacity}"
+    );
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .process_pool
+        .clone();
+    let outcome = pool
+        .read_stderr(handle, buf.as_mut())
+        .await
+        .map_err(process_pool_error_to_js_error)?;
+    let n = outcome.unwrap_or(0);
+    log::trace!(
+        "[saya_live_runtime][process] op_process_read_stderr ok: handle={handle}, bytes={n}"
+    );
+    Ok(n as u32)
+}
+
+/// Phase A.2: `handle` のプロセスに kill シグナルを送る。
+#[op2(async(deferred), fast)]
+async fn op_process_kill(
+    state: Rc<RefCell<OpState>>,
+    #[smi] handle: u32,
+) -> Result<(), JsErrorBox> {
+    log::debug!(
+        "[saya_live_runtime][process] op_process_kill: handle={handle}"
+    );
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .process_pool
+        .clone();
+    pool.kill(handle)
+        .await
+        .map_err(process_pool_error_to_js_error)?;
+    log::debug!(
+        "[saya_live_runtime][process] op_process_kill ok: handle={handle}"
+    );
+    Ok(())
+}
+
+/// Phase A.2: `handle` のプロセスの終了を待ち、exit code を返す。
+///
+/// シグナルで終了した場合は `128 + signal` (Unix 慣例)。
+#[op2(async(deferred), fast)]
+async fn op_process_wait(
+    state: Rc<RefCell<OpState>>,
+    #[smi] handle: u32,
+) -> Result<i32, JsErrorBox> {
+    log::debug!(
+        "[saya_live_runtime][process] op_process_wait: handle={handle}"
+    );
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .process_pool
+        .clone();
+    let code = pool
+        .wait(handle)
+        .await
+        .map_err(process_pool_error_to_js_error)?;
+    log::debug!(
+        "[saya_live_runtime][process] op_process_wait ok: handle={handle}, code={code}"
+    );
+    Ok(code)
+}
+
 deno_core::extension!(
     live_saya_extension,
     ops = [
         op_runtime_execute_host_command,
-        op_runtime_lsp_request,
+        op_runtime_lsif_request,
         op_runtime_workspace_find_root,
         op_runtime_current_buffer,
         op_runtime_current_window,
@@ -1701,14 +2058,22 @@ deno_core::extension!(
         op_runtime_filer_clear_marks,
         op_runtime_filer_bulk_delete_preview,
         op_runtime_filer_bulk_delete,
-        op_runtime_console_log
+        op_runtime_console_log,
+        op_process_spawn,
+        op_process_write_stdin,
+        op_process_read_stdout,
+        op_process_read_stderr,
+        op_process_kill,
+        op_process_wait
     ],
     options = {
         bridge: Arc<dyn HostCapabilityBridge>,
+        process_pool: Arc<ProcessPool>,
     },
     state = |state, options| {
         state.put(LiveRuntimeOpState {
             bridge: options.bridge,
+            process_pool: options.process_pool,
         });
     }
 );
@@ -2206,14 +2571,17 @@ fn build_seed_registration_script(
 fn create_seed_runtime(
     bridge: Arc<dyn HostCapabilityBridge>,
     seed: &CallbackRegistrySeed,
-) -> Result<(JsRuntime, SeedRuntimeMetadata), RuntimeInitError> {
+) -> Result<(JsRuntime, SeedRuntimeMetadata, Arc<ProcessPool>), RuntimeInitError> {
     log::debug!(
         "[saya_live_runtime] create deno_core live runtime from seed: commands={}, events={}",
         seed.commands().len(),
         seed.events().len()
     );
+    // Phase A.2: 共有プロセスプールを生成し、extension にも、worker
+    // ループ脱出時の sweeper にも参照を渡せるよう Arc を 2 部複製する。
+    let process_pool = Arc::new(ProcessPool::new());
     let mut runtime = JsRuntime::new(RuntimeOptions {
-        extensions: vec![live_saya_extension::init(bridge)],
+        extensions: vec![live_saya_extension::init(bridge, process_pool.clone())],
         ..Default::default()
     });
 
@@ -2230,7 +2598,7 @@ fn create_seed_runtime(
             message: error.to_string(),
         })?;
 
-    Ok((runtime, metadata))
+    Ok((runtime, metadata, process_pool))
 }
 
 async fn dispatch_event_in_seed_runtime(
@@ -2706,13 +3074,14 @@ impl SayaLiveRuntime {
 
                 runtime.block_on(async move {
                     let mut receiver = receiver;
-                    let (mut js_runtime, metadata) = match create_seed_runtime(bridge, &seed) {
-                        Ok(runtime) => runtime,
-                        Err(error) => {
-                            let _ = init_sender.send(Err(error));
-                            return;
-                        }
-                    };
+                    let (mut js_runtime, metadata, process_pool) =
+                        match create_seed_runtime(bridge, &seed) {
+                            Ok(runtime) => runtime,
+                            Err(error) => {
+                                let _ = init_sender.send(Err(error));
+                                return;
+                            }
+                        };
                     let _ = init_sender.send(Ok(()));
                     log::debug!("[saya_live_runtime] seed-backed live runtime initialized");
 
@@ -2748,6 +3117,25 @@ impl SayaLiveRuntime {
                         }
                     }
 
+                    // Phase A.2: receiver が close（SayaLiveRuntime drop）
+                    // した時点で `saya.process` で起動した子プロセス群を
+                    // 確実に kill する。タイムアウトを掛けて kill ハングを
+                    // 検出する（見つかった場合は debug ログのみ残し、
+                    // worker thread を最終的には抜ける）。
+                    log::info!(
+                        "[saya_live_runtime] worker loop ended; sweeping process pool"
+                    );
+                    if let Err(_elapsed) = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        process_pool.shutdown_all(),
+                    )
+                    .await
+                    {
+                        log::debug!(
+                            "[saya_live_runtime] process pool shutdown timed out (some children may rely on kill_on_drop)"
+                        );
+                    }
+                    drop(js_runtime);
                     log::debug!("[saya_live_runtime] seed-backed live runtime stopped");
                 });
             })

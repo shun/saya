@@ -1,4 +1,6 @@
-use crate::floating_window::{FloatingBorder, FloatingScreenModel};
+use crate::floating_window::{
+    FloatingBorder, FloatingInlineStyle, FloatingInlineStyleKind, FloatingScreenModel,
+};
 #[cfg(test)]
 use crate::screen_model::PaneRect;
 use crate::screen_model::{
@@ -395,22 +397,94 @@ fn render_floats(
             float.creation_order
         );
         f.render_widget(Clear, rect);
+        let base_style = ui_style(theme, UiStyleKey::Message, text_mode);
         let text = Text::from(
             float
                 .lines
                 .iter()
-                .map(|line| Line::from(line.clone()))
+                .enumerate()
+                .map(|(line_index, line)| {
+                    Line::from(line_to_styled_spans(line, line_index, &float.inline_styles))
+                })
                 .collect::<Vec<_>>(),
         );
+        // Block の `.style(base_style)` で内側の空セルを base_style で
+        // 塗りつぶしつつ、`.border_style(...)` で border 文字には背景色
+        // だけを base_style から引き継ぎ、前景色は端末 default のままに
+        // する。これで base_style の前景が背景と同色になる theme でも
+        // border 文字（│┌┐└┘─）が確実に視認できる。
+        let border_only_style = match base_style.bg {
+            Some(bg) => Style::default().bg(bg),
+            None => Style::default(),
+        };
         let paragraph = match float.chrome.border {
-            FloatingBorder::None => {
-                Paragraph::new(text).style(ui_style(theme, UiStyleKey::Message, text_mode))
-            }
+            FloatingBorder::None => Paragraph::new(text).style(base_style),
             FloatingBorder::Single => Paragraph::new(text)
-                .style(ui_style(theme, UiStyleKey::Message, text_mode))
-                .block(Block::bordered()),
+                .style(base_style)
+                .block(
+                    Block::bordered()
+                        .style(base_style)
+                        .border_style(border_only_style),
+                ),
         };
         f.render_widget(paragraph, rect);
+    }
+}
+
+/// 行を `FloatingInlineStyle` に従って Span に分割する。Span 自体は
+/// Style::default() のままにして、Paragraph 全体に適用される `base_style`
+/// に対し inline スタイル領域だけが Modifier を patch する設計。
+/// これで Block::bordered() の border が Span の style に上書きされない。
+fn line_to_styled_spans<'a>(
+    line: &'a str,
+    line_index: usize,
+    inline_styles: &[FloatingInlineStyle],
+) -> Vec<Span<'a>> {
+    let line_bytes = line.len();
+    let mut applicable: Vec<&FloatingInlineStyle> = inline_styles
+        .iter()
+        .filter(|style| style.line == line_index)
+        .collect();
+    applicable.sort_by_key(|style| (style.column_start, style.column_end));
+
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut cursor = 0usize;
+    for style in applicable {
+        let start = style.column_start.min(line_bytes);
+        let end = style.column_end.min(line_bytes);
+        if start < cursor || start >= end {
+            continue;
+        }
+        if start > cursor {
+            spans.push(Span::raw(&line[cursor..start]));
+        }
+        spans.push(Span::styled(
+            &line[start..end],
+            inline_kind_modifier_style(style.kind),
+        ));
+        cursor = end;
+    }
+    if cursor < line_bytes {
+        spans.push(Span::raw(&line[cursor..]));
+    }
+    if spans.is_empty() {
+        spans.push(Span::raw(line));
+    }
+    spans
+}
+
+/// inline スタイル種別ごとの追加 Modifier。背景・前景の色は触らず
+/// modifier だけを足すことで、Paragraph 全体の base_style と合成される。
+fn inline_kind_modifier_style(kind: FloatingInlineStyleKind) -> Style {
+    use ratatui::style::Modifier;
+    match kind {
+        FloatingInlineStyleKind::Code => Style::default().add_modifier(Modifier::BOLD),
+        FloatingInlineStyleKind::Emphasis => Style::default().add_modifier(Modifier::ITALIC),
+        FloatingInlineStyleKind::Heading { .. } => Style::default().add_modifier(Modifier::BOLD),
+        FloatingInlineStyleKind::LinkText => Style::default().add_modifier(Modifier::UNDERLINED),
+        FloatingInlineStyleKind::LinkUrl => Style::default()
+            .add_modifier(Modifier::UNDERLINED)
+            .add_modifier(Modifier::DIM),
     }
 }
 
@@ -3315,6 +3389,7 @@ mod tests {
                     height: 2,
                 },
                 lines: vec!["low".to_string()],
+                inline_styles: Vec::new(),
                 focusable: false,
                 mouse: false,
                 chrome: FloatingChrome {
@@ -3333,6 +3408,7 @@ mod tests {
                     height: 2,
                 },
                 lines: vec!["top".to_string()],
+                inline_styles: Vec::new(),
                 focusable: false,
                 mouse: false,
                 chrome: FloatingChrome {
@@ -3379,6 +3455,7 @@ mod tests {
                 height: 3,
             },
             lines: vec!["hover".to_string()],
+            inline_styles: Vec::new(),
             focusable: false,
             mouse: false,
             chrome: FloatingChrome {
@@ -3400,6 +3477,81 @@ mod tests {
         assert!(
             rendered.contains("│hover"),
             "bordered float should draw content inside the border: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_render_applies_inline_styles_to_float_text_via_span_split() {
+        use ratatui::style::Modifier;
+        let mut terminal =
+            Terminal::new(TestBackend::new(30, 6)).expect("test terminal should initialize");
+        let mut model = workspace_with_typed_message(None);
+        // 行内バイト 0..4 を Code (Bold), 5..9 を Emphasis (Italic)、
+        // 10..16 を LinkText (Underlined) として宣言。border 無しで
+        // float の最初の行をそのまま検証する。
+        model.floats = vec![FloatingScreenModel {
+            id: FloatingWindowId(1),
+            content: FloatingContentRef::StaticLines { content_id: 1 },
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 1,
+            },
+            lines: vec!["abcd efgh ijklmn ".to_string()],
+            inline_styles: vec![
+                FloatingInlineStyle {
+                    kind: FloatingInlineStyleKind::Code,
+                    line: 0,
+                    column_start: 0,
+                    column_end: 4,
+                },
+                FloatingInlineStyle {
+                    kind: FloatingInlineStyleKind::Emphasis,
+                    line: 0,
+                    column_start: 5,
+                    column_end: 9,
+                },
+                FloatingInlineStyle {
+                    kind: FloatingInlineStyleKind::LinkText,
+                    line: 0,
+                    column_start: 10,
+                    column_end: 16,
+                },
+            ],
+            focusable: false,
+            mouse: false,
+            chrome: FloatingChrome {
+                border: FloatingBorder::None,
+            },
+            zindex: 40,
+            creation_order: 1,
+        }];
+
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+            .expect("workspace render should succeed");
+
+        let buffer = terminal.backend().buffer().clone();
+        let cell = |x: u16| buffer[(x, 0u16)].clone();
+        assert!(
+            cell(0).modifier.contains(Modifier::BOLD),
+            "Code range must apply BOLD to first 4 cells: got modifier={:?}",
+            cell(0).modifier
+        );
+        assert!(
+            cell(5).modifier.contains(Modifier::ITALIC),
+            "Emphasis range must apply ITALIC: got modifier={:?}",
+            cell(5).modifier
+        );
+        assert!(
+            cell(10).modifier.contains(Modifier::UNDERLINED),
+            "LinkText range must apply UNDERLINED: got modifier={:?}",
+            cell(10).modifier
+        );
+        assert!(
+            !cell(4).modifier.contains(Modifier::BOLD),
+            "Cell outside the Code range must not be BOLD: got modifier={:?}",
+            cell(4).modifier
         );
     }
 

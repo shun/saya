@@ -5,6 +5,112 @@ use crate::input_router::KeyInput;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FloatingWindowId(pub u64);
 
+/// 同じ `focus_id` で同じ `FloatingAnchorSignature` を持つ float が既に
+/// 存在する場合、`open_static_lines_with_focus_toggle` は新規生成せず
+/// 既存 float に focus を移す。LSP hover の "2 回目の K で float に
+/// focus" のような UX を支える、汎用的な float identifier。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FloatingFocusId(String);
+
+impl FloatingFocusId {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 「同じ anchor 位置」を判定するための float の位置同一性キー。
+/// `FloatingPlacement` は anchor / offset を含むため等価判定に向かないが、
+/// このキーは「論理的に同じ場所か」を粒度を選んで表現できる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatingAnchorSignature {
+    Cursor {
+        window_id: i32,
+        row: usize,
+        col: usize,
+    },
+    BufferPosition {
+        window_id: i32,
+        line: usize,
+        column: usize,
+    },
+    Window {
+        window_id: i32,
+    },
+    Editor,
+}
+
+impl FloatingAnchorSignature {
+    pub fn cursor(window_id: i32, row: usize, col: usize) -> Self {
+        Self::Cursor {
+            window_id,
+            row,
+            col,
+        }
+    }
+
+    pub fn buffer_position(window_id: i32, line: usize, column: usize) -> Self {
+        Self::BufferPosition {
+            window_id,
+            line,
+            column,
+        }
+    }
+
+    pub fn window(window_id: i32) -> Self {
+        Self::Window { window_id }
+    }
+
+    pub fn editor() -> Self {
+        Self::Editor
+    }
+}
+
+/// 行内テキストのスタイル種別。saya コア層に閉じた抽象表現で、
+/// markdown のような特定プロトコル概念に依存しない。`tui_renderer` が
+/// theme key にマップして実際の色 / 太字 / 下線を決定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatingInlineStyleKind {
+    /// インラインコード相当（モノスペース強調）
+    Code,
+    /// 強調（太字 / 斜体相当）
+    Emphasis,
+    /// 見出し（レベルは別情報。階層強調用）
+    Heading { level: u8 },
+    /// リンクの可読テキスト部分
+    LinkText,
+    /// リンクの URL 部分
+    LinkUrl,
+}
+
+/// float の特定行内に適用するインラインスタイル範囲。
+/// `line` / `column_start` / `column_end` は `FloatingScreenModel.lines`
+/// 配列上のバイト単位列範囲（end は exclusive）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatingInlineStyle {
+    pub kind: FloatingInlineStyleKind,
+    pub line: usize,
+    pub column_start: usize,
+    pub column_end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatingOpenWithFocusOutcome {
+    Opened { id: FloatingWindowId },
+    FocusedExisting { id: FloatingWindowId },
+}
+
+impl FloatingOpenWithFocusOutcome {
+    pub fn id(&self) -> FloatingWindowId {
+        match self {
+            Self::Opened { id } | Self::FocusedExisting { id } => *id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceFocus {
     Pane { window_id: i32 },
@@ -133,11 +239,85 @@ impl FloatingZIndex {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorMode {
+    Normal,
+    Insert,
+    Visual,
+    Command,
+    Replace,
+    Terminal,
+}
+
+/// 複数の close トリガを宣言的にまとめる bitflag セット。
+/// `CloseOnCursorMove` / `CloseOnInsert` / `CloseOnBufferChange` の単一
+/// トリガでは表現できない「cursor 移動 / モード切替 / ウィンドウ離脱の
+/// いずれでも閉じる」のような UX を 1 つの値で記述するために用意する。
+///
+/// 既存の単一トリガ enum 値は引き続きシンタックスシュガーとして残し、
+/// `lifecycle_matches_event` がそれぞれを独立に判定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloatingCloseEvents {
+    pub on_cursor_move: bool,
+    pub on_mode_change: bool,
+    pub on_buffer_change: bool,
+    pub on_window_leave: bool,
+}
+
+impl FloatingCloseEvents {
+    pub const fn none() -> Self {
+        Self {
+            on_cursor_move: false,
+            on_mode_change: false,
+            on_buffer_change: false,
+            on_window_leave: false,
+        }
+    }
+
+    pub const fn with_cursor_move(mut self) -> Self {
+        self.on_cursor_move = true;
+        self
+    }
+
+    pub const fn with_mode_change(mut self) -> Self {
+        self.on_mode_change = true;
+        self
+    }
+
+    pub const fn with_buffer_change(mut self) -> Self {
+        self.on_buffer_change = true;
+        self
+    }
+
+    pub const fn with_window_leave(mut self) -> Self {
+        self.on_window_leave = true;
+        self
+    }
+
+    fn matches(&self, event: FloatingLifecycleEvent) -> bool {
+        match event {
+            FloatingLifecycleEvent::CursorMoved { .. } => self.on_cursor_move,
+            FloatingLifecycleEvent::InsertStarted { .. } => self.on_mode_change,
+            FloatingLifecycleEvent::ModeChanged { from, to, .. } => {
+                self.on_mode_change && from != to
+            }
+            FloatingLifecycleEvent::BufferChanged { .. } => self.on_buffer_change,
+            FloatingLifecycleEvent::WindowLeft {
+                from_window_id,
+                to_window_id,
+            } => self.on_window_leave && from_window_id != to_window_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatingLifecycle {
     Manual,
     CloseOnCursorMove,
     CloseOnInsert,
     CloseOnBufferChange,
+    /// 任意の close トリガを bitflag セットで宣言する。Neovim の
+    /// `vim.lsp.util.open_floating_preview({ close_events = {...} })` 相当。
+    CloseOnEvents(FloatingCloseEvents),
     ReplaceByGroup(&'static str),
 }
 
@@ -151,9 +331,22 @@ pub enum FloatingLifecycleEvent {
     InsertStarted {
         window_id: i32,
     },
+    /// 任意のモード遷移を表現する汎用イベント。`from == to` の場合は
+    /// 遷移が起きていないとみなし、close 判定では発火しないことが期待。
+    ModeChanged {
+        window_id: i32,
+        from: EditorMode,
+        to: EditorMode,
+    },
     BufferChanged {
         buffer_id: i32,
         revision: u64,
+    },
+    /// アクティブウィンドウの離脱を表す。`from_window_id != to_window_id`
+    /// のときだけ「離脱した」と扱う。BufLeave 相当の UX を支える。
+    WindowLeft {
+        from_window_id: i32,
+        to_window_id: i32,
     },
 }
 
@@ -162,7 +355,9 @@ impl FloatingLifecycleEvent {
         match self {
             Self::CursorMoved { .. } => "CursorMoved",
             Self::InsertStarted { .. } => "InsertStarted",
+            Self::ModeChanged { .. } => "ModeChanged",
             Self::BufferChanged { .. } => "BufferChanged",
+            Self::WindowLeft { .. } => "WindowLeft",
         }
     }
 }
@@ -184,9 +379,17 @@ pub struct FloatingWindow {
     pub zindex: i32,
     pub lifecycle: FloatingLifecycle,
     pub replacement_group: Option<String>,
+    pub focus_id: Option<FloatingFocusId>,
+    pub anchor_signature: Option<FloatingAnchorSignature>,
+    pub close_keys: Vec<KeyInput>,
+    pub inline_styles: Vec<FloatingInlineStyle>,
     pub creation_order: u64,
     pub scroll_offset: u16,
     pub lines: Vec<String>,
+}
+
+fn default_close_keys() -> Vec<KeyInput> {
+    vec![KeyInput::Escape, KeyInput::Ctrl('[')]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,6 +398,7 @@ pub struct FloatingScreenModel {
     pub content: FloatingContentRef,
     pub rect: PaneRect,
     pub lines: Vec<String>,
+    pub inline_styles: Vec<FloatingInlineStyle>,
     pub focusable: bool,
     pub mouse: bool,
     pub chrome: FloatingChrome,
@@ -428,11 +632,112 @@ impl FloatingWindowManager {
             zindex: zindex.value(),
             lifecycle,
             replacement_group,
+            focus_id: None,
+            anchor_signature: None,
+            close_keys: default_close_keys(),
+            inline_styles: Vec::new(),
             creation_order,
             scroll_offset: 0,
             lines,
         });
         id
+    }
+
+    /// `focus_id` + `anchor_signature` を持つ既存 float があり、現 focus が
+    /// パネル側ならば、新規 float を生成せず既存 float に focus を移して
+    /// `FocusedExisting` を返す。focus が既に float 側にあるか、anchor が
+    /// 違うか、既存 float が存在しなければ通常 open + 同 `focus_id` の旧
+    /// float を内部 replace して `Opened` を返す。
+    ///
+    /// この API は LSP hover の "2 回目の K で float に focus" UX を
+    /// 一般化したもので、`completion menu` / `signature help` 等にも適用
+    /// 可能。`replacement_group` は同名グループによる "強制 replace" 用で
+    /// あり、`focus_id` は "同一性 + focus toggle" 用に役割を分けている。
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_static_lines_with_focus_toggle(
+        &mut self,
+        lines: Vec<String>,
+        focus_id: FloatingFocusId,
+        anchor_signature: FloatingAnchorSignature,
+        lifecycle: FloatingLifecycle,
+        placement: FloatingPlacement,
+        size: FloatingSize,
+        chrome: FloatingChrome,
+        zindex: FloatingZIndex,
+        focusable: bool,
+    ) -> FloatingOpenWithFocusOutcome {
+        let existing_match = self.windows.iter().find(|window| {
+            window.focus_id.as_ref() == Some(&focus_id)
+                && window.anchor_signature == Some(anchor_signature)
+        });
+
+        if let Some(existing) = existing_match {
+            let existing_id = existing.id;
+            let existing_focusable = existing.focusable;
+            let already_focused = matches!(
+                self.focus,
+                Some(WorkspaceFocus::Float { float_id }) if float_id == existing_id
+            );
+            if !already_focused && existing_focusable {
+                self.focus_float(existing_id);
+                log::debug!(
+                    "[floating_window] focus toggle reused existing float: id={}, focus_id={}, anchor={:?}",
+                    existing_id.0,
+                    focus_id.as_str(),
+                    anchor_signature
+                );
+                return FloatingOpenWithFocusOutcome::FocusedExisting { id: existing_id };
+            }
+            log::debug!(
+                "[floating_window] focus toggle fell through to replace: existing_id={}, focus_id={}, already_focused={}, existing_focusable={}",
+                existing_id.0,
+                focus_id.as_str(),
+                already_focused,
+                existing_focusable
+            );
+        }
+
+        let replaced: Vec<FloatingWindowId> = self
+            .windows
+            .iter()
+            .filter(|window| window.focus_id.as_ref() == Some(&focus_id))
+            .map(|window| window.id)
+            .collect();
+        if !replaced.is_empty() {
+            log::debug!(
+                "[floating_window] focus toggle replacing prior floats with same focus_id: focus_id={}, replaced={:?}",
+                focus_id.as_str(),
+                replaced.iter().map(|id| id.0).collect::<Vec<_>>()
+            );
+            self.windows.retain(|window| !replaced.contains(&window.id));
+            if let Some(WorkspaceFocus::Float { float_id }) = self.focus
+                && replaced.contains(&float_id)
+            {
+                self.focus = None;
+            }
+        }
+
+        let id = self.open_static_lines_with_lifecycle_and_replacement_group(
+            lines,
+            lifecycle,
+            None,
+            placement,
+            size,
+            chrome,
+            zindex,
+            focusable,
+        );
+        if let Some(window) = self.windows.iter_mut().find(|window| window.id == id) {
+            window.focus_id = Some(focus_id.clone());
+            window.anchor_signature = Some(anchor_signature);
+        }
+        log::debug!(
+            "[floating_window] focus toggle opened new float: id={}, focus_id={}, anchor={:?}",
+            id.0,
+            focus_id.as_str(),
+            anchor_signature
+        );
+        FloatingOpenWithFocusOutcome::Opened { id }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -740,19 +1045,19 @@ impl FloatingWindowManager {
             return FloatingInputOutcome::Ignored;
         }
 
-        match key {
-            KeyInput::Escape | KeyInput::Ctrl('[') => {
-                self.close(float_id);
-                if let Some(window_id) = restore_window_id {
-                    self.clear_focus_to_pane(window_id);
-                }
-                log::debug!(
-                    "[floating_window] focused static-lines float closed by key: key={:?}, float_id={}",
-                    key,
-                    float_id.0
-                );
-                FloatingInputOutcome::Closed { id: float_id }
+        if self.windows[index].close_keys.contains(key) {
+            self.close(float_id);
+            if let Some(window_id) = restore_window_id {
+                self.clear_focus_to_pane(window_id);
             }
+            log::debug!(
+                "[floating_window] focused static-lines float closed by declarative close key: key={:?}, float_id={}",
+                key,
+                float_id.0
+            );
+            return FloatingInputOutcome::Closed { id: float_id };
+        }
+        match key {
             KeyInput::Up | KeyInput::Char('k') => {
                 self.scroll_focused(index, -1);
                 FloatingInputOutcome::Consumed
@@ -780,6 +1085,54 @@ impl FloatingWindowManager {
                 FloatingInputOutcome::Ignored
             }
         }
+    }
+
+    /// 指定 float の close_keys を全置換する。focus 中のときに
+    /// `handle_focused_static_lines_key` がこれを参照して close 判定する。
+    /// 既定値（`[Escape, Ctrl('[')]`）を hover float のように `q` を加えた
+    /// セットへ拡張したい場合に使う。empty を渡すとキーで閉じられなくなる。
+    pub fn set_close_keys(&mut self, id: FloatingWindowId, keys: Vec<KeyInput>) -> bool {
+        let Some(window) = self.windows.iter_mut().find(|window| window.id == id) else {
+            log::debug!(
+                "[floating_window] close_keys update ignored for missing float: id={}",
+                id.0
+            );
+            return false;
+        };
+        log::debug!(
+            "[floating_window] close_keys updated: id={}, old={:?}, new={:?}",
+            id.0,
+            window.close_keys,
+            keys
+        );
+        window.close_keys = keys;
+        true
+    }
+
+    /// 指定 float の `inline_styles` を全置換する。`tui_renderer` は
+    /// `FloatingScreenModel.inline_styles` を参照して Span 単位の theme
+    /// スタイルを適用する。markdown レンダリング結果を視覚的に反映する
+    /// 際の公式入口。
+    pub fn set_inline_styles(
+        &mut self,
+        id: FloatingWindowId,
+        styles: Vec<FloatingInlineStyle>,
+    ) -> bool {
+        let Some(window) = self.windows.iter_mut().find(|window| window.id == id) else {
+            log::debug!(
+                "[floating_window] inline_styles update ignored for missing float: id={}",
+                id.0
+            );
+            return false;
+        };
+        log::debug!(
+            "[floating_window] inline_styles updated: id={}, old_count={}, new_count={}",
+            id.0,
+            window.inline_styles.len(),
+            styles.len()
+        );
+        window.inline_styles = styles;
+        true
     }
 
     pub fn set_mouse_enabled(&mut self, id: FloatingWindowId, mouse: bool) -> bool {
@@ -848,6 +1201,7 @@ impl FloatingWindowManager {
                     window.zindex,
                     window.creation_order
                 );
+                let scroll_offset = usize::from(window.scroll_offset);
                 Some(FloatingScreenModel {
                     id: window.id,
                     content: window.content.clone(),
@@ -855,8 +1209,24 @@ impl FloatingWindowManager {
                     lines: window
                         .lines
                         .iter()
-                        .skip(usize::from(window.scroll_offset))
+                        .skip(scroll_offset)
                         .cloned()
+                        .collect(),
+                    inline_styles: window
+                        .inline_styles
+                        .iter()
+                        .filter_map(|style| {
+                            if style.line < scroll_offset {
+                                None
+                            } else {
+                                Some(FloatingInlineStyle {
+                                    kind: style.kind,
+                                    line: style.line - scroll_offset,
+                                    column_start: style.column_start,
+                                    column_end: style.column_end,
+                                })
+                            }
+                        })
                         .collect(),
                     focusable: window.focusable,
                     mouse: window.mouse,
@@ -1174,6 +1544,22 @@ fn lifecycle_matches_event(window: &FloatingWindow, event: FloatingLifecycleEven
         }
         (FloatingLifecycle::CloseOnBufferChange, FloatingLifecycleEvent::BufferChanged { .. }) => {
             true
+        }
+        (FloatingLifecycle::CloseOnEvents(events), event) => {
+            if !events.matches(event) {
+                return false;
+            }
+            match event {
+                FloatingLifecycleEvent::CursorMoved { window_id, .. }
+                | FloatingLifecycleEvent::InsertStarted { window_id }
+                | FloatingLifecycleEvent::ModeChanged { window_id, .. } => {
+                    window_related_to_window(window, window_id)
+                }
+                FloatingLifecycleEvent::WindowLeft { from_window_id, .. } => {
+                    window_related_to_window(window, from_window_id)
+                }
+                FloatingLifecycleEvent::BufferChanged { .. } => true,
+            }
         }
         _ => false,
     }

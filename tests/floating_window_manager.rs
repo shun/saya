@@ -1,8 +1,9 @@
 use saya::floating_window::{
-    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingContentRef, FloatingFit,
-    FloatingInputOutcome, FloatingLifecycle, FloatingLifecycleEvent, FloatingLifecycleOutcome,
-    FloatingMouseOutcome, FloatingPlacement, FloatingRelativeTo, FloatingSize,
-    FloatingWindowManager, FloatingZIndex, WorkspaceFocus,
+    EditorMode, FloatingAnchor, FloatingAnchorSignature, FloatingBorder, FloatingChrome,
+    FloatingCloseEvents, FloatingContentRef, FloatingFit, FloatingFocusId, FloatingInlineStyle,
+    FloatingInlineStyleKind, FloatingInputOutcome, FloatingLifecycle, FloatingLifecycleEvent,
+    FloatingLifecycleOutcome, FloatingMouseOutcome, FloatingOpenWithFocusOutcome, FloatingPlacement,
+    FloatingRelativeTo, FloatingSize, FloatingWindowManager, FloatingZIndex, WorkspaceFocus,
 };
 use saya::input_router::KeyInput;
 use saya::screen_model::PaneRect;
@@ -935,5 +936,671 @@ fn stale_hover_and_diagnostic_like_floats_close_on_cursor_move() {
         manager
             .resolve_screen_models(80, 24, &[pane(3, 0, 0, 40, 12)], Some(3))
             .is_empty()
+    );
+}
+
+// ============================================================================
+// focus_id / anchor-based focus toggle (Phase D)
+// ----------------------------------------------------------------------------
+// `open_static_lines_with_focus_toggle` は、同じ `focus_id` で同じ
+// `anchor_signature` を持つ float が既に存在する場合に新規生成せず、
+// 既存 float に focus を移す。LSP hover の "2 回目の K で float に focus"
+// を支える汎用基盤として `FloatingWindowManager` に持たせる。
+// ============================================================================
+
+fn cursor_hover_placement(window_id: i32) -> FloatingPlacement {
+    FloatingPlacement {
+        relative_to: FloatingRelativeTo::Cursor { window_id },
+        anchor: FloatingAnchor::NorthWest,
+        row: 1,
+        col: 0,
+        fit: FloatingFit::TruncateToGrid,
+    }
+}
+
+fn hover_size() -> FloatingSize {
+    FloatingSize {
+        width: 20,
+        height: 4,
+    }
+}
+
+#[test]
+fn focus_toggle_reuses_existing_float_with_same_focus_id_and_anchor_signature() {
+    let mut manager = FloatingWindowManager::default();
+    let first = match manager.open_static_lines_with_focus_toggle(
+        vec!["hover".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("expected first open to create a new float, got {other:?}"),
+    };
+    assert_eq!(
+        manager.focus(),
+        None,
+        "newly opened hover float should not steal focus on first open"
+    );
+
+    let outcome = manager.open_static_lines_with_focus_toggle(
+        vec!["hover-still".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    );
+
+    assert_eq!(
+        outcome,
+        FloatingOpenWithFocusOutcome::FocusedExisting { id: first },
+        "same focus_id + same anchor while pane is focused must reuse the float"
+    );
+    assert_eq!(
+        manager.focus(),
+        Some(WorkspaceFocus::Float { float_id: first }),
+        "second open at the same anchor must move focus to the existing float"
+    );
+    let resolved = manager.resolve_screen_models_with_cursors(
+        80,
+        24,
+        &[pane(7, 0, 0, 40, 12)],
+        &[(7, 4, 9)],
+        Some(7),
+    );
+    assert_eq!(resolved.len(), 1, "no duplicate float should be opened");
+    assert_eq!(resolved[0].id, first);
+    assert_eq!(
+        resolved[0].lines,
+        vec!["hover".to_string()],
+        "existing float lines must remain unchanged"
+    );
+}
+
+#[test]
+fn focus_toggle_replaces_existing_float_when_anchor_signature_differs() {
+    let mut manager = FloatingWindowManager::default();
+    let first = match manager.open_static_lines_with_focus_toggle(
+        vec!["old".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("expected first open to create a new float, got {other:?}"),
+    };
+    let second = match manager.open_static_lines_with_focus_toggle(
+        vec!["new".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 5, 1),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("expected second open to replace the previous float, got {other:?}"),
+    };
+
+    assert_ne!(first, second);
+    let resolved = manager.resolve_screen_models_with_cursors(
+        80,
+        24,
+        &[pane(7, 0, 0, 40, 12)],
+        &[(7, 5, 1)],
+        Some(7),
+    );
+    assert_eq!(
+        resolved.len(),
+        1,
+        "different anchor signature must replace the previous float"
+    );
+    assert_eq!(resolved[0].id, second);
+    assert_eq!(resolved[0].lines, vec!["new".to_string()]);
+}
+
+#[test]
+fn focus_toggle_falls_through_to_replace_when_focus_is_already_on_the_float() {
+    let mut manager = FloatingWindowManager::default();
+    let first = match manager.open_static_lines_with_focus_toggle(
+        vec!["first".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("expected first open to create a new float, got {other:?}"),
+    };
+    assert!(manager.focus_float(first));
+
+    let second = match manager.open_static_lines_with_focus_toggle(
+        vec!["second".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("float-focused state must fall through to replace, got {other:?}"),
+    };
+
+    assert_ne!(first, second);
+    let resolved = manager.resolve_screen_models_with_cursors(
+        80,
+        24,
+        &[pane(7, 0, 0, 40, 12)],
+        &[(7, 4, 9)],
+        Some(7),
+    );
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, second);
+    assert_eq!(resolved[0].lines, vec!["second".to_string()]);
+}
+
+#[test]
+fn focus_toggle_clears_anchor_state_when_underlying_float_auto_closes() {
+    let mut manager = FloatingWindowManager::default();
+    let first = match manager.open_static_lines_with_focus_toggle(
+        vec!["hover".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("expected first open to create a new float, got {other:?}"),
+    };
+
+    manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::CursorMoved {
+            window_id: 7,
+            row: 5,
+            col: 1,
+        },
+        Some(7),
+    );
+
+    let second = match manager.open_static_lines_with_focus_toggle(
+        vec!["fresh".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        FloatingOpenWithFocusOutcome::FocusedExisting { id } => {
+            panic!("expected fresh float after auto-close, got focus reuse on id={id:?}")
+        }
+    };
+
+    assert_ne!(first, second);
+    let resolved = manager.resolve_screen_models_with_cursors(
+        80,
+        24,
+        &[pane(7, 0, 0, 40, 12)],
+        &[(7, 4, 9)],
+        Some(7),
+    );
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, second);
+}
+
+// ============================================================================
+// close_keys 宣言化 (Phase D)
+// ----------------------------------------------------------------------------
+// float は「どのキーで閉じるか」を宣言的なフィールド `close_keys` で持ち、
+// `handle_focused_static_lines_key` はそれを参照して close を判定する。
+// 既定値は `[Escape, Ctrl('[')]` で従来挙動を維持し、LSP hover のように
+// `q` でも閉じたい float は `set_close_keys` で拡張する。
+// ============================================================================
+
+#[test]
+fn focused_static_lines_float_default_close_keys_include_escape_and_ctrl_bracket() {
+    let mut manager = FloatingWindowManager::default();
+    let id = manager.open_static_lines(
+        vec!["default close keys".to_string()],
+        FloatingPlacement::editor_at(0, 0),
+        FloatingSize {
+            width: 20,
+            height: 3,
+        },
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    );
+    assert!(manager.focus_float(id));
+
+    assert_eq!(
+        manager.handle_focused_static_lines_key(&KeyInput::Char('q')),
+        FloatingInputOutcome::Ignored,
+        "by default `q` should be ignored, not closing the float"
+    );
+
+    assert_eq!(
+        manager.handle_focused_static_lines_key(&KeyInput::Ctrl('[')),
+        FloatingInputOutcome::Closed { id },
+        "default close keys must still include Ctrl-["
+    );
+}
+
+#[test]
+fn set_close_keys_overrides_default_close_keys_to_enable_q_to_close() {
+    let mut manager = FloatingWindowManager::default();
+    let id = manager.open_static_lines(
+        vec!["q closes".to_string()],
+        FloatingPlacement::editor_at(0, 0),
+        FloatingSize {
+            width: 20,
+            height: 3,
+        },
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    );
+    assert!(manager.focus_float(id));
+
+    assert!(manager.set_close_keys(
+        id,
+        vec![KeyInput::Escape, KeyInput::Ctrl('['), KeyInput::Char('q')]
+    ));
+
+    assert_eq!(
+        manager.handle_focused_static_lines_key(&KeyInput::Char('q')),
+        FloatingInputOutcome::Closed { id },
+        "after extending close_keys, `q` must close the focused float"
+    );
+}
+
+#[test]
+fn set_close_keys_to_empty_disables_close_via_key_for_focused_float() {
+    let mut manager = FloatingWindowManager::default();
+    let id = manager.open_static_lines(
+        vec!["no close".to_string()],
+        FloatingPlacement::editor_at(0, 0),
+        FloatingSize {
+            width: 20,
+            height: 3,
+        },
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    );
+    assert!(manager.focus_float(id));
+    assert!(manager.set_close_keys(id, Vec::new()));
+
+    assert_eq!(
+        manager.handle_focused_static_lines_key(&KeyInput::Escape),
+        FloatingInputOutcome::Ignored,
+        "empty close_keys must suppress key-driven close"
+    );
+}
+
+#[test]
+fn set_close_keys_returns_false_for_unknown_float_id() {
+    let mut manager = FloatingWindowManager::default();
+    assert!(!manager.set_close_keys(
+        saya::floating_window::FloatingWindowId(999),
+        vec![KeyInput::Escape]
+    ));
+}
+
+#[test]
+fn focus_toggle_keeps_floats_with_different_focus_ids_independent() {
+    let mut manager = FloatingWindowManager::default();
+    let hover = match manager.open_static_lines_with_focus_toggle(
+        vec!["hover".to_string()],
+        FloatingFocusId::new("lsp:hover"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("expected first open to create a new float, got {other:?}"),
+    };
+    let signature_help = match manager.open_static_lines_with_focus_toggle(
+        vec!["signature".to_string()],
+        FloatingFocusId::new("lsp:signature-help"),
+        FloatingAnchorSignature::cursor(7, 4, 9),
+        FloatingLifecycle::CloseOnCursorMove,
+        cursor_hover_placement(7),
+        hover_size(),
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    ) {
+        FloatingOpenWithFocusOutcome::Opened { id } => id,
+        other => panic!("different focus_id must not reuse another focus_id's float, got {other:?}"),
+    };
+
+    assert_ne!(hover, signature_help);
+    let resolved = manager.resolve_screen_models_with_cursors(
+        80,
+        24,
+        &[pane(7, 0, 0, 40, 12)],
+        &[(7, 4, 9)],
+        Some(7),
+    );
+    assert_eq!(resolved.len(), 2);
+}
+
+// ============================================================================
+// FloatingCloseEvents bitflag + ModeChanged / WindowLeft (Phase D)
+// ----------------------------------------------------------------------------
+// 既存の `CloseOnCursorMove` / `CloseOnInsert` / `CloseOnBufferChange` は
+// 単一トリガのショートカットとして残しつつ、複数トリガをまとめて宣言
+// したい場合のため `CloseOnEvents(FloatingCloseEvents)` を追加。
+// LSP hover は cursor 移動・モード切替・ウィンドウ離脱で閉じるため、
+// `FloatingCloseEvents` の 3 つのフラグを同時に有効にする想定。
+// ============================================================================
+
+fn lifecycle_at_cursor_for(window_id: i32, lifecycle: FloatingLifecycle) -> FloatingWindowManager {
+    let mut manager = FloatingWindowManager::default();
+    manager.open_static_lines_with_lifecycle(
+        vec!["hover".to_string()],
+        lifecycle,
+        FloatingPlacement {
+            relative_to: FloatingRelativeTo::Cursor { window_id },
+            anchor: FloatingAnchor::NorthWest,
+            row: 1,
+            col: 0,
+            fit: FloatingFit::TruncateToGrid,
+        },
+        FloatingSize {
+            width: 20,
+            height: 3,
+        },
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    );
+    manager
+}
+
+#[test]
+fn close_on_events_with_only_cursor_move_flag_matches_existing_short_form() {
+    let events = FloatingCloseEvents::none().with_cursor_move();
+    let mut manager = lifecycle_at_cursor_for(7, FloatingLifecycle::CloseOnEvents(events));
+
+    let outcome = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::CursorMoved {
+            window_id: 7,
+            row: 5,
+            col: 1,
+        },
+        Some(7),
+    );
+    assert_eq!(
+        outcome.closed.len(),
+        1,
+        "CloseOnEvents with on_cursor_move=true must close on CursorMoved: {outcome:?}"
+    );
+}
+
+#[test]
+fn close_on_events_with_mode_change_closes_on_mode_changed_event() {
+    let events = FloatingCloseEvents::none()
+        .with_mode_change()
+        .with_window_leave();
+    let mut manager = lifecycle_at_cursor_for(7, FloatingLifecycle::CloseOnEvents(events));
+
+    let unchanged = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::ModeChanged {
+            window_id: 7,
+            from: EditorMode::Normal,
+            to: EditorMode::Normal,
+        },
+        Some(7),
+    );
+    assert!(
+        unchanged.closed.is_empty(),
+        "from == to must not be treated as a mode change: {unchanged:?}"
+    );
+
+    let outcome = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::ModeChanged {
+            window_id: 7,
+            from: EditorMode::Normal,
+            to: EditorMode::Insert,
+        },
+        Some(7),
+    );
+    assert_eq!(
+        outcome.closed.len(),
+        1,
+        "ModeChanged with different modes must close on_mode_change floats: {outcome:?}"
+    );
+}
+
+#[test]
+fn close_on_events_with_window_leave_closes_when_active_window_changes() {
+    let events = FloatingCloseEvents::none().with_window_leave();
+    let mut manager = lifecycle_at_cursor_for(7, FloatingLifecycle::CloseOnEvents(events));
+
+    let same_window = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::WindowLeft {
+            from_window_id: 7,
+            to_window_id: 7,
+        },
+        Some(7),
+    );
+    assert!(
+        same_window.closed.is_empty(),
+        "from == to must not be treated as a window leave: {same_window:?}"
+    );
+
+    let outcome = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::WindowLeft {
+            from_window_id: 7,
+            to_window_id: 8,
+        },
+        Some(7),
+    );
+    assert_eq!(
+        outcome.closed.len(),
+        1,
+        "WindowLeft must close on_window_leave floats anchored to the source window: {outcome:?}"
+    );
+}
+
+#[test]
+fn close_on_events_does_not_close_when_no_matching_flag_is_enabled() {
+    let events = FloatingCloseEvents::none().with_cursor_move();
+    let mut manager = lifecycle_at_cursor_for(7, FloatingLifecycle::CloseOnEvents(events));
+
+    let mode_only = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::ModeChanged {
+            window_id: 7,
+            from: EditorMode::Normal,
+            to: EditorMode::Insert,
+        },
+        Some(7),
+    );
+    assert!(
+        mode_only.closed.is_empty(),
+        "ModeChanged must not close floats without on_mode_change flag: {mode_only:?}"
+    );
+
+    let window_only = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::WindowLeft {
+            from_window_id: 7,
+            to_window_id: 8,
+        },
+        Some(7),
+    );
+    assert!(
+        window_only.closed.is_empty(),
+        "WindowLeft must not close floats without on_window_leave flag: {window_only:?}"
+    );
+}
+
+#[test]
+fn close_on_events_combining_multiple_flags_closes_on_first_matching_trigger() {
+    let events = FloatingCloseEvents::none()
+        .with_cursor_move()
+        .with_mode_change()
+        .with_window_leave();
+    let mut manager = lifecycle_at_cursor_for(7, FloatingLifecycle::CloseOnEvents(events));
+
+    let outcome = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::ModeChanged {
+            window_id: 7,
+            from: EditorMode::Normal,
+            to: EditorMode::Visual,
+        },
+        Some(7),
+    );
+    assert_eq!(
+        outcome.closed.len(),
+        1,
+        "any enabled flag whose event arrives must close the float: {outcome:?}"
+    );
+}
+
+// ============================================================================
+// FloatingInlineStyle: 行内テキストのスタイル範囲 (Phase D 拡張)
+// ----------------------------------------------------------------------------
+// markdown レンダリング結果を視覚的に反映するため、float は「行内の
+// どの列範囲がどのスタイル種別か」を `inline_styles` として保持する。
+// tui_renderer はこれを参照して Span 単位でスタイルを適用する。
+// ============================================================================
+
+#[test]
+fn set_inline_styles_replaces_full_inline_style_list_on_existing_float() {
+    let mut manager = FloatingWindowManager::default();
+    let id = manager.open_static_lines(
+        vec!["**bold** and `code`".to_string()],
+        FloatingPlacement::editor_at(0, 0),
+        FloatingSize {
+            width: 20,
+            height: 3,
+        },
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    );
+
+    let styles = vec![
+        FloatingInlineStyle {
+            kind: FloatingInlineStyleKind::Emphasis,
+            line: 0,
+            column_start: 0,
+            column_end: 8,
+        },
+        FloatingInlineStyle {
+            kind: FloatingInlineStyleKind::Code,
+            line: 0,
+            column_start: 13,
+            column_end: 19,
+        },
+    ];
+    assert!(manager.set_inline_styles(id, styles.clone()));
+
+    let observed = manager
+        .debug_window(id)
+        .expect("float should exist")
+        .inline_styles
+        .clone();
+    assert_eq!(observed, styles);
+}
+
+#[test]
+fn set_inline_styles_returns_false_for_unknown_float_id() {
+    let mut manager = FloatingWindowManager::default();
+    assert!(!manager.set_inline_styles(
+        saya::floating_window::FloatingWindowId(999),
+        Vec::new()
+    ));
+}
+
+#[test]
+fn screen_model_propagates_inline_styles_through_resolve() {
+    let mut manager = FloatingWindowManager::default();
+    let id = manager.open_static_lines(
+        vec!["alpha bold".to_string()],
+        FloatingPlacement::editor_at(0, 0),
+        FloatingSize {
+            width: 20,
+            height: 3,
+        },
+        FloatingChrome::borderless(),
+        FloatingZIndex::Hover,
+        true,
+    );
+    assert!(manager.set_inline_styles(
+        id,
+        vec![FloatingInlineStyle {
+            kind: FloatingInlineStyleKind::Emphasis,
+            line: 0,
+            column_start: 6,
+            column_end: 10,
+        }]
+    ));
+
+    let models = manager.resolve_screen_models(80, 24, &[], None);
+    assert_eq!(models.len(), 1);
+    assert_eq!(
+        models[0].inline_styles,
+        vec![FloatingInlineStyle {
+            kind: FloatingInlineStyleKind::Emphasis,
+            line: 0,
+            column_start: 6,
+            column_end: 10,
+        }],
+        "FloatingScreenModel must carry the float's inline_styles for tui_renderer to use"
+    );
+}
+
+#[test]
+fn close_on_events_window_leave_keeps_floats_anchored_to_other_windows() {
+    let events = FloatingCloseEvents::none().with_window_leave();
+    let mut manager = lifecycle_at_cursor_for(8, FloatingLifecycle::CloseOnEvents(events));
+
+    let outcome = manager.apply_lifecycle_event(
+        FloatingLifecycleEvent::WindowLeft {
+            from_window_id: 7,
+            to_window_id: 9,
+        },
+        Some(7),
+    );
+    assert!(
+        outcome.closed.is_empty(),
+        "WindowLeft must only close floats anchored to from_window_id: {outcome:?}"
     );
 }

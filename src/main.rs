@@ -50,8 +50,8 @@ use saya::lsp_float::{
     LspSymbolOutlineRequest, file_uri_to_path, open_lsp_diagnostic_float, open_lsp_hover_float,
     open_lsp_location_list_float, open_lsp_symbol_outline_float,
 };
+use saya::lsif_index::LsifIndexCache;
 use saya::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
-use saya::lsp_session::LspSessionManager;
 use saya::markdown_structure::{MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey};
 use saya::optional_graphics::{OptionalGraphicsAdapter, OverlayTerminalWriter};
 use saya::overlay_asset_store::OverlayAssetStore;
@@ -195,7 +195,7 @@ async fn main() {
     let mut floating_window_manager = FloatingWindowManager::default();
     let mut completion_float_manager = CompletionFloatManager::default();
     let mut lsp_diagnostic_store = LspDiagnosticStore::default();
-    let lsp_session_manager = LspSessionManager::default();
+    let lsif_bridge = LsifBridgeHandle::default();
     let mut terminal_float_manager = TerminalFloatManager::default();
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
     let mut terminal_display_redraw_plan: Option<RedrawPlan> = None;
@@ -209,7 +209,7 @@ async fn main() {
         &mut transient_msg,
         &mut startup_runtime_redraw,
         &mut runtime_presentation_intents,
-        Some(&lsp_session_manager),
+        Some(&lsif_bridge),
     )
     .await;
 
@@ -344,7 +344,7 @@ async fn main() {
                                 &mut need_redraw,
                                 runtime_session.as_mut(),
                                 &mut runtime_presentation_intents,
-                                Some(&lsp_session_manager),
+                                Some(&lsif_bridge),
                             )
                             .await
                         {
@@ -380,7 +380,7 @@ async fn main() {
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
-                                        Some(&lsp_session_manager),
+                                        Some(&lsif_bridge),
                                     )
                                     .await
                                     {
@@ -582,7 +582,7 @@ async fn main() {
                                 runtime_session.as_mut(),
                                 &mut need_redraw,
                                 &mut runtime_presentation_intents,
-                                Some(&lsp_session_manager),
+                                Some(&lsif_bridge),
                             )
                             .await
                             {
@@ -643,7 +643,7 @@ async fn main() {
                                                 runtime_session.as_mut(),
                                                 &mut need_redraw,
                                                 &mut runtime_presentation_intents,
-                                                Some(&lsp_session_manager),
+                                                Some(&lsif_bridge),
                                             )
                                             .await
                                         {
@@ -788,7 +788,7 @@ async fn main() {
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
-                                        Some(&lsp_session_manager),
+                                        Some(&lsif_bridge),
                                     )
                                     .await
                                     {
@@ -814,7 +814,7 @@ async fn main() {
                                         &mut transient_msg,
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
-                                        Some(&lsp_session_manager),
+                                        Some(&lsif_bridge),
                                     )
                                     .await
                                     {
@@ -887,7 +887,7 @@ async fn main() {
                                         runtime_session.as_mut(),
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
-                                        Some(&lsp_session_manager),
+                                        Some(&lsif_bridge),
                                     )
                                     .await
                                     {
@@ -919,7 +919,7 @@ async fn main() {
                                                 &mut transient_msg,
                                                 &mut need_redraw,
                                                 &mut runtime_presentation_intents,
-                                                Some(&lsp_session_manager),
+                                                Some(&lsif_bridge),
                                             )
                                             .await
                                         {
@@ -1020,7 +1020,7 @@ async fn main() {
                                 runtime_session.as_mut(),
                                 &mut need_redraw,
                                 &mut runtime_presentation_intents,
-                                Some(&lsp_session_manager),
+                                Some(&lsif_bridge),
                             )
                             .await
                             {
@@ -1061,7 +1061,7 @@ async fn main() {
                             runtime_session.as_mut(),
                             &mut need_redraw,
                             &mut runtime_presentation_intents,
-                            Some(&lsp_session_manager),
+                            Some(&lsif_bridge),
                         )
                         .await
                         {
@@ -1288,6 +1288,38 @@ fn apply_floating_lifecycle_after_core_edit(
                 .closed,
         );
     }
+    if before.mode != after.mode
+        && let Some(window_id) = restore_window_id
+    {
+        closed.extend(
+            floating_window_manager
+                .apply_lifecycle_event(
+                    FloatingLifecycleEvent::ModeChanged {
+                        window_id,
+                        from: floating_editor_mode_from_core(before.mode),
+                        to: floating_editor_mode_from_core(after.mode),
+                    },
+                    Some(window_id),
+                )
+                .closed,
+        );
+    }
+    if let (Some(before_window_id), Some(after_window_id)) =
+        (before.active_window_id(), after.active_window_id())
+        && before_window_id != after_window_id
+    {
+        closed.extend(
+            floating_window_manager
+                .apply_lifecycle_event(
+                    FloatingLifecycleEvent::WindowLeft {
+                        from_window_id: before_window_id,
+                        to_window_id: after_window_id,
+                    },
+                    Some(after_window_id),
+                )
+                .closed,
+        );
+    }
     if before.revision != after.revision {
         closed.extend(
             floating_window_manager
@@ -1317,6 +1349,26 @@ fn apply_floating_lifecycle_after_core_edit(
         );
     }
     did_close
+}
+
+/// `vim_core_rs::CoreMode` を float lifecycle が扱う中立 `EditorMode` に
+/// 変換する。コアの細かいモード（VisualLine 等）は float ライフサイクル
+/// 上は同一視して構わないため、Visual / Select 系は EditorMode::Visual に
+/// 集約し、OperatorPending は Normal の延長として扱う。
+fn floating_editor_mode_from_core(mode: CoreMode) -> saya::floating_window::EditorMode {
+    use saya::floating_window::EditorMode;
+    match mode {
+        CoreMode::Normal | CoreMode::OperatorPending => EditorMode::Normal,
+        CoreMode::Insert => EditorMode::Insert,
+        CoreMode::Visual
+        | CoreMode::VisualLine
+        | CoreMode::VisualBlock
+        | CoreMode::Select
+        | CoreMode::SelectLine
+        | CoreMode::SelectBlock => EditorMode::Visual,
+        CoreMode::Replace => EditorMode::Replace,
+        CoreMode::CommandLine => EditorMode::Command,
+    }
 }
 
 fn viewport_sync_mode_for_input(key: &KeyInput) -> ViewportSyncMode {
@@ -1790,7 +1842,7 @@ async fn process_pending_host_actions_with_runtime(
     mut runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
-    lsp_session_manager: Option<&LspSessionManager>,
+    lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<ShutdownReason> {
     let mut shutdown_reason = None;
     loop {
@@ -1817,7 +1869,7 @@ async fn process_pending_host_actions_with_runtime(
                         runtime_session.as_deref_mut(),
                         need_redraw,
                         runtime_presentation_intents,
-                        lsp_session_manager,
+                        lsif_bridge,
                     )
                     .await
                     {
@@ -2099,7 +2151,7 @@ async fn handle_write_host_action_with_runtime(
     runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
-    lsp_session_manager: Option<&LspSessionManager>,
+    lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<ShutdownReason> {
     let snapshot = outcome.core_bridge.snapshot();
     log::debug!(
@@ -2124,7 +2176,7 @@ async fn handle_write_host_action_with_runtime(
             transient_msg,
             need_redraw,
             runtime_presentation_intents,
-            lsp_session_manager,
+            lsif_bridge,
         )
         .await;
     }
@@ -2214,7 +2266,7 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
     need_redraw: &mut bool,
     runtime_session: Option<&mut RuntimeSessionOwner>,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
-    lsp_session_manager: Option<&LspSessionManager>,
+    lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<Option<ShutdownReason>> {
     let action = directory_operation_confirmation_key_action(key, session_state)?;
     *need_redraw = true;
@@ -2238,7 +2290,7 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
                         transient_msg,
                         need_redraw,
                         runtime_presentation_intents,
-                        lsp_session_manager,
+                        lsif_bridge,
                     )
                     .await,
                 );
@@ -3987,7 +4039,7 @@ fn execute_lsp_hover_float_host_command(
         .or_else(|| value.get("result"))
         .cloned()
         .unwrap_or(value);
-    let id = open_lsp_hover_float(
+    let outcome = open_lsp_hover_float(
         manager,
         LspHoverFloatRequest {
             window_id,
@@ -3997,14 +4049,16 @@ fn execute_lsp_hover_float_host_command(
         },
     );
     log::debug!(
-        "[main][lsp_float] hover float host command applied: opened={:?}, window_id={}, cursor=({}, {})",
-        id.map(|id| id.0),
+        "[main][lsp_float] hover float host command applied: outcome={:?}, window_id={}, cursor=({}, {})",
+        outcome,
         window_id,
         snapshot.cursor_row,
         snapshot.cursor_col
     );
     Ok(RuntimeCommandEffect {
-        transient_message: id.is_none().then(|| "No LSP hover content".to_string()),
+        transient_message: outcome
+            .is_none()
+            .then(|| "No LSP hover content".to_string()),
         follow_up_events: Vec::new(),
         shutdown_intent: None,
         presentation_intents: Vec::new(),
@@ -4677,13 +4731,13 @@ async fn dispatch_buffer_open_with_runtime(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
-    lsp_session_manager: Option<&LspSessionManager>,
+    lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         return None;
     };
     let mut host_session =
-        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsp_session_manager);
+        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsif_bridge);
     let payload = RuntimeEventMapper::buffer_open(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
     apply_runtime_dispatch_outcome(
@@ -4701,13 +4755,13 @@ async fn dispatch_buffer_write_post_with_runtime(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
-    lsp_session_manager: Option<&LspSessionManager>,
+    lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         return None;
     };
     let mut host_session =
-        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsp_session_manager);
+        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsif_bridge);
     let payload = RuntimeEventMapper::buffer_write_post(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
     apply_runtime_dispatch_outcome(
@@ -4766,7 +4820,7 @@ async fn execute_startup_keymap_registered_command(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
-    lsp_session_manager: Option<&LspSessionManager>,
+    lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         log::info!(
@@ -4788,7 +4842,7 @@ async fn execute_startup_keymap_registered_command(
         completion_float_manager,
         lsp_diagnostic_store,
         terminal_float_manager,
-        lsp_session_manager,
+        lsif_bridge,
     );
     let dispatch_outcome = runtime_session
         .execute_command(command_name, &mut host_session)
@@ -5069,6 +5123,7 @@ fn runtime_float_lifecycle_label(lifecycle: FloatingLifecycle) -> &'static str {
         FloatingLifecycle::CloseOnCursorMove => "closeOnCursorMove",
         FloatingLifecycle::CloseOnInsert => "closeOnInsert",
         FloatingLifecycle::CloseOnBufferChange => "closeOnBufferChange",
+        FloatingLifecycle::CloseOnEvents(_) => "closeOnEvents",
         FloatingLifecycle::ReplaceByGroup(_) => "replaceByGroup",
     }
 }
@@ -5193,7 +5248,7 @@ struct MainRuntimeHostSession<'a> {
     completion_float_manager: Option<&'a mut CompletionFloatManager>,
     lsp_diagnostic_store: Option<&'a mut LspDiagnosticStore>,
     terminal_float_manager: Option<&'a mut TerminalFloatManager>,
-    lsp_session_manager: Option<&'a LspSessionManager>,
+    lsif_bridge: Option<&'a LsifBridgeHandle>,
 }
 
 impl<'a> MainRuntimeHostSession<'a> {
@@ -5208,14 +5263,14 @@ impl<'a> MainRuntimeHostSession<'a> {
             completion_float_manager: None,
             lsp_diagnostic_store: None,
             terminal_float_manager: None,
-            lsp_session_manager: None,
+            lsif_bridge: None,
         }
     }
 
     fn new_with_lsp_session(
         outcome: &'a mut saya::bootstrap::BootstrapOutcome,
         session_state: &'a mut saya::editor_session::EditorSessionState,
-        lsp_session_manager: Option<&'a LspSessionManager>,
+        lsif_bridge: Option<&'a LsifBridgeHandle>,
     ) -> Self {
         Self {
             outcome,
@@ -5224,7 +5279,7 @@ impl<'a> MainRuntimeHostSession<'a> {
             completion_float_manager: None,
             lsp_diagnostic_store: None,
             terminal_float_manager: None,
-            lsp_session_manager,
+            lsif_bridge,
         }
     }
 
@@ -5235,7 +5290,7 @@ impl<'a> MainRuntimeHostSession<'a> {
         completion_float_manager: &'a mut CompletionFloatManager,
         lsp_diagnostic_store: &'a mut LspDiagnosticStore,
         terminal_float_manager: &'a mut TerminalFloatManager,
-        lsp_session_manager: Option<&'a LspSessionManager>,
+        lsif_bridge: Option<&'a LsifBridgeHandle>,
     ) -> Self {
         Self {
             outcome,
@@ -5244,7 +5299,7 @@ impl<'a> MainRuntimeHostSession<'a> {
             completion_float_manager: Some(completion_float_manager),
             lsp_diagnostic_store: Some(lsp_diagnostic_store),
             terminal_float_manager: Some(terminal_float_manager),
-            lsp_session_manager,
+            lsif_bridge,
         }
     }
 }
@@ -5447,21 +5502,21 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
         )
     }
 
-    fn execute_lsp_request(
+    fn execute_lsif_request(
         &mut self,
         request: LspRuntimeBridgeRequest,
     ) -> Result<LspRuntimeBridgeResponse, RuntimeCommandError> {
-        let Some(manager) = self.lsp_session_manager else {
+        let Some(bridge) = self.lsif_bridge else {
             return Err(RuntimeCommandError::CommandFailed {
-                name: "lsp.request".to_string(),
+                name: "lsif.request".to_string(),
                 message: format!(
-                    "LSP transport is not configured for runtime method {}",
+                    "LSIF bridge is not configured for runtime method {}",
                     request.method
                 ),
             });
         };
         log::info!(
-            "[main][lsp] executing runtime LSP request through session manager: method={}, language={}, document={}",
+            "[main][lsif] executing runtime LSIF request through index cache: method={}, language={}, document={}",
             request.method,
             request.language_id,
             request
@@ -5470,8 +5525,21 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
                 .map(|document| document.uri.as_str())
                 .unwrap_or("<none>")
         );
-        manager.execute_blocking(request)
+        bridge
+            .cache
+            .lock()
+            .map_err(|_| RuntimeCommandError::CommandFailed {
+                name: "lsif.request".to_string(),
+                message: "LSIF index cache mutex poisoned".to_string(),
+            })
+            .and_then(|mut cache| cache.execute_request(request, &bridge.diagnostic_events))
     }
+}
+
+#[derive(Clone, Default)]
+pub struct LsifBridgeHandle {
+    cache: Arc<std::sync::Mutex<LsifIndexCache>>,
+    diagnostic_events: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 fn directory_buffer_listing_options_from_runtime(
