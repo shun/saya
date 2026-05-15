@@ -9,38 +9,40 @@
 
 use std::io;
 
-use saya::app_startup::{prepare_launch_and_start_terminal, prepare_tui_startup_context};
-use saya::architecture_compliance::ArchitectureComplianceGuard;
-use saya::cli::LaunchRequest;
-use saya::core_notification_prompt::{
+use saya::app::cli::LaunchRequest;
+use saya::app::event_loop::EventLoopCoordinator;
+use saya::app::startup::{prepare_launch_and_start_terminal, prepare_tui_startup_context};
+use saya::core::notification_prompt::{
     MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
 };
-use saya::event_loop::EventLoopCoordinator;
-use saya::input_loop::TerminalEventSource;
-use saya::optional_graphics::{
-    OptionalGraphicsAdapter, OverlayRenderResult, RecordingOverlayWriter,
-};
-use saya::overlay_asset_store::{
+use saya::presentation::overlay::asset_store::{
     OverlayAssetMedia, OverlayAssetSource, OverlayAssetStore, OverlayAssetStoreService,
 };
-use saya::presentation_effect::{
+use saya::presentation::overlay::effect::{
     OverlayContentKey, OverlayTarget, PresentationEffectProjector,
     PresentationEffectProjectorService, RuntimePresentationIntent,
 };
-use saya::screen_model::{
+use saya::presentation::overlay::optional_graphics::{
+    OptionalGraphicsAdapter, OverlayRenderResult, RecordingOverlayWriter,
+};
+use saya::presentation::render::coordinator::{
+    RenderFrameRequest, RenderTextMode, TuiRenderCoordinator, TuiRenderCoordinatorService,
+};
+use saya::presentation::screen_model::{
     CommandLineModel, PaneRect, ScreenCursorStyle, ScreenModel, WorkspaceScreenModel,
 };
-use saya::terminal_capability::{
+use saya::presentation::ui_surface::{
+    UiFeatureRequest, UiSurfaceMode, UiSurfacePolicy, UiSurfacePolicyService,
+};
+use saya::support::architecture_compliance::ArchitectureComplianceGuard;
+use saya::terminal::capability::{
     CapabilityDegradationReason, InlineGraphicsProbeResult, TerminalCapabilityObservation,
     TerminalCapabilityProbe, TerminalCapabilityProbeService, TerminalSessionKind,
     TextStyleCapability,
 };
-use saya::terminal_io_broker::TerminalIoPhase;
-use saya::terminal_lifecycle::TerminalBackend;
-use saya::tui_render_coordinator::{
-    RenderFrameRequest, RenderTextMode, TuiRenderCoordinator, TuiRenderCoordinatorService,
-};
-use saya::ui_surface::{UiFeatureRequest, UiSurfaceMode, UiSurfacePolicy, UiSurfacePolicyService};
+use saya::terminal::input_loop::TerminalEventSource;
+use saya::terminal::io_broker::TerminalIoPhase;
+use saya::terminal::lifecycle::TerminalBackend;
 
 fn tui_only_architecture_suite_scope_statement() -> &'static str {
     "host/application TUI-only architecture suite for startup policy, dependency drift guard, terminal phase ownership, capability degradation, and portability"
@@ -133,7 +135,7 @@ fn architecture_compliance_guard_accepts_the_repository_dependency_set() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_interactive_input() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -253,7 +255,7 @@ async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_inter
 
 #[test]
 fn prepare_tui_startup_context_composes_policy_probe_and_runtime_owner_before_event_loop() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -402,7 +404,7 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
-            resolved_theme: saya::theme::ResolvedTheme::default(),
+            resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -440,7 +442,7 @@ fn presentation_effect_projector_normalizes_runtime_overlay_requests_without_lea
             truecolor: true,
         },
         InlineGraphicsProbeResult::Supported(
-            saya::terminal_capability::InlineGraphicsProtocol::Kitty,
+            saya::terminal::capability::InlineGraphicsProtocol::Kitty,
         ),
     )
     .detect();
@@ -535,7 +537,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
-            resolved_theme: saya::theme::ResolvedTheme::default(),
+            resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -608,7 +610,7 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
             truecolor: true,
         },
         InlineGraphicsProbeResult::Supported(
-            saya::terminal_capability::InlineGraphicsProtocol::Kitty,
+            saya::terminal::capability::InlineGraphicsProtocol::Kitty,
         ),
     )
     .detect();
@@ -695,9 +697,11 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
 #[test]
 fn layered_architecture_keeps_terminal_protocols_out_of_runtime_and_public_surface() {
     let runtime_source =
-        std::fs::read_to_string("src/runtime_integration.rs").expect("runtime source should load");
-    let public_declaration = saya::RUNTIME_SAYA_TYPE_DECLARATION.to_ascii_lowercase();
-    let graphics_source = std::fs::read_to_string("src/optional_graphics.rs")
+        std::fs::read_to_string("src/runtime/integration.rs").expect("runtime source should load");
+    let public_declaration = saya::RUNTIME_SAYA_TYPE_DECLARATION
+        .to_ascii_lowercase()
+        .replace("estimatedbytes", "");
+    let graphics_source = std::fs::read_to_string("src/presentation/overlay/optional_graphics.rs")
         .expect("graphics adapter source should load");
 
     for forbidden in [

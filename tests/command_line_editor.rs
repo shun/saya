@@ -1,5 +1,5 @@
-use saya::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
-use saya::input_router::KeyInput;
+use saya::input::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
+use saya::input::router::KeyInput;
 
 #[test]
 fn left_home_end_and_ctrl_variants_move_the_command_line_cursor() {

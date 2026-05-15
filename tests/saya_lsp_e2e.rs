@@ -19,13 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
-use saya::saya_live_runtime::{
+use saya::features::lsp::runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::live::{
     BoxFuture, HostCapabilityBridge, ReadonlyBufferSnapshot, ReadonlyEditorSnapshot,
     ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeMode, SayaLiveRuntime,
 };
-use saya::startup_runtime::{
+use saya::runtime::startup::{
     StartupModulePrepareResult, collect_startup_registry, prepare_init_module,
 };
 

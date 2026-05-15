@@ -1,5 +1,5 @@
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::config_runtime::StartupRegistryEntry;
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::config::StartupRegistryEntry;
 
 #[test]
 fn callback_registry_seed_preserves_command_and_event_registration_order() {

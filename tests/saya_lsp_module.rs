@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use saya::startup_runtime::{
+use saya::runtime::startup::{
     StartupModulePrepareResult, evaluate_startup_module, prepare_init_module,
 };
 

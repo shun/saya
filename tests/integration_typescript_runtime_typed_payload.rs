@@ -6,9 +6,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::config_runtime::StartupRegistryEntry;
-use saya::saya_live_runtime::{
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::config::StartupRegistryEntry;
+use saya::runtime::live::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
     ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventName,
     RuntimeEventPayload, RuntimeMode, SayaLiveRuntime,

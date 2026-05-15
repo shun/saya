@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::editor_session::EditorSessionState;
-use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
-use saya::screen_model::{ProjectionInput, project};
-use saya::viewport::ViewportState;
+use saya::app::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::app::session::EditorSessionState;
+use saya::input::router::{EditorIntent, KeyInput, resolve_intent};
+use saya::presentation::screen_model::{ProjectionInput, project};
+use saya::presentation::viewport::ViewportState;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

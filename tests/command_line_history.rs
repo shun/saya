@@ -1,4 +1,4 @@
-use saya::command_line_history::{
+use saya::input::command_line_history::{
     CommandLineHistories, CommandLineHistory, CommandLineHistoryDirection,
     load_histories_from_path, record_history_and_save_to_path, save_histories_to_path,
 };

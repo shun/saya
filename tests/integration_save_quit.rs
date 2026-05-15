@@ -14,12 +14,12 @@ use std::path::PathBuf;
 use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::editor_session::{EditorSessionState, QuitDecision};
-use saya::host_io::{SaveRequest, SaveResult, write_to_path};
-use saya::screen_model::{ProjectionInput, project};
-use saya::swapfile::swapfile_path_for_target;
+use saya::app::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::app::host_io::{SaveRequest, SaveResult, write_to_path};
+use saya::app::session::{EditorSessionState, QuitDecision};
+use saya::presentation::screen_model::{ProjectionInput, project};
+use saya::support::swapfile::swapfile_path_for_target;
 use vim_core_rs::CoreHostAction;
 
 fn unique_path(name: &str) -> PathBuf {

@@ -16,17 +16,17 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app_startup::prepare_launch_and_start_terminal;
-use saya::bootstrap::{
+use saya::app::bootstrap::{
     BootstrapError, BootstrapWarning, LoadedConfig, bootstrap_warning_message, launch_test_lock,
     prepare_launch, prepare_launch_with_reader,
 };
-use saya::cli::{
+use saya::app::cli::{
     ConfigSource, InitialCursorPosition, InputSource, LaunchRequest, parse_launch_request,
 };
-use saya::editor_session::{EditorSessionState, SaveRequestError};
-use saya::screen_model::{ProjectionInput, project};
-use saya::terminal_lifecycle::TerminalBackend;
+use saya::app::session::{EditorSessionState, SaveRequestError};
+use saya::app::startup::prepare_launch_and_start_terminal;
+use saya::presentation::screen_model::{ProjectionInput, project};
+use saya::terminal::lifecycle::TerminalBackend;
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {

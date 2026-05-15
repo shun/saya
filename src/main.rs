@@ -1,66 +1,85 @@
-use saya::app_startup::{
-    LaunchStartError, PreparedTuiStartup, TuiStartupContextError, prepare_tui_startup_context,
-};
-use saya::bootstrap::{
+use saya::app::bootstrap::{
     BootstrapError, StartupKeymapAction, StartupKeymapMode, bootstrap_warning_message,
 };
-use saya::cli::{CliParseError, StartupAction, parse_launch_request};
-use saya::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
-use saya::command_line_history::{
-    history_direction_for_key, load_histories_from_default_cache,
-    record_history_and_save_to_default_cache, save_histories_to_default_cache,
-};
-use saya::completion_float::{
-    CompletionFloatInputOutcome, CompletionFloatManager, completion_menu_request_from_json,
-};
-use saya::core_host_actions::HostActionRuntime;
-use saya::core_notification_prompt::{
-    InputPromptStatus, InputPromptView, NotificationPromptProjectionState, PagerPromptView,
-    ProjectionFrame, PromptInputAction, handle_prompt_key, record_prompt_response_error,
-};
-use saya::core_outcome::{
-    ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
-    NormalizedOutcomeBatch, StructuralEffectSet, fold_normalized_outcomes,
-};
-use saya::core_prompt::PromptResponseCommand;
-use saya::diagnostic_log::{
-    configure_from_startup as configure_diagnostic_log_from_startup,
-    init_from_env as init_diagnostic_log_from_env,
-};
-use saya::editor_session::{
+use saya::app::cli::{CliParseError, StartupAction, parse_launch_request};
+use saya::app::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
+use saya::app::host_io::{SaveRequest, SaveResult, write_to_path};
+use saya::app::session::{
     DirectoryBufferListingOptions, DirectoryBufferPlannedOperation,
     DirectoryBufferPreviewConfirmationError, DirectoryBufferSortKey, EditorSessionState,
     QuitDecision, SaveRequestError,
 };
-use saya::event_loop::{EventLoopCoordinator, LoopAction, ShutdownReason, UiEvent};
-use saya::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
-use saya::floating_window::{
-    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingFit, FloatingInputOutcome,
-    FloatingLifecycle, FloatingLifecycleEvent, FloatingMouseOutcome, FloatingPlacement,
-    FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager, FloatingZIndex,
+use saya::app::startup::{
+    LaunchStartError, PreparedTuiStartup, TuiStartupContextError, prepare_tui_startup_context,
 };
-use saya::host_io::{SaveRequest, SaveResult, write_to_path};
-use saya::input_loop::CrosstermEventSource;
-use saya::input_router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
-use saya::job_control::{
-    start_job_control_signal_watcher, suspend_current_process_for_job_control,
+use saya::core::host_actions::HostActionRuntime;
+use saya::core::notification_prompt::{
+    InputPromptStatus, InputPromptView, NotificationPromptProjectionState, PagerPromptView,
+    ProjectionFrame, PromptInputAction, handle_prompt_key, record_prompt_response_error,
 };
-use saya::lsif_index::LsifIndexCache;
-use saya::lsp_float::{
+use saya::core::outcome::{
+    ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
+    NormalizedOutcomeBatch, StructuralEffectSet, fold_normalized_outcomes,
+};
+use saya::core::prompt::PromptResponseCommand;
+use saya::features::completion::float::{
+    CompletionFloatInputOutcome, CompletionFloatManager, completion_menu_request_from_json,
+};
+use saya::features::lsp::float::{
     LspDiagnosticFloatRequest, LspDiagnosticStore, LspHoverFloatRequest, LspLocationListRequest,
     LspSymbolOutlineRequest, file_uri_to_path, open_lsp_diagnostic_float, open_lsp_hover_float,
     open_lsp_location_list_float, open_lsp_symbol_outline_float,
 };
-use saya::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
-use saya::markdown_structure::{MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey};
-use saya::optional_graphics::{OptionalGraphicsAdapter, OverlayTerminalWriter};
-use saya::overlay_asset_store::OverlayAssetStore;
-use saya::presentation_effect::RuntimePresentationIntent;
-use saya::runtime_integration::{
+use saya::features::lsp::lsif_index::LsifIndexCache;
+use saya::features::lsp::runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
+use saya::features::search::query::{SearchStateError, SearchVisibleState};
+use saya::features::search::refresh::{
+    SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore,
+};
+use saya::features::selector::keymap::{
+    SelectorAction, SelectorKeyRoute, selector_key_route_for_model,
+};
+use saya::features::selector::runtime::{
+    RuntimeRgLocation, RuntimeSelectorControllerCommand, parse_rg_selector_location_detail,
+};
+use saya::features::selector::tui_state::{
+    SelectorTuiProjectionSink, SelectorTuiViewModel, selector_tui_model_to_workspace_float,
+};
+use saya::input::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
+use saya::input::command_line_history::{
+    history_direction_for_key, load_histories_from_default_cache,
+    record_history_and_save_to_default_cache, save_histories_to_default_cache,
+};
+use saya::input::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
+use saya::input::router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
+use saya::presentation::floating_window::{
+    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingFit, FloatingInputOutcome,
+    FloatingLifecycle, FloatingLifecycleEvent, FloatingMouseOutcome, FloatingPlacement,
+    FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager, FloatingZIndex,
+};
+use saya::presentation::markdown::structure::{
+    MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey,
+};
+use saya::presentation::overlay::asset_store::OverlayAssetStore;
+use saya::presentation::overlay::effect::RuntimePresentationIntent;
+use saya::presentation::overlay::optional_graphics::{
+    OptionalGraphicsAdapter, OverlayTerminalWriter,
+};
+use saya::presentation::render::coordinator::{RenderFrameError, TuiRenderCoordinator};
+use saya::presentation::render::renderer::{CrosstermBackendImpl, TuiRenderer};
+use saya::presentation::screen_model::{
+    CommandLineModel, ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput,
+    WorkspaceScreenModel, project, project_workspace,
+};
+use saya::presentation::structural_refresh::{
+    RedrawPlan, RedrawPlanSource, StructuralRefresh, StructuralRefreshOutcome,
+};
+use saya::presentation::viewport::{ViewportSyncMode, WindowViewportStore};
+use saya::runtime::integration::{
     RuntimeCommandEffect, RuntimeDispatchOutcome, RuntimeEventMapper, RuntimeHostSession,
     RuntimeInputPromptHostResponse, RuntimeSessionOwner, RuntimeShutdownIntent,
 };
-use saya::saya_live_runtime::{
+use saya::runtime::live::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
     RuntimeFilerCurrentEntry, RuntimeFilerEntry, RuntimeFilerEntryKind, RuntimeFilerError,
     RuntimeFilerErrorKind, RuntimeFilerListOptions, RuntimeFilerOperation,
@@ -69,31 +88,20 @@ use saya::saya_live_runtime::{
     RuntimeFloatSnapshot, RuntimeFloatZIndexRequest, RuntimeInputPromptRequest,
     RuntimeInputPromptResponse, RuntimeMode,
 };
-use saya::screen_model::{
-    CommandLineModel, ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput,
-    WorkspaceScreenModel, project, project_workspace,
+use saya::support::diagnostic_log::{
+    configure_from_startup as configure_diagnostic_log_from_startup,
+    init_from_env as init_diagnostic_log_from_env,
 };
-use saya::search_query::{SearchStateError, SearchVisibleState};
-use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
-use saya::selector_keymap::{SelectorAction, SelectorKeyRoute, selector_key_route_for_model};
-use saya::selector_runtime::{
-    RuntimeRgLocation, RuntimeSelectorControllerCommand, parse_rg_selector_location_detail,
-};
-use saya::selector_tui_state::{
-    SelectorTuiProjectionSink, SelectorTuiViewModel, selector_tui_model_to_workspace_float,
-};
-use saya::structural_refresh::{
-    RedrawPlan, RedrawPlanSource, StructuralRefresh, StructuralRefreshOutcome,
-};
-use saya::terminal_capability::TerminalCapabilityProbe;
-use saya::terminal_float::{
+use saya::terminal::capability::TerminalCapabilityProbe;
+use saya::terminal::float::{
     TerminalFloatCloseBehavior, TerminalFloatManager, TerminalFloatSpawnRequest,
 };
-use saya::terminal_lifecycle::TerminalBackend;
-use saya::terminal_lifecycle::TerminalSize;
-use saya::tui_render_coordinator::{RenderFrameError, TuiRenderCoordinator};
-use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
-use saya::viewport::{ViewportSyncMode, WindowViewportStore};
+use saya::terminal::input_loop::CrosstermEventSource;
+use saya::terminal::job_control::{
+    start_job_control_signal_watcher, suspend_current_process_for_job_control,
+};
+use saya::terminal::lifecycle::TerminalBackend;
+use saya::terminal::lifecycle::TerminalSize;
 use vim_core_rs::CoreInputRequestKind;
 #[cfg(test)]
 use vim_core_rs::CoreMessageEvent;
@@ -1559,8 +1567,10 @@ fn apply_floating_lifecycle_after_core_edit(
 /// 変換する。コアの細かいモード（VisualLine 等）は float ライフサイクル
 /// 上は同一視して構わないため、Visual / Select 系は EditorMode::Visual に
 /// 集約し、OperatorPending は Normal の延長として扱う。
-fn floating_editor_mode_from_core(mode: CoreMode) -> saya::floating_window::EditorMode {
-    use saya::floating_window::EditorMode;
+fn floating_editor_mode_from_core(
+    mode: CoreMode,
+) -> saya::presentation::floating_window::EditorMode {
+    use saya::presentation::floating_window::EditorMode;
     match mode {
         CoreMode::Normal | CoreMode::OperatorPending => EditorMode::Normal,
         CoreMode::Insert => EditorMode::Insert,
@@ -1589,10 +1599,10 @@ fn viewport_sync_mode_for_input(key: &KeyInput) -> ViewportSyncMode {
     }
 }
 
-fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), String> {
+fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Result<(), String> {
     eprintln!("[main][smoke] preparing headless launch");
     let mut outcome =
-        saya::bootstrap::prepare_launch(launch_request).map_err(format_bootstrap_error)?;
+        saya::app::bootstrap::prepare_launch(launch_request).map_err(format_bootstrap_error)?;
     configure_diagnostic_log_from_startup(outcome.startup_registry.log.log_file.as_deref())
         .map_err(|error| error.to_string())?;
     let mut session_state = outcome.editor_session_state();
@@ -1686,7 +1696,7 @@ fn run_binary_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), Stri
     Ok(())
 }
 
-async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Result<(), String> {
+async fn run_binary_pty_smoke(launch_request: saya::app::cli::LaunchRequest) -> Result<(), String> {
     eprintln!("[main][pty-smoke] preparing PTY launch");
     let mut backend = CrosstermBackendImpl;
     let mut capability_probe = TerminalCapabilityProbe::from_env();
@@ -2043,9 +2053,9 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
 }
 
 async fn process_pending_host_actions_with_runtime(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     outcome_accumulator: &mut MainOutcomeAccumulator,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
     system_warning: &mut Option<String>,
     host_action_runtime: &mut HostActionRuntime,
@@ -2222,9 +2232,9 @@ fn prioritize_save_family_host_directives(
 }
 
 fn process_pending_host_actions_without_runtime(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     outcome_accumulator: &mut MainOutcomeAccumulator,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
     system_warning: &mut Option<String>,
     host_action_runtime: &mut HostActionRuntime,
@@ -2353,8 +2363,8 @@ fn process_pending_host_actions_without_runtime(
 }
 
 async fn handle_write_host_action_with_runtime(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     path_override: Option<&str>,
     confirmed: bool,
     transient_msg: &mut Option<String>,
@@ -2403,7 +2413,7 @@ enum DirectoryOperationConfirmationKeyAction {
 
 fn directory_operation_confirmation_key_action(
     key: &KeyInput,
-    session_state: &saya::editor_session::EditorSessionState,
+    session_state: &saya::app::session::EditorSessionState,
 ) -> Option<DirectoryOperationConfirmationKeyAction> {
     if !session_state.directory_operation_confirmation_dialog_active() {
         return None;
@@ -2421,7 +2431,7 @@ fn directory_operation_confirmation_key_action(
 }
 
 fn directory_operation_cancel_message(
-    session_state: &mut saya::editor_session::EditorSessionState,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> String {
     match session_state.cancel_directory_buffer_operation_preview() {
         Some(_) => "Directory operation cancelled; no filesystem changes were applied".to_string(),
@@ -2432,8 +2442,8 @@ fn directory_operation_cancel_message(
 #[cfg(test)]
 fn handle_directory_operation_confirmation_key_without_runtime(
     key: &KeyInput,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
 ) -> bool {
@@ -2470,8 +2480,8 @@ fn handle_directory_operation_confirmation_key_without_runtime(
 
 async fn handle_directory_operation_confirmation_key_with_runtime(
     key: &KeyInput,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_session: Option<&mut RuntimeSessionOwner>,
@@ -2520,8 +2530,8 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
 }
 
 fn refresh_directory_buffer_after_confirmed_save(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
 ) {
     let Some(root_path) = session_state
@@ -2552,8 +2562,8 @@ fn refresh_directory_buffer_after_confirmed_save(
 }
 
 fn handle_directory_buffer_vfs_save_request(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     request: CoreVfsRequest,
     transient_msg: &mut Option<String>,
 ) -> Option<SaveSnapshotOutcome> {
@@ -2618,14 +2628,14 @@ struct SaveSnapshotOutcome {
 
 fn save_snapshot_result(
     buffer_contents: &str,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> SaveSnapshotOutcome {
     save_snapshot_result_with_path_override(buffer_contents, session_state, None)
 }
 
 fn save_snapshot_result_with_path_override(
     buffer_contents: &str,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    session_state: &mut saya::app::session::EditorSessionState,
     path_override: Option<&str>,
 ) -> SaveSnapshotOutcome {
     save_snapshot_result_with_confirmation(buffer_contents, session_state, path_override, false)
@@ -2633,7 +2643,7 @@ fn save_snapshot_result_with_path_override(
 
 fn save_snapshot_result_with_confirmation(
     buffer_contents: &str,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    session_state: &mut saya::app::session::EditorSessionState,
     path_override: Option<&str>,
     confirmed: bool,
 ) -> SaveSnapshotOutcome {
@@ -2771,8 +2781,8 @@ fn save_snapshot_result_with_confirmation(
 }
 
 fn apply_directory_buffer_operation_plan(
-    session_state: &mut saya::editor_session::EditorSessionState,
-    plan: &saya::editor_session::DirectoryBufferOperationPlan,
+    session_state: &mut saya::app::session::EditorSessionState,
+    plan: &saya::app::session::DirectoryBufferOperationPlan,
 ) -> Result<usize, RuntimeFilerError> {
     log::info!(
         "[main][dired][writable] applying confirmed directory operation plan through filer operations: root_path={}, operations={}",
@@ -2818,7 +2828,7 @@ struct DirectoryBufferOperationTransactionReport {
 }
 
 fn build_directory_buffer_operation_transaction(
-    plan: &saya::editor_session::DirectoryBufferOperationPlan,
+    plan: &saya::app::session::DirectoryBufferOperationPlan,
 ) -> Result<DirectoryBufferOperationTransaction, RuntimeFilerError> {
     validate_directory_buffer_operation_conflicts(plan)?;
     let mut steps = Vec::new();
@@ -2924,7 +2934,7 @@ fn build_directory_buffer_operation_transaction(
 }
 
 fn validate_directory_buffer_operation_conflicts(
-    plan: &saya::editor_session::DirectoryBufferOperationPlan,
+    plan: &saya::app::session::DirectoryBufferOperationPlan,
 ) -> Result<(), RuntimeFilerError> {
     let rename_sources = plan
         .operations
@@ -3069,9 +3079,9 @@ fn directory_transaction_path_has_write_permission(path: &std::path::Path) -> bo
 fn validate_directory_transaction_entry_kind(
     operation: RuntimeFilerOperationKind,
     path: &std::path::Path,
-    kind: saya::editor_session::DirectoryBufferEntryKind,
+    kind: saya::app::session::DirectoryBufferEntryKind,
 ) -> Result<(), RuntimeFilerError> {
-    if kind == saya::editor_session::DirectoryBufferEntryKind::Other {
+    if kind == saya::app::session::DirectoryBufferEntryKind::Other {
         return Err(directory_transaction_conflict_error(
             operation,
             path,
@@ -3100,7 +3110,7 @@ fn execute_directory_buffer_operation_transaction(
             index,
             step.operation
         );
-        match saya::saya_live_runtime::execute_local_filer_operation(step.operation.clone()) {
+        match saya::runtime::live::execute_local_filer_operation(step.operation.clone()) {
             Ok(_) => {
                 report.successful += 1;
                 applied_steps.push(step);
@@ -3114,9 +3124,7 @@ fn execute_directory_buffer_operation_transaction(
                 );
                 for applied_step in applied_steps.into_iter().rev() {
                     if let Some(rollback) = &applied_step.rollback {
-                        match saya::saya_live_runtime::execute_local_filer_operation(
-                            rollback.clone(),
-                        ) {
+                        match saya::runtime::live::execute_local_filer_operation(rollback.clone()) {
                             Ok(_) => report.rollback_succeeded += 1,
                             Err(rollback_error) => {
                                 report.rollback_failed += 1;
@@ -3236,7 +3244,7 @@ fn unique_directory_transaction_temp_path(
 
 fn build_save_request_for_host_write(
     buffer_contents: &str,
-    session_state: &saya::editor_session::EditorSessionState,
+    session_state: &saya::app::session::EditorSessionState,
     path_override: Option<&str>,
 ) -> Result<SaveRequest, SaveRequestError> {
     let Some(path_override) = effective_host_write_path_override(session_state, path_override)
@@ -3255,7 +3263,7 @@ fn build_save_request_for_host_write(
 }
 
 fn effective_host_write_path_override<'a>(
-    session_state: &saya::editor_session::EditorSessionState,
+    session_state: &saya::app::session::EditorSessionState,
     path_override: Option<&'a str>,
 ) -> Option<&'a str> {
     let path_override = path_override.filter(|path| !path.is_empty())?;
@@ -3513,8 +3521,8 @@ fn merge_shutdown_reason(current: &mut Option<ShutdownReason>, next: Option<Shut
 
 fn execute_runtime_host_command_through_core(
     ex_command: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     outcome
         .core_bridge
@@ -3672,8 +3680,8 @@ fn execute_runtime_host_command_through_core(
 
 fn execute_runtime_host_command(
     command: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     execute_runtime_host_command_with_floats(
         command,
@@ -3688,8 +3696,8 @@ fn execute_runtime_host_command(
 
 fn execute_runtime_host_command_with_floats(
     command: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     floating_window_manager: Option<&mut FloatingWindowManager>,
     completion_float_manager: Option<&mut CompletionFloatManager>,
     lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
@@ -3830,7 +3838,7 @@ fn execute_runtime_host_command_with_floats(
 
 fn execute_buffer_window_float_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
@@ -4175,7 +4183,7 @@ fn execute_terminal_close_float_host_command(
 
 fn execute_completion_menu_float_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
     completion_float_manager: Option<&mut CompletionFloatManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
@@ -4230,7 +4238,7 @@ fn execute_completion_menu_float_host_command(
 
 fn execute_lsp_hover_float_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
@@ -4277,7 +4285,7 @@ fn execute_lsp_hover_float_host_command(
 
 fn execute_lsp_diagnostic_float_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
@@ -4332,7 +4340,7 @@ fn execute_lsp_diagnostic_float_host_command(
 
 fn execute_lsp_location_list_float_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
@@ -4379,7 +4387,7 @@ fn execute_lsp_location_list_float_host_command(
 
 fn execute_lsp_symbol_outline_float_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
@@ -4420,8 +4428,8 @@ fn execute_lsp_symbol_outline_float_host_command(
 
 fn execute_lsp_goto_definition_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let value: serde_json::Value =
         serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
@@ -4480,8 +4488,8 @@ fn execute_lsp_goto_definition_host_command(
 async fn handle_selector_accept_action(
     runtime_session: &mut RuntimeSessionOwner,
     selector_model: &SelectorTuiViewModel,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> RuntimeDispatchOutcome {
     log::info!(
         "[main][selector] selector action accept selected start: session_id={}, hidden={}, cancelled={}",
@@ -4565,8 +4573,8 @@ async fn handle_selector_accept_action(
 
 fn execute_selector_rg_jump(
     location: &RuntimeRgLocation,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> Result<RuntimeDispatchOutcome, RuntimeCommandError> {
     log::info!(
         "[main][selector] jump execution start: path={}, line={}, column={}",
@@ -4621,7 +4629,7 @@ fn execute_selector_rg_jump(
 
 fn execute_lsp_workspace_edit_preview_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let value: serde_json::Value =
@@ -4661,7 +4669,7 @@ fn execute_lsp_workspace_edit_preview_host_command(
 
 fn execute_lsp_code_actions_float_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let value: serde_json::Value =
@@ -4696,7 +4704,7 @@ fn execute_lsp_code_actions_float_host_command(
 
 fn execute_lsp_publish_diagnostics_host_command(
     payload: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
     lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
@@ -4712,7 +4720,7 @@ fn execute_lsp_publish_diagnostics_host_command(
 }
 
 fn execute_lsp_cycle_diagnostic_host_command(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
     lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
     next: bool,
@@ -4887,7 +4895,7 @@ fn save_error_message(error: &SaveRequestError) -> String {
 }
 
 fn consume_core_outcomes_from_core(
-    core_bridge: &mut saya::core_bridge::CoreBridge,
+    core_bridge: &mut saya::core::bridge::CoreBridge,
     accumulator: &mut MainOutcomeAccumulator,
     need_redraw: &mut bool,
 ) {
@@ -5040,7 +5048,7 @@ fn apply_core_dispatch_effects(
 }
 
 fn dispatch_prompt_response_command(
-    core_bridge: &mut saya::core_bridge::CoreBridge,
+    core_bridge: &mut saya::core::bridge::CoreBridge,
     accumulator: &mut MainOutcomeAccumulator,
     command: PromptResponseCommand,
     need_redraw: &mut bool,
@@ -5078,8 +5086,8 @@ fn latest_user_visible_message(messages: Vec<CoreMessageEvent>) -> Option<String
 
 async fn dispatch_buffer_open_with_runtime(
     runtime_session: Option<&mut RuntimeSessionOwner>,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
@@ -5102,8 +5110,8 @@ async fn dispatch_buffer_open_with_runtime(
 
 async fn dispatch_buffer_write_post_with_runtime(
     runtime_session: Option<&mut RuntimeSessionOwner>,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
@@ -5177,8 +5185,8 @@ fn apply_runtime_dispatch_outcome(
 async fn execute_startup_keymap_registered_command(
     runtime_session: Option<&mut RuntimeSessionOwner>,
     command_name: &str,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
     floating_window_manager: &mut FloatingWindowManager,
     completion_float_manager: &mut CompletionFloatManager,
     lsp_diagnostic_store: &mut LspDiagnosticStore,
@@ -5224,7 +5232,7 @@ async fn execute_startup_keymap_registered_command(
 }
 
 fn startup_keymap_action_for_input(
-    keymaps: &[saya::bootstrap::StartupKeymapSnapshot],
+    keymaps: &[saya::app::bootstrap::StartupKeymapSnapshot],
     mode: CoreMode,
     key: &KeyInput,
 ) -> Option<StartupKeymapAction> {
@@ -5238,7 +5246,7 @@ fn startup_keymap_action_for_input(
 }
 
 fn startup_keymap_action_for_snapshot_input(
-    keymaps: &[saya::bootstrap::StartupKeymapSnapshot],
+    keymaps: &[saya::app::bootstrap::StartupKeymapSnapshot],
     snapshot: &vim_core_rs::CoreLightSnapshot,
     key: &KeyInput,
 ) -> Option<StartupKeymapAction> {
@@ -5289,7 +5297,7 @@ fn startup_keymap_lhs_from_input(key: &KeyInput) -> Option<String> {
 
 fn execute_runtime_window_open_float(
     request: RuntimeFloatOpenRequest,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
     terminal_float_manager: Option<&mut TerminalFloatManager>,
 ) -> Result<RuntimeFloatSnapshot, RuntimeCommandError> {
@@ -5419,7 +5427,7 @@ fn execute_runtime_window_close_float(
     let terminal_id = manager
         .window_content(float_id)
         .and_then(|content| match content {
-            saya::floating_window::FloatingContentRef::Terminal { terminal_id } => {
+            saya::presentation::floating_window::FloatingContentRef::Terminal { terminal_id } => {
                 Some(*terminal_id)
             }
             _ => None,
@@ -5449,7 +5457,7 @@ fn runtime_float_snapshots(manager: &FloatingWindowManager) -> Vec<RuntimeFloatS
 }
 
 fn runtime_float_snapshot(
-    window: &saya::floating_window::FloatingWindow,
+    window: &saya::presentation::floating_window::FloatingWindow,
     focused_float_id: Option<FloatingWindowId>,
 ) -> RuntimeFloatSnapshot {
     RuntimeFloatSnapshot {
@@ -5468,13 +5476,17 @@ fn runtime_float_snapshot(
     }
 }
 
-fn runtime_float_content_kind(content: &saya::floating_window::FloatingContentRef) -> &'static str {
+fn runtime_float_content_kind(
+    content: &saya::presentation::floating_window::FloatingContentRef,
+) -> &'static str {
     match content {
-        saya::floating_window::FloatingContentRef::CoreWindow { .. } => "buffer",
-        saya::floating_window::FloatingContentRef::ScratchBuffer { .. } => "buffer",
-        saya::floating_window::FloatingContentRef::Terminal { .. } => "terminal",
-        saya::floating_window::FloatingContentRef::StaticLines { .. } => "lines",
-        saya::floating_window::FloatingContentRef::CompletionMenu { .. } => "completionMenu",
+        saya::presentation::floating_window::FloatingContentRef::CoreWindow { .. } => "buffer",
+        saya::presentation::floating_window::FloatingContentRef::ScratchBuffer { .. } => "buffer",
+        saya::presentation::floating_window::FloatingContentRef::Terminal { .. } => "terminal",
+        saya::presentation::floating_window::FloatingContentRef::StaticLines { .. } => "lines",
+        saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. } => {
+            "completionMenu"
+        }
     }
 }
 
@@ -5530,7 +5542,7 @@ fn runtime_float_zindex(zindex: Option<&RuntimeFloatZIndexRequest>) -> FloatingZ
 
 fn runtime_float_placement(
     request: &RuntimeFloatOpenRequest,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
 ) -> Result<FloatingPlacement, RuntimeCommandError> {
     let row = request.row.unwrap_or(1);
     let col = request.col.unwrap_or(2);
@@ -5572,7 +5584,7 @@ fn runtime_float_anchor(anchor: Option<&str>) -> FloatingAnchor {
 
 fn runtime_float_window_id(
     requested: Option<u64>,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
 ) -> Result<i32, RuntimeCommandError> {
     requested
         .map(|id| id as i32)
@@ -5610,8 +5622,8 @@ fn runtime_terminal_close_behavior(close_behavior: Option<&str>) -> TerminalFloa
 }
 
 struct MainRuntimeHostSession<'a> {
-    outcome: &'a mut saya::bootstrap::BootstrapOutcome,
-    session_state: &'a mut saya::editor_session::EditorSessionState,
+    outcome: &'a mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &'a mut saya::app::session::EditorSessionState,
     runtime_input_prompt: Option<&'a mut Option<RuntimeInputPromptUiState>>,
     floating_window_manager: Option<&'a mut FloatingWindowManager>,
     completion_float_manager: Option<&'a mut CompletionFloatManager>,
@@ -5622,8 +5634,8 @@ struct MainRuntimeHostSession<'a> {
 
 impl<'a> MainRuntimeHostSession<'a> {
     fn new(
-        outcome: &'a mut saya::bootstrap::BootstrapOutcome,
-        session_state: &'a mut saya::editor_session::EditorSessionState,
+        outcome: &'a mut saya::app::bootstrap::BootstrapOutcome,
+        session_state: &'a mut saya::app::session::EditorSessionState,
     ) -> Self {
         Self {
             outcome,
@@ -5638,8 +5650,8 @@ impl<'a> MainRuntimeHostSession<'a> {
     }
 
     fn new_with_lsp_session(
-        outcome: &'a mut saya::bootstrap::BootstrapOutcome,
-        session_state: &'a mut saya::editor_session::EditorSessionState,
+        outcome: &'a mut saya::app::bootstrap::BootstrapOutcome,
+        session_state: &'a mut saya::app::session::EditorSessionState,
         lsif_bridge: Option<&'a LsifBridgeHandle>,
     ) -> Self {
         Self {
@@ -5655,8 +5667,8 @@ impl<'a> MainRuntimeHostSession<'a> {
     }
 
     fn new_with_floating_windows(
-        outcome: &'a mut saya::bootstrap::BootstrapOutcome,
-        session_state: &'a mut saya::editor_session::EditorSessionState,
+        outcome: &'a mut saya::app::bootstrap::BootstrapOutcome,
+        session_state: &'a mut saya::app::session::EditorSessionState,
         floating_window_manager: &'a mut FloatingWindowManager,
         completion_float_manager: &'a mut CompletionFloatManager,
         lsp_diagnostic_store: &'a mut LspDiagnosticStore,
@@ -5676,8 +5688,8 @@ impl<'a> MainRuntimeHostSession<'a> {
     }
 
     fn new_with_runtime_input(
-        outcome: &'a mut saya::bootstrap::BootstrapOutcome,
-        session_state: &'a mut saya::editor_session::EditorSessionState,
+        outcome: &'a mut saya::app::bootstrap::BootstrapOutcome,
+        session_state: &'a mut saya::app::session::EditorSessionState,
         runtime_input_prompt: &'a mut Option<RuntimeInputPromptUiState>,
     ) -> Self {
         Self {
@@ -5783,7 +5795,7 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
 
     fn current_filer_entry(
         &mut self,
-    ) -> Result<Option<RuntimeFilerCurrentEntry>, saya::saya_live_runtime::RuntimeFilerError> {
+    ) -> Result<Option<RuntimeFilerCurrentEntry>, saya::runtime::live::RuntimeFilerError> {
         let Some(directory_buffer) = self.session_state.directory_buffer() else {
             log::debug!(
                 "[main][runtime] current filer entry requested outside directory buffer: target_path={:?}",
@@ -6035,8 +6047,8 @@ fn handle_runtime_input_prompt_key(
 
 fn execute_runtime_filer_operation(
     operation: RuntimeFilerOperation,
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
-    session_state: &mut saya::editor_session::EditorSessionState,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
 ) -> Result<RuntimeFilerOperationReport, RuntimeFilerError> {
     let refresh_path = runtime_filer_operation_refresh_path(&operation)
         .or_else(|| session_state.target_path().cloned());
@@ -6141,7 +6153,7 @@ fn execute_runtime_filer_operation(
                 entries.len()
             );
             for entry in &entries {
-                saya::saya_live_runtime::execute_local_filer_operation(
+                saya::runtime::live::execute_local_filer_operation(
                     RuntimeFilerOperation::Delete {
                         path: entry.path.clone(),
                         confirm: true,
@@ -6163,7 +6175,7 @@ fn execute_runtime_filer_operation(
             }
         }
         operation => {
-            let report = saya::saya_live_runtime::execute_local_filer_operation(operation)?;
+            let report = saya::runtime::live::execute_local_filer_operation(operation)?;
             if let RuntimeFilerOperation::Rename { from, to }
             | RuntimeFilerOperation::Move { from, to } = &operation_for_refresh
             {
@@ -6232,9 +6244,9 @@ fn execute_runtime_filer_operation(
 }
 
 fn find_directory_entry_by_path(
-    session_state: &saya::editor_session::EditorSessionState,
+    session_state: &saya::app::session::EditorSessionState,
     path: &std::path::Path,
-) -> Option<saya::editor_session::DirectoryBufferEntry> {
+) -> Option<saya::app::session::DirectoryBufferEntry> {
     session_state
         .directory_buffer()?
         .entries
@@ -6244,7 +6256,7 @@ fn find_directory_entry_by_path(
 }
 
 fn directory_entries_for_runtime(
-    entries: Vec<saya::editor_session::DirectoryBufferEntry>,
+    entries: Vec<saya::app::session::DirectoryBufferEntry>,
 ) -> Vec<RuntimeFilerCurrentEntry> {
     entries
         .into_iter()
@@ -6264,7 +6276,7 @@ fn directory_entries_for_runtime(
 }
 
 fn directory_entries_for_runtime_entries(
-    entries: Vec<saya::editor_session::DirectoryBufferEntry>,
+    entries: Vec<saya::app::session::DirectoryBufferEntry>,
 ) -> Vec<RuntimeFilerEntry> {
     entries
         .into_iter()
@@ -6280,7 +6292,7 @@ fn directory_entries_for_runtime_entries(
 }
 
 fn runtime_filer_bulk_delete_preview_id(
-    entries: &[saya::editor_session::DirectoryBufferEntry],
+    entries: &[saya::app::session::DirectoryBufferEntry],
 ) -> String {
     let mut hasher = DefaultHasher::new();
     for entry in entries {
@@ -6312,15 +6324,13 @@ fn runtime_filer_operation_refresh_path(
 }
 
 fn runtime_filer_kind_from_directory_entry(
-    kind: saya::editor_session::DirectoryBufferEntryKind,
+    kind: saya::app::session::DirectoryBufferEntryKind,
 ) -> RuntimeFilerEntryKind {
     match kind {
-        saya::editor_session::DirectoryBufferEntryKind::Directory => {
-            RuntimeFilerEntryKind::Directory
-        }
-        saya::editor_session::DirectoryBufferEntryKind::File => RuntimeFilerEntryKind::File,
-        saya::editor_session::DirectoryBufferEntryKind::Symlink => RuntimeFilerEntryKind::Symlink,
-        saya::editor_session::DirectoryBufferEntryKind::Other => RuntimeFilerEntryKind::Other,
+        saya::app::session::DirectoryBufferEntryKind::Directory => RuntimeFilerEntryKind::Directory,
+        saya::app::session::DirectoryBufferEntryKind::File => RuntimeFilerEntryKind::File,
+        saya::app::session::DirectoryBufferEntryKind::Symlink => RuntimeFilerEntryKind::Symlink,
+        saya::app::session::DirectoryBufferEntryKind::Other => RuntimeFilerEntryKind::Other,
     }
 }
 
@@ -6361,7 +6371,7 @@ fn current_terminal_size() -> (u16, u16) {
 }
 
 fn perform_job_control_suspend_cycle<B: TerminalBackend>(
-    terminal_broker: &mut saya::terminal_io_broker::TerminalIoBroker<'_, B>,
+    terminal_broker: &mut saya::terminal::io_broker::TerminalIoBroker<'_, B>,
     need_redraw: &mut bool,
     terminal_display_redraw_plan: &mut Option<RedrawPlan>,
 ) {
@@ -6499,10 +6509,10 @@ fn apply_workspace_redraw_transaction(
             if let Some(last_successful) = last_successful_workspace_model.as_ref() {
                 let failure_message = error.to_string();
                 let rollback_model = WorkspaceScreenModel {
-                    message_line: saya::presentation_effect::merge_presentation_message_line(
+                    message_line: saya::presentation::overlay::effect::merge_presentation_message_line(
                         &last_successful.message_line,
-                        [saya::core_notification_prompt::MessageLineCandidate::legacy(
-                            saya::core_notification_prompt::MessageLineSource::RenderProjectionError,
+                        [saya::core::notification_prompt::MessageLineCandidate::legacy(
+                            saya::core::notification_prompt::MessageLineSource::RenderProjectionError,
                             failure_message.as_str(),
                         )],
                     ),
@@ -6520,7 +6530,7 @@ fn apply_workspace_redraw_transaction(
 }
 
 fn build_workspace_render_output(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     session_state: &mut EditorSessionState,
     viewport_store: &mut WindowViewportStore,
     viewport_sync_mode: ViewportSyncMode,
@@ -6874,7 +6884,7 @@ fn apply_workspace_floating_window_models(
 
 fn refresh_buffer_backed_float_lines(
     manager: &mut FloatingWindowManager,
-    core_bridge: &saya::core_bridge::CoreBridge,
+    core_bridge: &saya::core::bridge::CoreBridge,
     snapshot: &CoreLightSnapshot,
 ) {
     for request in manager.core_window_float_view_requests() {
@@ -6943,7 +6953,7 @@ enum FloatingWindowKeyHandling {
 fn handle_completion_float_key(
     completion_manager: &mut CompletionFloatManager,
     floating_manager: &mut FloatingWindowManager,
-    core_bridge: &mut saya::core_bridge::CoreBridge,
+    core_bridge: &mut saya::core::bridge::CoreBridge,
     key: &KeyInput,
     restore_window_id: i32,
 ) -> Option<FloatingWindowKeyHandling> {
@@ -6986,7 +6996,7 @@ fn handle_completion_float_key(
 
 fn handle_core_window_float_key(
     manager: &mut FloatingWindowManager,
-    core_bridge: &mut saya::core_bridge::CoreBridge,
+    core_bridge: &mut saya::core::bridge::CoreBridge,
     key: &KeyInput,
 ) -> Option<FloatingWindowKeyHandling> {
     let window_id = manager.focused_core_window_id()?;
@@ -7152,7 +7162,7 @@ fn sync_workspace_message_pager(
 }
 
 fn sync_core_screen_size_if_changed(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     last_synced_terminal_size: &mut Option<TerminalSize>,
     terminal_size: TerminalSize,
 ) -> bool {
@@ -7227,7 +7237,7 @@ fn snapshot_from_light_snapshot(light: &CoreLightSnapshot, text: String) -> Core
 }
 
 fn collect_workspace_line_ranges(
-    core_bridge: &saya::core_bridge::CoreBridge,
+    core_bridge: &saya::core::bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
     viewport_store: &WindowViewportStore,
 ) -> BTreeMap<i32, CoreBufferLineRange> {
@@ -7268,7 +7278,7 @@ fn collect_workspace_line_ranges(
 }
 
 fn collect_workspace_buffer_line_counts(
-    core_bridge: &saya::core_bridge::CoreBridge,
+    core_bridge: &saya::core::bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
 ) -> BTreeMap<i32, usize> {
     let mut line_counts = BTreeMap::new();
@@ -7314,7 +7324,7 @@ fn resolve_runtime_current_window_id(snapshot: &vim_core_rs::CoreSnapshot) -> Op
 fn trace_workspace_render_pipeline(
     phase: &str,
     snapshot_text: &str,
-    workspace_model: &saya::screen_model::WorkspaceScreenModel,
+    workspace_model: &saya::presentation::screen_model::WorkspaceScreenModel,
 ) {
     if std::env::var_os("SAYA_TRACE_RENDER").is_none() {
         return;
@@ -7346,7 +7356,7 @@ fn trace_workspace_render_pipeline(
 }
 
 fn collect_workspace_search_states(
-    core_bridge: &mut saya::core_bridge::CoreBridge,
+    core_bridge: &mut saya::core::bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
     viewport_store: &WindowViewportStore,
     search_refresh_store: &mut WindowSearchRefreshStore,
@@ -7405,7 +7415,7 @@ fn collect_workspace_search_states(
                     .matches
                     .iter()
                     .find(|search_match| {
-                        search_match.kind == saya::search_query::SearchMatchKind::Current
+                        search_match.kind == saya::features::search::query::SearchMatchKind::Current
                     })
                     .map(|search_match| {
                         (
@@ -7436,7 +7446,7 @@ fn collect_workspace_search_states(
 }
 
 fn collect_workspace_syntax_lines(
-    core_bridge: &saya::core_bridge::CoreBridge,
+    core_bridge: &saya::core::bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
     viewport_store: &WindowViewportStore,
     line_ranges: &BTreeMap<i32, CoreBufferLineRange>,
@@ -7512,7 +7522,7 @@ fn collect_workspace_syntax_lines(
 
 #[cfg(feature = "tree-sitter-syntax")]
 fn collect_workspace_tree_sitter_syntax(
-    core_bridge: &mut saya::core_bridge::CoreBridge,
+    core_bridge: &mut saya::core::bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
     viewport_store: &WindowViewportStore,
     line_ranges: &BTreeMap<i32, CoreBufferLineRange>,
@@ -7681,7 +7691,7 @@ fn tree_sitter_coverage_contains_range(
 
 fn collect_workspace_markdown_document_maps(
     markdown_metadata_cache: &mut MarkdownMetadataCache,
-    session_state: &saya::editor_session::EditorSessionState,
+    session_state: &saya::app::session::EditorSessionState,
     snapshot: &vim_core_rs::CoreSnapshot,
     source_text: &str,
 ) -> BTreeMap<i32, Arc<MarkdownDocumentMap>> {
@@ -8105,8 +8115,8 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use saya::optional_graphics::RecordingOverlayWriter;
-    use saya::screen_model::ScreenCursorStyle;
+    use saya::presentation::overlay::optional_graphics::RecordingOverlayWriter;
+    use saya::presentation::screen_model::ScreenCursorStyle;
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -8137,10 +8147,10 @@ mod tests {
 
     fn main_test_workspace() -> WorkspaceScreenModel {
         WorkspaceScreenModel {
-            panes: vec![saya::screen_model::ScreenModel {
+            panes: vec![saya::presentation::screen_model::ScreenModel {
                 window_id: 1,
                 buffer_id: 1,
-                rect: saya::screen_model::PaneRect {
+                rect: saya::presentation::screen_model::PaneRect {
                     x: 0,
                     y: 0,
                     width: 20,
@@ -8158,15 +8168,15 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
-                resolved_theme: saya::theme::ResolvedTheme::default(),
+                resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,
             }],
             floats: vec![],
             active_window_id: 1,
-            message_line: saya::core_notification_prompt::resolve_workspace_message_line(Vec::<
-                saya::core_notification_prompt::MessageLineCandidate,
+            message_line: saya::core::notification_prompt::resolve_workspace_message_line(Vec::<
+                saya::core::notification_prompt::MessageLineCandidate,
             >::new(
             )),
             message_area_height: 5,
@@ -8181,17 +8191,17 @@ mod tests {
 
     #[test]
     fn workspace_render_ignores_saya_float_demo_env() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os("SAYA_FLOAT_DEMO");
         unsafe {
             std::env::set_var("SAYA_FLOAT_DEMO", "1");
         }
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -8259,7 +8269,7 @@ mod tests {
         assert_eq!(handling, None);
         assert_eq!(
             manager.focus(),
-            Some(saya::floating_window::WorkspaceFocus::Float { float_id: id }),
+            Some(saya::presentation::floating_window::WorkspaceFocus::Float { float_id: id }),
             "ignored keys must leave float focus unchanged but pass through to later handlers"
         );
     }
@@ -8285,7 +8295,7 @@ mod tests {
         assert_eq!(handling, Some(FloatingWindowKeyHandling::Closed { id }));
         assert_eq!(
             manager.focus(),
-            Some(saya::floating_window::WorkspaceFocus::Pane { window_id: 9 }),
+            Some(saya::presentation::floating_window::WorkspaceFocus::Pane { window_id: 9 }),
             "closed float should restore the active pane focus through the main routing helper"
         );
     }
@@ -8312,7 +8322,7 @@ mod tests {
         assert_eq!(outcome, FloatingMouseOutcome::Focused { id });
         assert_eq!(
             manager.focus(),
-            Some(saya::floating_window::WorkspaceFocus::Float { float_id: id })
+            Some(saya::presentation::floating_window::WorkspaceFocus::Float { float_id: id })
         );
     }
 
@@ -8402,8 +8412,8 @@ mod tests {
     #[test]
     fn mouse_click_sgr_coordinates_saturate_at_u16_max() {
         let workspace = WorkspaceScreenModel {
-            panes: vec![saya::screen_model::ScreenModel {
-                rect: saya::screen_model::PaneRect {
+            panes: vec![saya::presentation::screen_model::ScreenModel {
+                rect: saya::presentation::screen_model::PaneRect {
                     x: u16::MAX,
                     y: u16::MAX,
                     width: 1,
@@ -8421,22 +8431,22 @@ mod tests {
 
     #[test]
     fn markdown_metadata_collection_is_skipped_when_markdown_render_is_disabled() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("markdown-render-off").with_extension("md");
         std::fs::write(&target_path, "# Title\n").expect("test markdown file");
-        let outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
         session_state
             .apply_presentation_option(
-                saya::option_registry::SayaOptionName::MarkdownRender,
-                saya::option_registry::SayaOptionValue::Boolean(false),
+                saya::runtime::options::SayaOptionName::MarkdownRender,
+                saya::runtime::options::SayaOptionValue::Boolean(false),
             )
             .expect("markdownrender option should apply");
         let mut markdown_metadata_cache = MarkdownMetadataCache::default();
@@ -8458,17 +8468,17 @@ mod tests {
     #[cfg(feature = "tree-sitter-syntax")]
     #[test]
     fn workspace_render_collects_tree_sitter_highlight_only_when_vim_syntax_is_on() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("syntax-toggle-main").with_extension("rs");
         let config_path = unique_path("syntax-toggle-empty-init").with_extension("ts");
         std::fs::write(&target_path, "fn main() {}\n").expect("test source file");
         std::fs::write(&config_path, "").expect("empty test config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         outcome.core_bridge.set_screen_size(24, 80);
@@ -8669,20 +8679,20 @@ mod tests {
 
     #[test]
     fn write_host_action_updates_transient_message_on_failure() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("write-failure");
         std::fs::write(&target_path, "initial\n").expect("test file");
 
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let bad_path = PathBuf::from("/nonexistent/dir/file.txt");
-        let mut session_state = saya::editor_session::EditorSessionState::new(Some(bad_path));
+        let mut session_state = saya::app::session::EditorSessionState::new(Some(bad_path));
 
         outcome.core_bridge.dispatch_key("i").unwrap();
         outcome.core_bridge.dispatch_key("X").unwrap();
@@ -8736,7 +8746,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_write_prepares_operation_preview_without_filesystem_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-plan");
@@ -8747,7 +8757,7 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
 
         let save_outcome = save_snapshot_result("renamed.md\nbeta.md\n", &mut session_state);
 
@@ -8773,7 +8783,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_write_reports_validation_error_without_filesystem_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-validation");
@@ -8781,7 +8791,7 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("test directory");
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
 
         let save_outcome =
             save_snapshot_result("alpha.md\n\n../escape.md\nalpha.md\n", &mut session_state);
@@ -8805,7 +8815,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_plain_write_previews_delete_without_filesystem_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-preview-delete");
@@ -8815,7 +8825,7 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
 
         let save_outcome = save_snapshot_result("beta.md\n", &mut session_state);
         let preview = session_state
@@ -8844,7 +8854,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_write_confirmation_ok_applies_delete_and_refreshes_metadata() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-dialog-ok");
@@ -8853,10 +8863,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("test directory");
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -8913,7 +8923,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_write_confirmation_cancel_keeps_filesystem_unchanged() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-dialog-cancel");
@@ -8922,10 +8932,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("test directory");
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -8971,7 +8981,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_force_write_applies_latest_preview_and_refreshes_metadata() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-apply");
@@ -8984,7 +8994,7 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
 
         let edited_text = "renamed.md\nnotes.md\nsrc/\n";
         let preview_outcome = save_snapshot_result(edited_text, &mut session_state);
@@ -9027,7 +9037,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_force_write_applies_confirmed_delete_and_refreshes_metadata() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-apply-delete");
@@ -9037,7 +9047,7 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
 
         let preview_outcome = save_snapshot_result("beta.md\n", &mut session_state);
         let preview = session_state
@@ -9072,7 +9082,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_write_host_action_previews_confirms_deletes_and_refreshes_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-host-action-delete");
@@ -9082,10 +9092,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("test directory");
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -9199,7 +9209,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_force_write_rejects_stale_preview_without_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-stale-preview");
@@ -9209,7 +9219,7 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
 
         let preview_outcome = save_snapshot_result("beta.md\n", &mut session_state);
         assert!(!preview_outcome.wrote);
@@ -9232,7 +9242,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_cancel_command_clears_preview_without_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-cancel-preview");
@@ -9241,10 +9251,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("test directory");
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -9299,7 +9309,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_transaction_applies_multiple_renames_without_collision() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-transaction-rename-collision");
@@ -9310,8 +9320,8 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
-        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::app::session::DirectoryBufferOperationPlan {
             root_path: root_path.clone(),
             operations: vec![
                 DirectoryBufferPlannedOperation::Rename {
@@ -9319,14 +9329,14 @@ mod tests {
                     to: beta_path.clone(),
                     from_name: "alpha.md".to_string(),
                     to_name: "beta.md".to_string(),
-                    kind: saya::editor_session::DirectoryBufferEntryKind::File,
+                    kind: saya::app::session::DirectoryBufferEntryKind::File,
                 },
                 DirectoryBufferPlannedOperation::Rename {
                     from: beta_path.clone(),
                     to: gamma_path.clone(),
                     from_name: "beta.md".to_string(),
                     to_name: "gamma.md".to_string(),
-                    kind: saya::editor_session::DirectoryBufferEntryKind::File,
+                    kind: saya::app::session::DirectoryBufferEntryKind::File,
                 },
             ],
         };
@@ -9358,7 +9368,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_transaction_reports_partial_failure_and_refreshes_metadata() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-transaction-partial-failure");
@@ -9367,8 +9377,8 @@ mod tests {
         std::fs::create_dir_all(&non_empty_dir).expect("test directory");
         std::fs::write(non_empty_dir.join("child.md"), "child\n").expect("child file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
-        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::app::session::DirectoryBufferOperationPlan {
             root_path: root_path.clone(),
             operations: vec![
                 DirectoryBufferPlannedOperation::CreateFile {
@@ -9378,7 +9388,7 @@ mod tests {
                 DirectoryBufferPlannedOperation::Delete {
                     path: non_empty_dir.clone(),
                     name: "non-empty".to_string(),
-                    kind: saya::editor_session::DirectoryBufferEntryKind::Directory,
+                    kind: saya::app::session::DirectoryBufferEntryKind::Directory,
                 },
             ],
         };
@@ -9423,7 +9433,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_confirm_failure_reports_recovery_hint_and_keeps_real_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-write-recovery-hint");
@@ -9431,7 +9441,7 @@ mod tests {
         std::fs::create_dir_all(&non_empty_dir).expect("test directory");
         std::fs::write(non_empty_dir.join("child.md"), "child\n").expect("child file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
 
         let preview_outcome = save_snapshot_result("", &mut session_state);
         assert!(!preview_outcome.wrote);
@@ -9467,7 +9477,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_transaction_rejects_existing_create_target_before_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-transaction-create-conflict");
@@ -9476,8 +9486,8 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("test directory");
         std::fs::write(&existing_path, "existing\n").expect("existing file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
-        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::app::session::DirectoryBufferOperationPlan {
             root_path: root_path.clone(),
             operations: vec![
                 DirectoryBufferPlannedOperation::CreateFile {
@@ -9515,7 +9525,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_transaction_rejects_missing_rename_source_before_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-transaction-missing-source");
@@ -9524,8 +9534,8 @@ mod tests {
         let later_path = root_path.join("later.md");
         std::fs::create_dir_all(&root_path).expect("test directory");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
-        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::app::session::DirectoryBufferOperationPlan {
             root_path: root_path.clone(),
             operations: vec![
                 DirectoryBufferPlannedOperation::Rename {
@@ -9533,7 +9543,7 @@ mod tests {
                     to: renamed_path.clone(),
                     from_name: "missing.md".to_string(),
                     to_name: "renamed.md".to_string(),
-                    kind: saya::editor_session::DirectoryBufferEntryKind::File,
+                    kind: saya::app::session::DirectoryBufferEntryKind::File,
                 },
                 DirectoryBufferPlannedOperation::CreateFile {
                     path: later_path.clone(),
@@ -9563,7 +9573,7 @@ mod tests {
 
     #[test]
     fn directory_buffer_transaction_rejects_special_file_entries_before_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-transaction-special-file");
@@ -9572,14 +9582,14 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("test directory");
         std::fs::write(&special_path, "special\n").expect("special placeholder");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
-        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::app::session::DirectoryBufferOperationPlan {
             root_path: root_path.clone(),
             operations: vec![
                 DirectoryBufferPlannedOperation::Delete {
                     path: special_path.clone(),
                     name: "special".to_string(),
-                    kind: saya::editor_session::DirectoryBufferEntryKind::Other,
+                    kind: saya::app::session::DirectoryBufferEntryKind::Other,
                 },
                 DirectoryBufferPlannedOperation::CreateFile {
                     path: later_path.clone(),
@@ -9612,7 +9622,7 @@ mod tests {
     fn directory_buffer_transaction_rejects_unwritable_parent_before_mutation() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("directory-transaction-permission-conflict");
@@ -9624,8 +9634,8 @@ mod tests {
         std::fs::set_permissions(&root_path, std::fs::Permissions::from_mode(0o555))
             .expect("make root read-only");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(root_path.clone()));
-        let plan = saya::editor_session::DirectoryBufferOperationPlan {
+            saya::app::session::EditorSessionState::new(Some(root_path.clone()));
+        let plan = saya::app::session::DirectoryBufferOperationPlan {
             root_path: root_path.clone(),
             operations: vec![DirectoryBufferPlannedOperation::CreateFile {
                 path: create_path.clone(),
@@ -9727,13 +9737,13 @@ mod tests {
 
     #[test]
     fn runtime_lsp_hover_float_host_command_opens_replacing_cursor_relative_float() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -9770,7 +9780,7 @@ mod tests {
             24,
             &[(
                 active_window_id,
-                saya::screen_model::PaneRect {
+                saya::presentation::screen_model::PaneRect {
                     x: 0,
                     y: 0,
                     width: 80,
@@ -9786,16 +9796,16 @@ mod tests {
 
     #[test]
     fn runtime_lsp_feature_host_commands_render_lists_and_navigate_definition() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("lsp-definition-target").with_extension("rs");
         std::fs::write(&target_path, "fn target() {}\nfn caller() {}\n")
             .expect("definition target should be written");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -9868,7 +9878,7 @@ mod tests {
             30,
             &[(
                 active_window_id,
-                saya::screen_model::PaneRect {
+                saya::presentation::screen_model::PaneRect {
                     x: 0,
                     y: 0,
                     width: 100,
@@ -9909,13 +9919,13 @@ mod tests {
 
     #[test]
     fn runtime_lsp_diagnostics_publish_and_cycle_open_diagnostic_floats() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -9965,7 +9975,7 @@ mod tests {
             24,
             &[(
                 active_window_id,
-                saya::screen_model::PaneRect {
+                saya::presentation::screen_model::PaneRect {
                     x: 0,
                     y: 0,
                     width: 80,
@@ -9992,13 +10002,13 @@ mod tests {
 
     #[test]
     fn runtime_completion_float_host_command_opens_focusable_menu_and_routes_selection() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -10045,13 +10055,13 @@ mod tests {
 
     #[test]
     fn runtime_completion_float_accept_inserts_selected_candidate() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         outcome
@@ -10093,15 +10103,15 @@ mod tests {
 
     #[test]
     fn runtime_buffer_float_host_command_opens_core_window_float_and_renders_buffer_lines() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("buffer-float-render").with_extension("txt");
         std::fs::write(&target_path, "alpha\nbeta\ngamma\n").expect("target file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -10137,7 +10147,7 @@ mod tests {
             24,
             &[(
                 active_window_id,
-                saya::screen_model::PaneRect {
+                saya::presentation::screen_model::PaneRect {
                     x: 0,
                     y: 0,
                     width: 80,
@@ -10150,7 +10160,7 @@ mod tests {
         assert_eq!(floats.len(), 1);
         assert_eq!(
             floats[0].content,
-            saya::floating_window::FloatingContentRef::CoreWindow {
+            saya::presentation::floating_window::FloatingContentRef::CoreWindow {
                 window_id: active_window_id
             }
         );
@@ -10159,13 +10169,13 @@ mod tests {
 
     #[test]
     fn runtime_window_open_float_api_opens_static_lines_float_through_application_host() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut floating_window_manager = FloatingWindowManager::default();
@@ -10208,15 +10218,15 @@ mod tests {
 
     #[test]
     fn runtime_buffer_float_uses_existing_backing_window_without_switching_active_window() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let first_path = unique_path("buffer-float-backed-first").with_extension("txt");
         std::fs::write(&first_path, "first\n").expect("first target file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(first_path.clone()),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(first_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut floating_window_manager = FloatingWindowManager::default();
@@ -10299,13 +10309,13 @@ mod tests {
 
     #[test]
     fn runtime_buffer_float_rejects_unbacked_buffer_without_partial_float() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut floating_window_manager = FloatingWindowManager::default();
@@ -10363,13 +10373,13 @@ mod tests {
 
     #[test]
     fn runtime_window_open_float_api_opens_pty_terminal_float_and_renders_output() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut floating_window_manager = FloatingWindowManager::default();
@@ -10428,13 +10438,13 @@ mod tests {
 
     #[test]
     fn runtime_terminal_float_host_command_opens_pty_float_and_renders_output() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -10477,7 +10487,7 @@ mod tests {
 
     #[test]
     fn focused_terminal_float_routes_input_through_main_key_handler() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut floating_window_manager = FloatingWindowManager::default();
@@ -10550,15 +10560,15 @@ mod tests {
 
     #[test]
     fn focused_buffer_float_routes_edit_keys_through_core_and_preserves_dirty_state() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("buffer-float-edit").with_extension("txt");
         std::fs::write(&target_path, "hello\n").expect("target file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut manager = FloatingWindowManager::default();
@@ -10613,14 +10623,14 @@ mod tests {
         );
         assert_eq!(
             manager.focus(),
-            Some(saya::floating_window::WorkspaceFocus::Float { float_id: id }),
+            Some(saya::presentation::floating_window::WorkspaceFocus::Float { float_id: id }),
             "editing Escape should leave insert mode through core, not close the buffer float"
         );
     }
 
     #[test]
     fn focused_buffer_float_routes_normal_movement_and_page_scroll_through_core_window() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("buffer-float-scroll").with_extension("txt");
@@ -10630,10 +10640,10 @@ mod tests {
             .join("\n")
             + "\n";
         std::fs::write(&target_path, text).expect("target file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         outcome.core_bridge.set_screen_size(6, 80);
@@ -10693,7 +10703,7 @@ mod tests {
 
     #[test]
     fn startup_keymap_action_for_input_resolves_registered_command_before_core_dispatch() {
-        let keymaps = vec![saya::bootstrap::StartupKeymapSnapshot {
+        let keymaps = vec![saya::app::bootstrap::StartupKeymapSnapshot {
             mode: StartupKeymapMode::Normal,
             lhs: "-".to_string(),
             action: StartupKeymapAction::RegisteredCommand("dired.open".to_string()),
@@ -10709,15 +10719,15 @@ mod tests {
 
     #[test]
     fn startup_keymap_action_for_input_resolves_pending_two_key_sequence() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let keymaps = vec![saya::bootstrap::StartupKeymapSnapshot {
+        let keymaps = vec![saya::app::bootstrap::StartupKeymapSnapshot {
             mode: StartupKeymapMode::Normal,
             lhs: "gr".to_string(),
             action: StartupKeymapAction::RegisteredCommand("dired.refresh".to_string()),
         }];
-        let mut bridge = saya::core_bridge::CoreBridge::new("README.md\nsrc/\n")
+        let mut bridge = saya::core::bridge::CoreBridge::new("README.md\nsrc/\n")
             .expect("core bridge should initialize");
 
         bridge.dispatch_key("g").expect("g should become pending");
@@ -10736,15 +10746,15 @@ mod tests {
 
     #[test]
     fn runtime_current_buffer_snapshot_includes_cursor_line_for_dired_navigation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("runtime-buffer-snapshot-current-line");
         std::fs::write(&target_path, "README.md\nsrc/\n").expect("test file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -10761,7 +10771,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_current_filer_entry_uses_directory_metadata_not_rendered_text() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("runtime-current-filer-entry-root");
@@ -10769,10 +10779,10 @@ mod tests {
         let readme_path = root_path.join("README.md");
         std::fs::create_dir_all(&nested_path).expect("nested directory");
         std::fs::write(&readme_path, "hello\n").expect("readme file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -10807,7 +10817,7 @@ mod tests {
         assert_eq!(entry.path, nested_path.to_string_lossy());
         assert_eq!(
             entry.kind,
-            saya::saya_live_runtime::RuntimeFilerEntryKind::Directory
+            saya::runtime::live::RuntimeFilerEntryKind::Directory
         );
 
         std::fs::remove_dir_all(root_path).expect("cleanup root directory");
@@ -10815,15 +10825,15 @@ mod tests {
 
     #[test]
     fn runtime_current_filer_entry_is_none_for_regular_file_buffer() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("runtime-current-filer-entry-file");
         std::fs::write(&target_path, "hello\n").expect("test file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -10839,16 +10849,16 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_host_command_executor_routes_quit_family_through_coordinator() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("runtime-host-command");
         std::fs::write(&target_path, "initial\n").expect("test file");
 
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -10871,7 +10881,7 @@ mod tests {
         );
         assert!(matches!(
             effect.follow_up_events.as_slice(),
-            [saya::saya_live_runtime::RuntimeEventPayload::BufferWritePost(_)]
+            [saya::runtime::live::RuntimeEventPayload::BufferWritePost(_)]
         ));
         assert_eq!(
             std::fs::read_to_string(&target_path).expect("saved file should exist"),
@@ -10883,7 +10893,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_host_command_executor_drains_vfs_until_directory_listing_loads() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("runtime-host-command-directory");
@@ -10892,10 +10902,10 @@ mod tests {
         std::fs::create_dir_all(&nested_path).expect("test directory");
         std::fs::write(&readme_path, "hello\n").expect("test file");
 
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11027,8 +11037,8 @@ mod tests {
     }
 
     async fn execute_runtime_command_for_test(
-        outcome: &mut saya::bootstrap::BootstrapOutcome,
-        session_state: &mut saya::editor_session::EditorSessionState,
+        outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+        session_state: &mut saya::app::session::EditorSessionState,
         runtime_session: &mut RuntimeSessionOwner,
         command_name: &str,
     ) {
@@ -11061,8 +11071,8 @@ mod tests {
     }
 
     async fn execute_runtime_command_outcome_for_test(
-        outcome: &mut saya::bootstrap::BootstrapOutcome,
-        session_state: &mut saya::editor_session::EditorSessionState,
+        outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+        session_state: &mut saya::app::session::EditorSessionState,
         runtime_session: &mut RuntimeSessionOwner,
         command_name: &str,
     ) -> (Option<String>, bool) {
@@ -11097,7 +11107,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_enter_opens_directory_entry_from_current_line() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-enter-directory-root");
@@ -11109,10 +11119,10 @@ mod tests {
         std::fs::write(&nested_file, "mod\n").expect("nested file");
         std::fs::write(&readme_path, "hello\n").expect("readme file");
         std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11143,7 +11153,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_enter_opens_file_entry_from_current_line() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-enter-file-root");
@@ -11152,10 +11162,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&readme_path, "hello\n").expect("readme file");
         std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11185,7 +11195,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_up_opens_parent_directory() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-up-root");
@@ -11193,10 +11203,10 @@ mod tests {
         let config_path = unique_path("dired-up-init").with_extension("ts");
         std::fs::create_dir_all(&child_path).expect("child directory");
         std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11226,7 +11236,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_refresh_reloads_current_directory_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-refresh-root");
@@ -11236,10 +11246,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&readme_path, "hello\n").expect("readme file");
         std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11270,7 +11280,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_filter_projects_listing_and_current_entry_metadata() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-filter-root");
@@ -11283,10 +11293,10 @@ mod tests {
         std::fs::write(&notes_path, "notes\n").expect("notes file");
         std::fs::write(&hidden_path, "hidden\n").expect("hidden file");
         std::fs::write(&config_path, dired_phase12_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11321,7 +11331,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_filter_sort_and_hidden_state_survive_operation_refresh() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-filter-refresh-root");
@@ -11335,10 +11345,10 @@ mod tests {
         std::fs::write(&notes_path, "notes\n").expect("notes file");
         std::fs::write(&hidden_path, "hidden\n").expect("hidden file");
         std::fs::write(&config_path, dired_phase12_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11383,7 +11393,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_create_file_refreshes_directory_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-create-file-root");
@@ -11391,10 +11401,10 @@ mod tests {
         let config_path = unique_path("dired-create-file-init").with_extension("ts");
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11430,7 +11440,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_create_directory_refreshes_directory_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-create-directory-root");
@@ -11438,10 +11448,10 @@ mod tests {
         let config_path = unique_path("dired-create-directory-init").with_extension("ts");
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11477,7 +11487,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_rename_refreshes_directory_listing_and_preserves_cursor_target() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-rename-root");
@@ -11487,10 +11497,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&source_path, "hello\n").expect("source file");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11523,7 +11533,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_copy_and_move_are_host_mediated_and_refresh_directory_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-copy-move-root");
@@ -11535,10 +11545,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::create_dir_all(&directory_source_path).expect("source directory");
         std::fs::write(&source_path, "hello\n").expect("source file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11608,7 +11618,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_recursive_delete_and_trash_policy_fail_without_mutation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-recursive-delete-policy");
@@ -11621,10 +11631,10 @@ mod tests {
         std::fs::create_dir_all(&copy_dir).expect("copy directory");
         std::fs::write(&child_path, "child\n").expect("child file");
         std::fs::write(&trash_target, "trash\n").expect("trash target");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11696,7 +11706,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_delete_confirmed_single_file_refreshes_directory_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-delete-file-root");
@@ -11707,10 +11717,10 @@ mod tests {
         std::fs::write(&delete_path, "delete\n").expect("delete file");
         std::fs::write(&keep_path, "keep\n").expect("keep file");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11743,7 +11753,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_delete_confirmed_single_empty_directory_refreshes_directory_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-delete-directory-root");
@@ -11751,10 +11761,10 @@ mod tests {
         let config_path = unique_path("dired-delete-directory-init").with_extension("ts");
         std::fs::create_dir_all(&delete_path).expect("delete directory");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11790,7 +11800,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_delete_requires_explicit_confirmation() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-delete-confirm-root");
@@ -11799,10 +11809,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&delete_path, "delete\n").expect("delete file");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11837,7 +11847,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_mark_unmark_and_clear_are_available_from_typescript_commands() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-mark-runtime-root");
@@ -11848,10 +11858,10 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         std::fs::write(&config_path, dired_phase4_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -11914,7 +11924,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_bulk_delete_requires_preview_id_and_confirmation_before_deleting_marks() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-bulk-delete-root");
@@ -11925,10 +11935,10 @@ mod tests {
         std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
         std::fs::write(&beta_path, "beta\n").expect("beta file");
         std::fs::write(&keep_path, "keep\n").expect("keep file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -12031,7 +12041,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_create_file_collision_surfaces_structured_error() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-create-collision-root");
@@ -12040,10 +12050,10 @@ mod tests {
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&existing_path, "existing\n").expect("existing file");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -12081,17 +12091,17 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn dired_rename_missing_path_surfaces_structured_error() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("dired-rename-missing-root");
         let config_path = unique_path("dired-rename-missing-init").with_extension("ts");
         std::fs::create_dir_all(&root_path).expect("root directory");
         std::fs::write(&config_path, dired_phase3_config_source()).expect("config file");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -12126,7 +12136,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn startup_registered_dired_keymap_opens_directory_listing() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root_path = unique_path("startup-dired-root");
@@ -12153,10 +12163,10 @@ mod tests {
         )
         .expect("config file");
 
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -12218,7 +12228,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn startup_registered_dired_keymap_opens_current_directory_for_relative_file() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config_path = unique_path("startup-dired-relative-init").with_extension("ts");
@@ -12238,10 +12248,10 @@ mod tests {
         )
         .expect("config file");
 
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(PathBuf::from("AGENTS.md")),
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(PathBuf::from("AGENTS.md")),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -12292,7 +12302,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn repository_dired_keymap_moves_above_current_directory_from_relative_file() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config_path = unique_path("repository-dired-up-relative-init").with_extension("ts");
@@ -12314,10 +12324,10 @@ mod tests {
         )
         .expect("config file");
 
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::File(target_path.clone()),
-            config_source: saya::cli::ConfigSource::File(config_path.clone()),
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -12402,7 +12412,7 @@ mod tests {
         let alternate_path = unique_path("write-override-alternate");
         std::fs::write(&original_path, "original\n").expect("original file");
         let mut session_state =
-            saya::editor_session::EditorSessionState::new(Some(original_path.clone()));
+            saya::app::session::EditorSessionState::new(Some(original_path.clone()));
         session_state.update_dirty(true);
         let alternate_path_string = alternate_path.display().to_string();
 
@@ -12440,9 +12450,9 @@ mod tests {
 
     #[test]
     fn save_family_host_actions_are_prioritized_by_revision_and_kind() {
-        let trace = |sequence| saya::core_outcome::OutcomeTrace {
+        let trace = |sequence| saya::core::outcome::OutcomeTrace {
             sequence,
-            origin: saya::core_outcome::OutcomeOrigin::TransactionHostAction,
+            origin: saya::core::outcome::OutcomeOrigin::TransactionHostAction,
             raw_kind: "test",
         };
         let directives = vec![
@@ -12500,10 +12510,10 @@ mod tests {
 
     #[test]
     fn runtime_current_window_id_keeps_explicit_failure_when_snapshot_has_no_active_window() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let bridge = saya::core_bridge::CoreBridge::new("alpha\nbeta\n").expect("core bridge");
+        let bridge = saya::core::bridge::CoreBridge::new("alpha\nbeta\n").expect("core bridge");
         let mut snapshot = bridge.snapshot();
         snapshot.windows[0].id = 42;
         snapshot.windows[0].is_active = false;
@@ -12518,10 +12528,10 @@ mod tests {
     #[test]
     fn workspace_redraw_transaction_rolls_back_to_last_successful_model_with_failure_message() {
         let mut last_successful_workspace_model = Some(WorkspaceScreenModel {
-            panes: vec![saya::screen_model::ScreenModel {
+            panes: vec![saya::presentation::screen_model::ScreenModel {
                 window_id: 1,
                 buffer_id: 1,
-                rect: saya::screen_model::PaneRect {
+                rect: saya::presentation::screen_model::PaneRect {
                     x: 0,
                     y: 0,
                     width: 20,
@@ -12539,15 +12549,15 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
-                resolved_theme: saya::theme::ResolvedTheme::default(),
+                resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
                 is_active: true,
             }],
             floats: vec![],
             active_window_id: 1,
-            message_line: saya::core_notification_prompt::resolve_workspace_message_line(Vec::<
-                saya::core_notification_prompt::MessageLineCandidate,
+            message_line: saya::core::notification_prompt::resolve_workspace_message_line(Vec::<
+                saya::core::notification_prompt::MessageLineCandidate,
             >::new(
             )),
             message_area_height: 5,
@@ -12611,7 +12621,7 @@ mod tests {
         assert_eq!(rendered.panes, last_workspace.panes);
         assert_eq!(
             rendered.command_line,
-            Some(saya::screen_model::CommandLineModel {
+            Some(saya::presentation::screen_model::CommandLineModel {
                 text: ":write".to_string(),
                 cursor_col: 6,
             })
@@ -12628,7 +12638,7 @@ mod tests {
 
         assert_eq!(
             rendered.command_line,
-            Some(saya::screen_model::CommandLineModel {
+            Some(saya::presentation::screen_model::CommandLineModel {
                 text: ":write".to_string(),
                 cursor_col: 2,
             })
@@ -12879,11 +12889,12 @@ mod tests {
 
     #[test]
     fn core_screen_size_sync_does_not_enqueue_redraw_when_size_is_unchanged() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest::default())
-            .expect("launch should succeed");
+        let mut outcome =
+            saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest::default())
+                .expect("launch should succeed");
         let mut last_synced_terminal_size = None;
         let terminal_size = TerminalSize {
             columns: 80,
@@ -12914,11 +12925,12 @@ mod tests {
 
     #[test]
     fn core_screen_size_sync_updates_when_size_changes() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest::default())
-            .expect("launch should succeed");
+        let mut outcome =
+            saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest::default())
+                .expect("launch should succeed");
         let mut last_synced_terminal_size = Some(TerminalSize {
             columns: 80,
             rows: 24,
@@ -12949,8 +12961,8 @@ mod tests {
     fn rendered_structural_refresh_no_longer_blocks_command_line_overlay() {
         let mut accumulator = MainOutcomeAccumulator {
             last_structural_refresh: Some(StructuralRefresh::from_folded_effects(
-                &saya::core_outcome::StructuralEffectSet {
-                    redraw: Some(saya::core_outcome::RedrawEffect {
+                &saya::core::outcome::StructuralEffectSet {
+                    redraw: Some(saya::core::outcome::RedrawEffect {
                         full: true,
                         clear_before_draw: false,
                         required_by_structure_change: true,
@@ -12988,14 +13000,14 @@ mod tests {
         assert!(redraw_plan.clear_before_draw);
         assert_eq!(
             redraw_plan.source,
-            saya::structural_refresh::RedrawPlanSource::TerminalDisplayInvalidation
+            saya::presentation::structural_refresh::RedrawPlanSource::TerminalDisplayInvalidation
         );
     }
 
     #[test]
     fn terminal_display_invalidation_overrides_idle_structural_refresh_for_resume() {
         let idle_refresh =
-            StructuralRefresh::from_folded_effects(&saya::core_outcome::StructuralEffectSet {
+            StructuralRefresh::from_folded_effects(&saya::core::outcome::StructuralEffectSet {
                 redraw: None,
                 invalidate_buffers: vec![],
                 invalidate_windows: vec![],
@@ -13012,16 +13024,16 @@ mod tests {
         assert!(redraw_plan.clear_before_draw);
         assert_eq!(
             redraw_plan.source,
-            saya::structural_refresh::RedrawPlanSource::TerminalDisplayInvalidation
+            saya::presentation::structural_refresh::RedrawPlanSource::TerminalDisplayInvalidation
         );
     }
 
     #[test]
     fn consume_core_outcomes_marks_need_redraw_when_bridge_has_pending_redraw() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut bridge = saya::core::bridge::CoreBridge::new("hello\n").expect("core bridge");
         let mut accumulator = MainOutcomeAccumulator::default();
         let mut need_redraw = false;
 
@@ -13042,17 +13054,17 @@ mod tests {
 
     #[test]
     fn consume_core_outcomes_replaces_stale_structural_refresh_on_empty_batch() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut bridge = saya::core::bridge::CoreBridge::new("hello\n").expect("core bridge");
         assert!(
             bridge.take_normalized_outcomes().is_empty(),
             "new bridge should not start with pending normalized outcomes"
         );
         let stale_full_refresh =
-            StructuralRefresh::from_folded_effects(&saya::core_outcome::StructuralEffectSet {
-                redraw: Some(saya::core_outcome::RedrawEffect {
+            StructuralRefresh::from_folded_effects(&saya::core::outcome::StructuralEffectSet {
+                redraw: Some(saya::core::outcome::RedrawEffect {
                     full: true,
                     clear_before_draw: true,
                     required_by_structure_change: true,
@@ -13082,16 +13094,16 @@ mod tests {
         assert!(!refresh.redraw_plan.clear_before_draw);
         assert_eq!(
             refresh.redraw_plan.source,
-            saya::structural_refresh::RedrawPlanSource::None
+            saya::presentation::structural_refresh::RedrawPlanSource::None
         );
     }
 
     #[test]
     fn consume_core_outcomes_tracks_active_prompt_in_projection_state() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut bridge = saya::core::bridge::CoreBridge::new("hello\n").expect("core bridge");
         let mut accumulator = MainOutcomeAccumulator::default();
         let mut need_redraw = false;
 
@@ -13120,10 +13132,10 @@ mod tests {
 
     #[test]
     fn prompt_response_success_is_routed_through_bridge_and_closes_only_after_folded_batch() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut bridge = saya::core::bridge::CoreBridge::new("hello\n").expect("core bridge");
         let mut accumulator = MainOutcomeAccumulator::default();
         let mut need_redraw = false;
 
@@ -13140,12 +13152,12 @@ mod tests {
             Some(1)
         );
 
-        let action = saya::core_notification_prompt::handle_prompt_key(
+        let action = saya::core::notification_prompt::handle_prompt_key(
             &mut accumulator.projection,
             &KeyInput::Enter,
         );
         let command = match action {
-            saya::core_notification_prompt::PromptInputAction::Submit(command) => command,
+            saya::core::notification_prompt::PromptInputAction::Submit(command) => command,
             other => panic!("expected submit action, got {other:?}"),
         };
 
@@ -13159,16 +13171,16 @@ mod tests {
                 .prompt()
                 .last_transition()
                 .map(|transition| transition.kind),
-            Some(saya::core_notification_prompt::PromptTransitionKind::Submitted)
+            Some(saya::core::notification_prompt::PromptTransitionKind::Submitted)
         );
     }
 
     #[test]
     fn prompt_response_end_to_end_preserves_typed_input_value() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut bridge = saya::core::bridge::CoreBridge::new("hello\n").expect("core bridge");
         let mut accumulator = MainOutcomeAccumulator::default();
         let mut need_redraw = false;
 
@@ -13178,25 +13190,25 @@ mod tests {
         consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
 
         assert!(matches!(
-            saya::core_notification_prompt::handle_prompt_key(
+            saya::core::notification_prompt::handle_prompt_key(
                 &mut accumulator.projection,
                 &KeyInput::Char('a'),
             ),
-            saya::core_notification_prompt::PromptInputAction::Consumed
+            saya::core::notification_prompt::PromptInputAction::Consumed
         ));
         assert!(matches!(
-            saya::core_notification_prompt::handle_prompt_key(
+            saya::core::notification_prompt::handle_prompt_key(
                 &mut accumulator.projection,
                 &KeyInput::Char('b'),
             ),
-            saya::core_notification_prompt::PromptInputAction::Consumed
+            saya::core::notification_prompt::PromptInputAction::Consumed
         ));
-        let action = saya::core_notification_prompt::handle_prompt_key(
+        let action = saya::core::notification_prompt::handle_prompt_key(
             &mut accumulator.projection,
             &KeyInput::Enter,
         );
         let command = match action {
-            saya::core_notification_prompt::PromptInputAction::Submit(command) => command,
+            saya::core::notification_prompt::PromptInputAction::Submit(command) => command,
             other => panic!("expected submit action, got {other:?}"),
         };
 
@@ -13210,7 +13222,7 @@ mod tests {
                 .last_transition()
                 .map(|transition| (transition.kind, transition.input_len)),
             Some((
-                saya::core_notification_prompt::PromptTransitionKind::Submitted,
+                saya::core::notification_prompt::PromptTransitionKind::Submitted,
                 2
             ))
         );
@@ -13218,10 +13230,10 @@ mod tests {
 
     #[test]
     fn structural_redraw_does_not_close_active_prompt() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut bridge = saya::core::bridge::CoreBridge::new("hello\n").expect("core bridge");
         let mut accumulator = MainOutcomeAccumulator::default();
         let mut need_redraw = false;
 
@@ -13261,10 +13273,10 @@ mod tests {
 
     #[test]
     fn prompt_response_error_restores_active_prompt_and_preserves_buffer() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut bridge = saya::core_bridge::CoreBridge::new("hello\n").expect("core bridge");
+        let mut bridge = saya::core::bridge::CoreBridge::new("hello\n").expect("core bridge");
         let mut accumulator = MainOutcomeAccumulator::default();
         let mut need_redraw = false;
 
@@ -13273,25 +13285,25 @@ mod tests {
             .expect("input request should succeed");
         consume_core_outcomes_from_core(&mut bridge, &mut accumulator, &mut need_redraw);
         assert!(matches!(
-            saya::core_notification_prompt::handle_prompt_key(
+            saya::core::notification_prompt::handle_prompt_key(
                 &mut accumulator.projection,
                 &KeyInput::Char('x'),
             ),
-            saya::core_notification_prompt::PromptInputAction::Consumed
+            saya::core::notification_prompt::PromptInputAction::Consumed
         ));
-        let action = saya::core_notification_prompt::handle_prompt_key(
+        let action = saya::core::notification_prompt::handle_prompt_key(
             &mut accumulator.projection,
             &KeyInput::Enter,
         );
         let command = match action {
-            saya::core_notification_prompt::PromptInputAction::Submit(command) => command,
+            saya::core::notification_prompt::PromptInputAction::Submit(command) => command,
             other => panic!("expected submit action, got {other:?}"),
         };
 
         dispatch_prompt_response_command(
             &mut bridge,
             &mut accumulator,
-            saya::core_prompt::PromptResponseCommand::Submit {
+            saya::core::prompt::PromptResponseCommand::Submit {
                 correlation_id: command.correlation_id() + 1,
                 value: "ignored".to_string(),
             },
@@ -13304,7 +13316,7 @@ mod tests {
                 .prompt()
                 .active_input()
                 .map(|view| view.status),
-            Some(saya::core_notification_prompt::InputPromptStatus::Active)
+            Some(saya::core::notification_prompt::InputPromptStatus::Active)
         ));
         assert_eq!(
             accumulator
@@ -13339,18 +13351,19 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn selector_accept_action_opens_selected_rg_location_and_cancels_selector() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let target_path = unique_path("selector-rg-jump").with_extension("txt");
         std::fs::write(&target_path, "first\nabcdef\nthird\n").expect("target fixture");
         let target_literal =
             serde_json::to_string(&target_path.to_string_lossy()).expect("path JSON");
-        let seed = saya::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(vec![
-            saya::config_runtime::StartupRegistryEntry::Event {
-                name: "bufferOpen".to_string(),
-                callback_source: format!(
-                    r#"
+        let seed =
+            saya::runtime::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(
+                vec![saya::runtime::config::StartupRegistryEntry::Event {
+                    name: "bufferOpen".to_string(),
+                    callback_source: format!(
+                        r#"
                             async () => {{
                                 await saya.selector.open({{
                                     source: {{
@@ -13369,15 +13382,15 @@ mod tests {
                                 }});
                             }}
                         "#
-                ),
-            },
-        ]);
+                    ),
+                }],
+            );
         let mut runtime_session =
             RuntimeSessionOwner::spawn(seed).expect("runtime owner should initialize");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -13386,8 +13399,8 @@ mod tests {
             let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
             runtime_session
                 .dispatch(
-                    saya::saya_live_runtime::RuntimeEventPayload::BufferOpen(
-                        saya::saya_live_runtime::BufferEventPayload {
+                    saya::runtime::live::RuntimeEventPayload::BufferOpen(
+                        saya::runtime::live::BufferEventPayload {
                             buffer: host_session.current_buffer_snapshot(),
                         },
                     ),
@@ -13429,13 +13442,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn selector_accept_action_reports_invalid_rg_detail_without_normal_enter_leak() {
-        let _lock = saya::bootstrap::launch_test_lock()
+        let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let seed = saya::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(vec![
-            saya::config_runtime::StartupRegistryEntry::Event {
-                name: "bufferOpen".to_string(),
-                callback_source: r#"
+        let seed =
+            saya::runtime::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(
+                vec![saya::runtime::config::StartupRegistryEntry::Event {
+                    name: "bufferOpen".to_string(),
+                    callback_source: r#"
                         async () => {
                             await saya.selector.open({
                                 source: {
@@ -13454,15 +13468,15 @@ mod tests {
                             });
                         }
                     "#
-                .to_string(),
-            },
-        ]);
+                    .to_string(),
+                }],
+            );
         let mut runtime_session =
             RuntimeSessionOwner::spawn(seed).expect("runtime owner should initialize");
-        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
-            input_source: saya::cli::InputSource::Empty,
-            config_source: saya::cli::ConfigSource::Default,
-            ..saya::cli::LaunchRequest::default()
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
         })
         .expect("launch should succeed");
         let mut session_state = outcome.editor_session_state();
@@ -13471,8 +13485,8 @@ mod tests {
             let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
             runtime_session
                 .dispatch(
-                    saya::saya_live_runtime::RuntimeEventPayload::BufferOpen(
-                        saya::saya_live_runtime::BufferEventPayload {
+                    saya::runtime::live::RuntimeEventPayload::BufferOpen(
+                        saya::runtime::live::BufferEventPayload {
                             buffer: host_session.current_buffer_snapshot(),
                         },
                     ),

@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{BootstrapOutcome, prepare_launch};
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::search_capability::SearchCapabilityContract;
-use saya::search_query::{SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery};
+use saya::app::bootstrap::{BootstrapOutcome, prepare_launch};
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::features::search::capability::SearchCapabilityContract;
+use saya::features::search::query::{
+    SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery,
+};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -35,7 +37,7 @@ fn full_viewport_query() -> SearchVisibleQuery {
 
 #[test]
 fn search_capability_contract_reports_live_state_query_available() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let outcome = launch_with_content("alpha\nbeta alpha\ngamma alpha\n");
@@ -54,7 +56,7 @@ fn search_capability_contract_reports_live_state_query_available() {
 
 #[test]
 fn query_visible_search_state_returns_typed_highlight_data() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("zero\nalpha one\nalpha two\nomega\n");
@@ -100,7 +102,7 @@ fn query_visible_search_state_returns_typed_highlight_data() {
 
 #[test]
 fn query_visible_search_state_keeps_search_start_at_the_first_matched_character() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("zero\nxvimx\nomega\n");
@@ -126,7 +128,7 @@ fn query_visible_search_state_keeps_search_start_at_the_first_matched_character(
 
 #[test]
 fn query_visible_search_state_handles_full_width_match_bounds() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("zero\nxあx\nomega\n");
@@ -153,7 +155,7 @@ fn query_visible_search_state_handles_full_width_match_bounds() {
 
 #[test]
 fn query_visible_search_state_reports_incsearch_preview_when_active() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("alpha\nhello world hello\nomega\n");
@@ -189,7 +191,7 @@ fn query_visible_search_state_reports_incsearch_preview_when_active() {
 
 #[test]
 fn query_visible_search_state_keeps_input_pattern_without_preview_when_noincsearch() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("alpha\nhello world hello\nomega\n");
@@ -218,7 +220,7 @@ fn query_visible_search_state_keeps_input_pattern_without_preview_when_noincsear
 
 #[test]
 fn query_visible_search_state_clears_preview_after_escape() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("alpha\nhello world hello\nomega\n");
@@ -248,7 +250,7 @@ fn query_visible_search_state_clears_preview_after_escape() {
 
 #[test]
 fn query_visible_search_state_commits_preview_into_regular_search_after_enter() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("alpha\nhello world hello\nomega\n");
@@ -283,7 +285,7 @@ fn query_visible_search_state_commits_preview_into_regular_search_after_enter() 
 
 #[test]
 fn query_visible_search_state_marks_hlsearch_suspend_as_empty_overlay() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("zero\nalpha one\nalpha two\nomega\n");
@@ -315,7 +317,7 @@ fn query_visible_search_state_marks_hlsearch_suspend_as_empty_overlay() {
 
 #[test]
 fn query_visible_search_state_rejects_invalid_viewport() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("zero\nalpha one\nalpha two\nomega\n");
@@ -339,7 +341,7 @@ fn query_visible_search_state_rejects_invalid_viewport() {
 
 #[test]
 fn core_owned_search_option_updates_change_query_results() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("zero\nalpha one\nalpha two\nomega\n");

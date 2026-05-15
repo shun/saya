@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use saya::lsif_index::LsifIndexCache;
-use saya::lsp_runtime_bridge::{
+use saya::features::lsp::lsif_index::LsifIndexCache;
+use saya::features::lsp::runtime_bridge::{
     LspRuntimeBridgeRequest, LspRuntimeBridgeSource, LspRuntimePosition, LspRuntimeTextDocument,
 };
-use saya::saya_live_runtime::{
+use saya::runtime::live::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, RuntimeCommandError, RuntimeMode,
 };
 use serde_json::json;

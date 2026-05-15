@@ -261,8 +261,8 @@ application.
 - The TypeScript layer defines the public `saya.theme` declaration surface.
 - The startup registry stores normalized theme declarations.
 - The application layer owns `ThemeRegistry` and resolved presentation styles.
-- `screen_model.rs` maps Markdown metadata to semantic presentation ranges.
-- `tui_renderer.rs` renders already-resolved styles according to terminal
+- `src/presentation/screen_model.rs` maps Markdown metadata to semantic presentation ranges.
+- `src/presentation/render/renderer.rs` renders already-resolved styles according to terminal
   capability.
 
 This model keeps plugins and config away from renderer internals and keeps

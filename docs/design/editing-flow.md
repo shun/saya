@@ -36,7 +36,7 @@ This path keeps the application layer small.
 
 - `vim-core-rs` owns modal behavior and text mutation
 - `CoreBridge` adapts repository-local command dispatch details
-- `screen_model.rs` turns core state into renderable data
+- `src/presentation/screen_model.rs` turns core state into renderable data
 
 ## Save and quit path
 
@@ -44,8 +44,8 @@ The editor does not let the core write directly to disk or exit the process by
 itself. Instead, the core emits host actions and the application layer decides
 how to fulfill them.
 
-- Save requests become `SaveRequest` values handled by `host_io.rs`
-- Quit requests become `QuitDecision` values handled by `editor_session.rs`
+- Save requests become `SaveRequest` values handled by `src/app/host_io.rs`
+- Quit requests become `QuitDecision` values handled by `src/app/session.rs`
 - Dirty-state warnings stay in the application layer and surface through the UI
 
 This split makes save and quit logic testable without embedding host behavior
@@ -53,7 +53,7 @@ inside the core.
 
 ## Projection model
 
-`screen_model.rs` turns core snapshots and session state into a render-only
+`src/presentation/screen_model.rs` turns core snapshots and session state into a render-only
 view model.
 
 The projection currently handles these concerns.
@@ -67,7 +67,7 @@ The projection currently handles these concerns.
 - Viewport-relative visible lines
 - Transient status messages
 
-`tui_renderer.rs` consumes only `ScreenModel`, which keeps rendering detached
+`src/presentation/render/renderer.rs` consumes only `ScreenModel`, which keeps rendering detached
 from core and session internals.
 
 ## Redraw and terminal-size policy

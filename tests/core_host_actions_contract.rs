@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::launch_test_lock;
-use saya::core_bridge::CoreBridge;
-use saya::core_host_actions::CoreHostActionRuntime;
-use saya::core_outcome::{
+use saya::app::bootstrap::launch_test_lock;
+use saya::core::bridge::CoreBridge;
+use saya::core::host_actions::CoreHostActionRuntime;
+use saya::core::outcome::{
     ApplicationOutcomeState, NormalizedHostDirective, fold_normalized_outcomes,
 };
 

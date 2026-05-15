@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::saya_live_runtime::{
+use saya::presentation::theme::{
+    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
+};
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::live::{
     BoxFuture, HostCapabilityBridge, ReadonlyBufferSnapshot, ReadonlyEditorSnapshot,
     ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeMode, SayaLiveRuntime,
 };
-use saya::startup_runtime::{
+use saya::runtime::startup::{
     SayaKeyMode, SayaKeymapAction, StartupModuleLoadResult, StartupModulePrepareResult,
     StartupOptionName, StartupOptionValue, StartupRegistryEntry, collect_startup_registry,
     evaluate_startup_module, load_init_module, prepare_init_module, resolve_init_module_specifier,
-};
-use saya::theme::{
-    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
 };
 
 fn unique_path(name: &str) -> PathBuf {

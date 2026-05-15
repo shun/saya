@@ -7,22 +7,28 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::config_runtime::StartupRegistryEntry;
-use saya::input_router::KeyInput;
-use saya::runtime_integration::{RuntimeCommandEffect, RuntimeHostSession, RuntimeSessionOwner};
-use saya::saya_live_runtime::{
+use saya::features::selector::host_adapter::{
+    HeadlessSelectorUiProjectionSink, SelectorHostViewAdapter,
+};
+use saya::features::selector::keymap::{
+    SelectorAction, SelectorKeyRoute, selector_key_route_for_model,
+};
+use saya::features::selector::runtime::{
+    HeadlessSelectorViewBackend, RuntimeRenderedSelectorItem, SelectorViewBackend,
+    parse_rg_selector_location_detail, parse_rg_vimgrep_output,
+};
+use saya::features::selector::tui_state::{
+    SelectorTuiProjectionSink, selector_tui_model_to_workspace_float,
+};
+use saya::input::router::KeyInput;
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::config::StartupRegistryEntry;
+use saya::runtime::integration::{RuntimeCommandEffect, RuntimeHostSession, RuntimeSessionOwner};
+use saya::runtime::live::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
     ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
     RuntimeInputPromptRequest, RuntimeInputPromptResponse, RuntimeMode, SayaLiveRuntime,
 };
-use saya::selector_host_adapter::{HeadlessSelectorUiProjectionSink, SelectorHostViewAdapter};
-use saya::selector_keymap::{SelectorAction, SelectorKeyRoute, selector_key_route_for_model};
-use saya::selector_runtime::{
-    HeadlessSelectorViewBackend, RuntimeRenderedSelectorItem, SelectorViewBackend,
-    parse_rg_selector_location_detail, parse_rg_vimgrep_output,
-};
-use saya::selector_tui_state::{SelectorTuiProjectionSink, selector_tui_model_to_workspace_float};
 use tokio::sync::Mutex;
 
 #[tokio::test(flavor = "current_thread")]
@@ -550,8 +556,8 @@ async fn runtime_selector_rg_source_error_returns_runtime_callback_failure() {
         .expect_err("rg execution failure should reject the runtime callback");
 
     match error {
-        saya::saya_live_runtime::RuntimeDispatchError::CallbackFailed {
-            error: saya::saya_live_runtime::RuntimeCallbackError::ScriptFailed { message },
+        saya::runtime::live::RuntimeDispatchError::CallbackFailed {
+            error: saya::runtime::live::RuntimeCallbackError::ScriptFailed { message },
             ..
         } => {
             assert!(
@@ -565,7 +571,7 @@ async fn runtime_selector_rg_source_error_returns_runtime_callback_failure() {
 
 #[test]
 fn runtime_selector_rg_source_does_not_expand_public_selector_surface() {
-    let surface = saya::saya_live_runtime::runtime_public_surface_paths();
+    let surface = saya::runtime::live::runtime_public_surface_paths();
 
     assert_eq!(
         surface
@@ -932,7 +938,7 @@ async fn runtime_selector_host_adapter_projects_without_opening_float_ui() {
     );
     assert_eq!(
         projections[2].intent,
-        saya::selector_host_adapter::SelectorUiIntent::Hide
+        saya::features::selector::host_adapter::SelectorUiIntent::Hide
     );
     assert!(!projections[2].should_dispose_session);
     assert_eq!(
@@ -1229,7 +1235,8 @@ async fn runtime_session_owner_controls_active_selector_from_tui_key_routes_head
         selector_key_route_for_model(Some(&initial_model), &KeyInput::Char('j')),
         SelectorKeyRoute::Control {
             session_id: initial_model.session_id,
-            command: saya::selector_runtime::RuntimeSelectorControllerCommand::CursorNext,
+            command:
+                saya::features::selector::runtime::RuntimeSelectorControllerCommand::CursorNext,
         }
     );
     assert_eq!(
@@ -1399,8 +1406,8 @@ impl HostCapabilityBridge for RecordingHostBridge {
 
     fn open_float(
         &self,
-        _request: saya::saya_live_runtime::RuntimeFloatOpenRequest,
-    ) -> BoxFuture<Result<saya::saya_live_runtime::RuntimeFloatSnapshot, RuntimeCommandError>> {
+        _request: saya::runtime::live::RuntimeFloatOpenRequest,
+    ) -> BoxFuture<Result<saya::runtime::live::RuntimeFloatSnapshot, RuntimeCommandError>> {
         let open_float_calls = self.open_float_calls.clone();
         Box::pin(async move {
             *open_float_calls.lock().await += 1;

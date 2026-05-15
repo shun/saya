@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{BootstrapOutcome, prepare_launch};
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::editor_session::EditorSessionState;
-use saya::screen_model::{ProjectionInput, project};
+use saya::app::bootstrap::{BootstrapOutcome, prepare_launch};
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::app::session::EditorSessionState;
+use saya::presentation::screen_model::{ProjectionInput, project};
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -29,7 +29,7 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
 
 #[test]
 fn search_starts_and_executes() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nsearch test\nworld\n");
@@ -52,7 +52,7 @@ fn search_starts_and_executes() {
 
 #[test]
 fn next_previous_search_results() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("word\ntext\nword\nhello\nword\n");
@@ -75,7 +75,7 @@ fn next_previous_search_results() {
 
 #[test]
 fn search_not_found_message() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nworld\n");
@@ -112,7 +112,7 @@ fn search_not_found_message() {
 
 #[test]
 fn search_navigation_failure() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nworld\n");
@@ -140,7 +140,7 @@ fn search_navigation_failure() {
 
 #[test]
 fn search_exact_word() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
@@ -156,7 +156,7 @@ fn search_exact_word() {
 
 #[test]
 fn search_asterisk() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
@@ -171,7 +171,7 @@ fn search_asterisk() {
 
 #[test]
 fn search_hash() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
@@ -187,7 +187,7 @@ fn search_hash() {
 
 #[test]
 fn search_prompt_and_cancel_flow() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nsearch test\nworld\n");

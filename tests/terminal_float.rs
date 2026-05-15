@@ -1,9 +1,9 @@
-use saya::floating_window::{
+use saya::input::router::KeyInput;
+use saya::presentation::floating_window::{
     FloatingBorder, FloatingChrome, FloatingContentRef, FloatingPlacement, FloatingSize,
     FloatingWindowManager, FloatingZIndex,
 };
-use saya::input_router::KeyInput;
-use saya::terminal_float::{
+use saya::terminal::float::{
     TerminalFloatCloseBehavior, TerminalFloatManager, TerminalFloatSpawnRequest,
 };
 use std::time::{Duration, Instant};

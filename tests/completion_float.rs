@@ -1,13 +1,13 @@
-use saya::completion_float::{
+use saya::features::completion::float::{
     CompletionCandidate, CompletionFloatInputOutcome, CompletionFloatManager,
     CompletionMenuFloatRequest,
 };
-use saya::floating_window::{
+use saya::input::router::KeyInput;
+use saya::presentation::floating_window::{
     FloatingAnchor, FloatingContentRef, FloatingFit, FloatingInputOutcome, FloatingPlacement,
     FloatingRelativeTo, FloatingWindowManager, FloatingZIndex, WorkspaceFocus,
 };
-use saya::input_router::KeyInput;
-use saya::screen_model::PaneRect;
+use saya::presentation::screen_model::PaneRect;
 
 fn request() -> CompletionMenuFloatRequest {
     CompletionMenuFloatRequest {

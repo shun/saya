@@ -7,9 +7,9 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::screen_model::{ProjectionInput, project};
+use saya::app::bootstrap::{launch_test_lock, prepare_launch};
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::presentation::screen_model::{ProjectionInput, project};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

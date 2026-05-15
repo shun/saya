@@ -6,7 +6,7 @@
 //! float 表示用整形を `markdown_render` に分離する。これにより
 //! `lsp_float.rs` は markdown の存在を知らずに描画行を受け取れる。
 
-use saya::markdown_render::{
+use saya::presentation::markdown::render::{
     InlineStyleKind, RenderedFloatContent, render_markdown_to_float_content,
     render_plaintext_to_float_content,
 };

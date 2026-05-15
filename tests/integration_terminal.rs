@@ -22,31 +22,31 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use saya::bootstrap::{launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
-use saya::core_notification_prompt::{
+use saya::app::bootstrap::{launch_test_lock, prepare_launch};
+use saya::app::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
+use saya::app::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
+use saya::app::session::EditorSessionState;
+use saya::core::notification_prompt::{
     MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
 };
-use saya::editor_session::EditorSessionState;
-use saya::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
-use saya::input_loop::{TerminalEventSource, run_terminal_input_loop};
-use saya::input_router::{EditorIntent, KeyInput, resolve_intent};
-use saya::markdown_structure::MarkdownDocumentMap;
-use saya::optional_graphics::OptionalGraphicsAdapter;
-use saya::overlay_asset_store::OverlayAssetStore;
-use saya::screen_model::{
+use saya::features::search::query::{SearchVisibleQuery, SearchVisibleState};
+use saya::input::router::{EditorIntent, KeyInput, resolve_intent};
+use saya::presentation::markdown::structure::MarkdownDocumentMap;
+use saya::presentation::overlay::asset_store::OverlayAssetStore;
+use saya::presentation::overlay::optional_graphics::OptionalGraphicsAdapter;
+use saya::presentation::render::coordinator::TuiRenderCoordinator;
+use saya::presentation::screen_model::{
     PaneRect, ProjectionInput, ScreenCursorStyle, ScreenModel, WorkspaceProjectionError,
     WorkspaceProjectionInput, WorkspaceScreenModel, project, project_workspace,
 };
-use saya::search_query::{SearchVisibleQuery, SearchVisibleState};
-use saya::terminal_capability::{
+use saya::presentation::viewport::ViewportState;
+use saya::presentation::viewport::WindowViewportStore;
+use saya::terminal::capability::{
     InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
     TerminalCapabilityProbeService, TerminalSessionKind,
 };
-use saya::terminal_lifecycle::{TerminalBackend, TerminalLifecycle};
-use saya::tui_render_coordinator::TuiRenderCoordinator;
-use saya::viewport::ViewportState;
-use saya::viewport::WindowViewportStore;
+use saya::terminal::input_loop::{TerminalEventSource, run_terminal_input_loop};
+use saya::terminal::lifecycle::{TerminalBackend, TerminalLifecycle};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -325,8 +325,10 @@ fn terminal_suite_scope_statement() -> &'static str {
 fn project_workspace_from_snapshot(
     snapshot: &vim_core_rs::CoreSnapshot,
     session_state: &EditorSessionState,
-) -> Result<saya::screen_model::WorkspaceScreenModel, saya::screen_model::WorkspaceProjectionError>
-{
+) -> Result<
+    saya::presentation::screen_model::WorkspaceScreenModel,
+    saya::presentation::screen_model::WorkspaceProjectionError,
+> {
     let mut viewport_store = WindowViewportStore::new();
     viewport_store.sync_from_windows(&snapshot.windows);
     let search_states = BTreeMap::new();
@@ -358,8 +360,10 @@ fn project_markdown_workspace_from_snapshot(
     snapshot: &vim_core_rs::CoreSnapshot,
     session_state: &EditorSessionState,
     markdown_source: &str,
-) -> Result<saya::screen_model::WorkspaceScreenModel, saya::screen_model::WorkspaceProjectionError>
-{
+) -> Result<
+    saya::presentation::screen_model::WorkspaceScreenModel,
+    saya::presentation::screen_model::WorkspaceProjectionError,
+> {
     let mut viewport_store = WindowViewportStore::new();
     viewport_store.sync_from_windows(&snapshot.windows);
     let search_states = BTreeMap::new();
@@ -401,7 +405,7 @@ fn project_markdown_workspace_from_snapshot(
 }
 
 fn collect_search_states_for_snapshot(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     snapshot: &vim_core_rs::CoreSnapshot,
 ) -> BTreeMap<i32, SearchVisibleState> {
     snapshot
@@ -601,7 +605,7 @@ fn workspace_projection_returns_explicit_failure_when_active_window_is_missing()
     let model = project_workspace_from_snapshot(&snapshot, &session_state);
     assert_eq!(
         model,
-        Err(saya::screen_model::WorkspaceProjectionError::ActiveWindowMissing)
+        Err(saya::presentation::screen_model::WorkspaceProjectionError::ActiveWindowMissing)
     );
 }
 
@@ -845,7 +849,7 @@ fn headless_workspace(
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
-            resolved_theme: saya::theme::ResolvedTheme::default(),
+            resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -891,7 +895,7 @@ fn headless_split_workspace() -> WorkspaceScreenModel {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
-            resolved_theme: saya::theme::ResolvedTheme::default(),
+            resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: false,
@@ -906,7 +910,7 @@ fn headless_split_workspace() -> WorkspaceScreenModel {
     workspace
 }
 
-fn plain_terminal_capabilities() -> saya::terminal_capability::TerminalCapabilityProfile {
+fn plain_terminal_capabilities() -> saya::terminal::capability::TerminalCapabilityProfile {
     TerminalCapabilityProbe::new(
         TerminalCapabilityObservation {
             session_kind: TerminalSessionKind::Local,
@@ -920,7 +924,7 @@ fn plain_terminal_capabilities() -> saya::terminal_capability::TerminalCapabilit
     .detect()
 }
 
-fn dispatch_ctrl_w(outcome: &mut saya::bootstrap::BootstrapOutcome, command: char) {
+fn dispatch_ctrl_w(outcome: &mut saya::app::bootstrap::BootstrapOutcome, command: char) {
     log::debug!("[test] dispatching Ctrl-w command: {}", command);
     let sequence = format!("\u{17}{command}");
     outcome
@@ -929,7 +933,7 @@ fn dispatch_ctrl_w(outcome: &mut saya::bootstrap::BootstrapOutcome, command: cha
         .expect("Ctrl-w command should be accepted");
 }
 
-fn dispatch_key_input(outcome: &mut saya::bootstrap::BootstrapOutcome, key: KeyInput) {
+fn dispatch_key_input(outcome: &mut saya::app::bootstrap::BootstrapOutcome, key: KeyInput) {
     let intent = resolve_intent(&key);
     match intent {
         EditorIntent::EditKey(key_text) => {
@@ -951,7 +955,7 @@ fn dispatch_key_input(outcome: &mut saya::bootstrap::BootstrapOutcome, key: KeyI
 }
 
 async fn dispatch_terminal_key_events_through_user_path(
-    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     terminal_events: Vec<Event>,
 ) {
     let (mut coordinator, sender) = EventLoopCoordinator::with_capacity(8);
@@ -1312,7 +1316,7 @@ async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
 #[test]
 fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let event_loop_source = std::fs::read_to_string(manifest_dir.join("src/event_loop.rs"))
+    let event_loop_source = std::fs::read_to_string(manifest_dir.join("src/app/event_loop.rs"))
         .expect("event loop source is readable");
     let main_source =
         std::fs::read_to_string(manifest_dir.join("src/main.rs")).expect("main source is readable");

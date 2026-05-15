@@ -1,12 +1,14 @@
 use std::fs;
 
-use saya::core_outcome::{RedrawEffect, StructuralEffectSet};
-use saya::screen_model::{PaneProjectionGeometry, PaneRect, WorkspaceProjectionSummary};
-use saya::structural_refresh::{
+use saya::core::outcome::{RedrawEffect, StructuralEffectSet};
+use saya::presentation::screen_model::{
+    PaneProjectionGeometry, PaneRect, WorkspaceProjectionSummary,
+};
+use saya::presentation::structural_refresh::{
     ProjectionFailureDiagnostic, ProjectionStaleReason, ProjectionStatus, RedrawPlanSource,
     StructuralRefresh, ViewportRefreshStatus, ViewportSyncDiagnostic,
 };
-use saya::viewport::ViewportSyncSummary;
+use saya::presentation::viewport::ViewportSyncSummary;
 
 fn folded_effects(
     redraw: Option<RedrawEffect>,
@@ -247,7 +249,7 @@ fn projection_failure_diagnostic_keeps_failure_reason_without_broken_summary() {
 
 #[test]
 fn projection_failure_debug_log_names_required_diagnostic_fields() {
-    let source = fs::read_to_string("src/structural_refresh.rs")
+    let source = fs::read_to_string("src/presentation/structural_refresh.rs")
         .expect("structural refresh source should be readable");
 
     let required_log_format = "[structural_refresh] projection failure: reason={}, redraw_requested={}, redraw_full={}, clear_before_draw={}, buffer_invalidations={}, window_invalidations={}, layout_dirty={}, viewport_status={:?}, projection_status={:?}";
@@ -260,7 +262,7 @@ fn projection_failure_debug_log_names_required_diagnostic_fields() {
 
 #[test]
 fn structural_refresh_boundary_excludes_prompt_notification_and_raw_core_decisions() {
-    let source = fs::read_to_string("src/structural_refresh.rs")
+    let source = fs::read_to_string("src/presentation/structural_refresh.rs")
         .expect("structural refresh source should be readable");
 
     for forbidden in [

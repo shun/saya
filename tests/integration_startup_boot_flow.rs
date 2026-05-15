@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{StartupKeymapAction, launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::app::bootstrap::{StartupKeymapAction, launch_test_lock, prepare_launch};
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

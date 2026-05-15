@@ -1,4 +1,4 @@
-use saya::core_outcome::{
+use saya::core::outcome::{
     ApplicationOutcomeState, NormalizedCoreOutcome, NormalizedHostDirective,
     NormalizedNotification, NormalizedOutcomeBatch, NormalizedPrompt, NormalizedStructuralOutcome,
     OutcomeOrigin, OutcomeTrace, PromptInputTransition, PromptResponseDisposition,

@@ -23,22 +23,20 @@ The current codebase is easiest to understand as four layers.
          │
          ▼
 [Layer 3] TypeScript execution layer
-    ├── startup_runtime.rs
-    └── saya_live_runtime.rs
+    └── src/runtime/
          │
          ▼
 [Layer 2] Application orchestration and presentation
-    ├── bootstrap.rs
-    ├── event_loop.rs
-    ├── editor_session.rs
-    ├── screen_model.rs
-    ├── tui_renderer.rs
-    └── host_io.rs
+    ├── src/app/
+    ├── src/input/
+    ├── src/presentation/
+    ├── src/terminal/
+    └── src/features/
          │
          ▼
 [Layer 1] Editing core
     ├── vim-core-rs
-    └── core_bridge.rs as the repository-local adapter
+    └── src/core/ as the repository-local adapter boundary
 ```
 
 ## Responsibilities by layer
@@ -63,10 +61,11 @@ logic.
 
 This layer also owns presentation metadata that is specific to `saya`. The
 Markdown WYSIWYG path is the current example: `main.rs` builds
-`MarkdownDocumentMap` values outside the draw loop, `screen_model.rs` projects
-raw buffer text into display text and display-space mappings, and
-`tui_renderer.rs` renders the projected screen model. This path must not mutate
-buffer text or re-implement Vim motion.
+`MarkdownDocumentMap` values outside the draw loop,
+`src/presentation/screen_model.rs` projects raw buffer text into display text
+and display-space mappings, and `src/presentation/render/renderer.rs` renders
+the projected screen model. This path must not mutate buffer text or
+re-implement Vim motion.
 
 Syntax, highlight, and conceal have a different boundary. `vim-core-rs` owns
 the extraction semantics and public core data. `saya` can collect visible
@@ -74,27 +73,33 @@ the extraction semantics and public core data. `saya` can collect visible
 it must not define Vim-compatible syntax extraction, `:highlight` tables,
 resolved highlight attributes, or `matchadd()` conceal parity.
 
-This layer includes these key modules.
+The `src/` tree mirrors this ownership model so new code has an obvious home.
 
-- `bootstrap.rs`
-- `event_loop.rs`
-- `editor_session.rs`
-- `lsp_session.rs`
-- `lsp_transport.rs`
-- `lsif_index.rs`
-- `markdown_structure.rs`
-- `screen_model.rs`
-- `tui_renderer.rs`
-- `host_io.rs`
+- `src/app/` owns startup assembly, bootstrapping, session state, host I/O, and
+  the event loop.
+- `src/input/` owns key routing, command-line editing, command history, and
+  local ex-command routing.
+- `src/presentation/` owns screen projection, viewport state, Markdown
+  presentation metadata, render-ready models, theme resolution, overlays, and
+  TUI rendering.
+- `src/terminal/` owns terminal lifecycle, terminal capability detection,
+  terminal input, signal handling, terminal I/O brokering, and terminal-backed
+  floating surfaces.
+- `src/features/` owns feature-level orchestration that crosses lower-level
+  primitives, such as selector, search, LSP, and completion workflows.
 
 ### Layer 3: TypeScript execution
 
 The TypeScript layer exists in two phases.
 
-- `startup_runtime.rs` evaluates `init.ts` before session startup and collects a
-  normalized startup registry.
-- `saya_live_runtime.rs` hosts runtime callbacks, typed payload dispatch, and
+- `src/runtime/startup.rs` evaluates `init.ts` before session startup and
+  collects a normalized startup registry.
+- `src/runtime/live.rs` hosts runtime callbacks, typed payload dispatch, and
   command execution against a host capability bridge.
+
+The surrounding runtime modules keep capability setup, configuration parsing,
+worker-boundary integration, process operations, dispatch messages, and redraw
+refresh decisions out of the TUI drawing path.
 
 This layer must stay isolated from the TUI main loop. The repository already
 tests worker-boundary execution and phase separation, even though full live
@@ -103,10 +108,10 @@ integration is still incomplete.
 The LSP preview follows this boundary. TypeScript startup code declares server
 configuration through `plugins/saya-lsp-client.ts`, and runtime callbacks send
 typed requests through `saya.lsp.request`. The Rust application layer owns the
-host-side process boundary in `lsp_session.rs` and `lsp_transport.rs`, including
-language server process spawning, `Content-Length` framing, response routing,
-timeouts, shutdown, diagnostic redaction, and LSIF index lookup. TypeScript
-plugins don't receive raw process handles or broad filesystem access.
+host-side feature boundary in `src/features/lsp/` and runtime bridging through
+`src/features/lsp/runtime_bridge.rs`, including LSIF index lookup and typed
+request or response routing. TypeScript plugins don't receive raw process
+handles or broad filesystem access.
 
 ### Layer 4: User configuration and future extensions
 
@@ -148,7 +153,8 @@ This page describes the current implementation rather than the larger
 architecture vision documented in older planning notes. In the present
 repository state:
 
-- The code is a single Rust crate, not a split Cargo workspace.
+- The code is a single Rust crate with a layered `src/` module tree, not a split
+  Cargo workspace.
 - `vim-core-rs` is consumed as a published crates.io dependency.
 - The TUI uses `ratatui` and `crossterm`.
 - The TypeScript runtime uses `deno_core`.

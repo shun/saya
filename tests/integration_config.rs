@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::config_runtime::{ConfigInput, load_and_apply_config};
+use saya::runtime::config::{ConfigInput, load_and_apply_config};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

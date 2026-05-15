@@ -1,5 +1,5 @@
-use saya::saya_live_runtime::RUNTIME_SAYA_TYPE_DECLARATION;
-use saya::startup_runtime::STARTUP_SAYA_TYPE_DECLARATION;
+use saya::runtime::live::RUNTIME_SAYA_TYPE_DECLARATION;
+use saya::runtime::startup::STARTUP_SAYA_TYPE_DECLARATION;
 
 #[test]
 fn startup_public_api_type_declaration_covers_formal_configuration_surface() {

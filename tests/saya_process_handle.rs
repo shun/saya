@@ -33,13 +33,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::saya_live_runtime::{
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::live::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
     ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
     RuntimeMode, SayaLiveRuntime,
 };
-use saya::startup_runtime::StartupRegistryEntry;
+use saya::runtime::startup::StartupRegistryEntry;
 use tokio::sync::Mutex;
 
 /// 検証用の `HostCapabilityBridge`。

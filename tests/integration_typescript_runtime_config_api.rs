@@ -10,21 +10,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::prepare_launch;
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::editor_session::EditorSessionState;
-use saya::host_io::{SaveResult, write_to_path};
-use saya::markdown_structure::MarkdownDocumentMap;
-use saya::runtime_message::runtime_callback_failure_message;
-use saya::runtime_refresh::runtime_dispatch_requests_redraw;
-use saya::saya_live_runtime::{
+use saya::app::bootstrap::prepare_launch;
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::app::host_io::{SaveResult, write_to_path};
+use saya::app::session::EditorSessionState;
+use saya::presentation::markdown::structure::MarkdownDocumentMap;
+use saya::presentation::screen_model::{ProjectionInput, project};
+use saya::presentation::theme::ResolvedThemeColor;
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::live::{
     BoxFuture, BufferEventPayload, CallbackRegistryBuilder, HostCapabilityBridge,
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
     RuntimeEventPayload, RuntimeMode, SayaLiveRuntime,
 };
-use saya::screen_model::{ProjectionInput, project};
-use saya::theme::ResolvedThemeColor;
+use saya::runtime::message::runtime_callback_failure_message;
+use saya::runtime::refresh::runtime_dispatch_requests_redraw;
 use tokio::sync::Mutex;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -107,7 +107,7 @@ fn runtime_related_test_files_use_typescript_runtime_prefix_instead_of_wave6_pre
 
 #[test]
 fn startup_typescript_config_reflects_options_registry_and_headless_projection() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("target.txt");
@@ -163,7 +163,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
 
 #[test]
 fn startup_typescript_config_resolves_markdown_theme_for_headless_projection() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-target.md");
@@ -243,7 +243,7 @@ fn startup_typescript_config_resolves_markdown_theme_for_headless_projection() {
 
 #[test]
 fn startup_typescript_config_keeps_markdown_projection_with_ui_and_syntax_theme() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-ui-syntax-target.md");
@@ -320,7 +320,7 @@ fn startup_typescript_config_keeps_markdown_projection_with_ui_and_syntax_theme(
 
 #[test]
 fn startup_markdown_projection_parses_repository_agents_md_headings() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("AGENTS.md");
@@ -342,7 +342,7 @@ fn startup_markdown_projection_parses_repository_agents_md_headings() {
 
 #[test]
 fn startup_typescript_config_heading_level_can_disable_inherited_bold() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-bold-false-target.md");
@@ -399,7 +399,7 @@ fn startup_typescript_config_heading_level_can_disable_inherited_bold() {
 
 #[test]
 fn startup_typescript_config_applies_heading_bold_to_heading1() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-heading1-target.md");
@@ -453,7 +453,7 @@ fn startup_typescript_config_applies_heading_bold_to_heading1() {
 
 #[test]
 fn startup_typescript_config_applies_heading_bold_to_active_raw_heading1() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-active-heading1-target.md");
@@ -511,7 +511,7 @@ fn startup_typescript_config_applies_heading_bold_to_active_raw_heading1() {
 
 #[test]
 fn startup_config_failure_keeps_default_session_and_presentation_state() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("target-fallback.txt");
@@ -530,7 +530,7 @@ fn startup_config_failure_keeps_default_session_and_presentation_state() {
     assert_eq!(outcome.initial_number_width, 4);
     assert!(outcome.warnings.iter().any(|warning| matches!(
         warning,
-        saya::bootstrap::BootstrapWarning::ConfigLoadFailed { path, .. } if path == &config_path
+        saya::app::bootstrap::BootstrapWarning::ConfigLoadFailed { path, .. } if path == &config_path
     )));
 
     let session_state = outcome.editor_session_state();
@@ -666,7 +666,7 @@ async fn runtime_event_dispatch_executes_registered_command_headlessly() {
 async fn runtime_surface_is_frozen_and_does_not_expose_registration_apis() {
     let host_bridge = Arc::new(RecordingHostBridge::new());
     let seed = CallbackRegistrySeed::from_startup_entries(vec![
-        saya::config_runtime::StartupRegistryEntry::Event {
+        saya::runtime::config::StartupRegistryEntry::Event {
             name: "bufferOpen".to_string(),
             callback_source: r#"
             async (payload) => {
@@ -728,7 +728,7 @@ async fn runtime_surface_is_frozen_and_does_not_expose_registration_apis() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_callback_failure_projects_as_message_without_corrupting_session_state() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("runtime-failure.txt");
@@ -804,7 +804,7 @@ async fn runtime_callback_failure_projects_as_message_without_corrupting_session
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_callback_completion_requests_projection_refresh_after_host_save() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("runtime-refresh-target.txt");
@@ -839,11 +839,13 @@ async fn runtime_callback_completion_requests_projection_refresh_after_host_save
 
     let mut session_state = EditorSessionState::new(outcome.target_path.clone());
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
-    let before_model = saya::screen_model::project(&saya::screen_model::ProjectionInput::new(
-        &outcome.core_bridge.snapshot(),
-        &session_state,
-        None,
-    ));
+    let before_model = saya::presentation::screen_model::project(
+        &saya::presentation::screen_model::ProjectionInput::new(
+            &outcome.core_bridge.snapshot(),
+            &session_state,
+            None,
+        ),
+    );
     assert!(before_model.dirty);
 
     let host_bridge = Arc::new(RecordingHostBridge::new());
@@ -884,11 +886,13 @@ async fn runtime_callback_completion_requests_projection_refresh_after_host_save
     session_state.record_save_success();
 
     let transient_message = Some("Saved successfully");
-    let after_model = saya::screen_model::project(&saya::screen_model::ProjectionInput::new(
-        &snapshot,
-        &session_state,
-        transient_message,
-    ));
+    let after_model = saya::presentation::screen_model::project(
+        &saya::presentation::screen_model::ProjectionInput::new(
+            &snapshot,
+            &session_state,
+            transient_message,
+        ),
+    );
     assert_eq!(
         after_model.message_line,
         Some("Saved successfully".to_string())

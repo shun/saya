@@ -102,7 +102,7 @@ The main risks and countermeasures are:
   line.
 - Buffer-backed floats can tempt the application layer to reimplement editing.
   `saya` must route editing in focused buffer floats through `vim-core-rs` and
-  use `core_bridge.rs` only as an adapter.
+  use `src/core/bridge.rs` only as an adapter.
 - Neovim has z-index conventions for built-in UI elements. `saya` should use
   documented z-index bands so hover, completion, terminal, prompt, and pager
   surfaces do not accidentally cover each other.
@@ -127,15 +127,15 @@ The recommended module boundary is:
 
 - `vim-core-rs` owns text buffer mutation, cursor movement, modes, and edit
   commands for buffer-backed surfaces.
-- `core_bridge.rs` exposes enough window and buffer operations for `saya` to
+- `src/core/bridge.rs` exposes enough window and buffer operations for `saya` to
   bind a float to a core buffer or window.
 - `FloatingWindowManager` in the application layer owns float IDs, placement
   specs, focus state, lifecycle, scroll state for non-core content, and z-index
   ordering.
-- `screen_model.rs` projects normal panes plus floating surfaces into a single
+- `src/presentation/screen_model.rs` projects normal panes plus floating surfaces into a single
   render model.
-- `tui_renderer.rs` draws normal panes first, then floats sorted by z-index.
-- `input_router.rs` keeps key normalization, but the main loop dispatches each
+- `src/presentation/render/renderer.rs` draws normal panes first, then floats sorted by z-index.
+- `src/input/router.rs` keeps key normalization, but the main loop dispatches each
   key to the active focus target.
 
 This keeps the generic float mechanism in `saya` without moving editor
@@ -367,7 +367,7 @@ Connect floats to real editor buffers and windows.
   behavior inside the focused float.
 
 If `vim-core-rs` cannot represent the required window identity yet, this phase
-must extend `vim-core-rs` or `core_bridge.rs` intentionally instead of
+must extend `vim-core-rs` or `src/core/bridge.rs` intentionally instead of
 duplicating editing semantics in `saya`.
 
 Status: implemented for existing core-window-backed buffers.

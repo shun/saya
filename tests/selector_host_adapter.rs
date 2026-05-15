@@ -1,7 +1,7 @@
-use saya::selector_host_adapter::{
+use saya::features::selector::host_adapter::{
     HeadlessSelectorUiProjectionSink, SelectorHostViewAdapter, SelectorUiIntent,
 };
-use saya::selector_runtime::{
+use saya::features::selector::runtime::{
     RuntimeRenderedSelectorItem, RuntimeSelectorCollectStatus, RuntimeSelectorHighlight,
     RuntimeSelectorMatchStatus, RuntimeSelectorStatus, RuntimeSelectorStorageMode,
     RuntimeSelectorStoreStatus, RuntimeSelectorWorkState, SelectorViewBackend,

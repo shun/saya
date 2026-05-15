@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use saya::selector_host_adapter::{SelectorHostViewAdapter, SelectorUiIntent};
-use saya::selector_runtime::{
+use saya::features::selector::host_adapter::{SelectorHostViewAdapter, SelectorUiIntent};
+use saya::features::selector::runtime::{
     RuntimeRenderedSelectorItem, RuntimeSelectorCollectStatus, RuntimeSelectorHighlight,
     RuntimeSelectorMatchStatus, RuntimeSelectorStatus, RuntimeSelectorStorageMode,
     RuntimeSelectorStoreStatus, RuntimeSelectorWorkState, SelectorViewBackend,
     SelectorViewBackendInput,
 };
-use saya::selector_tui_state::{SelectorTuiProjectionSink, selector_tui_model_to_workspace_float};
+use saya::features::selector::tui_state::{
+    SelectorTuiProjectionSink, selector_tui_model_to_workspace_float,
+};
 
 #[test]
 fn tui_selector_state_keeps_render_projection_as_draw_ready_model() {

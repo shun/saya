@@ -6,9 +6,9 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::bootstrap::{BootstrapWarning, launch_test_lock, prepare_launch};
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::screen_model::{ProjectionInput, project};
+use saya::app::bootstrap::{BootstrapWarning, launch_test_lock, prepare_launch};
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::presentation::screen_model::{ProjectionInput, project};
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {

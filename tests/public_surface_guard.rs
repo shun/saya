@@ -3,8 +3,8 @@
 //! This file stays focused on string-level public API exposure and namespace
 //! exclusions. It must not drift into duplicated editing semantics.
 
-use saya::saya_live_runtime::runtime_public_surface_paths;
-use saya::startup_runtime::startup_public_surface_paths;
+use saya::runtime::live::runtime_public_surface_paths;
+use saya::runtime::startup::startup_public_surface_paths;
 use std::path::{Path, PathBuf};
 
 const FORBIDDEN_COMPAT_STRING_APIS: &[&str] = &["vim.cmd", ":set", ":map"];
@@ -224,7 +224,7 @@ fn main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
 fn structural_refresh_consumes_only_folded_structural_effects() {
     BoundaryGuard {
         boundary: "structural_refresh",
-        path: "src/structural_refresh.rs",
+        path: "src/presentation/structural_refresh.rs",
         forbidden_terms: &[
             "CoreHostAction",
             "CoreEvent",
@@ -236,7 +236,7 @@ fn structural_refresh_consumes_only_folded_structural_effects() {
     }
     .assert_clean();
 
-    let source = std::fs::read_to_string("src/structural_refresh.rs")
+    let source = std::fs::read_to_string("src/presentation/structural_refresh.rs")
         .expect("structural refresh source should be readable from the repository root");
 
     assert!(
@@ -249,7 +249,7 @@ fn structural_refresh_consumes_only_folded_structural_effects() {
 fn structural_refresh_does_not_own_prompt_notification_bell_or_job_behavior() {
     BoundaryGuard {
         boundary: "structural_refresh",
-        path: "src/structural_refresh.rs",
+        path: "src/presentation/structural_refresh.rs",
         forbidden_terms: &[
             "core_notification_prompt",
             "Prompt",
@@ -269,7 +269,7 @@ fn structural_refresh_boundary_guard_names_each_checked_boundary() {
     for guard in [
         BoundaryGuard {
             boundary: "structural_refresh",
-            path: "src/structural_refresh.rs",
+            path: "src/presentation/structural_refresh.rs",
             forbidden_terms: &[
                 "CoreHostAction",
                 "CoreEvent",
@@ -302,7 +302,7 @@ fn structural_refresh_boundary_guard_names_each_checked_boundary() {
 
 #[test]
 fn notification_projection_module_keeps_raw_core_enums_out_of_ui_surface() {
-    let source = std::fs::read_to_string("src/core_notification_prompt.rs")
+    let source = std::fs::read_to_string("src/core/notification_prompt.rs")
         .expect("notification projection module should be readable from the repository root");
 
     for raw_enum in ["CoreHostAction", "CoreEvent"] {
@@ -364,10 +364,10 @@ fn structural_refresh_acceptance_command_is_headless_timeout_guarded_and_complet
 #[test]
 fn typed_message_line_migration_forbids_direct_string_overwrite_paths() {
     for path in [
-        "src/screen_model.rs",
-        "src/presentation_effect.rs",
-        "src/tui_render_coordinator.rs",
-        "src/tui_renderer.rs",
+        "src/presentation/screen_model.rs",
+        "src/presentation/overlay/effect.rs",
+        "src/presentation/render/coordinator.rs",
+        "src/presentation/render/renderer.rs",
         "src/main.rs",
     ] {
         let source =

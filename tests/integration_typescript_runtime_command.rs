@@ -10,18 +10,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app_startup::prepare_launch_and_start_terminal;
-use saya::cli::{ConfigSource, InputSource, LaunchRequest};
-use saya::runtime_integration::{
+use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use saya::app::startup::prepare_launch_and_start_terminal;
+use saya::runtime::integration::{
     RuntimeCommandEffect, RuntimeDispatchOutcome, RuntimeEventMapper, RuntimeHostSession,
     RuntimeOutcomeProjector, RuntimeSessionOwner, RuntimeShutdownIntent,
 };
-use saya::saya_live_runtime::{
+use saya::runtime::live::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
     ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
     RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeMode, SayaLiveRuntime,
 };
-use saya::terminal_lifecycle::TerminalBackend;
+use saya::terminal::lifecycle::TerminalBackend;
 use tokio::sync::Mutex as TokioMutex;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -227,7 +227,7 @@ impl HostCapabilityBridge for RecordingHostBridge {
 
 #[tokio::test(flavor = "current_thread")]
 async fn startup_registered_command_executes_from_runtime_event_after_application_boot() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("init.ts");
@@ -319,7 +319,7 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
 
 #[tokio::test(flavor = "current_thread")]
 async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("boundary-init.ts");
@@ -415,7 +415,7 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_window_float_api_routes_typed_requests_through_host_bridge() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("typed-window-float-api-init.ts");
@@ -450,7 +450,7 @@ async fn runtime_window_float_api_routes_typed_requests_through_host_bridge() {
     )
     .expect("config file");
 
-    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+    let outcome = saya::app::bootstrap::prepare_launch(LaunchRequest {
         input_source: InputSource::Empty,
         config_source: ConfigSource::File(config_path.clone()),
         ..LaunchRequest::default()
@@ -648,7 +648,7 @@ impl RuntimeHostSession for RecordingRuntimeHostSession {
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_through_normalized_outcome()
  {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("live-session-owner-init.ts");
@@ -669,7 +669,7 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
     )
     .expect("config file");
 
-    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+    let outcome = saya::app::bootstrap::prepare_launch(LaunchRequest {
         input_source: InputSource::Empty,
         config_source: ConfigSource::File(config_path.clone()),
         ..LaunchRequest::default()
@@ -728,7 +728,7 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_routes_window_float_api_through_typed_host_session() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("live-session-owner-float-api-init.ts");
@@ -752,7 +752,7 @@ async fn runtime_session_owner_routes_window_float_api_through_typed_host_sessio
     )
     .expect("config file");
 
-    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+    let outcome = saya::app::bootstrap::prepare_launch(LaunchRequest {
         input_source: InputSource::Empty,
         config_source: ConfigSource::File(config_path.clone()),
         ..LaunchRequest::default()
@@ -785,7 +785,7 @@ async fn runtime_session_owner_routes_window_float_api_through_typed_host_sessio
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_follow_up_events() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("live-session-owner-shutdown-init.ts");
@@ -802,7 +802,7 @@ async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_fo
     )
     .expect("config file");
 
-    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+    let outcome = saya::app::bootstrap::prepare_launch(LaunchRequest {
         input_source: InputSource::Empty,
         config_source: ConfigSource::File(config_path.clone()),
         ..LaunchRequest::default()
@@ -857,7 +857,7 @@ async fn runtime_session_owner_retains_shutdown_intent_while_preserving_write_fo
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_projects_callback_failure_into_transient_message_and_redraw() {
-    let _lock = saya::bootstrap::launch_test_lock()
+    let _lock = saya::app::bootstrap::launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("live-session-owner-failure-init.ts");
@@ -871,7 +871,7 @@ async fn runtime_session_owner_projects_callback_failure_into_transient_message_
     )
     .expect("config file");
 
-    let outcome = saya::bootstrap::prepare_launch(LaunchRequest {
+    let outcome = saya::app::bootstrap::prepare_launch(LaunchRequest {
         input_source: InputSource::Empty,
         config_source: ConfigSource::File(config_path.clone()),
         ..LaunchRequest::default()
@@ -908,10 +908,10 @@ async fn runtime_session_owner_projects_callback_failure_into_transient_message_
 #[test]
 fn runtime_outcome_projector_requests_redraw_for_callback_failure_messages() {
     let projected = RuntimeOutcomeProjector::project_error(
-        &saya::saya_live_runtime::RuntimeDispatchError::CallbackFailed {
-            event: saya::saya_live_runtime::RuntimeEventName::BufferOpen,
+        &saya::runtime::live::RuntimeDispatchError::CallbackFailed {
+            event: saya::runtime::live::RuntimeEventName::BufferOpen,
             handler_index: 0,
-            error: saya::saya_live_runtime::RuntimeCallbackError::ScriptFailed {
+            error: saya::runtime::live::RuntimeCallbackError::ScriptFailed {
                 message: "boom".to_string(),
             },
         },

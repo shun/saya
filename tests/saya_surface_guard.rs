@@ -6,17 +6,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use saya::callback_registry_seed::CallbackRegistrySeed;
-use saya::saya_live_runtime::{
+use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
+use saya::runtime::live::{
     BoxFuture, HostCapabilityBridge, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot,
     RuntimeCommandError, RuntimeMode,
 };
-use saya::saya_live_runtime::{
+use saya::runtime::live::{
     BufferEventPayload, ReadonlyBufferSnapshot, RuntimeEventPayload, SayaLiveRuntime,
     runtime_forbidden_surface_names, runtime_public_surface_names,
 };
-use saya::startup_runtime::StartupRegistryEntry;
-use saya::startup_runtime::{
+use saya::runtime::startup::StartupRegistryEntry;
+use saya::runtime::startup::{
     evaluate_startup_module, startup_forbidden_surface_names, startup_public_surface_names,
 };
 
@@ -207,7 +207,7 @@ fn integration_editing_smoke_does_not_reintroduce_core_owned_selection_and_edit_
 
 #[test]
 fn core_bridge_debug_does_not_materialize_full_snapshots() {
-    let source = std::fs::read_to_string("src/core_bridge.rs")
+    let source = std::fs::read_to_string("src/core/bridge.rs")
         .expect("core bridge source should be readable from the repository root");
 
     assert!(

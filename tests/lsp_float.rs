@@ -1,13 +1,13 @@
-use saya::floating_window::{
-    FloatingCloseEvents, FloatingInlineStyleKind, FloatingLifecycle, FloatingLifecycleEvent,
-    FloatingLifecycleOutcome, FloatingRelativeTo, FloatingWindowManager, WorkspaceFocus,
-};
-use saya::input_router::KeyInput;
-use saya::lsp_float::{
+use saya::features::lsp::float::{
     LspDiagnosticFloatRequest, LspHoverFloatRequest, LspHoverOpenOutcome,
     hover_lines_from_lsp_value, open_lsp_diagnostic_float, open_lsp_hover_float,
 };
-use saya::screen_model::PaneRect;
+use saya::input::router::KeyInput;
+use saya::presentation::floating_window::{
+    FloatingCloseEvents, FloatingInlineStyleKind, FloatingLifecycle, FloatingLifecycleEvent,
+    FloatingLifecycleOutcome, FloatingRelativeTo, FloatingWindowManager, WorkspaceFocus,
+};
+use saya::presentation::screen_model::PaneRect;
 use serde_json::json;
 use unicode_width::UnicodeWidthStr;
 
@@ -243,7 +243,7 @@ fn lsp_hover_uses_close_on_events_lifecycle_with_cursor_move_and_mode_change_and
         window
             .focus_id
             .as_ref()
-            .map(saya::floating_window::FloatingFocusId::as_str),
+            .map(saya::presentation::floating_window::FloatingFocusId::as_str),
         Some("lsp:hover"),
         "hover float must carry focus_id `lsp:hover` for focus toggle"
     );

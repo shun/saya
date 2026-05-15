@@ -1,25 +1,27 @@
 use std::fs;
 
-use saya::core_notification_prompt::{
+use saya::core::notification_prompt::{
     BellIndication, MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
 };
-use saya::core_outcome::{RedrawEffect, StructuralEffectSet};
-use saya::optional_graphics::{OptionalGraphicsAdapter, RecordingOverlayWriter};
-use saya::overlay_asset_store::OverlayAssetStore;
-use saya::screen_model::{
+use saya::core::outcome::{RedrawEffect, StructuralEffectSet};
+use saya::presentation::overlay::asset_store::OverlayAssetStore;
+use saya::presentation::overlay::optional_graphics::{
+    OptionalGraphicsAdapter, RecordingOverlayWriter,
+};
+use saya::presentation::render::coordinator::TuiRenderCoordinator;
+use saya::presentation::render::renderer::{RenderFrameOptions, RenderTextMode};
+use saya::presentation::screen_model::{
     CommandLineModel, PaneRect, ScreenCursorStyle, ScreenModel, ScreenSyntaxChunk,
     WorkspaceProjectionError, WorkspaceScreenModel,
 };
-use saya::structural_refresh::{
+use saya::presentation::structural_refresh::{
     ProjectionFailureDiagnostic, ProjectionStatus, RedrawPlan, RedrawPlanSource, StructuralRefresh,
     ViewportRefreshStatus,
 };
-use saya::terminal_capability::{
+use saya::terminal::capability::{
     InlineGraphicsProbeResult, TerminalCapabilityObservation, TerminalCapabilityProbe,
     TerminalCapabilityProbeService, TerminalCapabilityProfile, TerminalSessionKind,
 };
-use saya::tui_render_coordinator::TuiRenderCoordinator;
-use saya::tui_renderer::{RenderFrameOptions, RenderTextMode};
 
 fn capabilities_without_graphics() -> TerminalCapabilityProfile {
     TerminalCapabilityProbe::new(
@@ -58,7 +60,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
-            resolved_theme: saya::theme::ResolvedTheme::default(),
+            resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
             is_active: true,
@@ -111,7 +113,7 @@ fn render_workspace_prefers_command_line_cursor_style() {
     );
     let mut workspace = workspace(1, 101, "normal projection", "message");
     workspace.panes[0].cursor_style = ScreenCursorStyle::Block;
-    workspace.command_line = Some(saya::screen_model::CommandLineModel {
+    workspace.command_line = Some(saya::presentation::screen_model::CommandLineModel {
         text: ":write".to_string(),
         cursor_col: 6,
     });
@@ -643,10 +645,10 @@ fn unresolved_projection_failure_keeps_failure_diagnostic_separate_from_retained
 
 #[test]
 fn renderer_option_contract_is_no_longer_source_only_future_guard() {
-    let coordinator_source = fs::read_to_string("src/tui_render_coordinator.rs")
+    let coordinator_source = fs::read_to_string("src/presentation/render/coordinator.rs")
         .expect("render coordinator source should be readable");
-    let renderer_source =
-        fs::read_to_string("src/tui_renderer.rs").expect("renderer source should be readable");
+    let renderer_source = fs::read_to_string("src/presentation/render/renderer.rs")
+        .expect("renderer source should be readable");
 
     assert!(
         coordinator_source.contains("RedrawPlan"),

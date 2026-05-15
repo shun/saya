@@ -1,4 +1,4 @@
-use saya::selector_core::{
+use saya::features::selector::core::{
     CancellationToken, CollectProcessor, DefaultRenderer, HighlightKind, InMemoryResultStore,
     MatchProcessor, NoopPreviewer, PrefixAndMatcher, PreviewProcessor, RenderProcessor,
     ResultStore, SelectorController, SelectorControllerCommand, SelectorError, SelectorHighlight,
@@ -248,8 +248,8 @@ struct FailingRenderer;
 impl SelectorRenderer<()> for FailingRenderer {
     fn render(
         &self,
-        _item: &saya::selector_core::MatchedItem<()>,
-    ) -> Result<saya::selector_core::RenderedItem, SelectorError> {
+        _item: &saya::features::selector::core::MatchedItem<()>,
+    ) -> Result<saya::features::selector::core::RenderedItem, SelectorError> {
         Err(SelectorError::Failed("render failed".to_string()))
     }
 }

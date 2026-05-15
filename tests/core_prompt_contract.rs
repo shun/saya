@@ -1,4 +1,4 @@
-use saya::core_prompt::{PromptResponseCommand, PromptResponseError, PromptResponseRejection};
+use saya::core::prompt::{PromptResponseCommand, PromptResponseError, PromptResponseRejection};
 
 #[test]
 fn prompt_response_command_exposes_submit_and_cancel_without_raw_core_types() {

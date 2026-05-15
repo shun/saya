@@ -10,7 +10,7 @@ different problems with different public surfaces.
 ## Phase 1: Startup evaluation
 
 Startup evaluation happens before the editor session begins. The implementation
-lives in `src/startup_runtime.rs`.
+lives in `src/runtime/startup.rs`.
 
 This phase gives `init.ts` a narrow `saya` surface for declaring initial state
 and callback registrations.
@@ -44,7 +44,7 @@ That design gives the repository these benefits.
 
 ## Phase 2: Runtime callback execution
 
-Runtime callback execution happens in `src/saya_live_runtime.rs`. This phase
+Runtime callback execution happens in `src/runtime/live.rs`. This phase
 hosts command dispatch and event handling through a separate runtime boundary.
 
 The runtime surface is narrower than the startup surface and focuses on typed,
@@ -196,8 +196,8 @@ should not become a back door for direct TUI mutation.
   rendering stay out of the bridge and remain in the application loop.
 
 That split matters because a redraw request is an application concern, not a
-runtime concern. The existing helpers in `runtime_message.rs` and
-`runtime_refresh.rs` already point in this direction and should remain
+runtime concern. The existing helpers in `src/runtime/message.rs` and
+`src/runtime/refresh.rs` already point in this direction and should remain
 application-side translators.
 
 ### Event coverage strategy

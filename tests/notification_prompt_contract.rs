@@ -1,18 +1,18 @@
 use std::sync::{Mutex, OnceLock};
 
-use saya::core_notification_prompt::{
+use saya::core::notification_prompt::{
     BellIndication, InputPromptStatus, InputPromptView, MessageLineCandidate, MessageLineSource,
     NotificationPromptProjectionState, PagerPromptView, ProjectionFrame,
     PromptHintSuppressionReason, PromptInputAction, PromptTransitionKind, RetainedPromptState,
     SuppressedPromptHint, handle_prompt_key, record_prompt_response_error,
     resolve_workspace_message_line,
 };
-use saya::core_outcome::{
+use saya::core::outcome::{
     ApplicationOutcomeState, NormalizedCoreOutcome, NormalizedOutcomeBatch, NormalizedPrompt,
     OutcomeOrigin, OutcomeTrace, PromptResponseDisposition, fold_normalized_outcomes,
 };
-use saya::core_prompt::PromptResponseError;
-use saya::input_router::KeyInput;
+use saya::core::prompt::PromptResponseError;
+use saya::input::router::KeyInput;
 use vim_core_rs::{CoreInputRequestKind, CorePagerPromptKind};
 
 struct TestLogger {
