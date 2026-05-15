@@ -171,6 +171,9 @@ pub enum StartupRegistryEntry {
     LogFile {
         path: String,
     },
+    LogLevel {
+        level: log::LevelFilter,
+    },
 }
 
 /// startup keymap のモード。

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use deno_core::{OpState, RuntimeOptions, op2};
 use deno_error::JsErrorBox;
+use log::LevelFilter;
 
 use crate::presentation::theme::{
     MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
@@ -51,6 +52,7 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.theme.syntax",
     "saya.theme.markdown",
     "saya.log.file",
+    "saya.log.level",
 ];
 
 const STARTUP_COMMAND_REFERENCE_PREFIX: &str = "__SAYA_STARTUP_COMMAND_REF__:";
@@ -76,6 +78,7 @@ const {
     op_collect_startup_theme_syntax,
     op_collect_startup_theme_markdown,
     op_collect_startup_log_file,
+    op_collect_startup_log_level,
 } = Deno.core.ops;
 
 globalThis.saya = {
@@ -205,6 +208,20 @@ Object.defineProperty(globalThis.saya.log, "file", {
             throw new TypeError("log.file must be a string");
         }
         op_collect_startup_log_file(value);
+    },
+});
+
+Object.defineProperty(globalThis.saya.log, "level", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return undefined;
+    },
+    set(value) {
+        if (typeof value !== "string") {
+            throw new TypeError("log.level must be a string");
+        }
+        op_collect_startup_log_level(value);
     },
 });
 
@@ -501,6 +518,7 @@ declare global {
 
     interface SayaStartupLogSurface {
         file?: string;
+        level?: "error" | "warn" | "info" | "debug" | "trace";
     }
 
     interface SayaStartupSurface {
@@ -830,6 +848,39 @@ fn op_collect_startup_log_file(
     Ok(())
 }
 
+#[op2(fast)]
+fn op_collect_startup_log_level(
+    state: &mut OpState,
+    #[string] level: String,
+) -> Result<(), JsErrorBox> {
+    let Some(level_filter) = parse_startup_log_level(&level) else {
+        return Err(JsErrorBox::generic(format!(
+            "unsupported log.level: {level}"
+        )));
+    };
+    log::debug!(
+        "[startup_runtime] collect startup log level: level={}",
+        level_filter
+    );
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::LogLevel {
+            level: level_filter,
+        });
+    Ok(())
+}
+
+fn parse_startup_log_level(level: &str) -> Option<LevelFilter> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "error" => Some(LevelFilter::Error),
+        "warn" => Some(LevelFilter::Warn),
+        "info" => Some(LevelFilter::Info),
+        "debug" => Some(LevelFilter::Debug),
+        "trace" => Some(LevelFilter::Trace),
+        _ => None,
+    }
+}
+
 fn parse_theme_text_style(
     label: &str,
     name: &str,
@@ -901,7 +952,8 @@ deno_core::extension!(
         op_collect_startup_theme_ui,
         op_collect_startup_theme_syntax,
         op_collect_startup_theme_markdown,
-        op_collect_startup_log_file
+        op_collect_startup_log_file,
+        op_collect_startup_log_level
     ],
     state = |state| state.put(StartupRegistry::default())
 );

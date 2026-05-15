@@ -175,6 +175,7 @@ top-level areas.
 - `saya.commands`
 - `saya.events`
 - `saya.theme`
+- `saya.log`
 
 ## Options
 
@@ -355,6 +356,34 @@ saya.theme.syntax = {
 
 The current syntax keys are `comment`, `string`, `constant`, `statement`,
 `identifier`, `type`, `function`, `punctuation`, `markup`, and `default`.
+
+## Log
+
+The log surface lets you declare diagnostic logging during startup. Use it for
+headless debugging and issue reproduction rather than normal editor
+interaction.
+
+### `saya.log.file`
+
+Use this string property to write diagnostic logs to a file. If `SAYA_LOG_FILE`
+is set in the environment, that environment path takes precedence over this
+startup property.
+
+```ts
+saya.log.file = "/tmp/saya.log";
+```
+
+### `saya.log.level`
+
+Use this string property to choose the minimum diagnostic log level collected
+after startup configuration is evaluated.
+
+```ts
+saya.log.level = "warn";
+```
+
+The accepted levels are `"error"`, `"warn"`, `"info"`, `"debug"`, and
+`"trace"`.
 
 ## What the startup API does not expose
 

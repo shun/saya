@@ -1170,6 +1170,24 @@ async fn startup_log_file_is_collected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_log_level_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.log.level = "warn";
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::LogLevel {
+            level: log::LevelFilter::Warn,
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_command_registration_is_collected() {
     let registry = collect_startup_registry(
         r#"

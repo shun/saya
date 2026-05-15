@@ -62,9 +62,10 @@ pub fn prepare_launch_and_start_terminal<'a, B: TerminalBackend>(
             return Err(LaunchStartError::Bootstrap(error));
         }
     };
-    if let Err(error) =
-        configure_diagnostic_log_from_startup(outcome.startup_registry.log.log_file.as_deref())
-    {
+    if let Err(error) = configure_diagnostic_log_from_startup(
+        outcome.startup_registry.log.log_file.as_deref(),
+        outcome.startup_registry.log.log_level,
+    ) {
         log::debug!(
             "[app_startup] startup log file configuration failed: {}",
             error

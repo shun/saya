@@ -130,6 +130,7 @@ pub enum StartupKeymapAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartupLogSnapshot {
     pub log_file: Option<PathBuf>,
+    pub log_level: Option<log::LevelFilter>,
 }
 
 #[derive(Debug, Clone)]
@@ -675,7 +676,8 @@ fn config_commands_from_registry(
             | StartupRegistryEntry::ThemeMarkdownStyle { .. }
             | StartupRegistryEntry::ThemeUiStyle { .. }
             | StartupRegistryEntry::ThemeSyntaxStyle { .. }
-            | StartupRegistryEntry::LogFile { .. } => None,
+            | StartupRegistryEntry::LogFile { .. }
+            | StartupRegistryEntry::LogLevel { .. } => None,
         })
         .collect()
 }
@@ -736,6 +738,14 @@ fn startup_log_from_registry(registry: &StartupRegistry) -> StartupLogSnapshot {
                 StartupRegistryEntry::LogFile { path } if !path.trim().is_empty() => {
                     Some(PathBuf::from(path))
                 }
+                _ => None,
+            }),
+        log_level: registry
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                StartupRegistryEntry::LogLevel { level } => Some(*level),
                 _ => None,
             }),
     }
@@ -1394,6 +1404,22 @@ mod tests {
             startup_registry.log.log_file,
             Some(PathBuf::from("/tmp/saya-new.log"))
         );
+    }
+
+    #[test]
+    fn startup_registry_from_registry_uses_last_log_level() {
+        let mut registry = StartupRegistry::default();
+        registry.push(StartupRegistryEntry::LogLevel {
+            level: log::LevelFilter::Debug,
+        });
+        registry.push(StartupRegistryEntry::LogLevel {
+            level: log::LevelFilter::Warn,
+        });
+
+        let state = ConfigApplyState::default_state();
+        let startup_registry = startup_registry_from_registry(&state, &registry);
+
+        assert_eq!(startup_registry.log.log_level, Some(log::LevelFilter::Warn));
     }
 
     #[test]

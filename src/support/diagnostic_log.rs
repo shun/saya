@@ -36,11 +36,16 @@ pub fn init_from_env() -> Result<Option<PathBuf>, DiagnosticLogInitError> {
 
 pub fn configure_from_startup(
     log_file: Option<&Path>,
+    log_level: Option<LevelFilter>,
 ) -> Result<Option<PathBuf>, DiagnosticLogInitError> {
+    let logger = LOGGER.get_or_init(FileDiagnosticLogger::default);
+    if let Some(level) = log_level {
+        logger.configure_level(level);
+        log::info!("[diagnostic_log] startup log level configured: level={level}");
+    }
     let Some(path) = log_file else {
         return Ok(None);
     };
-    let logger = LOGGER.get_or_init(FileDiagnosticLogger::default);
     let configured = logger.configure_file_from_startup(path)?;
     if let Some(path) = configured.as_ref() {
         log::info!(
@@ -150,8 +155,13 @@ struct FileDiagnosticLogger {
 struct FileDiagnosticLoggerState {
     file: Option<File>,
     level: LevelFilter,
-    buffer: Vec<String>,
+    buffer: Vec<BufferedLogLine>,
     locked_by_env: bool,
+}
+
+struct BufferedLogLine {
+    level: log::Level,
+    line: String,
 }
 
 impl Default for FileDiagnosticLoggerState {
@@ -180,8 +190,10 @@ impl FileDiagnosticLogger {
     ) -> Result<(), DiagnosticLogInitError> {
         let mut file = open_log_file(path)?;
         if let Ok(mut state) = self.state.lock() {
-            for line in state.buffer.drain(..) {
-                let _ = writeln!(file, "{line}");
+            for buffered in state.buffer.drain(..) {
+                if buffered.level <= level {
+                    let _ = writeln!(file, "{}", buffered.line);
+                }
             }
             let _ = file.flush();
             state.file = Some(file);
@@ -251,7 +263,10 @@ impl Log for FileDiagnosticLogger {
                 if state.buffer.len() >= BUFFER_LIMIT {
                     state.buffer.remove(0);
                 }
-                state.buffer.push(line);
+                state.buffer.push(BufferedLogLine {
+                    level: record.level(),
+                    line,
+                });
             }
         }
     }

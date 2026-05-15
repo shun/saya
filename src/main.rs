@@ -1603,8 +1603,11 @@ fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Result<(),
     eprintln!("[main][smoke] preparing headless launch");
     let mut outcome =
         saya::app::bootstrap::prepare_launch(launch_request).map_err(format_bootstrap_error)?;
-    configure_diagnostic_log_from_startup(outcome.startup_registry.log.log_file.as_deref())
-        .map_err(|error| error.to_string())?;
+    configure_diagnostic_log_from_startup(
+        outcome.startup_registry.log.log_file.as_deref(),
+        outcome.startup_registry.log.log_level,
+    )
+    .map_err(|error| error.to_string())?;
     let mut session_state = outcome.editor_session_state();
     let startup_model = project(&ProjectionInput::new(
         &outcome.initial_snapshot,

@@ -209,6 +209,52 @@ fn init_ts_log_file_writes_binary_smoke_logs() {
 }
 
 #[test]
+fn init_ts_log_level_filters_binary_smoke_logs() {
+    let target_path = unique_path("startup-log-level-target.txt");
+    let config_path = unique_path("log-level-init.ts");
+    let log_path = unique_path("startup-level.log");
+    std::fs::write(&target_path, "alpha\n").expect("target file should be created");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                saya.log.file = {};
+                saya.log.level = "warn";
+            "#,
+            serde_json::to_string(log_path.to_str().expect("log path should be UTF-8"))
+                .expect("log path should serialize")
+        ),
+    )
+    .expect("startup config should be created");
+
+    let output = run_sy_headless_smoke_with_env(
+        &[
+            "-u",
+            config_path.to_str().expect("config path should be UTF-8"),
+            target_path.to_str().expect("target path should be UTF-8"),
+        ],
+        &[("SAYA_LOG", "0")],
+    );
+
+    assert!(
+        output.status.success(),
+        "sy binary should exit cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = std::fs::read_to_string(&log_path).expect("init.ts log file should be created");
+    assert!(
+        !log.contains("[bootstrap] startup preflight requested"),
+        "warn startup level should filter debug logs: {log}"
+    );
+
+    std::fs::remove_file(&target_path).expect("cleanup target");
+    std::fs::remove_file(&config_path).expect("cleanup config");
+    std::fs::remove_file(&log_path).expect("cleanup log");
+}
+
+#[test]
 fn starting_from_stdin_surfaces_save_path_restriction_in_the_smoke_output() {
     let output = run_sy_headless_smoke_with_stdin(&["-"], b"alpha\nbeta\n");
 
