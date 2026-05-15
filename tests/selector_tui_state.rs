@@ -1,0 +1,249 @@
+use std::sync::Arc;
+
+use saya::selector_host_adapter::{SelectorHostViewAdapter, SelectorUiIntent};
+use saya::selector_runtime::{
+    RuntimeRenderedSelectorItem, RuntimeSelectorCollectStatus, RuntimeSelectorHighlight,
+    RuntimeSelectorMatchStatus, RuntimeSelectorStatus, RuntimeSelectorStorageMode,
+    RuntimeSelectorStoreStatus, RuntimeSelectorWorkState, SelectorViewBackend,
+    SelectorViewBackendInput,
+};
+use saya::selector_tui_state::{SelectorTuiProjectionSink, selector_tui_model_to_workspace_float};
+
+#[test]
+fn tui_selector_state_keeps_render_projection_as_draw_ready_model() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 3);
+
+    adapter.render(selector_input(
+        "needle",
+        3,
+        2,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    ));
+
+    let model = tui_state
+        .current_model()
+        .expect("render projection should produce TUI selector model");
+    assert!(tui_state.is_visible());
+    assert_eq!(model.session_id, 42);
+    assert_eq!(model.query, "needle");
+    assert_eq!(
+        model
+            .visible_rows
+            .iter()
+            .map(|row| (row.index, row.item.id.as_str(), row.selected))
+            .collect::<Vec<_>>(),
+        vec![(2, "row-2", false), (3, "row-3", true), (4, "row-4", false)]
+    );
+    assert_eq!(
+        model
+            .selected_row
+            .as_ref()
+            .map(|row| (row.index, row.item.id.as_str())),
+        Some((3, "row-3"))
+    );
+    assert_eq!(
+        model.status.match_status.state,
+        RuntimeSelectorWorkState::Completed
+    );
+    assert!(!model.cancelled);
+    assert_eq!(model.intent, SelectorUiIntent::Render);
+    assert!(!model.should_dispose_session);
+    assert_eq!(tui_state.projection_count(), 1);
+    assert_eq!(
+        tui_state.float_launch_count(),
+        0,
+        "TUI state sink must not start a floating or split UI"
+    );
+}
+
+#[test]
+fn tui_selector_state_hides_without_disposing_session() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 5);
+
+    adapter.render(selector_input(
+        "needle",
+        1,
+        0,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    ));
+    adapter.render(selector_input(
+        "needle",
+        1,
+        0,
+        true,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    ));
+
+    let model = tui_state
+        .current_model()
+        .expect("hide projection should retain the last selector model");
+    assert!(!tui_state.is_visible());
+    assert_eq!(model.intent, SelectorUiIntent::Hide);
+    assert!(model.hidden);
+    assert!(!model.cancelled);
+    assert!(!model.should_dispose_session);
+    assert_eq!(
+        model.status.match_status.state,
+        RuntimeSelectorWorkState::Completed
+    );
+    assert_eq!(tui_state.projection_count(), 2);
+}
+
+#[test]
+fn tui_selector_state_cancels_as_hidden_cancelled_model_without_dispose() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 5);
+
+    adapter.render(selector_input(
+        "needle",
+        1,
+        0,
+        true,
+        true,
+        RuntimeSelectorWorkState::Cancelled,
+    ));
+
+    let model = tui_state
+        .current_model()
+        .expect("cancel projection should retain cancelled selector model");
+    assert!(!tui_state.is_visible());
+    assert_eq!(model.intent, SelectorUiIntent::Cancel);
+    assert!(model.hidden);
+    assert!(model.cancelled);
+    assert!(!model.should_dispose_session);
+    assert_eq!(
+        model.status.match_status.state,
+        RuntimeSelectorWorkState::Cancelled
+    );
+    assert_eq!(tui_state.projection_count(), 1);
+}
+
+#[test]
+fn visible_tui_selector_model_projects_to_static_workspace_float() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 3);
+
+    adapter.render(selector_input(
+        "needle",
+        3,
+        2,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    ));
+
+    let model = tui_state
+        .current_model()
+        .expect("render projection should produce TUI selector model");
+    let float = selector_tui_model_to_workspace_float(&model, 80, 24)
+        .expect("visible selector model should project to workspace float");
+
+    assert_eq!(float.lines[0], "query: needle");
+    assert_eq!(
+        &float.lines[1..4],
+        ["  row 2", "> row 3", "  row 4"],
+        "selected row should be visible in the static selector float"
+    );
+    assert!(
+        float
+            .lines
+            .last()
+            .expect("status summary line")
+            .contains("matched=6 rendered=6"),
+        "status summary should include runtime selector counts"
+    );
+    assert!(!float.focusable);
+}
+
+#[test]
+fn hidden_or_cancelled_tui_selector_model_projects_to_no_workspace_float() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 3);
+
+    adapter.render(selector_input(
+        "needle",
+        3,
+        2,
+        true,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    ));
+    let hidden = tui_state
+        .current_model()
+        .expect("hide projection should retain TUI selector state");
+    assert!(selector_tui_model_to_workspace_float(&hidden, 80, 24).is_none());
+
+    adapter.render(selector_input(
+        "needle",
+        3,
+        2,
+        true,
+        true,
+        RuntimeSelectorWorkState::Cancelled,
+    ));
+    let cancelled = tui_state
+        .current_model()
+        .expect("cancel projection should retain TUI selector state");
+    assert!(cancelled.cancelled);
+    assert!(!cancelled.should_dispose_session);
+    assert!(selector_tui_model_to_workspace_float(&cancelled, 80, 24).is_none());
+}
+
+fn selector_input(
+    query: &str,
+    cursor: usize,
+    offset: usize,
+    hidden: bool,
+    cancelled: bool,
+    match_state: RuntimeSelectorWorkState,
+) -> SelectorViewBackendInput {
+    let rendered_items = (0..6)
+        .map(|index| RuntimeRenderedSelectorItem {
+            id: format!("row-{index}"),
+            label: format!("row {index}"),
+            kind: "test".to_string(),
+            detail: serde_json::json!({ "index": index }),
+            highlights: Vec::<RuntimeSelectorHighlight>::new(),
+        })
+        .collect::<Vec<_>>();
+    let selected_item = rendered_items.get(cursor).cloned();
+
+    SelectorViewBackendInput {
+        session_id: 42,
+        query: query.to_string(),
+        rendered_items,
+        selected_item,
+        cursor,
+        offset,
+        hidden,
+        cancelled,
+        status: RuntimeSelectorStatus {
+            collect: RuntimeSelectorCollectStatus {
+                state: RuntimeSelectorWorkState::Completed,
+                total_seen: 6,
+                total_stored: 6,
+                storage: RuntimeSelectorStorageMode::Memory,
+                error_message: None,
+            },
+            match_status: RuntimeSelectorMatchStatus {
+                state: match_state,
+                total_matched: 6,
+                total_rendered: 6,
+                error_message: None,
+            },
+            store: RuntimeSelectorStoreStatus {
+                storage: RuntimeSelectorStorageMode::Memory,
+                total_stored: 6,
+                estimated_bytes: Some(48),
+                temp_file_path: None,
+            },
+        },
+    }
+}

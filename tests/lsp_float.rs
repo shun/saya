@@ -78,9 +78,7 @@ fn lsp_hover_at_a_different_cursor_position_replaces_previous_hover_and_closes_o
     )
     .expect("second hover should open");
     let LspHoverOpenOutcome::Opened { id: second } = second_outcome else {
-        panic!(
-            "different anchor must produce a fresh float (Opened), got: {second_outcome:?}"
-        );
+        panic!("different anchor must produce a fresh float (Opened), got: {second_outcome:?}");
     };
 
     let floats =

@@ -419,13 +419,11 @@ fn render_floats(
         };
         let paragraph = match float.chrome.border {
             FloatingBorder::None => Paragraph::new(text).style(base_style),
-            FloatingBorder::Single => Paragraph::new(text)
-                .style(base_style)
-                .block(
-                    Block::bordered()
-                        .style(base_style)
-                        .border_style(border_only_style),
-                ),
+            FloatingBorder::Single => Paragraph::new(text).style(base_style).block(
+                Block::bordered()
+                    .style(base_style)
+                    .border_style(border_only_style),
+            ),
         };
         f.render_widget(paragraph, rect);
     }

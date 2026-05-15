@@ -2,8 +2,9 @@ use saya::floating_window::{
     EditorMode, FloatingAnchor, FloatingAnchorSignature, FloatingBorder, FloatingChrome,
     FloatingCloseEvents, FloatingContentRef, FloatingFit, FloatingFocusId, FloatingInlineStyle,
     FloatingInlineStyleKind, FloatingInputOutcome, FloatingLifecycle, FloatingLifecycleEvent,
-    FloatingLifecycleOutcome, FloatingMouseOutcome, FloatingOpenWithFocusOutcome, FloatingPlacement,
-    FloatingRelativeTo, FloatingSize, FloatingWindowManager, FloatingZIndex, WorkspaceFocus,
+    FloatingLifecycleOutcome, FloatingMouseOutcome, FloatingOpenWithFocusOutcome,
+    FloatingPlacement, FloatingRelativeTo, FloatingSize, FloatingWindowManager, FloatingZIndex,
+    WorkspaceFocus,
 };
 use saya::input_router::KeyInput;
 use saya::screen_model::PaneRect;
@@ -1306,7 +1307,9 @@ fn focus_toggle_keeps_floats_with_different_focus_ids_independent() {
         true,
     ) {
         FloatingOpenWithFocusOutcome::Opened { id } => id,
-        other => panic!("different focus_id must not reuse another focus_id's float, got {other:?}"),
+        other => {
+            panic!("different focus_id must not reuse another focus_id's float, got {other:?}")
+        }
     };
 
     assert_ne!(hover, signature_help);
@@ -1543,10 +1546,7 @@ fn set_inline_styles_replaces_full_inline_style_list_on_existing_float() {
 #[test]
 fn set_inline_styles_returns_false_for_unknown_float_id() {
     let mut manager = FloatingWindowManager::default();
-    assert!(!manager.set_inline_styles(
-        saya::floating_window::FloatingWindowId(999),
-        Vec::new()
-    ));
+    assert!(!manager.set_inline_styles(saya::floating_window::FloatingWindowId(999), Vec::new()));
 }
 
 #[test]

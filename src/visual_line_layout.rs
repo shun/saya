@@ -129,8 +129,7 @@ impl VisualLineLayout {
                 display_text.extend(std::iter::repeat_n(' ', usize::from(advance)));
                 advance
             } else {
-                let width = u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(0))
-                    .unwrap_or(0);
+                let width = u16::try_from(UnicodeWidthChar::width(ch).unwrap_or(0)).unwrap_or(0);
                 display_text.push(ch);
                 width
             };
@@ -242,16 +241,11 @@ impl VisualLineLayout {
             return None;
         }
         let content_col = screen_col.0 - self.gutter_width;
-        if let Some(cell) = self
-            .cells
-            .iter()
-            .find(|cell| {
-                cell.content_display.start.0 <= content_col
-                    && (content_col < cell.content_display.end.0
-                        || (cell.content_width() == 0
-                            && cell.content_display.start.0 == content_col))
-            })
-        {
+        if let Some(cell) = self.cells.iter().find(|cell| {
+            cell.content_display.start.0 <= content_col
+                && (content_col < cell.content_display.end.0
+                    || (cell.content_width() == 0 && cell.content_display.start.0 == content_col))
+        }) {
             return Some(cell.raw_start());
         }
         // コンテンツ末尾以降は raw 末尾を指す。

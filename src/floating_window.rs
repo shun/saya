@@ -718,14 +718,7 @@ impl FloatingWindowManager {
         }
 
         let id = self.open_static_lines_with_lifecycle_and_replacement_group(
-            lines,
-            lifecycle,
-            None,
-            placement,
-            size,
-            chrome,
-            zindex,
-            focusable,
+            lines, lifecycle, None, placement, size, chrome, zindex, focusable,
         );
         if let Some(window) = self.windows.iter_mut().find(|window| window.id == id) {
             window.focus_id = Some(focus_id.clone());

@@ -73,15 +73,9 @@ pub enum ProcessPoolError {
     /// 指定された `handle` が存在しない。
     UnknownHandle { handle: u32 },
     /// 指定ストリームが `StdioMode::Piped` で開かれていない。
-    StreamNotPiped {
-        handle: u32,
-        stream: &'static str,
-    },
+    StreamNotPiped { handle: u32, stream: &'static str },
     /// 同じストリームを別タスクが既に読み出している。
-    AlreadyReading {
-        handle: u32,
-        stream: &'static str,
-    },
+    AlreadyReading { handle: u32, stream: &'static str },
     /// I/O 操作でエラーが発生した。
     Io {
         context: &'static str,
@@ -229,29 +223,22 @@ impl ProcessPool {
     ///
     /// 書き込めたバイト数を返す。`AsyncWriteExt::write_all` を使うので、
     /// 戻り値は常に `buf.len()` と一致する（途中失敗は `Err` で返る）。
-    pub async fn write_stdin(
-        &self,
-        handle: u32,
-        buf: &[u8],
-    ) -> Result<usize, ProcessPoolError> {
+    pub async fn write_stdin(&self, handle: u32, buf: &[u8]) -> Result<usize, ProcessPoolError> {
         log::trace!(
             "[process_pool] write_stdin: handle={handle}, bytes={}",
             buf.len()
         );
         let session = self.session(handle).await?;
-        let stdin_mutex =
-            session
-                .stdin
-                .as_ref()
-                .ok_or(ProcessPoolError::StreamNotPiped {
-                    handle,
-                    stream: "stdin",
-                })?;
+        let stdin_mutex = session
+            .stdin
+            .as_ref()
+            .ok_or(ProcessPoolError::StreamNotPiped {
+                handle,
+                stream: "stdin",
+            })?;
         let mut stdin = stdin_mutex.lock().await;
         stdin.write_all(buf).await.map_err(|error| {
-            log::debug!(
-                "[process_pool] stdin write_all failed: handle={handle}, error={error}"
-            );
+            log::debug!("[process_pool] stdin write_all failed: handle={handle}, error={error}");
             ProcessPoolError::Io {
                 context: "stdin write_all",
                 detail: error.to_string(),
@@ -309,20 +296,12 @@ impl ProcessPool {
         );
         let session = self.session(handle).await?;
         match target {
-            ReadTarget::Stdout => read_via_mutex(
-                handle,
-                session.stdout.as_ref(),
-                "stdout",
-                buf,
-            )
-            .await,
-            ReadTarget::Stderr => read_via_mutex(
-                handle,
-                session.stderr.as_ref(),
-                "stderr",
-                buf,
-            )
-            .await,
+            ReadTarget::Stdout => {
+                read_via_mutex(handle, session.stdout.as_ref(), "stdout", buf).await
+            }
+            ReadTarget::Stderr => {
+                read_via_mutex(handle, session.stderr.as_ref(), "stderr", buf).await
+            }
         }
     }
 
@@ -432,9 +411,7 @@ where
     })?;
     let mut guard = mutex.try_lock().map_err(|error| match error {
         TryLockError { .. } => {
-            log::debug!(
-                "[process_pool] read_{label} rejected (already reading): handle={handle}"
-            );
+            log::debug!("[process_pool] read_{label} rejected (already reading): handle={handle}");
             ProcessPoolError::AlreadyReading {
                 handle,
                 stream: label,
@@ -442,9 +419,7 @@ where
         }
     })?;
     let n = guard.read(buf).await.map_err(|error| {
-        log::debug!(
-            "[process_pool] {label} read failed: handle={handle}, error={error}"
-        );
+        log::debug!("[process_pool] {label} read failed: handle={handle}, error={error}");
         ProcessPoolError::Io {
             context: "stream read",
             detail: error.to_string(),
@@ -537,10 +512,7 @@ mod tests {
         let pool = ProcessPool::new();
 
         let h1 = pool.spawn(cat_spec()).await.expect("first spawn succeeds");
-        let h2 = pool
-            .spawn(cat_spec())
-            .await
-            .expect("second spawn succeeds");
+        let h2 = pool.spawn(cat_spec()).await.expect("second spawn succeeds");
 
         assert!(
             h2 > h1,
@@ -589,12 +561,10 @@ mod tests {
         // 読み戻し。cat -u は unbuffered なので同じバイト列が返ってくる。
         // テストがハングしないようタイムアウトでガード。
         let mut buf = [0u8; 128];
-        let read_result = tokio::time::timeout(
-            Duration::from_secs(2),
-            pool.read_stdout(handle, &mut buf),
-        )
-        .await
-        .expect("read_stdout completes within 2s");
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(2), pool.read_stdout(handle, &mut buf))
+                .await
+                .expect("read_stdout completes within 2s");
         let n = read_result
             .expect("read_stdout returns Ok")
             .expect("read_stdout returns Some bytes (not EOF)");
@@ -649,10 +619,7 @@ mod tests {
         let pool = ProcessPool::new();
         let spec = ProcessSpec {
             command: "sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf out; printf err 1>&2".to_string(),
-            ],
+            args: vec!["-c".to_string(), "printf out; printf err 1>&2".to_string()],
             stdin: StdioMode::Null,
             stdout: StdioMode::Piped,
             stderr: StdioMode::Piped,
@@ -799,25 +766,19 @@ mod tests {
             .expect("write to b succeeds");
 
         let mut buf_a = [0u8; 64];
-        let n_a = tokio::time::timeout(
-            Duration::from_secs(2),
-            pool.read_stdout(h_a, &mut buf_a),
-        )
-        .await
-        .expect("read a within 2s")
-        .expect("read a ok")
-        .expect("read a returns Some");
+        let n_a = tokio::time::timeout(Duration::from_secs(2), pool.read_stdout(h_a, &mut buf_a))
+            .await
+            .expect("read a within 2s")
+            .expect("read a ok")
+            .expect("read a returns Some");
         assert_eq!(&buf_a[..n_a], payload_a);
 
         let mut buf_b = [0u8; 64];
-        let n_b = tokio::time::timeout(
-            Duration::from_secs(2),
-            pool.read_stdout(h_b, &mut buf_b),
-        )
-        .await
-        .expect("read b within 2s")
-        .expect("read b ok")
-        .expect("read b returns Some");
+        let n_b = tokio::time::timeout(Duration::from_secs(2), pool.read_stdout(h_b, &mut buf_b))
+            .await
+            .expect("read b within 2s")
+            .expect("read b ok")
+            .expect("read b returns Some");
         assert_eq!(&buf_b[..n_b], payload_b);
     }
 
@@ -905,22 +866,14 @@ mod tests {
     #[tokio::test]
     async fn read_stdout_returns_none_after_child_exits() {
         let pool = ProcessPool::new();
-        let handle = pool
-            .spawn(true_spec())
-            .await
-            .expect("true command spawns");
+        let handle = pool.spawn(true_spec()).await.expect("true command spawns");
 
         let mut buf = [0u8; 64];
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(2),
-            pool.read_stdout(handle, &mut buf),
-        )
-        .await
-        .expect("read_stdout completes within 2s")
-        .expect("read_stdout returns Ok");
-        assert_eq!(
-            outcome, None,
-            "expected EOF (None) after the child exited"
-        );
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(2), pool.read_stdout(handle, &mut buf))
+                .await
+                .expect("read_stdout completes within 2s")
+                .expect("read_stdout returns Ok");
+        assert_eq!(outcome, None, "expected EOF (None) after the child exited");
     }
 }

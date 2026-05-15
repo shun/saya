@@ -15,8 +15,8 @@ use saya::completion_float::{
 };
 use saya::core_host_actions::HostActionRuntime;
 use saya::core_notification_prompt::{
-    NotificationPromptProjectionState, PagerPromptView, ProjectionFrame, PromptInputAction,
-    handle_prompt_key, record_prompt_response_error,
+    InputPromptStatus, InputPromptView, NotificationPromptProjectionState, PagerPromptView,
+    ProjectionFrame, PromptInputAction, handle_prompt_key, record_prompt_response_error,
 };
 use saya::core_outcome::{
     ApplicationDispatchEffects, ApplicationOutcomeState, NormalizedHostDirective,
@@ -45,12 +45,12 @@ use saya::input_router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
 use saya::job_control::{
     start_job_control_signal_watcher, suspend_current_process_for_job_control,
 };
+use saya::lsif_index::LsifIndexCache;
 use saya::lsp_float::{
     LspDiagnosticFloatRequest, LspDiagnosticStore, LspHoverFloatRequest, LspLocationListRequest,
     LspSymbolOutlineRequest, file_uri_to_path, open_lsp_diagnostic_float, open_lsp_hover_float,
     open_lsp_location_list_float, open_lsp_symbol_outline_float,
 };
-use saya::lsif_index::LsifIndexCache;
 use saya::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
 use saya::markdown_structure::{MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey};
 use saya::optional_graphics::{OptionalGraphicsAdapter, OverlayTerminalWriter};
@@ -58,7 +58,7 @@ use saya::overlay_asset_store::OverlayAssetStore;
 use saya::presentation_effect::RuntimePresentationIntent;
 use saya::runtime_integration::{
     RuntimeCommandEffect, RuntimeDispatchOutcome, RuntimeEventMapper, RuntimeHostSession,
-    RuntimeSessionOwner, RuntimeShutdownIntent,
+    RuntimeInputPromptHostResponse, RuntimeSessionOwner, RuntimeShutdownIntent,
 };
 use saya::saya_live_runtime::{
     ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError,
@@ -66,7 +66,8 @@ use saya::saya_live_runtime::{
     RuntimeFilerErrorKind, RuntimeFilerListOptions, RuntimeFilerOperation,
     RuntimeFilerOperationKind, RuntimeFilerOperationReport, RuntimeFilerSortKey,
     RuntimeFloatContentRequest, RuntimeFloatOpenRequest, RuntimeFloatRelativeToRequest,
-    RuntimeFloatSnapshot, RuntimeFloatZIndexRequest, RuntimeMode,
+    RuntimeFloatSnapshot, RuntimeFloatZIndexRequest, RuntimeInputPromptRequest,
+    RuntimeInputPromptResponse, RuntimeMode,
 };
 use saya::screen_model::{
     CommandLineModel, ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput,
@@ -74,6 +75,13 @@ use saya::screen_model::{
 };
 use saya::search_query::{SearchStateError, SearchVisibleState};
 use saya::search_refresh::{SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore};
+use saya::selector_keymap::{SelectorAction, SelectorKeyRoute, selector_key_route_for_model};
+use saya::selector_runtime::{
+    RuntimeRgLocation, RuntimeSelectorControllerCommand, parse_rg_selector_location_detail,
+};
+use saya::selector_tui_state::{
+    SelectorTuiProjectionSink, SelectorTuiViewModel, selector_tui_model_to_workspace_float,
+};
 use saya::structural_refresh::{
     RedrawPlan, RedrawPlanSource, StructuralRefresh, StructuralRefreshOutcome,
 };
@@ -86,6 +94,7 @@ use saya::terminal_lifecycle::TerminalSize;
 use saya::tui_render_coordinator::{RenderFrameError, TuiRenderCoordinator};
 use saya::tui_renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::viewport::{ViewportSyncMode, WindowViewportStore};
+use vim_core_rs::CoreInputRequestKind;
 #[cfg(test)]
 use vim_core_rs::CoreMessageEvent;
 use vim_core_rs::{
@@ -189,6 +198,7 @@ async fn main() {
     let mut markdown_metadata_cache = MarkdownMetadataCache::new();
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_edit = CommandLineEdit::default();
+    let mut runtime_input_prompt: Option<RuntimeInputPromptUiState> = None;
     let mut command_line_histories = load_histories_from_default_cache();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
@@ -258,6 +268,7 @@ async fn main() {
         command_line_edit.buffer(),
         command_line_edit.cursor_byte_index(),
         outcome_accumulator.last_projection_frame.as_ref(),
+        runtime_input_prompt.as_ref(),
         outcome_accumulator.last_structural_refresh.as_mut(),
         system_warning.as_deref(),
         transient_msg.as_deref(),
@@ -265,6 +276,9 @@ async fn main() {
         terminal_height,
         Some(&mut floating_window_manager),
         Some(&mut terminal_float_manager),
+        runtime_session
+            .as_ref()
+            .map(RuntimeSessionOwner::selector_tui_projection_sink),
     );
     let initial_render_failure = initial_render.as_ref().err().map(ToString::to_string);
     match render_coordinator.render_workspace_result_with_structural_refresh(
@@ -351,6 +365,191 @@ async fn main() {
                             handled = true;
                             if let Some(reason) = reason {
                                 break 'main reason;
+                            }
+                        }
+
+                        if !handled {
+                            if let Some(action) =
+                                handle_runtime_input_prompt_key(runtime_input_prompt.as_mut(), &key)
+                            {
+                                handled = true;
+                                need_redraw = true;
+                                match action {
+                                    RuntimeInputPromptKeyAction::Submit(value) => {
+                                        log::info!(
+                                            "[main][runtime_input] prompt submit from TUI: value_len={}",
+                                            value.len()
+                                        );
+                                        runtime_input_prompt = None;
+                                        if let Some(runtime_session) = runtime_session.as_mut() {
+                                            let mut host_session =
+                                                MainRuntimeHostSession::new_with_runtime_input(
+                                                    &mut outcome,
+                                                    &mut session_state,
+                                                    &mut runtime_input_prompt,
+                                                );
+                                            let dispatch_outcome = runtime_session
+                                                .respond_to_input_prompt(
+                                                    RuntimeInputPromptResponse::Submitted { value },
+                                                    &mut host_session,
+                                                )
+                                                .await;
+                                            let _ = apply_runtime_dispatch_outcome(
+                                                &mut transient_msg,
+                                                &mut need_redraw,
+                                                &mut runtime_presentation_intents,
+                                                dispatch_outcome,
+                                            );
+                                        }
+                                    }
+                                    RuntimeInputPromptKeyAction::Cancel => {
+                                        log::info!(
+                                            "[main][runtime_input] prompt cancelled from TUI"
+                                        );
+                                        runtime_input_prompt = None;
+                                        if let Some(runtime_session) = runtime_session.as_mut() {
+                                            let mut host_session =
+                                                MainRuntimeHostSession::new_with_runtime_input(
+                                                    &mut outcome,
+                                                    &mut session_state,
+                                                    &mut runtime_input_prompt,
+                                                );
+                                            let dispatch_outcome = runtime_session
+                                                .respond_to_input_prompt(
+                                                    RuntimeInputPromptResponse::Cancelled,
+                                                    &mut host_session,
+                                                )
+                                                .await;
+                                            let _ = apply_runtime_dispatch_outcome(
+                                                &mut transient_msg,
+                                                &mut need_redraw,
+                                                &mut runtime_presentation_intents,
+                                                dispatch_outcome,
+                                            );
+                                        }
+                                    }
+                                    RuntimeInputPromptKeyAction::Editing => {}
+                                }
+                            }
+                        }
+
+                        if !handled {
+                            let selector_model =
+                                runtime_session.as_ref().and_then(|runtime_session| {
+                                    runtime_session
+                                        .selector_tui_projection_sink()
+                                        .current_model()
+                                });
+                            match selector_key_route_for_model(selector_model.as_ref(), &key) {
+                                SelectorKeyRoute::Action { session_id, action } => {
+                                    handled = true;
+                                    log::info!(
+                                        "[main][selector] selector action routing start: key={:?}, session_id={}, action={:?}",
+                                        key,
+                                        session_id,
+                                        action
+                                    );
+                                    if let (Some(runtime_session), Some(selector_model)) =
+                                        (runtime_session.as_mut(), selector_model.as_ref())
+                                    {
+                                        let dispatch_outcome = match action {
+                                            SelectorAction::AcceptSelected => {
+                                                handle_selector_accept_action(
+                                                    runtime_session,
+                                                    selector_model,
+                                                    &mut outcome,
+                                                    &mut session_state,
+                                                )
+                                                .await
+                                            }
+                                        };
+                                        let _ = apply_runtime_dispatch_outcome(
+                                            &mut transient_msg,
+                                            &mut need_redraw,
+                                            &mut runtime_presentation_intents,
+                                            dispatch_outcome,
+                                        );
+                                    } else {
+                                        log::debug!(
+                                            "[main][selector] selector action route resolved without runtime session/model: key={:?}, session_id={}, action={:?}",
+                                            key,
+                                            session_id,
+                                            action
+                                        );
+                                        transient_msg = Some(
+                                            "Selector runtime session is not available".to_string(),
+                                        );
+                                        need_redraw = true;
+                                    }
+                                }
+                                SelectorKeyRoute::Control {
+                                    session_id,
+                                    command,
+                                } => {
+                                    handled = true;
+                                    log::info!(
+                                        "[main][selector] selector key routing start: key={:?}, session_id={}",
+                                        key,
+                                        session_id
+                                    );
+                                    log::info!(
+                                        "[main][selector] selector key routing command conversion: key={:?}, command={:?}",
+                                        key,
+                                        command
+                                    );
+                                    if let Some(runtime_session) = runtime_session.as_mut() {
+                                        let mut host_session = MainRuntimeHostSession::new(
+                                            &mut outcome,
+                                            &mut session_state,
+                                        );
+                                        let dispatch_outcome = runtime_session
+                                            .control_selector(
+                                                session_id,
+                                                command,
+                                                &mut host_session,
+                                            )
+                                            .await;
+                                        if dispatch_outcome.transient_message.is_some() {
+                                            log::debug!(
+                                                "[main][selector] selector control failed from key routing: key={:?}, session_id={}, command={:?}",
+                                                key,
+                                                session_id,
+                                                command
+                                            );
+                                        } else {
+                                            log::info!(
+                                                "[main][selector] selector control succeeded from key routing: key={:?}, session_id={}, command={:?}",
+                                                key,
+                                                session_id,
+                                                command
+                                            );
+                                        }
+                                        let _ = apply_runtime_dispatch_outcome(
+                                            &mut transient_msg,
+                                            &mut need_redraw,
+                                            &mut runtime_presentation_intents,
+                                            dispatch_outcome,
+                                        );
+                                    } else {
+                                        log::debug!(
+                                            "[main][selector] selector key route resolved without runtime session: key={:?}, session_id={}, command={:?}",
+                                            key,
+                                            session_id,
+                                            command
+                                        );
+                                        transient_msg = Some(
+                                            "Selector runtime session is not available".to_string(),
+                                        );
+                                        need_redraw = true;
+                                    }
+                                }
+                                SelectorKeyRoute::Inactive => {
+                                    log::debug!(
+                                        "[main][selector] selector inactive; delegating key to normal input: key={:?}",
+                                        key
+                                    );
+                                }
+                                SelectorKeyRoute::Unmapped => {}
                             }
                         }
 
@@ -811,6 +1010,7 @@ async fn main() {
                                         &mut completion_float_manager,
                                         &mut lsp_diagnostic_store,
                                         &mut terminal_float_manager,
+                                        Some(&mut runtime_input_prompt),
                                         &mut transient_msg,
                                         &mut need_redraw,
                                         &mut runtime_presentation_intents,
@@ -1155,6 +1355,7 @@ async fn main() {
                     command_line_edit.buffer(),
                     command_line_edit.cursor_byte_index(),
                     outcome_accumulator.last_projection_frame.as_ref(),
+                    runtime_input_prompt.as_ref(),
                     outcome_accumulator.last_structural_refresh.as_mut(),
                     system_warning.as_deref(),
                     transient_msg.as_deref(),
@@ -1162,6 +1363,9 @@ async fn main() {
                     terminal_height,
                     Some(&mut floating_window_manager),
                     Some(&mut terminal_float_manager),
+                    runtime_session
+                        .as_ref()
+                        .map(RuntimeSessionOwner::selector_tui_projection_sink),
                 );
                 viewport_sync_mode = ViewportSyncMode::Core;
                 let redraw_failure = redraw_result.as_ref().err().map(ToString::to_string);
@@ -1551,8 +1755,10 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 None,
                 None,
                 None,
+                None,
                 terminal_width,
                 terminal_height,
+                None,
                 None,
                 None,
             ),
@@ -1606,8 +1812,10 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 None,
                 None,
                 None,
+                None,
                 terminal_width,
                 terminal_height,
+                None,
                 None,
                 None,
             ),
@@ -1663,8 +1871,10 @@ async fn run_binary_pty_smoke(launch_request: saya::cli::LaunchRequest) -> Resul
                 None,
                 None,
                 None,
+                None,
                 resized_width,
                 resized_height,
+                None,
                 None,
                 None,
             ),
@@ -4267,6 +4477,148 @@ fn execute_lsp_goto_definition_host_command(
     Ok(effect)
 }
 
+async fn handle_selector_accept_action(
+    runtime_session: &mut RuntimeSessionOwner,
+    selector_model: &SelectorTuiViewModel,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+) -> RuntimeDispatchOutcome {
+    log::info!(
+        "[main][selector] selector action accept selected start: session_id={}, hidden={}, cancelled={}",
+        selector_model.session_id,
+        selector_model.hidden,
+        selector_model.cancelled
+    );
+    let Some(selected_row) = selector_model.selected_row.as_ref() else {
+        log::debug!(
+            "[main][selector] selected item detail parse failed: session_id={}, reason=no-selected-row",
+            selector_model.session_id
+        );
+        return RuntimeDispatchOutcome {
+            transient_message: Some("Selector action failed: no selected item".to_string()),
+            requires_redraw: true,
+            shutdown_intent: None,
+            presentation_intents: Vec::new(),
+        };
+    };
+
+    let location = match parse_rg_selector_location_detail(&selected_row.item) {
+        Ok(location) => {
+            log::info!(
+                "[main][selector] selected item detail parse succeeded: session_id={}, item_id={}, path={}, line={}, column={}",
+                selector_model.session_id,
+                selected_row.item.id,
+                location.path.display(),
+                location.line,
+                location.column
+            );
+            location
+        }
+        Err(error) => {
+            log::debug!(
+                "[main][selector] selected item detail parse failed: session_id={}, item_id={}, kind={}, error={}",
+                selector_model.session_id,
+                selected_row.item.id,
+                selected_row.item.kind,
+                error
+            );
+            return RuntimeDispatchOutcome {
+                transient_message: Some(format!("Selector action failed: {error}")),
+                requires_redraw: true,
+                shutdown_intent: None,
+                presentation_intents: Vec::new(),
+            };
+        }
+    };
+
+    match execute_selector_rg_jump(&location, outcome, session_state) {
+        Ok(mut dispatch_outcome) => {
+            let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
+            let cancel_outcome = runtime_session
+                .control_selector(
+                    selector_model.session_id,
+                    RuntimeSelectorControllerCommand::Cancel,
+                    &mut host_session,
+                )
+                .await;
+            merge_runtime_dispatch_outcome(&mut dispatch_outcome, cancel_outcome);
+            dispatch_outcome
+        }
+        Err(error) => {
+            log::debug!(
+                "[main][selector] jump failed: session_id={}, path={}, line={}, column={}, error={:?}",
+                selector_model.session_id,
+                location.path.display(),
+                location.line,
+                location.column,
+                error
+            );
+            RuntimeDispatchOutcome {
+                transient_message: Some(format!("Selector jump failed: {error:?}")),
+                requires_redraw: true,
+                shutdown_intent: None,
+                presentation_intents: Vec::new(),
+            }
+        }
+    }
+}
+
+fn execute_selector_rg_jump(
+    location: &RuntimeRgLocation,
+    outcome: &mut saya::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::editor_session::EditorSessionState,
+) -> Result<RuntimeDispatchOutcome, RuntimeCommandError> {
+    log::info!(
+        "[main][selector] jump execution start: path={}, line={}, column={}",
+        location.path.display(),
+        location.line,
+        location.column
+    );
+    let mut effect = execute_runtime_host_command_with_floats(
+        &format!("edit {}", escape_runtime_edit_path(&location.path)),
+        outcome,
+        session_state,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    let line_command = format!("{}G", location.line);
+    outcome
+        .core_bridge
+        .dispatch_key(&line_command)
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "selector.rgJump".to_string(),
+            message: format!("failed to move to selector rg line: {error:?}"),
+        })?;
+    let column_command = format!("{}|", location.column);
+    outcome
+        .core_bridge
+        .dispatch_key(&column_command)
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "selector.rgJump".to_string(),
+            message: format!("failed to move to selector rg column: {error:?}"),
+        })?;
+    effect.transient_message = Some(format!(
+        "Selector jump: {}:{}:{}",
+        location.path.display(),
+        location.line,
+        location.column
+    ));
+    log::info!(
+        "[main][selector] jump succeeded: path={}, line={}, column={}",
+        location.path.display(),
+        location.line,
+        location.column
+    );
+    Ok(RuntimeDispatchOutcome {
+        transient_message: effect.transient_message,
+        requires_redraw: true,
+        shutdown_intent: effect.shutdown_intent,
+        presentation_intents: effect.presentation_intents,
+    })
+}
+
 fn execute_lsp_workspace_edit_preview_host_command(
     payload: &str,
     outcome: &mut saya::bootstrap::BootstrapOutcome,
@@ -4772,6 +5124,20 @@ async fn dispatch_buffer_write_post_with_runtime(
     )
 }
 
+fn merge_runtime_dispatch_outcome(
+    target: &mut RuntimeDispatchOutcome,
+    next: RuntimeDispatchOutcome,
+) {
+    if next.transient_message.is_some() {
+        target.transient_message = next.transient_message;
+    }
+    target.requires_redraw |= next.requires_redraw;
+    merge_runtime_shutdown_intent(&mut target.shutdown_intent, next.shutdown_intent);
+    if !next.presentation_intents.is_empty() {
+        target.presentation_intents = next.presentation_intents;
+    }
+}
+
 fn apply_runtime_dispatch_outcome(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
@@ -4817,6 +5183,7 @@ async fn execute_startup_keymap_registered_command(
     completion_float_manager: &mut CompletionFloatManager,
     lsp_diagnostic_store: &mut LspDiagnosticStore,
     terminal_float_manager: &mut TerminalFloatManager,
+    runtime_input_prompt: Option<&mut Option<RuntimeInputPromptUiState>>,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
@@ -4844,6 +5211,7 @@ async fn execute_startup_keymap_registered_command(
         terminal_float_manager,
         lsif_bridge,
     );
+    host_session.runtime_input_prompt = runtime_input_prompt;
     let dispatch_outcome = runtime_session
         .execute_command(command_name, &mut host_session)
         .await;
@@ -5244,6 +5612,7 @@ fn runtime_terminal_close_behavior(close_behavior: Option<&str>) -> TerminalFloa
 struct MainRuntimeHostSession<'a> {
     outcome: &'a mut saya::bootstrap::BootstrapOutcome,
     session_state: &'a mut saya::editor_session::EditorSessionState,
+    runtime_input_prompt: Option<&'a mut Option<RuntimeInputPromptUiState>>,
     floating_window_manager: Option<&'a mut FloatingWindowManager>,
     completion_float_manager: Option<&'a mut CompletionFloatManager>,
     lsp_diagnostic_store: Option<&'a mut LspDiagnosticStore>,
@@ -5259,6 +5628,7 @@ impl<'a> MainRuntimeHostSession<'a> {
         Self {
             outcome,
             session_state,
+            runtime_input_prompt: None,
             floating_window_manager: None,
             completion_float_manager: None,
             lsp_diagnostic_store: None,
@@ -5275,6 +5645,7 @@ impl<'a> MainRuntimeHostSession<'a> {
         Self {
             outcome,
             session_state,
+            runtime_input_prompt: None,
             floating_window_manager: None,
             completion_float_manager: None,
             lsp_diagnostic_store: None,
@@ -5295,11 +5666,29 @@ impl<'a> MainRuntimeHostSession<'a> {
         Self {
             outcome,
             session_state,
+            runtime_input_prompt: None,
             floating_window_manager: Some(floating_window_manager),
             completion_float_manager: Some(completion_float_manager),
             lsp_diagnostic_store: Some(lsp_diagnostic_store),
             terminal_float_manager: Some(terminal_float_manager),
             lsif_bridge,
+        }
+    }
+
+    fn new_with_runtime_input(
+        outcome: &'a mut saya::bootstrap::BootstrapOutcome,
+        session_state: &'a mut saya::editor_session::EditorSessionState,
+        runtime_input_prompt: &'a mut Option<RuntimeInputPromptUiState>,
+    ) -> Self {
+        Self {
+            outcome,
+            session_state,
+            runtime_input_prompt: Some(runtime_input_prompt),
+            floating_window_manager: None,
+            completion_float_manager: None,
+            lsp_diagnostic_store: None,
+            terminal_float_manager: None,
+            lsif_bridge: None,
         }
     }
 }
@@ -5502,6 +5891,34 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
         )
     }
 
+    fn request_input_prompt(
+        &mut self,
+        request: RuntimeInputPromptRequest,
+    ) -> Result<RuntimeInputPromptHostResponse, RuntimeCommandError> {
+        let Some(slot) = self.runtime_input_prompt.as_deref_mut() else {
+            log::debug!(
+                "[main][runtime_input] prompt requested without active TUI prompt slot: title={}",
+                request.title
+            );
+            return Ok(RuntimeInputPromptHostResponse::Completed(
+                RuntimeInputPromptResponse::Cancelled,
+            ));
+        };
+        if slot.is_some() {
+            return Err(RuntimeCommandError::CommandFailed {
+                name: "input.prompt".to_string(),
+                message: "another runtime input prompt is already active".to_string(),
+            });
+        }
+        log::info!(
+            "[main][runtime_input] prompt start: title={}, placeholder_present={}",
+            request.title,
+            request.placeholder.is_some()
+        );
+        *slot = Some(RuntimeInputPromptUiState::new(request));
+        Ok(RuntimeInputPromptHostResponse::Pending)
+    }
+
     fn execute_lsif_request(
         &mut self,
         request: LspRuntimeBridgeRequest,
@@ -5554,6 +5971,65 @@ fn directory_buffer_listing_options_from_runtime(
             RuntimeFilerSortKey::Size => DirectoryBufferSortKey::Size,
         },
         filter: options.filter,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeInputPromptUiState {
+    request: RuntimeInputPromptRequest,
+    edit: CommandLineEdit,
+    correlation_id: u64,
+}
+
+impl RuntimeInputPromptUiState {
+    fn new(request: RuntimeInputPromptRequest) -> Self {
+        Self {
+            request,
+            edit: CommandLineEdit::default(),
+            correlation_id: 0,
+        }
+    }
+
+    fn view(&self) -> InputPromptView {
+        InputPromptView {
+            prompt: format!("{}:", self.request.title),
+            input: self.edit.buffer().to_string(),
+            correlation_id: self.correlation_id,
+            input_kind: CoreInputRequestKind::CommandLine,
+            status: InputPromptStatus::Active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeInputPromptKeyAction {
+    Editing,
+    Submit(String),
+    Cancel,
+}
+
+fn handle_runtime_input_prompt_key(
+    state: Option<&mut RuntimeInputPromptUiState>,
+    key: &KeyInput,
+) -> Option<RuntimeInputPromptKeyAction> {
+    let state = state?;
+    match key {
+        KeyInput::Enter => Some(RuntimeInputPromptKeyAction::Submit(
+            state.edit.buffer().to_string(),
+        )),
+        KeyInput::Escape | KeyInput::Ctrl('c') | KeyInput::Ctrl('C') => {
+            Some(RuntimeInputPromptKeyAction::Cancel)
+        }
+        KeyInput::Char(ch) => {
+            state.edit.insert_char(*ch);
+            Some(RuntimeInputPromptKeyAction::Editing)
+        }
+        _ => {
+            if let Some(action) = command_line_edit_action_for_key(key) {
+                state.edit.apply_action(action);
+            }
+            Some(RuntimeInputPromptKeyAction::Editing)
+        }
     }
 }
 
@@ -6054,6 +6530,7 @@ fn build_workspace_render_output(
     command_line_buffer: &str,
     command_line_cursor_byte_index: usize,
     projection_frame: Option<&ProjectionFrame>,
+    runtime_input_prompt: Option<&RuntimeInputPromptUiState>,
     mut structural_refresh: Option<&mut StructuralRefreshOutcome>,
     system_warning: Option<&str>,
     transient_msg: Option<&str>,
@@ -6061,6 +6538,7 @@ fn build_workspace_render_output(
     terminal_height: u16,
     floating_window_manager: Option<&mut FloatingWindowManager>,
     terminal_float_manager: Option<&mut TerminalFloatManager>,
+    selector_tui_projection_sink: Option<Arc<SelectorTuiProjectionSink>>,
 ) -> Result<WorkspaceScreenModel, WorkspaceRedrawError> {
     let total_started_at = std::time::Instant::now();
     let snapshot_started_at = std::time::Instant::now();
@@ -6204,7 +6682,18 @@ fn build_workspace_render_output(
             session_state.tab_size(),
         )
     });
-    let notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
+    let mut notification_prompt = projection_frame.map(ProjectionFrame::workspace_view);
+    if let Some(runtime_prompt) = runtime_input_prompt {
+        let view = runtime_prompt.view();
+        log::debug!(
+            "[main][runtime_input] projecting active runtime prompt: title={}, input_len={}",
+            runtime_prompt.request.title,
+            view.input.len()
+        );
+        notification_prompt
+            .get_or_insert_with(Default::default)
+            .input_prompt = Some(view);
+    }
 
     let projection_started_at = std::time::Instant::now();
     let mut projection_result = project_workspace(&WorkspaceProjectionInput {
@@ -6274,6 +6763,31 @@ fn build_workspace_render_output(
                 terminal_height,
                 manager,
             );
+        }
+        if let Some(sink) = selector_tui_projection_sink
+            && let Some(selector_model) = sink.current_model()
+        {
+            if let Some(selector_float) = selector_tui_model_to_workspace_float(
+                &selector_model,
+                terminal_width,
+                terminal_height,
+            ) {
+                log::debug!(
+                    "[main][selector] appended selector TUI float to workspace model: session_id={}, rows={}, floats_before={}",
+                    selector_model.session_id,
+                    selector_model.visible_rows.len(),
+                    workspace.floats.len()
+                );
+                workspace.floats.push(selector_float);
+            } else {
+                log::debug!(
+                    "[main][selector] selector TUI model not visible in workspace render: session_id={}, intent={:?}, hidden={}, cancelled={}",
+                    selector_model.session_id,
+                    selector_model.intent,
+                    selector_model.hidden,
+                    selector_model.cancelled
+                );
+            }
         }
     }
 
@@ -7700,9 +8214,11 @@ mod tests {
             None,
             None,
             None,
+            None,
             80,
             24,
             Some(&mut floating_window_manager),
+            None,
             None,
         )
         .expect("workspace should render");
@@ -7975,8 +8491,10 @@ mod tests {
             None,
             None,
             None,
+            None,
             80,
             24,
+            None,
             None,
             None,
         )
@@ -8022,8 +8540,10 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 80,
                 24,
+                None,
                 None,
                 None,
             )
@@ -10528,6 +11048,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            None,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
@@ -10561,6 +11082,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            None,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
@@ -11672,6 +12194,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            None,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
@@ -11750,6 +12273,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            None,
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
@@ -11826,6 +12350,7 @@ mod tests {
                 &mut completion_float_manager,
                 &mut lsp_diagnostic_store,
                 &mut terminal_float_manager,
+                None,
                 &mut transient_msg,
                 &mut need_redraw,
                 &mut runtime_presentation_intents,
@@ -12810,6 +13335,185 @@ mod tests {
         assert!(help.contains("  +<lnum>          Start at line <lnum>"));
         assert!(help.contains("  -R               Read-only mode"));
         assert!(help.contains("  --version        Print version information and exit"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn selector_accept_action_opens_selected_rg_location_and_cancels_selector() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("selector-rg-jump").with_extension("txt");
+        std::fs::write(&target_path, "first\nabcdef\nthird\n").expect("target fixture");
+        let target_literal =
+            serde_json::to_string(&target_path.to_string_lossy()).expect("path JSON");
+        let seed = saya::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(vec![
+            saya::config_runtime::StartupRegistryEntry::Event {
+                name: "bufferOpen".to_string(),
+                callback_source: format!(
+                    r#"
+                            async () => {{
+                                await saya.selector.open({{
+                                    source: {{
+                                        kind: "static",
+                                        items: [
+                                            {{
+                                                id: "rg-target",
+                                                value: "target.txt:2:4:abcdef",
+                                                kind: "rg",
+                                                detail: {{ path: {target_literal}, line: 2, column: 4, text: "abcdef" }},
+                                            }},
+                                        ],
+                                    }},
+                                    matcher: "substringAnd",
+                                    query: "target",
+                                }});
+                            }}
+                        "#
+                ),
+            },
+        ]);
+        let mut runtime_session =
+            RuntimeSessionOwner::spawn(seed).expect("runtime owner should initialize");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        {
+            let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
+            runtime_session
+                .dispatch(
+                    saya::saya_live_runtime::RuntimeEventPayload::BufferOpen(
+                        saya::saya_live_runtime::BufferEventPayload {
+                            buffer: host_session.current_buffer_snapshot(),
+                        },
+                    ),
+                    &mut host_session,
+                )
+                .await;
+        }
+        let selector_model = runtime_session
+            .selector_tui_projection_sink()
+            .current_model()
+            .expect("selector should be active before Enter");
+
+        let dispatch_outcome = handle_selector_accept_action(
+            &mut runtime_session,
+            &selector_model,
+            &mut outcome,
+            &mut session_state,
+        )
+        .await;
+
+        assert!(dispatch_outcome.requires_redraw);
+        assert_eq!(session_state.target_path(), Some(&target_path));
+        assert_eq!(outcome.target_path, Some(target_path.clone()));
+        let snapshot = outcome.core_bridge.light_snapshot();
+        assert_eq!(snapshot.cursor_row, 1, "rg line is 1-based");
+        assert_eq!(snapshot.cursor_col, 3, "rg column is 1-based");
+        let cancelled_model = runtime_session
+            .selector_tui_projection_sink()
+            .current_model()
+            .expect("selector cancel should publish model");
+        assert!(cancelled_model.cancelled);
+        assert!(
+            outcome.core_bridge.buffer_text().contains("abcdef"),
+            "Enter must open the selected file instead of leaking into normal editing"
+        );
+
+        std::fs::remove_file(target_path).expect("cleanup target fixture");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn selector_accept_action_reports_invalid_rg_detail_without_normal_enter_leak() {
+        let _lock = saya::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let seed = saya::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(vec![
+            saya::config_runtime::StartupRegistryEntry::Event {
+                name: "bufferOpen".to_string(),
+                callback_source: r#"
+                        async () => {
+                            await saya.selector.open({
+                                source: {
+                                    kind: "static",
+                                    items: [
+                                        {
+                                            id: "rg-invalid",
+                                            value: "broken",
+                                            kind: "rg",
+                                            detail: { path: "missing.txt", line: 1 },
+                                        },
+                                    ],
+                                },
+                                matcher: "substringAnd",
+                                query: "broken",
+                            });
+                        }
+                    "#
+                .to_string(),
+            },
+        ]);
+        let mut runtime_session =
+            RuntimeSessionOwner::spawn(seed).expect("runtime owner should initialize");
+        let mut outcome = saya::bootstrap::prepare_launch(saya::cli::LaunchRequest {
+            input_source: saya::cli::InputSource::Empty,
+            config_source: saya::cli::ConfigSource::Default,
+            ..saya::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        {
+            let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
+            runtime_session
+                .dispatch(
+                    saya::saya_live_runtime::RuntimeEventPayload::BufferOpen(
+                        saya::saya_live_runtime::BufferEventPayload {
+                            buffer: host_session.current_buffer_snapshot(),
+                        },
+                    ),
+                    &mut host_session,
+                )
+                .await;
+        }
+        let before_text = outcome.core_bridge.buffer_text();
+        let selector_model = runtime_session
+            .selector_tui_projection_sink()
+            .current_model()
+            .expect("selector should be active before Enter");
+
+        let dispatch_outcome = handle_selector_accept_action(
+            &mut runtime_session,
+            &selector_model,
+            &mut outcome,
+            &mut session_state,
+        )
+        .await;
+
+        assert!(dispatch_outcome.requires_redraw);
+        assert!(
+            dispatch_outcome
+                .transient_message
+                .as_deref()
+                .is_some_and(|message| message.contains("detail.column")),
+            "invalid detail should report a user-visible failure: {:?}",
+            dispatch_outcome.transient_message
+        );
+        assert_eq!(
+            outcome.core_bridge.buffer_text(),
+            before_text,
+            "invalid selector Enter must be consumed without normal Enter editing"
+        );
+        assert_eq!(session_state.target_path(), None);
+        let current_model = runtime_session
+            .selector_tui_projection_sink()
+            .current_model()
+            .expect("failed action should retain selector state");
+        assert!(!current_model.cancelled);
     }
 
     #[test]

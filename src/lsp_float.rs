@@ -212,11 +212,7 @@ pub fn open_lsp_hover_float(
     let outcome = manager.open_static_lines_with_focus_toggle(
         rendered_lines,
         FloatingFocusId::new(LSP_HOVER_FOCUS_ID),
-        FloatingAnchorSignature::cursor(
-            request.window_id,
-            request.cursor_row,
-            request.cursor_col,
-        ),
+        FloatingAnchorSignature::cursor(request.window_id, request.cursor_row, request.cursor_col),
         FloatingLifecycle::CloseOnEvents(lsp_hover_close_events()),
         FloatingPlacement {
             relative_to: FloatingRelativeTo::Cursor {
@@ -246,10 +242,7 @@ pub fn open_lsp_hover_float(
             LspHoverOpenOutcome::FocusedExisting { id }
         }
     };
-    log::debug!(
-        "[lsp_float] hover float open outcome: {:?}",
-        hover_outcome
-    );
+    log::debug!("[lsp_float] hover float open outcome: {:?}", hover_outcome);
     Some(hover_outcome)
 }
 

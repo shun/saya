@@ -94,6 +94,12 @@ fn runtime_surface_excludes_compatibility_string_apis() {
         "saya.window.close",
         "saya.window.focus",
         "saya.window.floats",
+        "saya.selector.open",
+        "saya.selector.update",
+        "saya.selector.current",
+        "saya.selector.control",
+        "saya.selector.cancel",
+        "saya.selector.dispose",
     ] {
         assert!(
             surface.contains(&expected),

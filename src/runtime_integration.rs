@@ -14,8 +14,13 @@ use crate::saya_live_runtime::{
     RuntimeFilerCurrentEntry, RuntimeFilerEntry, RuntimeFilerError, RuntimeFilerErrorKind,
     RuntimeFilerListOptions, RuntimeFilerOperation, RuntimeFilerOperationKind,
     RuntimeFilerOperationReport, RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeInitError,
-    RuntimeMode, SayaLiveRuntime,
+    RuntimeInputPromptRequest, RuntimeInputPromptResponse, RuntimeMode, SayaLiveRuntime,
 };
+use crate::selector_host_adapter::SelectorHostViewAdapter;
+use crate::selector_runtime::{
+    RuntimeSelectorControlRequest, RuntimeSelectorControllerCommand, SelectorViewBackend,
+};
+use crate::selector_tui_state::SelectorTuiProjectionSink;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeDispatchOutcome {
@@ -108,6 +113,19 @@ pub trait RuntimeHostSession {
         &mut self,
         name: &str,
     ) -> Result<RuntimeCommandEffect, RuntimeCommandError>;
+    fn request_input_prompt(
+        &mut self,
+        request: RuntimeInputPromptRequest,
+    ) -> Result<RuntimeInputPromptHostResponse, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][input] prompt unsupported by host session: title={}, placeholder_present={}",
+            request.title,
+            request.placeholder.is_some()
+        );
+        Ok(RuntimeInputPromptHostResponse::Completed(
+            RuntimeInputPromptResponse::Cancelled,
+        ))
+    }
     fn execute_lsif_request(
         &mut self,
         request: LspRuntimeBridgeRequest,
@@ -120,6 +138,12 @@ pub trait RuntimeHostSession {
             ),
         })
     }
+}
+
+#[derive(Debug)]
+pub enum RuntimeInputPromptHostResponse {
+    Completed(RuntimeInputPromptResponse),
+    Pending,
 }
 
 pub struct RuntimeEventMapper;
@@ -199,6 +223,11 @@ impl Default for CachedRuntimeSnapshots {
 struct RuntimeHostCommandRequest {
     name: String,
     reply: oneshot::Sender<Result<(), RuntimeCommandError>>,
+}
+
+struct RuntimeInputPromptChannelRequest {
+    request: RuntimeInputPromptRequest,
+    reply: oneshot::Sender<Result<RuntimeInputPromptResponse, RuntimeCommandError>>,
 }
 
 struct RuntimeFilerOperationRequest {
@@ -292,7 +321,9 @@ fn runtime_filer_operation_parts(
 
 struct ChannelBackedHostBridge {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
+    selector_view_backend: Arc<dyn SelectorViewBackend>,
     command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
+    input_prompt_sender: mpsc::UnboundedSender<RuntimeInputPromptChannelRequest>,
     lsif_request_sender: mpsc::UnboundedSender<RuntimeLsifRequest>,
     filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
     filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
@@ -303,6 +334,10 @@ struct ChannelBackedHostBridge {
 }
 
 impl HostCapabilityBridge for ChannelBackedHostBridge {
+    fn selector_view_backend(&self) -> Option<Arc<dyn SelectorViewBackend>> {
+        Some(self.selector_view_backend.clone())
+    }
+
     fn execute_host_command(
         &self,
         name: &str,
@@ -325,6 +360,29 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
                 .map_err(|_| RuntimeCommandError::CommandFailed {
                     name,
                     message: "host command reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn request_input_prompt(
+        &self,
+        request: RuntimeInputPromptRequest,
+    ) -> crate::saya_live_runtime::BoxFuture<Result<RuntimeInputPromptResponse, RuntimeCommandError>>
+    {
+        let input_prompt_sender = self.input_prompt_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            input_prompt_sender
+                .send(RuntimeInputPromptChannelRequest { request, reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "input.prompt".to_string(),
+                    message: "host input prompt channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "input.prompt".to_string(),
+                    message: "host input prompt reply channel closed".to_string(),
                 })?
         })
     }
@@ -557,8 +615,14 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
 pub struct RuntimeSessionOwner {
     runtime: SayaLiveRuntime,
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
+    selector_tui_projection_sink: Arc<SelectorTuiProjectionSink>,
     _command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
     command_receiver: mpsc::UnboundedReceiver<RuntimeHostCommandRequest>,
+    _input_prompt_sender: mpsc::UnboundedSender<RuntimeInputPromptChannelRequest>,
+    input_prompt_receiver: mpsc::UnboundedReceiver<RuntimeInputPromptChannelRequest>,
+    pending_input_prompt_reply:
+        Option<oneshot::Sender<Result<RuntimeInputPromptResponse, RuntimeCommandError>>>,
+    pending_runtime_command: Option<PendingRuntimeCommand>,
     _lsif_request_sender: mpsc::UnboundedSender<RuntimeLsifRequest>,
     lsif_request_receiver: mpsc::UnboundedReceiver<RuntimeLsifRequest>,
     _filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
@@ -583,7 +647,13 @@ impl RuntimeSessionOwner {
             seed.events().len()
         );
         let snapshots = Arc::new(Mutex::new(CachedRuntimeSnapshots::default()));
+        let selector_tui_projection_sink = Arc::new(SelectorTuiProjectionSink::new());
+        let selector_view_backend = Arc::new(SelectorHostViewAdapter::new(
+            selector_tui_projection_sink.clone(),
+            10,
+        ));
         let (command_sender, command_receiver) = mpsc::unbounded_channel();
+        let (input_prompt_sender, input_prompt_receiver) = mpsc::unbounded_channel();
         let (lsif_request_sender, lsif_request_receiver) = mpsc::unbounded_channel();
         let (filer_operation_sender, filer_operation_receiver) = mpsc::unbounded_channel();
         let (filer_list_sender, filer_list_receiver) = mpsc::unbounded_channel();
@@ -593,7 +663,9 @@ impl RuntimeSessionOwner {
         let (float_snapshots_sender, float_snapshots_receiver) = mpsc::unbounded_channel();
         let bridge = Arc::new(ChannelBackedHostBridge {
             snapshots: snapshots.clone(),
+            selector_view_backend,
             command_sender: command_sender.clone(),
+            input_prompt_sender: input_prompt_sender.clone(),
             lsif_request_sender: lsif_request_sender.clone(),
             filer_operation_sender: filer_operation_sender.clone(),
             filer_list_sender: filer_list_sender.clone(),
@@ -606,8 +678,13 @@ impl RuntimeSessionOwner {
         Ok(Self {
             runtime,
             snapshots,
+            selector_tui_projection_sink,
             _command_sender: command_sender,
             command_receiver,
+            _input_prompt_sender: input_prompt_sender,
+            input_prompt_receiver,
+            pending_input_prompt_reply: None,
+            pending_runtime_command: None,
             _lsif_request_sender: lsif_request_sender,
             lsif_request_receiver,
             _filer_operation_sender: filer_operation_sender,
@@ -623,6 +700,79 @@ impl RuntimeSessionOwner {
             _float_snapshots_sender: float_snapshots_sender,
             float_snapshots_receiver,
         })
+    }
+
+    pub fn selector_tui_projection_sink(&self) -> Arc<SelectorTuiProjectionSink> {
+        self.selector_tui_projection_sink.clone()
+    }
+
+    pub async fn control_selector<H: RuntimeHostSession>(
+        &mut self,
+        id: u64,
+        command: RuntimeSelectorControllerCommand,
+        host_session: &mut H,
+    ) -> RuntimeDispatchOutcome {
+        self.refresh_cached_snapshots(host_session);
+        log::info!(
+            "[runtime_integration][selector] host selector control start: id={}, command={:?}",
+            id,
+            command
+        );
+        let projection_count_before = self.selector_tui_projection_sink.projection_count();
+        let receipt = match self
+            .runtime
+            .control_selector(id, RuntimeSelectorControlRequest { command })
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                log::debug!(
+                    "[runtime_integration][selector] selector control failed before queue: id={}, command={:?}, error={:?}",
+                    id,
+                    command,
+                    error
+                );
+                return RuntimeDispatchOutcome {
+                    transient_message: Some(format!("Selector control failed: {:?}", error)),
+                    requires_redraw: true,
+                    shutdown_intent: None,
+                    presentation_intents: Vec::new(),
+                };
+            }
+        };
+        match receipt.await_result().await {
+            Ok(snapshot) => {
+                let projection_count_after = self.selector_tui_projection_sink.projection_count();
+                log::info!(
+                    "[runtime_integration][selector] selector control succeeded: id={}, command={:?}, cursor={}, offset={}, hidden={}, cancelled={}",
+                    snapshot.id,
+                    command,
+                    snapshot.view.cursor,
+                    snapshot.view.offset,
+                    snapshot.view.hidden,
+                    snapshot.view.cancelled
+                );
+                RuntimeDispatchOutcome {
+                    transient_message: None,
+                    requires_redraw: projection_count_after != projection_count_before,
+                    shutdown_intent: None,
+                    presentation_intents: Vec::new(),
+                }
+            }
+            Err(error) => {
+                log::debug!(
+                    "[runtime_integration][selector] selector control failed: id={}, command={:?}, error={:?}",
+                    id,
+                    command,
+                    error
+                );
+                RuntimeDispatchOutcome {
+                    transient_message: Some(format!("Selector control failed: {:?}", error)),
+                    requires_redraw: true,
+                    shutdown_intent: None,
+                    presentation_intents: Vec::new(),
+                }
+            }
+        }
     }
 
     pub async fn dispatch<H: RuntimeHostSession>(
@@ -647,6 +797,18 @@ impl RuntimeSessionOwner {
         name: &str,
         host_session: &mut H,
     ) -> RuntimeDispatchOutcome {
+        if self.pending_runtime_command.is_some() {
+            log::debug!(
+                "[runtime_integration][command] refusing to start command while another runtime command is pending prompt: command={}",
+                name
+            );
+            return RuntimeDispatchOutcome {
+                transient_message: Some("Runtime command is waiting for input".to_string()),
+                requires_redraw: true,
+                shutdown_intent: None,
+                presentation_intents: Vec::new(),
+            };
+        }
         self.refresh_cached_snapshots(host_session);
         log::info!(
             "[runtime_integration][command] execute runtime command through session owner: command={}",
@@ -670,11 +832,72 @@ impl RuntimeSessionOwner {
             }
         };
 
+        let selector_projection_count_before = self.selector_tui_projection_sink.projection_count();
         let mut aggregate = self
-            .await_runtime_command(name, receipt, host_session)
+            .await_runtime_command(name.to_string(), receipt.into_receiver(), host_session)
             .await;
+        if let Some(pending_command) = aggregate.pending_runtime_command.take() {
+            self.pending_runtime_command = Some(pending_command);
+        }
+        let selector_projection_count_after = self.selector_tui_projection_sink.projection_count();
         let follow_up_events = std::mem::take(&mut aggregate.follow_up_events);
         let mut dispatch_outcome = aggregate.outcome;
+        if selector_projection_count_after != selector_projection_count_before {
+            log::debug!(
+                "[runtime_integration][selector] runtime command changed selector TUI projections: command={}, before={}, after={}",
+                name,
+                selector_projection_count_before,
+                selector_projection_count_after
+            );
+            dispatch_outcome.requires_redraw = true;
+        }
+        for event in follow_up_events {
+            merge_dispatch_outcome(
+                &mut dispatch_outcome,
+                self.dispatch(event, host_session).await,
+            );
+        }
+        dispatch_outcome
+    }
+
+    pub async fn respond_to_input_prompt<H: RuntimeHostSession>(
+        &mut self,
+        response: RuntimeInputPromptResponse,
+        host_session: &mut H,
+    ) -> RuntimeDispatchOutcome {
+        let Some(reply) = self.pending_input_prompt_reply.take() else {
+            log::debug!(
+                "[runtime_integration][input] prompt response ignored without pending runtime prompt"
+            );
+            return RuntimeDispatchOutcome {
+                transient_message: Some("No runtime input prompt is active".to_string()),
+                requires_redraw: true,
+                shutdown_intent: None,
+                presentation_intents: Vec::new(),
+            };
+        };
+        let _ = reply.send(Ok(response));
+        let Some(pending) = self.pending_runtime_command.take() else {
+            return RuntimeDispatchOutcome {
+                transient_message: None,
+                requires_redraw: true,
+                shutdown_intent: None,
+                presentation_intents: Vec::new(),
+            };
+        };
+        log::info!(
+            "[runtime_integration][input] resuming runtime command after input prompt: command={}",
+            pending.name
+        );
+        let mut aggregate = self
+            .await_runtime_command(pending.name, pending.receiver, host_session)
+            .await;
+        if let Some(pending_command) = aggregate.pending_runtime_command.take() {
+            self.pending_runtime_command = Some(pending_command);
+        }
+        let follow_up_events = std::mem::take(&mut aggregate.follow_up_events);
+        let mut dispatch_outcome = aggregate.outcome;
+        dispatch_outcome.requires_redraw = true;
         for event in follow_up_events {
             merge_dispatch_outcome(
                 &mut dispatch_outcome,
@@ -765,6 +988,31 @@ impl RuntimeSessionOwner {
                             );
                             follow_up_events.extend(effect.follow_up_events.clone());
                             let _ = request.reply.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.input_prompt_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] input prompt channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][input] servicing runtime input prompt during event dispatch: title={}, placeholder_present={}",
+                        request.request.title,
+                        request.request.placeholder.is_some()
+                    );
+                    match host_session.request_input_prompt(request.request) {
+                        Ok(RuntimeInputPromptHostResponse::Completed(response)) => {
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(response));
+                        }
+                        Ok(RuntimeInputPromptHostResponse::Pending) => {
+                            log::debug!("[runtime_integration][input] host left runtime input prompt pending during event dispatch");
+                            self.pending_input_prompt_reply = Some(request.reply);
+                            projected.requires_redraw = true;
                         }
                         Err(error) => {
                             let _ = request.reply.send(Err(error));
@@ -939,32 +1187,39 @@ impl RuntimeSessionOwner {
 
     async fn await_runtime_command<H: RuntimeHostSession>(
         &mut self,
-        name: &str,
-        receipt: crate::saya_live_runtime::RuntimeCommandReceipt,
+        name: String,
+        mut receiver: oneshot::Receiver<Result<(), RuntimeCommandError>>,
         host_session: &mut H,
     ) -> RuntimeCommandDispatchAggregate {
         let mut projected = RuntimeDispatchOutcome::default();
         let mut follow_up_events = Vec::new();
-        let result_future = receipt.await_result();
-        tokio::pin!(result_future);
+        let mut pending_runtime_command = None;
 
         loop {
             tokio::select! {
-                result = &mut result_future => {
+                result = &mut receiver => {
                     match result {
-                        Ok(()) => {
+                        Ok(Ok(())) => {
                             log::debug!(
                                 "[runtime_integration] runtime command completed: command={}",
                                 name
                             );
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             log::debug!(
                                 "[runtime_integration] runtime command failed: command={}, error={:?}",
                                 name,
                                 error
                             );
                             projected.transient_message = Some(format!("Runtime command failed: {:?}", error));
+                            projected.requires_redraw = true;
+                        }
+                        Err(_) => {
+                            log::debug!(
+                                "[runtime_integration] runtime command worker stopped before reply: command={}",
+                                name
+                            );
+                            projected.transient_message = Some("Runtime command worker stopped".to_string());
                             projected.requires_redraw = true;
                         }
                     }
@@ -994,6 +1249,36 @@ impl RuntimeSessionOwner {
                             );
                             follow_up_events.extend(effect.follow_up_events.clone());
                             let _ = request.reply.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.input_prompt_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] input prompt channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][input] servicing runtime input prompt during command execution: title={}, placeholder_present={}",
+                        request.request.title,
+                        request.request.placeholder.is_some()
+                    );
+                    match host_session.request_input_prompt(request.request) {
+                        Ok(RuntimeInputPromptHostResponse::Completed(response)) => {
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(response));
+                        }
+                        Ok(RuntimeInputPromptHostResponse::Pending) => {
+                            log::debug!("[runtime_integration][input] host left runtime input prompt pending during command execution");
+                            self.pending_input_prompt_reply = Some(request.reply);
+                            projected.requires_redraw = true;
+                            pending_runtime_command = Some(PendingRuntimeCommand {
+                                name: name.clone(),
+                                receiver,
+                            });
+                            break;
                         }
                         Err(error) => {
                             let _ = request.reply.send(Err(error));
@@ -1134,6 +1419,7 @@ impl RuntimeSessionOwner {
         RuntimeCommandDispatchAggregate {
             outcome: projected,
             follow_up_events,
+            pending_runtime_command,
         }
     }
 }
@@ -1141,6 +1427,12 @@ impl RuntimeSessionOwner {
 struct RuntimeCommandDispatchAggregate {
     outcome: RuntimeDispatchOutcome,
     follow_up_events: Vec<RuntimeEventPayload>,
+    pending_runtime_command: Option<PendingRuntimeCommand>,
+}
+
+struct PendingRuntimeCommand {
+    name: String,
+    receiver: oneshot::Receiver<Result<(), RuntimeCommandError>>,
 }
 
 fn merge_dispatch_outcome(target: &mut RuntimeDispatchOutcome, next: RuntimeDispatchOutcome) {

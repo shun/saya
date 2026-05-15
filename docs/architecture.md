@@ -165,6 +165,9 @@ theme model for Markdown presentation, palettes, and plugin-provided themes.
 Use [Floating windows design](design/floating-windows.md) for the proposed
 application-layer model for hover, completion, terminal, and buffer-backed
 floating surfaces.
+Use [Selector design](design/selector.md) for the proposed
+host-managed selector workflow for grep, file search, buffer-line search,
+preview, actions, and resumable selector sessions.
 Use [LSP preview](api/lsp-preview.md) for the current LSP setup surface,
 runtime boundary, supported feature matrix, LSIF limitations, and headless
 verification commands.
@@ -178,4 +181,5 @@ these pages.
 2. Read [Editing flow design](design/editing-flow.md).
 3. Read [Floating windows design](design/floating-windows.md).
 4. Read [TypeScript runtime design](design/typescript-runtime.md).
-5. Read [LSP preview](api/lsp-preview.md).
+5. Read [Selector design](design/selector.md).
+6. Read [LSP preview](api/lsp-preview.md).

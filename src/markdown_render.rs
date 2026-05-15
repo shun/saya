@@ -66,8 +66,7 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
 
     // fence ブロックの「ヘッダ行 / フッタ行」を識別するための index 集合。
     // 内部のコード本文は通常 line として出力する。
-    let mut fence_marker_lines: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
+    let mut fence_marker_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for block in &map.blocks {
         if let MarkdownBlockKind::FencedCodeBlock { .. } = block.kind {
             fence_marker_lines.insert(block.range.start.line);
@@ -78,8 +77,7 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
     // 各 source 行ごとに変換結果を out 配列に push し、出力 line index と
     // 元 line index の対応関係を作る。inline スタイルは出力行ベースで
     // 構築するため、列のオフセット変換も追跡する。
-    let mut source_to_rendered: Vec<Option<RenderedLineMap>> =
-        vec![None; source_lines.len()];
+    let mut source_to_rendered: Vec<Option<RenderedLineMap>> = vec![None; source_lines.len()];
 
     for (source_line_idx, source_line) in source_lines.iter().enumerate() {
         if fence_marker_lines.contains(&source_line_idx) {
@@ -93,7 +91,9 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
 
         let mut line_render = render_line(source_line);
         // List marker 正規化（行頭の `- ` 等 → `• `）はブロック判定に依存
-        if let Some(list_render) = transform_list_marker_if_applicable(&line_render, &map, source_line_idx) {
+        if let Some(list_render) =
+            transform_list_marker_if_applicable(&line_render, &map, source_line_idx)
+        {
             line_render = list_render;
         }
 
@@ -142,7 +142,10 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
                 column_start: mapped.column_start,
                 column_end: mapped.column_end,
             }),
-            MarkdownInlineKind::Link { text, destination: _ } => {
+            MarkdownInlineKind::Link {
+                text,
+                destination: _,
+            } => {
                 // Phase D の Link 表示は可視テキストのみで URL を隠す方針。
                 // 構造化情報として `LinkText` 範囲だけを記録し、`LinkUrl` は
                 // 出力しない。OSC8 hyperlink 等の対応が来た時にここに

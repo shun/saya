@@ -4,18 +4,24 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 
 use deno_core::{JsBuffer, JsRuntime, OpState, RuntimeOptions, op2};
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
+use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::callback_registry_seed::CallbackRegistrySeed;
 use crate::lsp_runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
 use crate::process_pool::{ProcessPool, ProcessPoolError, ProcessSpec, StdioMode};
+use crate::selector_runtime::{
+    RuntimeSelectorControlRequest, RuntimeSelectorError, RuntimeSelectorOpenRequest,
+    RuntimeSelectorSessions, RuntimeSelectorSnapshot, RuntimeSelectorSourceRequest,
+    RuntimeSelectorUpdateRequest, SelectorViewBackend, parse_rg_vimgrep_output,
+};
 #[cfg(test)]
 use crate::startup_runtime::{
     PreparedStartupModule, StartupModulePrepareResult, prepare_init_module,
@@ -50,6 +56,13 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.filer.bulkDeletePreview",
     "saya.filer.bulkDelete",
     "saya.lsif.request",
+    "saya.input.prompt",
+    "saya.selector.open",
+    "saya.selector.update",
+    "saya.selector.current",
+    "saya.selector.control",
+    "saya.selector.cancel",
+    "saya.selector.dispose",
     "saya.process.spawn",
 ];
 
@@ -215,6 +228,44 @@ globalThis.saya = {
             return Deno.core.ops.op_runtime_lsif_request(JSON.stringify(payload ?? {}));
         },
     },
+    input: {
+        async prompt(options) {
+            const request = {
+                title: String(options?.title ?? ""),
+                placeholder: options?.placeholder === undefined || options?.placeholder === null
+                    ? null
+                    : String(options.placeholder),
+            };
+            console.info(`[saya.input.prompt] start title=${request.title}`);
+            const response = await Deno.core.ops.op_runtime_input_prompt(JSON.stringify(request));
+            if (response.status === "submitted") {
+                console.info(`[saya.input.prompt] resolved title=${request.title} value_len=${response.value.length}`);
+                return response.value;
+            }
+            console.info(`[saya.input.prompt] cancelled title=${request.title}`);
+            return null;
+        },
+    },
+    selector: {
+        open(options) {
+            return Deno.core.ops.op_runtime_selector_open(JSON.stringify(options ?? {}));
+        },
+        update(id, options) {
+            return Deno.core.ops.op_runtime_selector_update(String(id), JSON.stringify(options ?? {}));
+        },
+        current(id) {
+            return Deno.core.ops.op_runtime_selector_current(String(id));
+        },
+        control(id, options) {
+            return Deno.core.ops.op_runtime_selector_control(String(id), JSON.stringify(options ?? {}));
+        },
+        cancel(id) {
+            return Deno.core.ops.op_runtime_selector_cancel(String(id));
+        },
+        dispose(id) {
+            return Deno.core.ops.op_runtime_selector_dispose(String(id));
+        },
+    },
     // Phase A.2: 汎用プロセス I/O。Rust 側の op_process_* を Object.freeze
     // で凍結したラッパ越しに公開する。LSP / DAP / linter / formatter 等
     // のプラグインから利用される基盤。
@@ -281,6 +332,8 @@ Object.freeze(globalThis.saya.window);
 Object.freeze(globalThis.saya.editor);
 Object.freeze(globalThis.saya.filer);
 Object.freeze(globalThis.saya.lsif);
+Object.freeze(globalThis.saya.input);
+Object.freeze(globalThis.saya.selector);
 Object.freeze(globalThis.saya.process);
 Object.freeze(globalThis.saya);
 
@@ -333,7 +386,7 @@ Object.freeze(globalThis.saya);
 "#;
 
 const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &[
-    "commands", "buffer", "window", "editor", "filer", "lsif", "process",
+    "commands", "buffer", "window", "editor", "filer", "lsif", "input", "selector", "process",
 ];
 const RUNTIME_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
@@ -516,6 +569,141 @@ declare global {
         request(payload: SayaLsifRuntimeBridgeRequest): Promise<SayaLsifRuntimeBridgeResponse>;
     }
 
+    interface SayaInputPromptOptions {
+        title: string;
+        placeholder?: string | null;
+    }
+
+    interface SayaRuntimeInputSurface {
+        prompt(options: SayaInputPromptOptions): Promise<string | null>;
+    }
+
+    type SayaSelectorMatcherName = "prefixAnd" | "substringAnd" | "suffixAnd";
+    type SayaSelectorWorkState =
+        | "idle"
+        | "running"
+        | "completed"
+        | "cancelled"
+        | "failed";
+    type SayaSelectorStorageMode = "memory" | "tempFile";
+
+    interface SayaSelectorItem<TDetail = unknown> {
+        id: string;
+        value: string;
+        kind: string;
+        detail: TDetail;
+    }
+
+    interface SayaStaticSelectorSource<TDetail = unknown> {
+        kind: "static";
+        items: SayaSelectorItem<TDetail>[];
+    }
+
+    interface SayaRgSelectorSource {
+        kind: "rg";
+        root?: string;
+        pattern: string;
+    }
+
+    interface SayaSelectorLimits {
+        maxRenderedItems?: number;
+    }
+
+    interface SayaSelectorOpenOptions<TDetail = unknown> {
+        source: SayaStaticSelectorSource<TDetail> | SayaRgSelectorSource;
+        matcher?: SayaSelectorMatcherName;
+        query?: string;
+        limits?: SayaSelectorLimits;
+    }
+
+    interface SayaSelectorUpdateOptions {
+        query: string;
+    }
+
+    type SayaSelectorControllerCommand =
+        | "cursorNext"
+        | "cursorPrevious"
+        | "cursorFirst"
+        | "cursorLast"
+        | "pageDown"
+        | "pageUp"
+        | "hide"
+        | "cancel";
+
+    interface SayaSelectorControlOptions {
+        command: SayaSelectorControllerCommand;
+    }
+
+    interface SayaSelectorHighlight {
+        column: number;
+        width: number;
+        kind: "match" | "selection" | "diagnostic";
+    }
+
+    interface SayaRenderedSelectorItem {
+        id: string;
+        label: string;
+        kind: string;
+        detail: unknown;
+        highlights: SayaSelectorHighlight[];
+    }
+
+    interface SayaSelectorViewState {
+        cursor: number;
+        offset: number;
+        renderedItemsLen: number;
+        hidden: boolean;
+        cancelled: boolean;
+    }
+
+    interface SayaSelectorCollectStatus {
+        state: SayaSelectorWorkState;
+        totalSeen: number;
+        totalStored: number;
+        storage: SayaSelectorStorageMode;
+        errorMessage?: string | null;
+    }
+
+    interface SayaSelectorMatchStatus {
+        state: SayaSelectorWorkState;
+        totalMatched: number;
+        totalRendered: number;
+        errorMessage?: string | null;
+    }
+
+    interface SayaSelectorStoreStatus {
+        storage: SayaSelectorStorageMode;
+        totalStored: number;
+        estimatedBytes?: number | null;
+        tempFilePath?: string | null;
+    }
+
+    interface SayaSelectorStatus {
+        collect: SayaSelectorCollectStatus;
+        match: SayaSelectorMatchStatus;
+        store: SayaSelectorStoreStatus;
+    }
+
+    interface SayaSelectorSnapshot {
+        id: number;
+        query: string;
+        renderedItems: SayaRenderedSelectorItem[];
+        selectedItem?: SayaRenderedSelectorItem | null;
+        view: SayaSelectorViewState;
+        status: SayaSelectorStatus;
+    }
+
+    interface SayaRuntimeSelectorSurface {
+        open<TDetail = unknown>(
+            options: SayaSelectorOpenOptions<TDetail>,
+        ): Promise<SayaSelectorSnapshot>;
+        update(id: number, options: SayaSelectorUpdateOptions): Promise<SayaSelectorSnapshot>;
+        current(id: number): Promise<SayaSelectorSnapshot>;
+        control(id: number, options: SayaSelectorControlOptions): Promise<SayaSelectorSnapshot>;
+        cancel(id: number): Promise<SayaSelectorSnapshot>;
+        dispose(id: number): Promise<boolean>;
+    }
+
     type SayaProcessStdioMode = "inherit" | "null" | "piped";
 
     interface SayaProcessSpec {
@@ -672,6 +860,8 @@ declare global {
         workspace: SayaRuntimeWorkspaceSurface;
         filer: SayaRuntimeFilerSurface;
         lsif: SayaRuntimeLsifSurface;
+        input: SayaRuntimeInputSurface;
+        selector: SayaRuntimeSelectorSurface;
         process: SayaRuntimeProcessSurface;
     }
 
@@ -1040,6 +1230,21 @@ pub enum RuntimeInitError {
 
 pub trait HostCapabilityBridge: Send + Sync + 'static {
     fn execute_host_command(&self, name: &str) -> BoxFuture<Result<(), RuntimeCommandError>>;
+    fn request_input_prompt(
+        &self,
+        request: RuntimeInputPromptRequest,
+    ) -> BoxFuture<Result<RuntimeInputPromptResponse, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][input] typed prompt unavailable: title={}, placeholder_present={}",
+                request.title,
+                request.placeholder.is_some()
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "input.prompt".to_string(),
+            })
+        })
+    }
     fn execute_lsif_request(
         &self,
         request: LspRuntimeBridgeRequest,
@@ -1103,6 +1308,9 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
         })
     }
     fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot>;
+    fn selector_view_backend(&self) -> Option<Arc<dyn SelectorViewBackend>> {
+        None
+    }
     fn find_workspace_root(&self, path: String, markers: Vec<String>) -> BoxFuture<Option<String>> {
         Box::pin(async move {
             let root = find_workspace_root_path(PathBuf::from(path), &markers)?;
@@ -1309,11 +1517,26 @@ impl CallbackRegistry {
 #[derive(Clone)]
 struct LiveRuntimeOpState {
     bridge: Arc<dyn HostCapabilityBridge>,
+    selector_sessions: Arc<StdMutex<RuntimeSelectorSessions>>,
     /// Phase A.2: 汎用プロセス I/O (`saya.process.*`) op の共有プール。
     ///
     /// Bootstrap script の `saya.process.spawn(...)` ラッパおよびテスト
     /// 用 `Deno.core.ops.op_process_*` から参照される。
     process_pool: Arc<crate::process_pool::ProcessPool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeInputPromptRequest {
+    pub title: String,
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum RuntimeInputPromptResponse {
+    Submitted { value: String },
+    Cancelled,
 }
 
 #[derive(Debug, Default)]
@@ -1382,6 +1605,275 @@ async fn op_runtime_lsif_request(
             Err(runtime_command_error_to_js_error(error))
         }
     }
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_input_prompt(
+    state: Rc<RefCell<OpState>>,
+    #[string] request_json: String,
+) -> Result<RuntimeInputPromptResponse, JsErrorBox> {
+    let request = serde_json::from_str::<RuntimeInputPromptRequest>(&request_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid input.prompt request: {error}")))?;
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::info!(
+        "[saya_live_runtime][input] runtime prompt requested: title={}, placeholder_present={}",
+        request.title,
+        request.placeholder.is_some()
+    );
+    match bridge.request_input_prompt(request).await {
+        Ok(RuntimeInputPromptResponse::Submitted { value }) => {
+            log::info!(
+                "[saya_live_runtime][input] runtime prompt resolved: value_len={}",
+                value.len()
+            );
+            Ok(RuntimeInputPromptResponse::Submitted { value })
+        }
+        Ok(RuntimeInputPromptResponse::Cancelled) => {
+            log::info!("[saya_live_runtime][input] runtime prompt cancelled");
+            Ok(RuntimeInputPromptResponse::Cancelled)
+        }
+        Err(error) => {
+            log::debug!(
+                "[saya_live_runtime][input] runtime prompt failed: error={:?}",
+                error
+            );
+            Err(runtime_command_error_to_js_error(error))
+        }
+    }
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_selector_open(
+    state: Rc<RefCell<OpState>>,
+    #[string] request_json: String,
+) -> Result<RuntimeSelectorSnapshot, JsErrorBox> {
+    let request = serde_json::from_str::<RuntimeSelectorOpenRequest>(&request_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid selector.open request: {error}")))?;
+    let sessions = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .selector_sessions
+        .clone();
+    log::debug!("[saya_live_runtime][selector] runtime op open");
+    let request = resolve_runtime_selector_source(request)
+        .await
+        .map_err(|error| JsErrorBox::generic(format!("rg selector source failed: {error}")))?;
+    sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .open(request)
+        .map_err(|error| JsErrorBox::generic(error.to_string()))
+}
+
+async fn resolve_runtime_selector_source(
+    mut request: RuntimeSelectorOpenRequest,
+) -> Result<RuntimeSelectorOpenRequest, RuntimeSelectorError> {
+    let RuntimeSelectorSourceRequest::Rg { root, pattern } = &request.source else {
+        return Ok(request);
+    };
+    if pattern.is_empty() {
+        return Err(RuntimeSelectorError::InvalidRequest(
+            "rg selector source requires a non-empty pattern".to_string(),
+        ));
+    }
+    let root = root
+        .as_deref()
+        .filter(|root| !root.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let pattern = pattern.clone();
+    let items = collect_rg_selector_items(root, pattern).await?;
+    request.source = RuntimeSelectorSourceRequest::Static { items };
+    Ok(request)
+}
+
+async fn collect_rg_selector_items(
+    root: PathBuf,
+    pattern: String,
+) -> Result<Vec<crate::selector_runtime::RuntimeSelectorItem>, RuntimeSelectorError> {
+    log::debug!(
+        "[saya_live_runtime][selector][rg] collect source: root={}, pattern_len={}",
+        root.display(),
+        pattern.len()
+    );
+    let mut command = TokioCommand::new("rg");
+    command
+        .arg("--vimgrep")
+        .arg("--")
+        .arg(&pattern)
+        .arg(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = command.output().await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeSelectorError::SourceUnavailable("rg executable was not found".to_string())
+        } else {
+            RuntimeSelectorError::SourceFailed(format!("failed to execute rg: {error}"))
+        }
+    })?;
+
+    let status_code = output.status.code();
+    if output.status.success() {
+        let stdout = String::from_utf8(output.stdout).map_err(|error| {
+            RuntimeSelectorError::SourceFailed(format!("rg stdout was not UTF-8: {error}"))
+        })?;
+        let items = parse_rg_vimgrep_output(&stdout)?;
+        log::debug!(
+            "[saya_live_runtime][selector][rg] collect completed: root={}, items={}",
+            root.display(),
+            items.len()
+        );
+        return Ok(items);
+    }
+
+    if status_code == Some(1) {
+        log::debug!(
+            "[saya_live_runtime][selector][rg] collect completed with no matches: root={}",
+            root.display()
+        );
+        return Ok(Vec::new());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let message = stderr.lines().next().unwrap_or("rg failed").to_string();
+    log::debug!(
+        "[saya_live_runtime][selector][rg] collect failed: root={}, status={:?}, stderr_first_line={:?}",
+        root.display(),
+        status_code,
+        message
+    );
+    Err(RuntimeSelectorError::SourceFailed(format!(
+        "rg exited with status {:?}: {}",
+        status_code, message
+    )))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_selector_update(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+    #[string] request_json: String,
+) -> Result<RuntimeSelectorSnapshot, JsErrorBox> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| JsErrorBox::generic(format!("invalid selector.update id: {error}")))?;
+    let request =
+        serde_json::from_str::<RuntimeSelectorUpdateRequest>(&request_json).map_err(|error| {
+            JsErrorBox::generic(format!("invalid selector.update request: {error}"))
+        })?;
+    let sessions = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .selector_sessions
+        .clone();
+    log::debug!("[saya_live_runtime][selector] runtime op update: id={id}");
+    sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .update(id, request)
+        .map_err(|error| JsErrorBox::generic(error.to_string()))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_selector_current(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+) -> Result<RuntimeSelectorSnapshot, JsErrorBox> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| JsErrorBox::generic(format!("invalid selector.current id: {error}")))?;
+    let sessions = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .selector_sessions
+        .clone();
+    log::debug!("[saya_live_runtime][selector] runtime op current: id={id}");
+    sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .current(id)
+        .map_err(|error| JsErrorBox::generic(error.to_string()))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_selector_control(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+    #[string] request_json: String,
+) -> Result<RuntimeSelectorSnapshot, JsErrorBox> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| JsErrorBox::generic(format!("invalid selector.control id: {error}")))?;
+    let request =
+        serde_json::from_str::<RuntimeSelectorControlRequest>(&request_json).map_err(|error| {
+            JsErrorBox::generic(format!("invalid selector.control request: {error}"))
+        })?;
+    let sessions = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .selector_sessions
+        .clone();
+    log::debug!(
+        "[saya_live_runtime][selector] runtime op control: id={id}, command={:?}",
+        request.command
+    );
+    sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .control(id, request)
+        .map_err(|error| JsErrorBox::generic(error.to_string()))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_selector_cancel(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+) -> Result<RuntimeSelectorSnapshot, JsErrorBox> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| JsErrorBox::generic(format!("invalid selector.cancel id: {error}")))?;
+    let sessions = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .selector_sessions
+        .clone();
+    log::debug!("[saya_live_runtime][selector] runtime op cancel: id={id}");
+    sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .cancel(id)
+        .map_err(|error| JsErrorBox::generic(error.to_string()))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_selector_dispose(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let id = id
+        .parse::<u64>()
+        .map_err(|error| JsErrorBox::generic(format!("invalid selector.dispose id: {error}")))?;
+    let sessions = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .selector_sessions
+        .clone();
+    log::debug!("[saya_live_runtime][selector] runtime op dispose: id={id}");
+    let disposed = sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .dispose(id)
+        .map_err(|error| JsErrorBox::generic(error.to_string()))?;
+    Ok(serde_json::Value::Bool(disposed))
 }
 
 #[op2(async(deferred), fast)]
@@ -1879,9 +2371,7 @@ async fn op_process_spawn(
         .spawn(process_spec)
         .await
         .map_err(process_pool_error_to_js_error)?;
-    log::debug!(
-        "[saya_live_runtime][process] op_process_spawn ok: handle={handle}"
-    );
+    log::debug!("[saya_live_runtime][process] op_process_spawn ok: handle={handle}");
     Ok(handle)
 }
 
@@ -1989,9 +2479,7 @@ async fn op_process_kill(
     state: Rc<RefCell<OpState>>,
     #[smi] handle: u32,
 ) -> Result<(), JsErrorBox> {
-    log::debug!(
-        "[saya_live_runtime][process] op_process_kill: handle={handle}"
-    );
+    log::debug!("[saya_live_runtime][process] op_process_kill: handle={handle}");
     let pool = state
         .borrow()
         .borrow::<LiveRuntimeOpState>()
@@ -2000,9 +2488,7 @@ async fn op_process_kill(
     pool.kill(handle)
         .await
         .map_err(process_pool_error_to_js_error)?;
-    log::debug!(
-        "[saya_live_runtime][process] op_process_kill ok: handle={handle}"
-    );
+    log::debug!("[saya_live_runtime][process] op_process_kill ok: handle={handle}");
     Ok(())
 }
 
@@ -2014,9 +2500,7 @@ async fn op_process_wait(
     state: Rc<RefCell<OpState>>,
     #[smi] handle: u32,
 ) -> Result<i32, JsErrorBox> {
-    log::debug!(
-        "[saya_live_runtime][process] op_process_wait: handle={handle}"
-    );
+    log::debug!("[saya_live_runtime][process] op_process_wait: handle={handle}");
     let pool = state
         .borrow()
         .borrow::<LiveRuntimeOpState>()
@@ -2026,9 +2510,7 @@ async fn op_process_wait(
         .wait(handle)
         .await
         .map_err(process_pool_error_to_js_error)?;
-    log::debug!(
-        "[saya_live_runtime][process] op_process_wait ok: handle={handle}, code={code}"
-    );
+    log::debug!("[saya_live_runtime][process] op_process_wait ok: handle={handle}, code={code}");
     Ok(code)
 }
 
@@ -2037,6 +2519,13 @@ deno_core::extension!(
     ops = [
         op_runtime_execute_host_command,
         op_runtime_lsif_request,
+        op_runtime_input_prompt,
+        op_runtime_selector_open,
+        op_runtime_selector_update,
+        op_runtime_selector_current,
+        op_runtime_selector_control,
+        op_runtime_selector_cancel,
+        op_runtime_selector_dispose,
         op_runtime_workspace_find_root,
         op_runtime_current_buffer,
         op_runtime_current_window,
@@ -2068,11 +2557,13 @@ deno_core::extension!(
     ],
     options = {
         bridge: Arc<dyn HostCapabilityBridge>,
+        selector_sessions: Arc<StdMutex<RuntimeSelectorSessions>>,
         process_pool: Arc<ProcessPool>,
     },
     state = |state, options| {
         state.put(LiveRuntimeOpState {
             bridge: options.bridge,
+            selector_sessions: options.selector_sessions,
             process_pool: options.process_pool,
         });
     }
@@ -2571,7 +3062,15 @@ fn build_seed_registration_script(
 fn create_seed_runtime(
     bridge: Arc<dyn HostCapabilityBridge>,
     seed: &CallbackRegistrySeed,
-) -> Result<(JsRuntime, SeedRuntimeMetadata, Arc<ProcessPool>), RuntimeInitError> {
+) -> Result<
+    (
+        JsRuntime,
+        SeedRuntimeMetadata,
+        Arc<ProcessPool>,
+        Arc<StdMutex<RuntimeSelectorSessions>>,
+    ),
+    RuntimeInitError,
+> {
     log::debug!(
         "[saya_live_runtime] create deno_core live runtime from seed: commands={}, events={}",
         seed.commands().len(),
@@ -2580,8 +3079,15 @@ fn create_seed_runtime(
     // Phase A.2: 共有プロセスプールを生成し、extension にも、worker
     // ループ脱出時の sweeper にも参照を渡せるよう Arc を 2 部複製する。
     let process_pool = Arc::new(ProcessPool::new());
+    let selector_sessions = Arc::new(StdMutex::new(RuntimeSelectorSessions::new(
+        bridge.selector_view_backend(),
+    )));
     let mut runtime = JsRuntime::new(RuntimeOptions {
-        extensions: vec![live_saya_extension::init(bridge, process_pool.clone())],
+        extensions: vec![live_saya_extension::init(
+            bridge,
+            selector_sessions.clone(),
+            process_pool.clone(),
+        )],
         ..Default::default()
     });
 
@@ -2598,7 +3104,7 @@ fn create_seed_runtime(
             message: error.to_string(),
         })?;
 
-    Ok((runtime, metadata, process_pool))
+    Ok((runtime, metadata, process_pool, selector_sessions))
 }
 
 async fn dispatch_event_in_seed_runtime(
@@ -2991,6 +3497,7 @@ impl RuntimeEditorApi {
 struct RuntimeSharedState {
     bridge: Arc<dyn HostCapabilityBridge>,
     registry: CallbackRegistry,
+    selector_sessions: Arc<StdMutex<RuntimeSelectorSessions>>,
     command_stack: Mutex<Vec<String>>,
 }
 
@@ -3021,9 +3528,13 @@ impl Drop for SayaLiveRuntime {
 impl SayaLiveRuntime {
     pub fn spawn(bridge: Arc<dyn HostCapabilityBridge>, registry: CallbackRegistry) -> Self {
         let (sender, mut receiver) = mpsc::unbounded_channel();
+        let selector_sessions = Arc::new(StdMutex::new(RuntimeSelectorSessions::new(
+            bridge.selector_view_backend(),
+        )));
         let shared = Arc::new(RuntimeSharedState {
             bridge,
             registry,
+            selector_sessions,
             command_stack: Mutex::new(Vec::new()),
         });
 
@@ -3043,6 +3554,11 @@ impl SayaLiveRuntime {
                         .commands()
                         .execute(&name)
                         .await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeMessage::ControlSelector { id, request, reply } => {
+                        let result =
+                            control_selector_session(&worker_shared.selector_sessions, id, request);
                         let _ = reply.send(result);
                     }
                 }
@@ -3074,7 +3590,7 @@ impl SayaLiveRuntime {
 
                 runtime.block_on(async move {
                     let mut receiver = receiver;
-                    let (mut js_runtime, metadata, process_pool) =
+                    let (mut js_runtime, metadata, process_pool, selector_sessions) =
                         match create_seed_runtime(bridge, &seed) {
                             Ok(runtime) => runtime,
                             Err(error) => {
@@ -3112,6 +3628,16 @@ impl SayaLiveRuntime {
                                 );
                                 let result =
                                     execute_command_in_seed_runtime(&mut js_runtime, &name).await;
+                                let _ = reply.send(result);
+                            }
+                            RuntimeMessage::ControlSelector { id, request, reply } => {
+                                log::debug!(
+                                    "[saya_live_runtime][selector] seed runtime received host selector control: id={}, command={:?}",
+                                    id,
+                                    request.command
+                                );
+                                let result =
+                                    control_selector_session(&selector_sessions, id, request);
                                 let _ = reply.send(result);
                             }
                         }
@@ -3196,6 +3722,26 @@ impl SayaLiveRuntime {
             })?;
         Ok(RuntimeCommandReceipt { receiver })
     }
+
+    pub fn control_selector(
+        &self,
+        id: u64,
+        request: RuntimeSelectorControlRequest,
+    ) -> Result<RuntimeSelectorControlReceipt, RuntimeCommandError> {
+        log::info!(
+            "[saya_live_runtime][selector] queue host selector control: id={}, command={:?}",
+            id,
+            request.command
+        );
+        let (reply, receiver) = oneshot::channel();
+        self.sender
+            .send(RuntimeMessage::ControlSelector { id, request, reply })
+            .map_err(|_| RuntimeCommandError::CommandFailed {
+                name: "selector.control".to_string(),
+                message: "runtime selector control queue closed".to_string(),
+            })?;
+        Ok(RuntimeSelectorControlReceipt { receiver })
+    }
 }
 
 pub struct RuntimeDispatchReceipt {
@@ -3215,12 +3761,31 @@ pub struct RuntimeCommandReceipt {
 }
 
 impl RuntimeCommandReceipt {
+    pub(crate) fn into_receiver(self) -> oneshot::Receiver<Result<(), RuntimeCommandError>> {
+        self.receiver
+    }
+
     pub async fn await_result(self) -> Result<(), RuntimeCommandError> {
         self.receiver
             .await
             .map_err(|_| RuntimeCommandError::CommandFailed {
                 name: "<runtime-command-reply>".to_string(),
                 message: "runtime command worker stopped".to_string(),
+            })?
+    }
+}
+
+pub struct RuntimeSelectorControlReceipt {
+    receiver: oneshot::Receiver<Result<RuntimeSelectorSnapshot, RuntimeCommandError>>,
+}
+
+impl RuntimeSelectorControlReceipt {
+    pub async fn await_result(self) -> Result<RuntimeSelectorSnapshot, RuntimeCommandError> {
+        self.receiver
+            .await
+            .map_err(|_| RuntimeCommandError::CommandFailed {
+                name: "selector.control".to_string(),
+                message: "runtime selector control worker stopped".to_string(),
             })?
     }
 }
@@ -3234,6 +3799,32 @@ enum RuntimeMessage {
         name: String,
         reply: oneshot::Sender<Result<(), RuntimeCommandError>>,
     },
+    ControlSelector {
+        id: u64,
+        request: RuntimeSelectorControlRequest,
+        reply: oneshot::Sender<Result<RuntimeSelectorSnapshot, RuntimeCommandError>>,
+    },
+}
+
+fn control_selector_session(
+    selector_sessions: &Arc<StdMutex<RuntimeSelectorSessions>>,
+    id: u64,
+    request: RuntimeSelectorControlRequest,
+) -> Result<RuntimeSelectorSnapshot, RuntimeCommandError> {
+    let command = request.command;
+    log::debug!(
+        "[saya_live_runtime][selector] host selector control start: id={}, command={:?}",
+        id,
+        command
+    );
+    selector_sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .control(id, request)
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "selector.control".to_string(),
+            message: error.to_string(),
+        })
 }
 
 async fn dispatch_event(

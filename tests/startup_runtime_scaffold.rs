@@ -57,7 +57,6 @@ impl HostCapabilityBridge for NoopHostBridge {
     }
 }
 
-
 #[test]
 fn init_ts_path_is_resolved_as_a_file_module_specifier() {
     let current_dir = unique_path("cwd");

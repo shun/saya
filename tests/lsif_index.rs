@@ -73,10 +73,7 @@ fn new_diagnostic_events() -> Arc<Mutex<Vec<String>>> {
 }
 
 fn collect_events(events: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
-    events
-        .lock()
-        .map(|guard| guard.clone())
-        .unwrap_or_default()
+    events.lock().map(|guard| guard.clone()).unwrap_or_default()
 }
 
 #[test]

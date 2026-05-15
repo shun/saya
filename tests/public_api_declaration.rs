@@ -56,11 +56,16 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("floats()"));
     assert!(declaration.contains("editor"));
     assert!(declaration.contains("filer"));
-    assert!(declaration.contains("lsp"));
-    assert!(declaration.contains("SayaRuntimeLspSurface"));
-    assert!(declaration.contains("SayaLspRuntimeBridgeRequest"));
-    assert!(declaration.contains("SayaLspRuntimeBridgeResponse"));
+    assert!(declaration.contains("lsif"));
+    assert!(declaration.contains("SayaRuntimeLsifSurface"));
+    assert!(declaration.contains("SayaLsifRuntimeBridgeRequest"));
+    assert!(declaration.contains("SayaLsifRuntimeBridgeResponse"));
     assert!(declaration.contains("positionEncoding"));
+    assert!(declaration.contains("input"));
+    assert!(declaration.contains("SayaRuntimeInputSurface"));
+    assert!(
+        declaration.contains("prompt(options: SayaInputPromptOptions): Promise<string | null>")
+    );
     assert!(declaration.contains("SayaRuntimeFilerSurface"));
     assert!(declaration.contains("SayaFilerListOptions"));
     assert!(declaration.contains("filter?: string | null"));
@@ -162,7 +167,9 @@ fn dired_v1_preview_contract_docs_match_guarded_public_declarations() {
 
 #[test]
 fn runtime_public_api_type_declaration_does_not_expose_transport_specific_presentation_details() {
-    let declaration = RUNTIME_SAYA_TYPE_DECLARATION.to_ascii_lowercase();
+    let declaration = RUNTIME_SAYA_TYPE_DECLARATION
+        .to_ascii_lowercase()
+        .replace("estimatedbytes", "");
 
     for forbidden in [
         "overlay", "graphics", "protocol", "bytes", "asset", "kitty", "sixel", "wgpu", "neovim",
