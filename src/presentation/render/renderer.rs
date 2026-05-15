@@ -896,7 +896,7 @@ fn render_line(
         .cloned()
         .unwrap_or_default();
     if overlays.is_empty() {
-        let style = style_for_text(base_style, text_mode);
+        let style = style_for_buffer_base_text(base_style, text_mode);
         let line = if style == Style::default() {
             Line::from(line.to_string())
         } else {
@@ -1059,7 +1059,7 @@ fn render_layered_line(
             })
             .max_by_key(|overlay| overlay_kind_rank(&overlay.kind))
             .map(|overlay| style_for_overlay_kind(overlay.kind.clone(), text_mode, theme))
-            .unwrap_or_else(|| style_for_text(base_style.clone(), text_mode));
+            .unwrap_or_else(|| style_for_buffer_base_text(base_style.clone(), text_mode));
         if style == Style::default() {
             spans.push(Span::raw(text));
         } else {
@@ -1138,6 +1138,16 @@ fn line_number_gutter_end_col(line: &str) -> Option<usize> {
 }
 
 fn style_for_markdown(style: ResolvedTextStyle, text_mode: RenderTextMode) -> Style {
+    style_for_text(style, text_mode)
+}
+
+fn style_for_buffer_base_text(mut style: ResolvedTextStyle, text_mode: RenderTextMode) -> Style {
+    if style.bg.is_some() {
+        log::debug!(
+            "[tui_renderer] ignoring ui.text.bg for buffer text cells so text, tabs, and padding keep the terminal background"
+        );
+        style.bg = None;
+    }
     style_for_text(style, text_mode)
 }
 
@@ -1896,7 +1906,7 @@ mod tests {
     }
 
     #[test]
-    fn render_buffer_text_applies_ui_text_style_without_markdown() {
+    fn render_buffer_text_applies_ui_text_fg_without_painting_base_bg() {
         let mut model = screen_model_with_message(None);
         model.lines = vec!["let value = 1;".to_string()];
         model.visual_selection = None;
@@ -1925,9 +1935,13 @@ mod tests {
         assert_eq!(line.spans[0].content.as_ref(), "let value = 1;");
         assert_eq!(
             line.spans[0].style,
-            Style::default()
-                .fg(Color::Rgb(0xc0, 0xca, 0xf5))
-                .bg(Color::Rgb(0x24, 0x28, 0x3b))
+            Style::default().fg(Color::Rgb(0xc0, 0xca, 0xf5))
+        );
+        assert_eq!(line.spans[1].content.as_ref(), "  ");
+        assert_eq!(
+            line.spans[1].style,
+            Style::default(),
+            "line padding should keep the terminal background instead of inheriting ui.text.bg"
         );
     }
 
