@@ -8,7 +8,7 @@
 
 use saya::presentation::markdown::render::{
     InlineStyleKind, RenderedFloatContent, render_markdown_to_float_content,
-    render_plaintext_to_float_content,
+    render_plaintext_to_float_content, wrap_rendered_content_to_width,
 };
 
 fn line_strings(content: &RenderedFloatContent) -> Vec<&str> {
@@ -185,5 +185,36 @@ fn render_plaintext_passes_lines_through_without_markdown_transformations() {
     assert!(
         rendered.inline_styles.is_empty(),
         "plaintext rendering must produce no inline styles"
+    );
+}
+
+#[test]
+fn wrap_rendered_content_prefers_word_boundaries() {
+    let rendered = render_plaintext_to_float_content(
+        "Error: Property 'lineNumber' does not exist on type 'SayaStartupOptionsSurface'.",
+    );
+
+    let wrapped = wrap_rendered_content_to_width(rendered, 68);
+
+    assert_eq!(
+        line_strings(&wrapped),
+        vec![
+            "Error: Property 'lineNumber' does not exist on type",
+            "'SayaStartupOptionsSurface'.",
+        ],
+        "wrapping should avoid splitting words when a word boundary fits"
+    );
+}
+
+#[test]
+fn wrap_rendered_content_splits_overlong_words_only_when_needed() {
+    let rendered = render_plaintext_to_float_content("SuperLongIdentifierWithoutAnyBreakPoint");
+
+    let wrapped = wrap_rendered_content_to_width(rendered, 12);
+
+    assert_eq!(
+        line_strings(&wrapped),
+        vec!["SuperLongIde", "ntifierWitho", "utAnyBreakPo", "int"],
+        "single words longer than the float width still need safe hard wrapping"
     );
 }

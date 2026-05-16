@@ -478,6 +478,36 @@ async fn init_ts_module_can_import_repository_lsp_client_plugin() {
 }
 
 #[test]
+fn lsp_client_shim_exposes_normal_typescript_named_exports() {
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-lsp-client.ts");
+    let source = std::fs::read_to_string(plugin_path).expect("lsp client shim should be readable");
+
+    assert!(
+        source.contains("export {")
+            && source.contains("setupSayaLspClient")
+            && source.contains("from \"./saya-lsp/index.ts\""),
+        "lsp client shim should expose named exports for external TypeScript language servers"
+    );
+}
+
+#[test]
+fn lsp_client_manager_routes_server_notifications_to_ui_commands() {
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-lsp/index.ts");
+    let source = std::fs::read_to_string(plugin_path).expect("lsp client should be readable");
+
+    assert!(
+        source.contains("session.onNotification(function (message)")
+            && source.contains("pendingNotifications.push")
+            && source.contains("api.drainNotifications")
+            && source.contains("for (const notification of manager.drainNotifications())")
+            && source.find("for (const notification of manager.drainNotifications())")
+                < source.find("await routeFeatureResponse(response)")
+            && source.contains("textDocument/publishDiagnostics"),
+        "LSP server notifications such as publishDiagnostics should update UI state before feature responses render"
+    );
+}
+
+#[test]
 fn repository_lsp_client_plugin_public_helpers_cover_lsp_and_lsif_protocol_shape() {
     // プラグインは plugins/saya-lsp-client.ts （シム）から
     // plugins/saya-lsp/ 配下のモジュール群へ分割されている。
@@ -812,14 +842,19 @@ async fn startup_saya_namespace_is_available_to_top_level_module_code() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn startup_removed_tab_size_alias_is_rejected() {
-    let result = evaluate_startup_module("saya.options.tabSize = 4;").await;
+async fn startup_unknown_option_warns_without_failing_evaluation() {
+    let registry = collect_startup_registry("saya.options.unknownoption = 4;")
+        .await
+        .expect("unknown option should warn without failing startup evaluation");
 
     assert!(
-        result
-            .as_ref()
-            .is_err_and(|message| message.contains("saya.options.tabSize")),
-        "removed tabSize alias should fail startup evaluation, got: {result:?}"
+        registry.entries().iter().any(|entry| matches!(
+            entry,
+            StartupRegistryEntry::Warning { message }
+                if message.contains("saya.options.unknownoption")
+        )),
+        "unknown option should be collected as a warning: {:?}",
+        registry.entries()
     );
 }
 
@@ -853,9 +888,6 @@ async fn startup_surface_is_frozen_and_does_not_expose_runtime_api() {
         r#"
             if (!Object.isFrozen(saya)) {
                 throw new Error("startup saya surface should be frozen");
-            }
-            if (!Object.isFrozen(saya.options)) {
-                throw new Error("startup options surface should be frozen");
             }
             if (!Object.isFrozen(saya.keymap)) {
                 throw new Error("startup keymap surface should be frozen");
@@ -1036,10 +1068,10 @@ async fn startup_tab_size_is_collected_in_source_order_and_is_deterministic() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn startup_line_numbers_is_collected() {
+async fn startup_number_is_collected() {
     let registry = collect_startup_registry(
         r#"
-            saya.options.lineNumbers = true;
+            saya.options.number = true;
         "#,
     )
     .await
@@ -1055,10 +1087,10 @@ async fn startup_line_numbers_is_collected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn startup_number_width_is_collected() {
+async fn startup_numberwidth_is_collected() {
     let registry = collect_startup_registry(
         r#"
-            saya.options.numberWidth = 6;
+            saya.options.numberwidth = 6;
         "#,
     )
     .await
@@ -1069,6 +1101,25 @@ async fn startup_number_width_is_collected() {
         &[StartupRegistryEntry::Option {
             name: StartupOptionName::NumberWidth,
             value: StartupOptionValue::Number(6),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_cmdheight_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.cmdheight = 3;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Option {
+            name: StartupOptionName::MessageHeight,
+            value: StartupOptionValue::Number(3),
         }]
     );
 }

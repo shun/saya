@@ -537,6 +537,49 @@ fn startup_config_enables_syntax_from_typescript_option() {
 }
 
 #[test]
+fn startup_unknown_option_warns_without_discarding_valid_options() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("unknown-option-warning-target.txt");
+    let config_path = unique_path("unknown-option-warning-init.ts");
+    std::fs::write(&target_path, "fn main() {}\n").expect("対象ファイルの作成");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.options.syntax = true;
+            saya.options.number = true;
+            saya.options.unknownoption = true;
+        "#,
+    )
+    .expect("設定ファイルの作成");
+
+    let mut outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("未知 option を含んでも有効な設定は適用されること");
+
+    assert!(
+        outcome.core_bridge.is_syntax_enabled(),
+        "valid syntax=true must still apply when an unknown option is ignored"
+    );
+    assert!(
+        outcome.initial_line_numbers,
+        "valid number=true must still apply when an unknown option is ignored"
+    );
+    assert!(outcome.warnings.iter().any(|warning| matches!(
+        warning,
+        BootstrapWarning::ConfigWarning { path, message }
+            if path == &config_path && message.contains("unknownoption")
+    )));
+
+    std::fs::remove_file(target_path).expect("cleanup target");
+    std::fs::remove_file(config_path).expect("cleanup config");
+}
+
+#[test]
 fn startup_config_keeps_syntax_disabled_from_typescript_false_option() {
     let _lock = test_lock();
     let target_path = unique_path("syntax-disabled-target.txt");
@@ -694,7 +737,7 @@ fn startup_with_relative_config_path_resolves_line_numbers_from_current_director
     let target_path = base_dir.join("target.txt");
 
     std::fs::create_dir_all(&work_dir).expect("作業ディレクトリの作成");
-    std::fs::write(&config_path, "saya.options.lineNumbers = true;\n").expect("設定ファイルの作成");
+    std::fs::write(&config_path, "saya.options.number = true;\n").expect("設定ファイルの作成");
     std::fs::write(&target_path, "alpha\nbeta\n").expect("対象ファイルの作成");
 
     let previous_dir = std::env::current_dir().expect("現在ディレクトリの取得");

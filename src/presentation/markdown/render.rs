@@ -207,20 +207,7 @@ pub fn wrap_rendered_content_to_width(
             source_was_wrapped.push(false);
             continue;
         }
-        let mut current = String::new();
-        let mut current_width = 0usize;
-        for ch in line.chars() {
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if current_width + ch_width > max_width && !current.is_empty() {
-                wrapped_lines.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            current.push(ch);
-            current_width += ch_width;
-        }
-        if !current.is_empty() {
-            wrapped_lines.push(current);
-        }
+        wrapped_lines.extend(wrap_line_to_width_preserving_words(&line, max_width));
         source_was_wrapped.push(true);
     }
 
@@ -266,6 +253,67 @@ pub fn wrap_rendered_content_to_width(
         lines: wrapped_lines,
         inline_styles: truncated_styles,
     }
+}
+
+fn wrap_line_to_width_preserving_words(line: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 || UnicodeWidthStr::width(line) <= max_width {
+        return vec![line.to_string()];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for segment in line.split_inclusive(char::is_whitespace) {
+        let segment_width = UnicodeWidthStr::width(segment);
+        if current_width > 0 && current_width + segment_width > max_width {
+            wrapped.push(trim_trailing_whitespace(std::mem::take(&mut current)));
+            current_width = 0;
+        }
+
+        if segment_width > max_width {
+            if !current.is_empty() {
+                wrapped.push(trim_trailing_whitespace(std::mem::take(&mut current)));
+                current_width = 0;
+            }
+            wrapped.extend(wrap_long_word_to_width(segment.trim_end(), max_width));
+            continue;
+        }
+
+        current.push_str(segment);
+        current_width += segment_width;
+    }
+
+    if !current.is_empty() {
+        wrapped.push(trim_trailing_whitespace(current));
+    }
+    wrapped
+}
+
+fn wrap_long_word_to_width(word: &str, max_width: usize) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in word.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > max_width && !current.is_empty() {
+            wrapped.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if !current.is_empty() {
+        wrapped.push(current);
+    }
+    wrapped
+}
+
+fn trim_trailing_whitespace(mut line: String) -> String {
+    while line.ends_with(char::is_whitespace) {
+        line.pop();
+    }
+    line
 }
 
 /// プレーンテキストを float に表示可能な行リストへ変換する。

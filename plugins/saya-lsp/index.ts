@@ -531,6 +531,7 @@ const __lspManagerSourceTemplate =
   "const __lspManager = (function () {\n" +
   "  const sessions = new Map();\n" +
   "  const initializeResults = new Map();\n" +
+  "  const pendingNotifications = [];\n" +
   "  // hover / definition / references / completion などの「結果を待つ」\n" +
   "  // request 系メソッドについて、`${server.name}:${method}` を key に\n" +
   "  // 直前 inflight を覚えておく。次の同 key request が来たら前 token を\n" +
@@ -550,6 +551,9 @@ const __lspManagerSourceTemplate =
   "      const child = await saya.process.spawn(spec);\n" +
   "      const transport = __lspTransport.createFromProcess(child);\n" +
   "      const session = __lspSession.create(transport, {});\n" +
+  "      session.onNotification(function (message) {\n" +
+  "        pendingNotifications.push({ source: 'lsp', method: message && message.method, params: message && message.params, result: message });\n" +
+  "      });\n" +
   "      const initializeResult = await session.start(initializeParams);\n" +
   "      initializeResults.set(serverConfig.name, initializeResult);\n" +
   "      return session;\n" +
@@ -706,6 +710,9 @@ const __lspManagerSourceTemplate =
   "  }\n" +
   "  const api = {};\n" +
   "  api.dispatch = dispatch;\n" +
+  "  api.drainNotifications = function () {\n" +
+  "    return pendingNotifications.splice(0, pendingNotifications.length);\n" +
+  "  };\n" +
   "  api.shutdownAll = async function () {\n" +
   "    for (const key of Array.from(inflightCancels.keys())) {\n" +
   "      supersedePreviousInflight(key);\n" +
@@ -1093,10 +1100,13 @@ function createRuntimeBridgeCallbackSource(
       "    }\n" +
       "    const manager = globalThis.__sayaLspManager;\n" +
       "    try {\n" +
-      "      const response = await manager.dispatch(request);\n" +
-      "      if (selectedServer) rememberServerCapabilities(selectedServer, response);\n" +
-      "      await routeFeatureResponse(response);\n" +
-      "      return response;\n" +
+  "      const response = await manager.dispatch(request);\n" +
+  "      if (selectedServer) rememberServerCapabilities(selectedServer, response);\n" +
+  "      for (const notification of manager.drainNotifications()) {\n" +
+  "        await routeFeatureResponse(notification);\n" +
+  "      }\n" +
+  "      await routeFeatureResponse(response);\n" +
+  "      return response;\n" +
       "    } catch (error) {\n" +
       // K 連打などで前回 inflight が cancel されたケース (error.lspSuperseded) は
       // routeFeatureResponse まで届けず静かに drop する。

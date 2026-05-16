@@ -33,7 +33,7 @@ fn formal_boot_flow_uses_deno_core_runtime_for_expression_based_startup_config()
             const writeCurrent = "writeCurrent";
 
             saya.options.tabstop = computedTabstop;
-            saya.options.lineNumbers = true;
+            saya.options.number = true;
             saya.keymap.set("normal", "<leader>w", saya.commands.execute(writeCurrent));
             saya.commands.register(writeCurrent, () => {
                 return saya.commands.execute("write");

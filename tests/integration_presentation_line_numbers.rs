@@ -31,8 +31,8 @@ fn presentation_line_numbers_reflect_in_headless_projection_without_conflicting_
         &config_path,
         r#"
             saya.options.tabstop = 4;
-            saya.options.lineNumbers = true;
-            saya.options.numberWidth = 4;
+            saya.options.number = true;
+            saya.options.numberwidth = 4;
         "#,
     )
     .expect("config file");

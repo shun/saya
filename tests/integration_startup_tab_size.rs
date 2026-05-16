@@ -98,22 +98,22 @@ fn startup_tab_size_falls_back_when_config_is_missing() {
 }
 
 #[test]
-fn startup_rejects_removed_tab_size_alias() {
+fn startup_unknown_option_does_not_change_tabstop_default() {
     let _lock = launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let target_path = unique_path("removed-alias-target.txt");
-    let config_path = unique_path("removed-alias-init.ts");
+    let target_path = unique_path("unknown-option-target.txt");
+    let config_path = unique_path("unknown-option-init.ts");
 
     std::fs::write(&target_path, "a\tb\n").expect("target file");
-    std::fs::write(&config_path, "saya.options.tabSize = 4;").expect("config file");
+    std::fs::write(&config_path, "saya.options.unknownoption = 4;").expect("config file");
 
     let outcome = prepare_launch(LaunchRequest {
         input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
         ..LaunchRequest::default()
     })
-    .expect("startup should continue with default fallback when tabSize is unsupported");
+    .expect("startup should continue when an unknown option is ignored");
 
     assert_eq!(outcome.initial_tab_size, 8);
 

@@ -20,6 +20,7 @@ startup loader resolves local file imports before evaluation, strips type-only
 declarations, and evaluates the combined startup module.
 
 ```ts
+/// <reference path="./plugins/saya-startup.d.ts" />
 import { setupSayaDired } from "./plugins/saya-dired.ts";
 
 setupSayaDired();
@@ -27,6 +28,10 @@ setupSayaDired();
 
 Only local file imports are supported. Bare package imports and network imports
 are intentionally outside the startup surface.
+
+Use `plugins/saya-startup.d.ts` when you want an external TypeScript language
+server to understand the startup-only global `saya` object while editing
+`init.ts`. The reference comment is type-only and has no runtime effect.
 
 ### Preview dired setup
 
@@ -182,6 +187,16 @@ top-level areas.
 The options surface lets you set initial editor options before the session
 starts.
 
+`saya.options.*` uses Vim and Neovim option names. The startup file is
+TypeScript, but option property names stay lowercase Vim-style names such as
+`tabstop`, `number`, `numberwidth`, and `cmdheight`. JavaScript-style camelCase
+names are not part of the public startup API.
+
+The exported TypeScript declaration lets editors and `tsc` report unknown
+option names while you edit `init.ts`. Startup evaluation also records a
+message-area warning for unknown option assignments and ignores that option;
+valid assignments in the same file still apply.
+
 ### `saya.options.tabstop`
 
 Use this number property to control tab expansion width in the projected TUI.
@@ -190,12 +205,12 @@ Use this number property to control tab expansion width in the projected TUI.
 saya.options.tabstop = 4;
 ```
 
-### `saya.options.lineNumbers`
+### `saya.options.number`
 
 Use this boolean property to enable line-number prefixes in the projected TUI.
 
 ```ts
-saya.options.lineNumbers = true;
+saya.options.number = true;
 ```
 
 ## Keymaps
@@ -334,7 +349,10 @@ saya.theme.ui = {
 ```
 
 The current UI keys are `text`, `gutter`, `statusActive`, `statusInactive`,
-`message`, and `prompt`.
+`message`, `warningMsg`, and `prompt`. `warningMsg` is the Vim-style warning
+message group. Saya uses it for startup warnings, such as ignored unknown
+options. Long message-area warnings wrap to the current editor width and use
+the message pager when they exceed `cmdheight`.
 
 ### `saya.theme.syntax`
 

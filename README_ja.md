@@ -117,7 +117,7 @@ cargo run --bin sy -- --help
 
 ```ts
 saya.options.tabstop = 4;
-saya.options.lineNumbers = true;
+saya.options.number = true;
 
 saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
 
@@ -130,7 +130,7 @@ saya.events.on("bufferOpen", (payload) => {
 });
 ```
 
-現時点で TUI 上で最も確認しやすい設定は `tabstop` と `lineNumbers` です。
+現時点で TUI 上で最も確認しやすい設定は `tabstop` と `number` です。
 command と event の登録は実装済みで headless テストもありますが、常駐 runtime
 との本番統合はまだ進行中です。
 

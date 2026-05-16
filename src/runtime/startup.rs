@@ -29,15 +29,12 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.scrolloff",
     "saya.options.sidescrolloff",
     "saya.options.wrap",
-    "saya.options.lineNumbers",
     "saya.options.number",
     "saya.options.relativenumber",
     "saya.options.cursorline",
-    "saya.options.numberWidth",
     "saya.options.numberwidth",
     "saya.options.laststatus",
-    "saya.options.messageheight",
-    "saya.options.messageHeight",
+    "saya.options.cmdheight",
     "saya.options.list",
     "saya.options.listchars",
     "saya.options.foldmethod",
@@ -78,6 +75,7 @@ const {
     op_collect_startup_theme_markdown,
     op_collect_startup_log_file,
     op_collect_startup_log_level,
+    op_collect_startup_warning,
 } = Deno.core.ops;
 
 globalThis.saya = {
@@ -94,15 +92,12 @@ globalThis.saya = {
         scrolloff: 0,
         sidescrolloff: 0,
         wrap: true,
-        lineNumbers: false,
         number: false,
         relativenumber: false,
         cursorline: false,
-        numberWidth: 4,
         numberwidth: 4,
         laststatus: 2,
-        messageheight: 5,
-        messageHeight: 5,
+        cmdheight: 5,
         list: false,
         listchars: "tab:>-,trail:-",
         foldmethod: "manual",
@@ -273,17 +268,6 @@ Object.defineProperty(globalThis.saya.options, "tabstop", {
     },
 });
 
-Object.defineProperty(globalThis.saya.options, "lineNumbers", {
-    configurable: true,
-    enumerable: true,
-    get() {
-        return false;
-    },
-    set(value) {
-        op_collect_startup_line_numbers(Boolean(value));
-    },
-});
-
 Object.defineProperty(globalThis.saya.options, "number", {
     configurable: true,
     enumerable: true,
@@ -292,17 +276,6 @@ Object.defineProperty(globalThis.saya.options, "number", {
     },
     set(value) {
         op_collect_startup_line_numbers(Boolean(value));
-    },
-});
-
-Object.defineProperty(globalThis.saya.options, "numberWidth", {
-    configurable: true,
-    enumerable: true,
-    get() {
-        return 4;
-    },
-    set(value) {
-        op_collect_startup_number_width(value);
     },
 });
 
@@ -354,9 +327,8 @@ defineBoolOption("cursorline", "cursorline", false);
 defineBoolOption("cul", "cursorline", false);
 defineNumberOption("laststatus", "laststatus", 2);
 defineNumberOption("ls", "laststatus", 2);
-defineNumberOption("messageheight", "messageheight", 5);
-defineNumberOption("messageHeight", "messageheight", 5);
-defineNumberOption("mh", "messageheight", 5);
+defineNumberOption("cmdheight", "cmdheight", 5);
+defineNumberOption("ch", "cmdheight", 5);
 defineBoolOption("list", "list", false);
 defineStringOption("listchars", "listchars", "tab:>-,trail:-");
 defineStringOption("lcs", "listchars", "tab:>-,trail:-");
@@ -365,7 +337,16 @@ defineStringOption("fdm", "foldmethod", "manual");
 defineNumberOption("foldlevel", "foldlevel", 0);
 defineNumberOption("fdl", "foldlevel", 0);
 
-Object.freeze(globalThis.saya.options);
+globalThis.saya.options = new Proxy(globalThis.saya.options, {
+    set(target, propertyName, value, receiver) {
+        if (typeof propertyName === "string" && Reflect.has(target, propertyName)) {
+            return Reflect.set(target, propertyName, value, receiver);
+        }
+        op_collect_startup_warning(`unsupported startup option: saya.options.${String(propertyName)}`);
+        return true;
+    },
+});
+
 Object.freeze(globalThis.saya.keymap);
 Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.events);
@@ -380,8 +361,6 @@ const STARTUP_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
 pub const STARTUP_SAYA_TYPE_DECLARATION: &str = r#"
 declare global {
-    type SayaStartupKeymapMode = "normal" | "insert" | "visual";
-
     interface SayaReadonlyBufferSnapshot {
         id: number;
         path: string | null;
@@ -409,15 +388,12 @@ declare global {
         scrolloff: number;
         sidescrolloff: number;
         wrap: boolean;
-        lineNumbers: boolean;
         number: boolean;
         relativenumber: boolean;
         cursorline: boolean;
-        numberWidth: number;
         numberwidth: number;
         laststatus: number;
-        messageheight: number;
-        messageHeight: number;
+        cmdheight: number;
         list: boolean;
         listchars: string;
         foldmethod: string;
@@ -426,7 +402,7 @@ declare global {
 
     interface SayaStartupKeymapSurface {
         set(
-            mode: SayaStartupKeymapMode,
+            mode: "normal" | "insert" | "visual",
             lhs: string,
             action: string | SayaStartupCommandReference,
         ): void;
@@ -448,11 +424,9 @@ declare global {
         ): void;
     }
 
-    type SayaThemeColor = string;
-
     interface SayaTextStyle {
-        fg?: SayaThemeColor;
-        bg?: SayaThemeColor;
+        fg?: string;
+        bg?: string;
         bold?: boolean;
         italic?: boolean;
         underline?: boolean;
@@ -460,13 +434,14 @@ declare global {
     }
 
     interface SayaStartupThemeSurface {
-        palette: Record<string, SayaThemeColor>;
+        palette: Record<string, string>;
         ui: Partial<Record<
             | "text"
             | "gutter"
             | "statusActive"
             | "statusInactive"
             | "message"
+            | "warningMsg"
             | "prompt",
             SayaTextStyle
         >>;
@@ -542,7 +517,7 @@ fn op_collect_startup_tabstop(state: &mut OpState, #[number] value: i64) -> Resu
 #[op2(fast)]
 fn op_collect_startup_line_numbers(state: &mut OpState, value: bool) -> Result<(), JsErrorBox> {
     log::debug!(
-        "[startup_runtime] collect startup lineNumbers option from runtime: value={}",
+        "[startup_runtime] collect startup number option from runtime: value={}",
         value
     );
 
@@ -562,7 +537,7 @@ fn op_collect_startup_number_width(
     #[number] value: i64,
 ) -> Result<(), JsErrorBox> {
     log::debug!(
-        "[startup_runtime] collect startup numberWidth option from runtime: value={}",
+        "[startup_runtime] collect startup numberwidth option from runtime: value={}",
         value
     );
 
@@ -853,6 +828,20 @@ fn op_collect_startup_log_level(
     Ok(())
 }
 
+#[op2(fast)]
+fn op_collect_startup_warning(
+    state: &mut OpState,
+    #[string] message: String,
+) -> Result<(), JsErrorBox> {
+    log::debug!("[startup_runtime] collect startup warning: {}", message);
+
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::Warning { message });
+
+    Ok(())
+}
+
 fn parse_startup_log_level(level: &str) -> Option<LevelFilter> {
     match level.trim().to_ascii_lowercase().as_str() {
         "error" => Some(LevelFilter::Error),
@@ -936,7 +925,8 @@ deno_core::extension!(
         op_collect_startup_theme_syntax,
         op_collect_startup_theme_markdown,
         op_collect_startup_log_file,
-        op_collect_startup_log_level
+        op_collect_startup_log_level,
+        op_collect_startup_warning
     ],
     state = |state| state.put(StartupRegistry::default())
 );
@@ -1256,6 +1246,8 @@ fn strip_export_modifiers(source_text: &str) -> String {
             ))
         } else if trimmed == "export {};" {
             Some(String::new())
+        } else if trimmed.starts_with("export {") && trimmed.ends_with(';') {
+            Some(String::new())
         } else {
             None
         };
@@ -1538,7 +1530,6 @@ pub async fn collect_startup_registry(source_text: &str) -> Result<StartupRegist
         "[startup_runtime] evaluate startup module with saya namespace: len={}",
         source_text.len()
     );
-    reject_removed_startup_surface(source_text)?;
 
     let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
     let specifier = resolve_init_module_specifier("init.ts", &current_dir)
@@ -1556,19 +1547,6 @@ pub async fn collect_startup_registry(source_text: &str) -> Result<StartupRegist
     evaluation.await.map_err(|error| error.to_string())?;
     let op_state = runtime.op_state();
     Ok(op_state.borrow().borrow::<StartupRegistry>().clone())
-}
-
-fn reject_removed_startup_surface(source_text: &str) -> Result<(), String> {
-    if source_text.contains("saya.options.tabSize") {
-        log::debug!(
-            "[startup_runtime] removed startup option rejected before evaluation: saya.options.tabSize"
-        );
-        return Err(
-            "unsupported startup option: saya.options.tabSize (use saya.options.tabstop)"
-                .to_string(),
-        );
-    }
-    Ok(())
 }
 
 fn parse_startup_keymap_action(action: &str) -> SayaKeymapAction {

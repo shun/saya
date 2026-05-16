@@ -117,8 +117,8 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
         &config_path,
         r#"
             saya.options.tabstop = 4;
-            saya.options.lineNumbers = true;
-            saya.options.numberWidth = 4;
+            saya.options.number = true;
+            saya.options.numberwidth = 4;
             saya.options.syntax = true;
             saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
             saya.commands.register("writeCurrent", () => {

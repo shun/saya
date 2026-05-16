@@ -16,7 +16,7 @@ This phase gives `init.ts` a narrow `saya` surface for declaring initial state
 and callback registrations.
 
 - `saya.options.tabstop`
-- `saya.options.lineNumbers`
+- `saya.options.number`
 - `saya.keymap.set(...)`
 - `saya.commands.register(...)`
 - `saya.events.on(...)`

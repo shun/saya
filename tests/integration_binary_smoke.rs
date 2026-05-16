@@ -123,8 +123,8 @@ fn opening_with_u_init_ts_projects_startup_configuration_into_the_ui() {
     std::fs::write(
         &config_path,
         r#"
-            saya.options.lineNumbers = true;
-            saya.options.numberWidth = 4;
+            saya.options.number = true;
+            saya.options.numberwidth = 4;
         "#,
     )
     .expect("startup config should be created");

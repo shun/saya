@@ -37,6 +37,7 @@ pub enum UiStyleKey {
     StatusActive,
     StatusInactive,
     Message,
+    WarningMsg,
     Prompt,
 }
 
@@ -48,6 +49,7 @@ impl UiStyleKey {
             "statusActive" => Some(Self::StatusActive),
             "statusInactive" => Some(Self::StatusInactive),
             "message" => Some(Self::Message),
+            "warningMsg" => Some(Self::WarningMsg),
             "prompt" => Some(Self::Prompt),
             _ => None,
         }

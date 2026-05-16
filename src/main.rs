@@ -1102,6 +1102,23 @@ async fn main() {
                                         break 'main reason;
                                     }
 
+                                    if after_snapshot.revision != before_snapshot.revision {
+                                        if let Some(reason) =
+                                            dispatch_buffer_changed_with_runtime(
+                                                runtime_session.as_mut(),
+                                                &mut outcome,
+                                                &mut session_state,
+                                                &mut transient_msg,
+                                                &mut need_redraw,
+                                                &mut runtime_presentation_intents,
+                                                Some(&lsif_bridge),
+                                            )
+                                            .await
+                                        {
+                                            break 'main reason;
+                                        }
+                                    }
+
                                     session_state.update_dirty(outcome.core_bridge.dirty());
                                     trace_redraw_diagnostic(format_args!(
                                         "edit key host policy forcing redraw after dispatch: key={:?}, cursor=({},{}), revision={}, prior_need_redraw={}",
@@ -3784,7 +3801,12 @@ fn execute_runtime_host_command_with_floats(
             )
         }
         Some(MainHostCommand::LspHoverFloat(payload)) => {
-            execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager)
+            execute_lsp_hover_float_host_command(
+                &payload,
+                outcome,
+                floating_window_manager,
+                lsp_diagnostic_store.as_deref(),
+            )
         }
         Some(MainHostCommand::LspDiagnosticFloat(payload)) => {
             execute_lsp_diagnostic_float_host_command(&payload, outcome, floating_window_manager)
@@ -4243,6 +4265,7 @@ fn execute_lsp_hover_float_host_command(
     payload: &str,
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     floating_window_manager: Option<&mut FloatingWindowManager>,
+    lsp_diagnostic_store: Option<&LspDiagnosticStore>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let manager = floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
         name: "lsp.floatHover".to_string(),
@@ -4260,6 +4283,40 @@ fn execute_lsp_hover_float_host_command(
         .or_else(|| value.get("result"))
         .cloned()
         .unwrap_or(value);
+    if hover_response_is_plain_any(&response)
+        && let Some(diagnostic) = lsp_diagnostic_store
+            .and_then(|store| store.diagnostic_at_position(snapshot.cursor_row, snapshot.cursor_col))
+    {
+        let response = serde_json::json!({
+            "result": {
+                "contents": format!("{}: {}", lsp_diagnostic_severity_label(diagnostic.severity), diagnostic.message)
+            }
+        });
+        let outcome = open_lsp_hover_float(
+            manager,
+            LspHoverFloatRequest {
+                window_id,
+                cursor_row: snapshot.cursor_row,
+                cursor_col: snapshot.cursor_col,
+                response,
+            },
+        );
+        log::debug!(
+            "[main][lsp_float] hover any replaced with cursor-relative diagnostic hover: outcome={:?}, window_id={}, cursor=({}, {}), diagnostic=({}, {})",
+            outcome,
+            window_id,
+            snapshot.cursor_row,
+            snapshot.cursor_col,
+            diagnostic.line,
+            diagnostic.column
+        );
+        return Ok(RuntimeCommandEffect {
+            transient_message: outcome.is_none().then(|| "No LSP diagnostics".to_string()),
+            follow_up_events: Vec::new(),
+            shutdown_intent: None,
+            presentation_intents: Vec::new(),
+        });
+    }
     let outcome = open_lsp_hover_float(
         manager,
         LspHoverFloatRequest {
@@ -4284,6 +4341,51 @@ fn execute_lsp_hover_float_host_command(
         shutdown_intent: None,
         presentation_intents: Vec::new(),
     })
+}
+
+fn lsp_diagnostic_severity_label(severity: Option<u64>) -> &'static str {
+    match severity {
+        Some(1) => "Error",
+        Some(2) => "Warning",
+        Some(3) => "Info",
+        Some(4) => "Hint",
+        _ => "Diagnostic",
+    }
+}
+
+fn hover_response_is_plain_any(response: &serde_json::Value) -> bool {
+    let Some(contents) = response
+        .pointer("/result/contents")
+        .or_else(|| response.get("contents"))
+    else {
+        return false;
+    };
+    hover_contents_plain_text(contents)
+        .map(|text| {
+            text.replace("```typescript", "")
+                .replace("```ts", "")
+                .replace("```", "")
+                .trim()
+                == "any"
+        })
+        .unwrap_or(false)
+}
+
+fn hover_contents_plain_text(contents: &serde_json::Value) -> Option<String> {
+    if let Some(text) = contents.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(value) = contents.get("value").and_then(serde_json::Value::as_str) {
+        return Some(value.to_string());
+    }
+    let items = contents.as_array()?;
+    let mut parts = Vec::new();
+    for item in items {
+        if let Some(text) = hover_contents_plain_text(item) {
+            parts.push(text);
+        }
+    }
+    Some(parts.join("\n"))
 }
 
 fn execute_lsp_diagnostic_float_host_command(
@@ -4657,7 +4759,7 @@ fn execute_lsp_workspace_edit_preview_host_command(
     });
     let payload = serde_json::json!({ "response": response }).to_string();
     let mut effect =
-        execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager)?;
+        execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager, None)?;
     effect.transient_message = Some(format!(
         "{title}: {} change(s)",
         lines.len().saturating_sub(1)
@@ -4693,7 +4795,7 @@ fn execute_lsp_code_actions_float_host_command(
     });
     let payload = serde_json::json!({ "response": response }).to_string();
     let mut effect =
-        execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager)?;
+        execute_lsp_hover_float_host_command(&payload, outcome, floating_window_manager, None)?;
     effect.transient_message = Some(format!(
         "LSP code actions: {} action(s)",
         lines.len().saturating_sub(1)
@@ -4707,8 +4809,8 @@ fn execute_lsp_code_actions_float_host_command(
 
 fn execute_lsp_publish_diagnostics_host_command(
     payload: &str,
-    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
-    floating_window_manager: Option<&mut FloatingWindowManager>,
+    _outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    _floating_window_manager: Option<&mut FloatingWindowManager>,
     lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let value: serde_json::Value =
@@ -4719,7 +4821,12 @@ fn execute_lsp_publish_diagnostics_host_command(
     if let Some(store) = lsp_diagnostic_store {
         store.replace_from_lsp_value(&value);
     }
-    execute_lsp_diagnostic_float_host_command(payload, outcome, floating_window_manager)
+    Ok(RuntimeCommandEffect {
+        transient_message: None,
+        follow_up_events: Vec::new(),
+        shutdown_intent: None,
+        presentation_intents: Vec::new(),
+    })
 }
 
 fn execute_lsp_cycle_diagnostic_host_command(
@@ -5126,6 +5233,30 @@ async fn dispatch_buffer_write_post_with_runtime(
     let mut host_session =
         MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsif_bridge);
     let payload = RuntimeEventMapper::buffer_write_post(host_session.current_buffer_snapshot());
+    let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
+    apply_runtime_dispatch_outcome(
+        transient_msg,
+        need_redraw,
+        runtime_presentation_intents,
+        dispatch_outcome,
+    )
+}
+
+async fn dispatch_buffer_changed_with_runtime(
+    runtime_session: Option<&mut RuntimeSessionOwner>,
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
+    transient_msg: &mut Option<String>,
+    need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsif_bridge: Option<&LsifBridgeHandle>,
+) -> Option<ShutdownReason> {
+    let Some(runtime_session) = runtime_session else {
+        return None;
+    };
+    let mut host_session =
+        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsif_bridge);
+    let payload = RuntimeEventMapper::buffer_changed(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
     apply_runtime_dispatch_outcome(
         transient_msg,
@@ -6759,7 +6890,7 @@ fn build_workspace_render_output(
         total_started_at.elapsed().as_millis()
     );
     if let Ok(workspace) = projection_result.as_mut() {
-        sync_workspace_message_pager(session_state, workspace);
+        sync_workspace_message_pager(session_state, workspace, terminal_width);
         if let Some(cursor_col) = command_preview_cursor_col
             && let Some(command_line) = workspace.command_line.as_mut()
         {
@@ -7128,14 +7259,16 @@ fn focus_floating_window_from_mouse_click(
 fn sync_workspace_message_pager(
     session_state: &mut EditorSessionState,
     workspace: &mut WorkspaceScreenModel,
+    terminal_width: u16,
 ) {
     let visible_message = workspace
         .visible_message_text()
         .map(str::to_owned)
         .unwrap_or_default();
+    let pager_message = wrap_message_for_pager(&visible_message, terminal_width);
     let activation_changed =
-        session_state.sync_message_pager(&visible_message, workspace.message_area_height);
-    if session_state.message_pager_hides_message(&visible_message) {
+        session_state.sync_message_pager(&pager_message, workspace.message_area_height);
+    if session_state.message_pager_hides_message(&pager_message) {
         workspace.message_line.visible = None;
         workspace.message_scroll_offset = 0;
         workspace.pager_prompt = None;
@@ -7159,9 +7292,41 @@ fn sync_workspace_message_pager(
         session_state.message_pager_active(),
         session_state.message_scroll_offset(),
         workspace.message_area_height,
-        visible_message.lines().count(),
+        pager_message.lines().count(),
         activation_changed
     );
+}
+
+fn wrap_message_for_pager(message: &str, width: u16) -> String {
+    let max_width = usize::from(width.max(1));
+    message
+        .lines()
+        .flat_map(|line| wrap_message_line_for_pager(line, max_width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn wrap_message_line_for_pager(line: &str, max_width: usize) -> Vec<String> {
+    if command_line_display_width(line, 8) <= max_width {
+        return vec![line.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for ch in line.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width > 0 && current_width.saturating_add(ch_width) > max_width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width = current_width.saturating_add(ch_width);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn sync_core_screen_size_if_changed(
@@ -8146,6 +8311,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(predicate(), "condition did not become true before timeout");
+    }
+
+    #[test]
+    fn message_pager_wraps_long_single_line_before_counting_visible_rows() {
+        let wrapped =
+            wrap_message_for_pager("unsupported startup option: saya.options.lineNumbers", 20);
+
+        assert_eq!(
+            wrapped.lines().collect::<Vec<_>>(),
+            vec![
+                "unsupported startup ",
+                "option: saya.options",
+                ".lineNumbers"
+            ]
+        );
     }
 
     fn main_test_workspace() -> WorkspaceScreenModel {
@@ -9798,6 +9978,76 @@ mod tests {
     }
 
     #[test]
+    fn runtime_lsp_hover_any_prefers_diagnostic_at_cursor() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+
+        execute_runtime_host_command_with_floats(
+            r#"lsp.publishDiagnostics {"params":{"uri":"file:///Users/skudo/.config/saya/init.ts","diagnostics":[{"severity":1,"message":"Property 'lineNumber' does not exist on type 'SayaStartupOptionsSurface'.","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":10}}}]}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            Some(&mut lsp_diagnostic_store),
+            None,
+        )
+        .expect("diagnostics should publish");
+
+        execute_runtime_host_command_with_floats(
+            r#"lsp.floatHover {"response":{"source":"lsp","method":"textDocument/hover","result":{"contents":"\n```typescript\nany\n```\n","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":10}}}}}"#,
+            &mut outcome,
+            &mut session_state,
+            Some(&mut floating_window_manager),
+            None,
+            Some(&mut lsp_diagnostic_store),
+            None,
+        )
+        .expect("hover should prefer diagnostic");
+
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        let floats = floating_window_manager.resolve_screen_models_with_cursors(
+            80,
+            24,
+            &[(
+                active_window_id,
+                saya::presentation::screen_model::PaneRect {
+                    x: 0,
+                    y: 0,
+                    width: 80,
+                    height: 24,
+                },
+            )],
+            &[(active_window_id, 3, 7)],
+            Some(active_window_id),
+        );
+
+        assert_eq!(floats.len(), 1);
+        assert!(
+            floats[0]
+                .lines
+                .join(" ")
+                .contains("Error: Property 'lineNumber' does not exist on type 'SayaStartupOptionsSurface'."),
+            "diagnostic hover should render the TypeScript error: {:?}",
+            floats[0].lines
+        );
+        assert_eq!((floats[0].rect.x, floats[0].rect.y), (7, 4));
+    }
+
+    #[test]
     fn runtime_lsp_feature_host_commands_render_lists_and_navigate_definition() {
         let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
@@ -9946,6 +10196,13 @@ mod tests {
         )
         .expect("diagnostics should publish");
         assert!(!lsp_diagnostic_store.is_empty());
+        assert_eq!(
+            floating_window_manager
+                .resolve_screen_models(80, 24, &[], None)
+                .len(),
+            0,
+            "publishing diagnostics should update the store without stealing focus"
+        );
 
         execute_runtime_host_command_with_floats(
             "lsp.nextDiagnostic",
@@ -11106,6 +11363,61 @@ mod tests {
         assert_eq!(shutdown, None);
         assert!(runtime_presentation_intents.is_empty());
         (transient_msg, need_redraw)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_buffer_changed_event_dispatches_after_text_revision_changes() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let seed =
+            saya::runtime::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(
+                vec![
+                    saya::runtime::config::StartupRegistryEntry::Event {
+                        name: "bufferChanged".to_string(),
+                        callback_source: r#"
+                            async () => {
+                                globalThis.__sayaBufferChangedObserved =
+                                    (globalThis.__sayaBufferChangedObserved ?? 0) + 1;
+                            }
+                        "#
+                        .to_string(),
+                    },
+                ],
+            );
+        let mut runtime_session =
+            RuntimeSessionOwner::spawn(seed).expect("runtime owner should initialize");
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+
+        let before = outcome.core_bridge.light_snapshot();
+        outcome.core_bridge.dispatch_key("i").expect("enter insert");
+        outcome.core_bridge.dispatch_key("x").expect("insert text");
+        let after = outcome.core_bridge.light_snapshot();
+        assert_ne!(before.revision, after.revision);
+
+        let shutdown = dispatch_buffer_changed_with_runtime(
+            Some(&mut runtime_session),
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            None,
+        )
+        .await;
+
+        assert_eq!(shutdown, None);
+        assert_eq!(transient_msg, None);
+        assert!(need_redraw, "runtime event dispatch should request redraw");
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -52,12 +52,29 @@ pub enum LoadedConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapWarning {
     ConfigLoadFailed { path: PathBuf, message: String },
+    ConfigWarning { path: PathBuf, message: String },
 }
 
 pub fn bootstrap_warning_message(warnings: &[BootstrapWarning]) -> Option<String> {
     warnings.iter().find_map(|warning| match warning {
         BootstrapWarning::ConfigLoadFailed { path, message } => {
-            let rendered = format!("設定読込に失敗しました ({}): {}", path.display(), message);
+            let rendered = format!(
+                "Failed to read startup config ({}): {}",
+                path.display(),
+                message
+            );
+            log::debug!(
+                "[bootstrap] projecting startup warning into host message line: {}",
+                rendered
+            );
+            Some(rendered)
+        }
+        BootstrapWarning::ConfigWarning { path, message } => {
+            let rendered = format!(
+                "Ignored startup config entry ({}): {}",
+                path.display(),
+                message
+            );
             log::debug!(
                 "[bootstrap] projecting startup warning into host message line: {}",
                 rendered
@@ -139,6 +156,7 @@ struct ResolvedStartupState {
     startup_registry: StartupRegistrySnapshot,
     callback_registry: CallbackRegistrySeed,
     resolved_theme: ResolvedTheme,
+    warnings: Vec<BootstrapWarning>,
 }
 
 impl StartupRegistrySnapshot {
@@ -308,6 +326,7 @@ fn prepare_launch_with_guard<R: Read>(
     let mut warnings = Vec::new();
     let loaded_config = load_config_with_fallback(request.config_source, &mut warnings);
     let bootstrap_state = resolve_bootstrap_state(&loaded_config);
+    warnings.extend(bootstrap_state.warnings.clone());
     apply_startup_core_options(&mut core_bridge, &bootstrap_state.startup_registry.options);
     log::debug!(
         "[PERF][bootstrap] config resolved and core options applied: elapsed_ms={}",
@@ -469,12 +488,15 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
     let mut state = ConfigApplyState::default_state();
     match evaluate_bootstrap_capability(loaded_config) {
         CapabilityLoadResult::Success {
-            registry, commands, ..
+            path,
+            registry,
+            commands,
         } => {
             let result = apply_config_commands(&commands, &mut state);
             let startup_registry = startup_registry_from_registry(&state, &registry);
             let callback_registry = callback_registry_from_registry(&registry);
             let resolved_theme = ThemeRegistry::from_startup_registry(&registry).resolve();
+            let warnings = startup_warnings_from_registry(&path, &registry);
             log::debug!(
                 "[bootstrap] resolved startup state from config: applied={}, errors={}, tab_size={}, line_numbers={}, keymaps={}, commands={}, events={}",
                 result.applied_count,
@@ -490,6 +512,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
                 startup_registry,
                 callback_registry,
                 resolved_theme,
+                warnings,
             };
         }
         CapabilityLoadResult::DefaultUsed => {
@@ -507,6 +530,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
                 startup_registry,
                 callback_registry,
                 resolved_theme,
+                warnings: Vec::new(),
             };
         }
         CapabilityLoadResult::ReadFailed { path, message } => {
@@ -553,6 +577,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
         startup_registry,
         callback_registry,
         resolved_theme,
+        warnings: Vec::new(),
     }
 }
 
@@ -677,7 +702,25 @@ fn config_commands_from_registry(
             | StartupRegistryEntry::ThemeUiStyle { .. }
             | StartupRegistryEntry::ThemeSyntaxStyle { .. }
             | StartupRegistryEntry::LogFile { .. }
-            | StartupRegistryEntry::LogLevel { .. } => None,
+            | StartupRegistryEntry::LogLevel { .. }
+            | StartupRegistryEntry::Warning { .. } => None,
+        })
+        .collect()
+}
+
+fn startup_warnings_from_registry(
+    path: &Path,
+    registry: &StartupRegistry,
+) -> Vec<BootstrapWarning> {
+    registry
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            StartupRegistryEntry::Warning { message } => Some(BootstrapWarning::ConfigWarning {
+                path: path.to_path_buf(),
+                message: message.clone(),
+            }),
+            _ => None,
         })
         .collect()
 }
@@ -952,7 +995,7 @@ mod tests {
     use super::startup_registry_from_registry;
     use crate::app::bootstrap::{
         BootstrapError, BootstrapWarning, LoadedConfig, StartupKeymapAction, StartupKeymapMode,
-        StartupKeymapSnapshot, StartupRegistrySnapshot, prepare_launch,
+        StartupKeymapSnapshot, StartupRegistrySnapshot, bootstrap_warning_message, prepare_launch,
     };
     use crate::app::cli::{ConfigSource, InputSource, LaunchRequest};
     use crate::runtime::config::{
@@ -1186,6 +1229,31 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_warning_message_distinguishes_config_load_failure_from_config_warning() {
+        let config_path = PathBuf::from("/tmp/init.ts");
+
+        let load_failure = bootstrap_warning_message(&[BootstrapWarning::ConfigLoadFailed {
+            path: config_path.clone(),
+            message: "No such file or directory".to_string(),
+        }])
+        .expect("load failure warning should render");
+        assert!(
+            load_failure.starts_with("Failed to read startup config"),
+            "config load failure should say that the config file could not be read: {load_failure}"
+        );
+
+        let partial_warning = bootstrap_warning_message(&[BootstrapWarning::ConfigWarning {
+            path: config_path,
+            message: "unsupported startup option: saya.options.lineNumbers".to_string(),
+        }])
+        .expect("partial warning should render");
+        assert!(
+            partial_warning.starts_with("Ignored startup config entry"),
+            "startup option warning should not imply total config load failure: {partial_warning}"
+        );
+    }
+
+    #[test]
     fn releases_session_guard_when_preflight_fails() {
         let _lock = session_test_lock()
             .lock()
@@ -1279,7 +1347,7 @@ mod tests {
         let config_dir = home_dir.join(".config").join("saya");
         let config_path = config_dir.join("init.ts");
         std::fs::create_dir_all(&config_dir).expect("home config directory");
-        std::fs::write(&config_path, "saya.options.lineNumbers = true;\n").expect("config file");
+        std::fs::write(&config_path, "saya.options.number = true;\n").expect("config file");
 
         let outcome = with_env_var_removed("XDG_CONFIG_HOME", || {
             with_env_var_set("HOME", &home_dir, || {
@@ -1296,7 +1364,7 @@ mod tests {
             outcome.loaded_config,
             LoadedConfig::File {
                 path: config_path.clone(),
-                source: "saya.options.lineNumbers = true;\n".to_string(),
+                source: "saya.options.number = true;\n".to_string(),
             }
         );
         assert!(outcome.initial_line_numbers);

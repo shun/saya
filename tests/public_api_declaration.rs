@@ -2,6 +2,18 @@ use saya::runtime::live::RUNTIME_SAYA_TYPE_DECLARATION;
 use saya::runtime::startup::STARTUP_SAYA_TYPE_DECLARATION;
 
 #[test]
+fn startup_public_api_type_declaration_is_published_for_external_language_servers() {
+    let declaration = std::fs::read_to_string("plugins/saya-startup.d.ts")
+        .expect("startup API declaration should be published for TypeScript language servers");
+
+    assert_eq!(
+        declaration.trim(),
+        STARTUP_SAYA_TYPE_DECLARATION.trim(),
+        "published startup declaration must stay in sync with the runtime startup surface"
+    );
+}
+
+#[test]
 fn startup_public_api_type_declaration_covers_formal_configuration_surface() {
     let declaration = STARTUP_SAYA_TYPE_DECLARATION;
 
@@ -11,8 +23,20 @@ fn startup_public_api_type_declaration_covers_formal_configuration_surface() {
         !declaration.contains("tabSize"),
         "startup API should use Vim-compatible tabstop naming without tabSize alias"
     );
-    assert!(declaration.contains("lineNumbers"));
-    assert!(declaration.contains("numberWidth"));
+    assert!(declaration.contains("number"));
+    assert!(declaration.contains("numberwidth"));
+    assert!(declaration.contains("cmdheight"));
+    for removed in [
+        "lineNumbers",
+        "numberWidth",
+        "messageHeight",
+        "messageheight",
+    ] {
+        assert!(
+            !declaration.contains(removed),
+            "startup API should use Vim-compatible option naming without {removed} alias"
+        );
+    }
     assert!(declaration.contains("syntax"));
     assert!(declaration.contains("keymap"));
     assert!(declaration.contains("commands"));

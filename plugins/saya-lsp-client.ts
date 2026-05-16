@@ -3,3 +3,4 @@
 // 既存の import { ... } from "plugins/saya-lsp-client.ts" を壊さないため、
 // すべての公開エントリポイントを ./saya-lsp/index.ts から取り込みます。
 import { setupSayaLspClient, createLspJsonRpcClient, createLspMessageParser, encodeLspMessage, lspPositionFromSayaCursor, lspRangeFromSayaRange, parseLsifLine } from "./saya-lsp/index.ts";
+export { setupSayaLspClient, createLspJsonRpcClient, createLspMessageParser, encodeLspMessage, lspPositionFromSayaCursor, lspRangeFromSayaRange, parseLsifLine } from "./saya-lsp/index.ts";

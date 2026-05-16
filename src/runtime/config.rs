@@ -174,6 +174,9 @@ pub enum StartupRegistryEntry {
     LogLevel {
         level: log::LevelFilter,
     },
+    Warning {
+        message: String,
+    },
 }
 
 /// startup keymap のモード。
@@ -530,27 +533,27 @@ fn parse_config_json(source: &str) -> Result<Vec<ConfigCommand>, String> {
         });
     }
 
-    // "lineNumbers": <bool> を検出
-    if let Some(value) = extract_json_bool(trimmed, "lineNumbers") {
-        log::debug!("[config_runtime] found lineNumbers option: {}", value);
+    // "number": <bool> を検出
+    if let Some(value) = extract_json_bool(trimmed, "number") {
+        log::debug!("[config_runtime] found number option: {}", value);
         commands.push(ConfigCommand::SetOption {
             name: ConfigOptionName::LineNumbers,
             value: ConfigOptionValue::Boolean(value),
         });
     }
 
-    // "numberWidth": <number> を検出
-    if let Some(value) = extract_json_number(trimmed, "numberWidth") {
-        log::debug!("[config_runtime] found numberWidth option: {}", value);
+    // "numberwidth": <number> を検出
+    if let Some(value) = extract_json_number(trimmed, "numberwidth") {
+        log::debug!("[config_runtime] found numberwidth option: {}", value);
         commands.push(ConfigCommand::SetOption {
             name: ConfigOptionName::NumberWidth,
             value: ConfigOptionValue::Number(value),
         });
     }
 
-    // "messageHeight": <number> を検出
-    if let Some(value) = extract_json_number(trimmed, "messageHeight") {
-        log::debug!("[config_runtime] found messageHeight option: {}", value);
+    // "cmdheight": <number> を検出
+    if let Some(value) = extract_json_number(trimmed, "cmdheight") {
+        log::debug!("[config_runtime] found cmdheight option: {}", value);
         commands.push(ConfigCommand::SetOption {
             name: ConfigOptionName::MessageHeight,
             value: ConfigOptionValue::Number(value),
@@ -1558,7 +1561,7 @@ fn apply_single_command(
             }
             (ConfigOptionName::LineNumbers, ConfigOptionValue::Boolean(b)) => {
                 log::debug!(
-                    "[config_runtime] setting lineNumbers: {} -> {}",
+                    "[config_runtime] setting number: {} -> {}",
                     state.line_numbers,
                     b
                 );
@@ -1586,12 +1589,12 @@ fn apply_single_command(
             (ConfigOptionName::NumberWidth, ConfigOptionValue::Number(n)) => {
                 if *n < 1 || *n > 32 {
                     return Err(format!(
-                        "numberWidth の値は 1〜32 の範囲で指定してください: {}",
+                        "numberwidth の値は 1〜32 の範囲で指定してください: {}",
                         n
                     ));
                 }
                 log::debug!(
-                    "[config_runtime] setting numberWidth: {} -> {}",
+                    "[config_runtime] setting numberwidth: {} -> {}",
                     state.number_width,
                     n
                 );
@@ -1609,9 +1612,9 @@ fn apply_single_command(
                 Ok(())
             }
             (ConfigOptionName::MessageHeight, ConfigOptionValue::Number(n)) => {
-                validate_number_range("messageheight", *n, 1, 999)?;
+                validate_number_range("cmdheight", *n, 1, 999)?;
                 log::debug!(
-                    "[config_runtime] setting messageheight: {} -> {}",
+                    "[config_runtime] setting cmdheight: {} -> {}",
                     state.message_height,
                     n
                 );
@@ -1725,7 +1728,7 @@ pub fn load_and_apply_config(input: &ConfigInput) -> (ConfigApplyState, Vec<Stri
         }
         ConfigLoadResult::ReadFailed { path, message } => {
             let warning = format!(
-                "設定ファイルの読み込みに失敗したため既定値で起動します ({}): {}",
+                "Failed to read config; using defaults ({}): {}",
                 path.display(),
                 message
             );
@@ -1734,7 +1737,7 @@ pub fn load_and_apply_config(input: &ConfigInput) -> (ConfigApplyState, Vec<Stri
         }
         ConfigLoadResult::EvalFailed { path, message } => {
             let warning = format!(
-                "設定ファイルの評価に失敗したため既定値で起動します ({}): {}",
+                "Failed to evaluate config; using defaults ({}): {}",
                 path.display(),
                 message
             );
@@ -1857,10 +1860,10 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_parses_line_numbers_option() {
+    fn evaluate_config_parses_number_option() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
-            source: "{ \"lineNumbers\": true }".to_string(),
+            source: "{ \"number\": true }".to_string(),
         };
 
         let result = evaluate_config(&source);
@@ -1881,10 +1884,10 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_parses_number_width_option() {
+    fn evaluate_config_parses_numberwidth_option() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
-            source: "{ \"numberWidth\": 6 }".to_string(),
+            source: "{ \"numberwidth\": 6 }".to_string(),
         };
 
         let result = evaluate_config(&source);
@@ -1908,7 +1911,7 @@ mod tests {
     fn evaluate_config_parses_multiple_options() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
-            source: "{ \"tabstop\": 2, \"lineNumbers\": false }".to_string(),
+            source: "{ \"tabstop\": 2, \"number\": false }".to_string(),
         };
 
         let result = evaluate_config(&source);
@@ -2018,9 +2021,9 @@ mod tests {
             path: PathBuf::from("init.ts"),
             source: r#"
                 saya.options.tabstop = 4;
-                saya.options.lineNumbers = true;
-                saya.options.numberWidth = 6;
-                saya.options.messageHeight = 3;
+                saya.options.number = true;
+                saya.options.numberwidth = 6;
+                saya.options.cmdheight = 3;
                 saya.keymap.set("normal", "x", "dd");
                 saya.commands.register("writeCurrent", () => {
                     saya.commands.execute("write");
@@ -2212,7 +2215,7 @@ mod tests {
 
         let result = apply_config_commands(&commands, &mut state);
 
-        assert!(state.line_numbers, "lineNumbers が true に変更されること");
+        assert!(state.line_numbers, "number が true に変更されること");
         assert!(result.is_fully_applied());
     }
 
@@ -2227,7 +2230,7 @@ mod tests {
 
         let result = apply_config_commands(&commands, &mut state);
 
-        assert_eq!(state.number_width, 6, "numberWidth が 6 に変更されること");
+        assert_eq!(state.number_width, 6, "numberwidth が 6 に変更されること");
         assert!(result.is_fully_applied());
     }
 
@@ -2242,10 +2245,7 @@ mod tests {
 
         let result = apply_config_commands(&commands, &mut state);
 
-        assert_eq!(
-            state.message_height, 3,
-            "messageHeight が 3 に変更されること"
-        );
+        assert_eq!(state.message_height, 3, "cmdheight が 3 に変更されること");
         assert!(result.is_fully_applied());
     }
 
@@ -2365,7 +2365,7 @@ mod tests {
             "読み込み失敗時は warning が 1 つ出ること"
         );
         assert!(
-            warnings[0].contains("読み込みに失敗"),
+            warnings[0].contains("Failed to read config"),
             "読み込み失敗の warning メッセージ: {}",
             warnings[0]
         );
@@ -2384,7 +2384,7 @@ mod tests {
         );
         assert_eq!(warnings.len(), 1, "評価失敗時は warning が 1 つ出ること");
         assert!(
-            warnings[0].contains("評価に失敗"),
+            warnings[0].contains("Failed to evaluate config"),
             "評価失敗の warning メッセージ: {}",
             warnings[0]
         );
@@ -2395,13 +2395,12 @@ mod tests {
     #[test]
     fn load_and_apply_with_valid_config_applies_successfully() {
         let config_path = unique_path("config-valid");
-        std::fs::write(&config_path, "{ \"tabstop\": 4, \"lineNumbers\": true }")
-            .expect("write config");
+        std::fs::write(&config_path, "{ \"tabstop\": 4, \"number\": true }").expect("write config");
 
         let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
 
         assert_eq!(state.tab_size, 4, "tabstop が設定値に変更されること");
-        assert!(state.line_numbers, "lineNumbers が設定値に変更されること");
+        assert!(state.line_numbers, "number が設定値に変更されること");
         assert!(
             warnings.is_empty(),
             "有効な設定では warning なしで適用されること"

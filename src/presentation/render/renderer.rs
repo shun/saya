@@ -319,9 +319,11 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
     }
     let theme = active_workspace_theme(model);
 
-    if let Some((message_area, message_rect)) = message_area_text(model).zip(layout.message_rect) {
+    if let Some((message_area, message_rect)) =
+        message_area_text(model, size.width).zip(layout.message_rect)
+    {
         f.render_widget(
-            Paragraph::new(message_area).style(ui_style(theme, UiStyleKey::Message, text_mode)),
+            Paragraph::new(message_area).style(message_area_style(model, theme, text_mode)),
             message_rect,
         );
     }
@@ -520,7 +522,7 @@ fn compute_workspace_layout<'a>(
     size: Rect,
     model: &'a WorkspaceScreenModel,
 ) -> WorkspaceLayout<'a> {
-    let global_rows = workspace_global_rows(model);
+    let global_rows = workspace_global_rows(model, size.width);
     let workspace_height = size.height.saturating_sub(global_rows).max(1);
 
     let panes = model
@@ -557,7 +559,7 @@ fn compute_workspace_layout<'a>(
     let message_rect = bottom_rect(
         size.width,
         &mut next_row,
-        Some(message_area_row_count(model)).filter(|height| *height > 0),
+        Some(message_area_row_count(model, size.width)).filter(|height| *height > 0),
     );
 
     let cursor = if command_rect.is_some() {
@@ -591,8 +593,8 @@ fn compute_workspace_layout<'a>(
     }
 }
 
-fn workspace_global_rows(model: &WorkspaceScreenModel) -> u16 {
-    message_area_row_count(model)
+fn workspace_global_rows(model: &WorkspaceScreenModel, width: u16) -> u16 {
+    message_area_row_count(model, width)
         + u16::from(pager_row_text(model).is_some())
         + u16::from(prompt_row_text(model).is_some())
         + u16::from(model.command_line.is_some())
@@ -617,17 +619,17 @@ fn bottom_rect(width: u16, next_row: &mut u16, height: Option<u16>) -> Option<Re
     })
 }
 
-fn message_area_row_count(model: &WorkspaceScreenModel) -> u16 {
-    let Some(lines) = message_area_lines(model) else {
+fn message_area_row_count(model: &WorkspaceScreenModel, width: u16) -> u16 {
+    let Some(lines) = message_area_lines(model, width) else {
         return 0;
     };
     let desired = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     desired.min(model.message_area_height.max(1))
 }
 
-fn message_area_text(model: &WorkspaceScreenModel) -> Option<Text<'static>> {
-    let lines = message_area_lines(model)?;
-    let height = usize::from(message_area_row_count(model));
+fn message_area_text(model: &WorkspaceScreenModel, width: u16) -> Option<Text<'static>> {
+    let lines = message_area_lines(model, width)?;
+    let height = usize::from(message_area_row_count(model, width));
     if height == 0 {
         return None;
     }
@@ -649,7 +651,7 @@ fn message_area_text(model: &WorkspaceScreenModel) -> Option<Text<'static>> {
     Some(Text::from(visible_lines))
 }
 
-fn message_area_lines(model: &WorkspaceScreenModel) -> Option<Vec<String>> {
+fn message_area_lines(model: &WorkspaceScreenModel, width: u16) -> Option<Vec<String>> {
     let message = model
         .visible_message_text()
         .map(str::trim)
@@ -659,7 +661,7 @@ fn message_area_lines(model: &WorkspaceScreenModel) -> Option<Vec<String>> {
         .lines()
         .map(str::trim_end)
         .filter(|line| !line.trim().is_empty())
-        .map(ToString::to_string)
+        .flat_map(|line| wrap_message_line_to_width(line, width))
         .collect::<Vec<_>>();
 
     if let Some(bell_marker) = bell {
@@ -672,6 +674,58 @@ fn message_area_lines(model: &WorkspaceScreenModel) -> Option<Vec<String>> {
     }
 
     if lines.is_empty() { None } else { Some(lines) }
+}
+
+fn wrap_message_line_to_width(line: &str, width: u16) -> Vec<String> {
+    let max_width = usize::from(width.max(1));
+    if display_width(line) <= max_width {
+        return vec![line.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut wrap_count = 0usize;
+    for ch in line.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if current_width > 0 && current_width.saturating_add(ch_width) > max_width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+            wrap_count = wrap_count.saturating_add(1);
+        }
+        current.push(ch);
+        current_width = current_width.saturating_add(ch_width);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    log::debug!(
+        "[tui_renderer] wrapped message area line: original_width={}, max_width={}, wrapped_lines={}, wrap_count={}",
+        display_width(line),
+        max_width,
+        lines.len(),
+        wrap_count
+    );
+    lines
+}
+
+fn message_area_style(
+    model: &WorkspaceScreenModel,
+    theme: &ResolvedTheme,
+    text_mode: RenderTextMode,
+) -> Style {
+    if text_mode == RenderTextMode::Plain {
+        return Style::default();
+    }
+    match model.visible_message_source() {
+        Some(crate::core::notification_prompt::MessageLineSource::SystemWarning) => theme
+            .ui_style(UiStyleKey::WarningMsg)
+            .cloned()
+            .map(|style| style_for_text(style, text_mode))
+            .unwrap_or_else(|| Style::default().fg(Color::Yellow)),
+        _ => ui_style(theme, UiStyleKey::Message, text_mode),
+    }
 }
 
 fn pager_row_text(model: &WorkspaceScreenModel) -> Option<String> {
@@ -1713,7 +1767,7 @@ mod tests {
         model.message_area_height = 2;
         model.message_scroll_offset = 1;
 
-        let message = message_area_text(&model).expect("message area should render");
+        let message = message_area_text(&model, 20).expect("message area should render");
         let rendered = message
             .lines
             .iter()
@@ -1726,6 +1780,51 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rendered, vec!["two", "three"]);
+    }
+
+    #[test]
+    fn message_area_wraps_single_long_message_to_workspace_width() {
+        let model = workspace_with_typed_message(Some(
+            "unsupported startup option: saya.options.lineNumbers",
+        ));
+
+        let message = message_area_text(&model, 20).expect("message area should render");
+        let rendered = message
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "unsupported startup ",
+                "option: saya.options",
+                ".lineNumbers"
+            ]
+        );
+    }
+
+    #[test]
+    fn system_warning_message_uses_warning_msg_style_by_default() {
+        let mut model = workspace_with_typed_message(None);
+        model.message_line = resolve_workspace_message_line(vec![MessageLineCandidate::legacy(
+            MessageLineSource::SystemWarning,
+            "warning",
+        )]);
+
+        let style = message_area_style(
+            &model,
+            &ResolvedTheme::default(),
+            RenderTextMode::StyledTrueColor,
+        );
+
+        assert_eq!(style, Style::default().fg(Color::Yellow));
     }
 
     #[test]
@@ -2522,7 +2621,7 @@ mod tests {
         std::fs::write(
             &config_path,
             r##"
-                saya.options.lineNumbers = true;
+                saya.options.number = true;
                 saya.options.syntax = true;
                 saya.theme.palette = {
                     accent: "#7aa2f7",

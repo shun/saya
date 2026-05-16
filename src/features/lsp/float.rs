@@ -87,6 +87,8 @@ pub struct LspDiagnosticEntry {
     pub uri: Option<String>,
     pub line: usize,
     pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
     pub message: String,
     pub severity: Option<u64>,
 }
@@ -139,6 +141,16 @@ impl LspDiagnosticStore {
         self.cursor = Some(index);
         log::debug!("[lsp_float] selected previous diagnostic: index={index}");
         self.diagnostics.get(index)
+    }
+
+    pub fn diagnostic_at_position(&self, line: usize, column: usize) -> Option<&LspDiagnosticEntry> {
+        self.diagnostics.iter().find(|diagnostic| {
+            let starts_before_or_at =
+                diagnostic.line < line || (diagnostic.line == line && diagnostic.column <= column);
+            let ends_after_or_at = diagnostic.end_line > line
+                || (diagnostic.end_line == line && diagnostic.end_column >= column);
+            starts_before_or_at && ends_after_or_at
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -534,6 +546,7 @@ fn diagnostic_entries_from_lsp_value(value: &Value) -> Vec<LspDiagnosticEntry> {
                 return None;
             }
             let start = item.pointer("/range/start");
+            let end = item.pointer("/range/end");
             Some(LspDiagnosticEntry {
                 uri: uri.clone(),
                 line: start
@@ -544,6 +557,24 @@ fn diagnostic_entries_from_lsp_value(value: &Value) -> Vec<LspDiagnosticEntry> {
                     .and_then(|start| start.get("character"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as usize,
+                end_line: end
+                    .and_then(|end| end.get("line"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| {
+                        start
+                            .and_then(|start| start.get("line"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0)
+                    }) as usize,
+                end_column: end
+                    .and_then(|end| end.get("character"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| {
+                        start
+                            .and_then(|start| start.get("character"))
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0)
+                    }) as usize,
                 message: message.to_string(),
                 severity: item.get("severity").and_then(Value::as_u64),
             })
