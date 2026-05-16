@@ -490,7 +490,7 @@ fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
 fn startup_with_vim_style_u_option_loads_config_without_warning() {
     let _lock = test_lock();
     let config_path = unique_path("config-ok.json");
-    std::fs::write(&config_path, "{ \"tabSize\": 4 }").expect("設定ファイルの作成");
+    std::fs::write(&config_path, "{ \"tabstop\": 4 }").expect("設定ファイルの作成");
 
     let request = parse_launch_request(["-u", config_path.to_str().unwrap()])
         .expect("CLI 引数のパースが成功すること");
@@ -501,7 +501,7 @@ fn startup_with_vim_style_u_option_loads_config_without_warning() {
         outcome.loaded_config,
         LoadedConfig::File {
             path: config_path.clone(),
-            source: "{ \"tabSize\": 4 }".to_string(),
+            source: "{ \"tabstop\": 4 }".to_string(),
         }
     );
     assert!(

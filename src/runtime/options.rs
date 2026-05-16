@@ -483,7 +483,7 @@ const OPTION_DEFINITIONS: &[SayaOptionDefinition] = &[
         value_type: SayaOptionType::Number,
         owner: SayaOptionOwner::CoreOwned,
         startup_public: true,
-        aliases: &["ts", "tabSize", "tabstop"],
+        aliases: &["ts"],
     },
     SayaOptionDefinition {
         name: SayaOptionName::Undofile,

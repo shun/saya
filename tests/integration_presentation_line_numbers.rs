@@ -30,7 +30,7 @@ fn presentation_line_numbers_reflect_in_headless_projection_without_conflicting_
     std::fs::write(
         &config_path,
         r#"
-            saya.options.tabSize = 4;
+            saya.options.tabstop = 4;
             saya.options.lineNumbers = true;
             saya.options.numberWidth = 4;
         "#,

@@ -116,7 +116,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
     std::fs::write(
         &config_path,
         r#"
-            saya.options.tabSize = 4;
+            saya.options.tabstop = 4;
             saya.options.lineNumbers = true;
             saya.options.numberWidth = 4;
             saya.options.syntax = true;

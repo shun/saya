@@ -15,7 +15,7 @@ lives in `src/runtime/startup.rs`.
 This phase gives `init.ts` a narrow `saya` surface for declaring initial state
 and callback registrations.
 
-- `saya.options.tabSize`
+- `saya.options.tabstop`
 - `saya.options.lineNumbers`
 - `saya.keymap.set(...)`
 - `saya.commands.register(...)`

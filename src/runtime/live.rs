@@ -4085,8 +4085,8 @@ mod tests {
         std::fs::write(
             &config_path,
             r#"
-                const tabSize: number = 4;
-                saya.options.tabSize = tabSize;
+                const tabstop: number = 4;
+                saya.options.tabstop = tabstop;
             "#,
         )
         .expect("config file");
@@ -4112,7 +4112,7 @@ mod tests {
             result.specifier.as_str(),
             format!("file://{}/init.ts", current_dir.to_string_lossy())
         );
-        assert!(result.executable_source_text.contains("const tabSize = 4;"));
+        assert!(result.executable_source_text.contains("const tabstop = 4;"));
     }
 
     #[tokio::test(flavor = "current_thread")]

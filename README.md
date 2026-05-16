@@ -115,7 +115,7 @@ The current startup API lets you configure options, register commands, and
 declare event handlers before the editor session begins.
 
 ```ts
-saya.options.tabSize = 4;
+saya.options.tabstop = 4;
 saya.options.lineNumbers = true;
 
 saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
@@ -178,7 +178,7 @@ setupSayaDired({
 > [`docs/api/dired-api-v1.md`](docs/api/dired-api-v1.md), including migration
 > notes and plugin author anti-patterns.
 
-At the moment, `tabSize` and `lineNumbers` are the most visible startup
+At the moment, `tabstop` and `lineNumbers` are the most visible startup
 settings in the TUI. Command and event registration are implemented and tested
 headlessly, but their full live integration is still in progress.
 

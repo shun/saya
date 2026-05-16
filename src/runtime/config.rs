@@ -521,9 +521,9 @@ fn parse_config_json(source: &str) -> Result<Vec<ConfigCommand>, String> {
     // 簡易 JSON パーサー（外部依存なし、MVP 最小限）
     let mut commands = Vec::new();
 
-    // "tabSize": <number> を検出
-    if let Some(value) = extract_json_number(trimmed, "tabSize") {
-        log::debug!("[config_runtime] found tabSize option: {}", value);
+    // "tabstop": <number> を検出
+    if let Some(value) = extract_json_number(trimmed, "tabstop") {
+        log::debug!("[config_runtime] found tabstop option: {}", value);
         commands.push(ConfigCommand::SetOption {
             name: ConfigOptionName::TabSize,
             value: ConfigOptionValue::Number(value),
@@ -1544,12 +1544,12 @@ fn apply_single_command(
             (ConfigOptionName::TabSize, ConfigOptionValue::Number(n)) => {
                 if *n < 1 || *n > 32 {
                     return Err(format!(
-                        "tabSize の値は 1〜32 の範囲で指定してください: {}",
+                        "tabstop の値は 1〜32 の範囲で指定してください: {}",
                         n
                     ));
                 }
                 log::debug!(
-                    "[config_runtime] setting tabSize: {} -> {}",
+                    "[config_runtime] setting tabstop: {} -> {}",
                     state.tab_size,
                     n
                 );
@@ -1782,14 +1782,14 @@ mod tests {
     #[test]
     fn read_config_returns_loaded_when_file_exists() {
         let config_path = unique_path("config-exists");
-        std::fs::write(&config_path, "{ \"tabSize\": 4 }").expect("write config");
+        std::fs::write(&config_path, "{ \"tabstop\": 4 }").expect("write config");
 
         let result = read_config_source(&ConfigInput::FilePath(config_path.clone()));
 
         match result {
             ConfigSourceResult::Loaded { path, source } => {
                 assert_eq!(path, config_path);
-                assert_eq!(source, "{ \"tabSize\": 4 }");
+                assert_eq!(source, "{ \"tabstop\": 4 }");
             }
             other => panic!("既存ファイルは Loaded を返すこと, got: {:?}", other),
         }
@@ -1832,10 +1832,10 @@ mod tests {
     // ==== タスク 8.2: 限定 API だけを使って設定を評価できるようにする ====
 
     #[test]
-    fn evaluate_config_parses_tab_size_option() {
+    fn evaluate_config_parses_tabstop_option() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
-            source: "{ \"tabSize\": 4 }".to_string(),
+            source: "{ \"tabstop\": 4 }".to_string(),
         };
 
         let result = evaluate_config(&source);
@@ -1849,7 +1849,7 @@ mod tests {
                         name: ConfigOptionName::TabSize,
                         value: ConfigOptionValue::Number(4),
                     },
-                    "tabSize オプションが正しくパースされること"
+                    "tabstop オプションが正しくパースされること"
                 );
             }
             other => panic!("Success を返すこと, got: {:?}", other),
@@ -1908,7 +1908,7 @@ mod tests {
     fn evaluate_config_parses_multiple_options() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
-            source: "{ \"tabSize\": 2, \"lineNumbers\": false }".to_string(),
+            source: "{ \"tabstop\": 2, \"lineNumbers\": false }".to_string(),
         };
 
         let result = evaluate_config(&source);
@@ -2017,7 +2017,7 @@ mod tests {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("init.ts"),
             source: r#"
-                saya.options.tabSize = 4;
+                saya.options.tabstop = 4;
                 saya.options.lineNumbers = true;
                 saya.options.numberWidth = 6;
                 saya.options.messageHeight = 3;
@@ -2167,7 +2167,7 @@ mod tests {
     fn evaluate_config_uses_typescript_capability_source_for_existing_boot_path() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("init.ts"),
-            source: "saya.options.tabSize = 6;".to_string(),
+            source: "saya.options.tabstop = 6;".to_string(),
         };
 
         let result = evaluate_config(&source);
@@ -2196,7 +2196,7 @@ mod tests {
 
         let result = apply_config_commands(&commands, &mut state);
 
-        assert_eq!(state.tab_size, 4, "tabSize が 4 に変更されること");
+        assert_eq!(state.tab_size, 4, "tabstop が 4 に変更されること");
         assert!(result.is_fully_applied());
         assert_eq!(result.applied_count, 1);
     }
@@ -2395,12 +2395,12 @@ mod tests {
     #[test]
     fn load_and_apply_with_valid_config_applies_successfully() {
         let config_path = unique_path("config-valid");
-        std::fs::write(&config_path, "{ \"tabSize\": 4, \"lineNumbers\": true }")
+        std::fs::write(&config_path, "{ \"tabstop\": 4, \"lineNumbers\": true }")
             .expect("write config");
 
         let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
 
-        assert_eq!(state.tab_size, 4, "tabSize が設定値に変更されること");
+        assert_eq!(state.tab_size, 4, "tabstop が設定値に変更されること");
         assert!(state.line_numbers, "lineNumbers が設定値に変更されること");
         assert!(
             warnings.is_empty(),

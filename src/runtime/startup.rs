@@ -17,7 +17,6 @@ pub use crate::runtime::config::{
 };
 
 const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
-    "saya.options.tabSize",
     "saya.options.tabstop",
     "saya.options.expandtab",
     "saya.options.shiftwidth",
@@ -64,7 +63,7 @@ pub fn startup_public_surface_paths() -> &'static [&'static str] {
 
 const STARTUP_SAYA_BOOTSTRAP: &str = r#"
 const {
-    op_collect_startup_tab_size,
+    op_collect_startup_tabstop,
     op_collect_startup_line_numbers,
     op_collect_startup_number_width,
     op_collect_startup_bool_option,
@@ -83,7 +82,6 @@ const {
 
 globalThis.saya = {
     options: {
-        tabSize: 8,
         tabstop: 8,
         expandtab: false,
         shiftwidth: 8,
@@ -264,17 +262,6 @@ function defineStringOption(propertyName, runtimeName, defaultValue) {
     });
 }
 
-Object.defineProperty(globalThis.saya.options, "tabSize", {
-    configurable: true,
-    enumerable: true,
-    get() {
-        return 8;
-    },
-    set(value) {
-        op_collect_startup_tab_size(value);
-    },
-});
-
 Object.defineProperty(globalThis.saya.options, "tabstop", {
     configurable: true,
     enumerable: true,
@@ -282,7 +269,7 @@ Object.defineProperty(globalThis.saya.options, "tabstop", {
         return 8;
     },
     set(value) {
-        op_collect_startup_tab_size(value);
+        op_collect_startup_tabstop(value);
     },
 });
 
@@ -410,7 +397,6 @@ declare global {
     }
 
     interface SayaStartupOptionsSurface {
-        tabSize: number;
         tabstop: number;
         expandtab: boolean;
         shiftwidth: number;
@@ -537,12 +523,9 @@ export {};
 "#;
 
 #[op2(fast)]
-fn op_collect_startup_tab_size(
-    state: &mut OpState,
-    #[number] value: i64,
-) -> Result<(), JsErrorBox> {
+fn op_collect_startup_tabstop(state: &mut OpState, #[number] value: i64) -> Result<(), JsErrorBox> {
     log::debug!(
-        "[startup_runtime] collect startup tabSize option from runtime: value={}",
+        "[startup_runtime] collect startup tabstop option from runtime: value={}",
         value
     );
 
@@ -939,7 +922,7 @@ fn theme_bool_property(
 deno_core::extension!(
     startup_saya_extension,
     ops = [
-        op_collect_startup_tab_size,
+        op_collect_startup_tabstop,
         op_collect_startup_line_numbers,
         op_collect_startup_number_width,
         op_collect_startup_bool_option,
@@ -1555,6 +1538,7 @@ pub async fn collect_startup_registry(source_text: &str) -> Result<StartupRegist
         "[startup_runtime] evaluate startup module with saya namespace: len={}",
         source_text.len()
     );
+    reject_removed_startup_surface(source_text)?;
 
     let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
     let specifier = resolve_init_module_specifier("init.ts", &current_dir)
@@ -1572,6 +1556,19 @@ pub async fn collect_startup_registry(source_text: &str) -> Result<StartupRegist
     evaluation.await.map_err(|error| error.to_string())?;
     let op_state = runtime.op_state();
     Ok(op_state.borrow().borrow::<StartupRegistry>().clone())
+}
+
+fn reject_removed_startup_surface(source_text: &str) -> Result<(), String> {
+    if source_text.contains("saya.options.tabSize") {
+        log::debug!(
+            "[startup_runtime] removed startup option rejected before evaluation: saya.options.tabSize"
+        );
+        return Err(
+            "unsupported startup option: saya.options.tabSize (use saya.options.tabstop)"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn parse_startup_keymap_action(action: &str) -> SayaKeymapAction {

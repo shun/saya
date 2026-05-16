@@ -1243,7 +1243,7 @@ mod tests {
         let config_dir = xdg_config_home.join("saya");
         let config_path = config_dir.join("init.ts");
         std::fs::create_dir_all(&config_dir).expect("xdg config directory");
-        std::fs::write(&config_path, "saya.options.tabSize = 4;\n").expect("config file");
+        std::fs::write(&config_path, "saya.options.tabstop = 4;\n").expect("config file");
 
         let outcome = with_env_var_set("XDG_CONFIG_HOME", &xdg_config_home, || {
             with_env_var_removed("HOME", || {
@@ -1260,7 +1260,7 @@ mod tests {
             outcome.loaded_config,
             LoadedConfig::File {
                 path: config_path.clone(),
-                source: "saya.options.tabSize = 4;\n".to_string(),
+                source: "saya.options.tabstop = 4;\n".to_string(),
             }
         );
         assert_eq!(outcome.initial_tab_size, 4);
@@ -1428,7 +1428,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config_path = unique_path("config-tab-size");
-        std::fs::write(&config_path, "saya.options.tabSize = 4;\n").expect("config file");
+        std::fs::write(&config_path, "saya.options.tabstop = 4;\n").expect("config file");
 
         let outcome = prepare_launch(LaunchRequest {
             input_source: InputSource::Empty,

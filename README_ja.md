@@ -116,7 +116,7 @@ cargo run --bin sy -- --help
 現在の startup API では、起動前に option、command、event を宣言できます。
 
 ```ts
-saya.options.tabSize = 4;
+saya.options.tabstop = 4;
 saya.options.lineNumbers = true;
 
 saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
@@ -130,7 +130,7 @@ saya.events.on("bufferOpen", (payload) => {
 });
 ```
 
-現時点で TUI 上で最も確認しやすい設定は `tabSize` と `lineNumbers` です。
+現時点で TUI 上で最も確認しやすい設定は `tabstop` と `lineNumbers` です。
 command と event の登録は実装済みで headless テストもありますが、常駐 runtime
 との本番統合はまだ進行中です。
 

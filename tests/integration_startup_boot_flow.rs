@@ -29,10 +29,10 @@ fn formal_boot_flow_uses_deno_core_runtime_for_expression_based_startup_config()
     std::fs::write(
         &config_path,
         r#"
-            const computedTabSize = 2 + 2;
+            const computedTabstop = 2 + 2;
             const writeCurrent = "writeCurrent";
 
-            saya.options.tabSize = computedTabSize;
+            saya.options.tabstop = computedTabstop;
             saya.options.lineNumbers = true;
             saya.keymap.set("normal", "<leader>w", saya.commands.execute(writeCurrent));
             saya.commands.register(writeCurrent, () => {

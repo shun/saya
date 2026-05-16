@@ -182,12 +182,12 @@ top-level areas.
 The options surface lets you set initial editor options before the session
 starts.
 
-### `saya.options.tabSize`
+### `saya.options.tabstop`
 
 Use this number property to control tab expansion width in the projected TUI.
 
 ```ts
-saya.options.tabSize = 4;
+saya.options.tabstop = 4;
 ```
 
 ### `saya.options.lineNumbers`

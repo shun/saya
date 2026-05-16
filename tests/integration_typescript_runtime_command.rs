@@ -326,7 +326,7 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
     std::fs::write(
         &config_path,
         r#"
-            saya.options.tabSize = 4;
+            saya.options.tabstop = 4;
             saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
             saya.commands.register("writeCurrent", () => {
                 saya.commands.execute("write");

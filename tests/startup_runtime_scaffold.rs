@@ -73,7 +73,7 @@ fn init_ts_module_loads_as_a_local_file_module() {
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
     let config_path = current_dir.join("init.ts");
-    std::fs::write(&config_path, "saya.options.tabSize = 4;").expect("config file");
+    std::fs::write(&config_path, "saya.options.tabstop = 4;").expect("config file");
 
     let result = load_init_module(&config_path, &current_dir);
 
@@ -83,7 +83,7 @@ fn init_ts_module_loads_as_a_local_file_module() {
                 module.specifier.as_str(),
                 format!("file://{}/init.ts", current_dir.to_string_lossy())
             );
-            assert_eq!(module.source_text, "saya.options.tabSize = 4;");
+            assert_eq!(module.source_text, "saya.options.tabstop = 4;");
             assert_eq!(module.path, config_path);
         }
         other => panic!("Success を返すこと, got: {:?}", other),
@@ -112,8 +112,8 @@ fn init_ts_module_transpiles_into_executable_javascript() {
     std::fs::write(
         &config_path,
         r#"
-            const tabSize: number = 4;
-            saya.options.tabSize = tabSize;
+            const tabstop: number = 4;
+            saya.options.tabstop = tabstop;
         "#,
     )
     .expect("config file");
@@ -122,11 +122,11 @@ fn init_ts_module_transpiles_into_executable_javascript() {
 
     match result {
         StartupModulePrepareResult::Success(module) => {
-            assert!(module.executable_source_text.contains("const tabSize = 4;"));
+            assert!(module.executable_source_text.contains("const tabstop = 4;"));
             assert!(
                 module
                     .executable_source_text
-                    .contains("saya.options.tabSize = tabSize;")
+                    .contains("saya.options.tabstop = tabstop;")
             );
             assert_eq!(module.path, config_path);
         }
@@ -804,11 +804,23 @@ async fn startup_saya_namespace_is_available_to_top_level_module_code() {
             if (typeof saya === "undefined") {
                 throw new Error("saya namespace is missing");
             }
-            saya.options.tabSize = 4;
+            saya.options.tabstop = 4;
         "#,
     )
     .await
     .expect("startup module should evaluate with saya namespace");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_removed_tab_size_alias_is_rejected() {
+    let result = evaluate_startup_module("saya.options.tabSize = 4;").await;
+
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|message| message.contains("saya.options.tabSize")),
+        "removed tabSize alias should fail startup evaluation, got: {result:?}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -996,8 +1008,8 @@ async fn startup_theme_ui_and_syntax_styles_are_collected() {
 #[tokio::test(flavor = "current_thread")]
 async fn startup_tab_size_is_collected_in_source_order_and_is_deterministic() {
     let source = r#"
-        saya.options.tabSize = 4;
-        saya.options.tabSize = 6;
+        saya.options.tabstop = 4;
+        saya.options.tabstop = 6;
     "#;
 
     let first = collect_startup_registry(source)

@@ -1,4 +1,4 @@
-//! 統合テスト: startup `tabSize` の headless 検証。
+//! 統合テスト: startup `tabstop` の headless 検証。
 //!
 //! startup option が host/application 層の session state と screen
 //! projection に反映されることを確認する。fallback 起動も同じファイル内
@@ -20,7 +20,7 @@ fn unique_path(name: &str) -> PathBuf {
 }
 
 #[test]
-fn startup_tab_size_reflects_in_headless_boot_projection() {
+fn startup_tabstop_reflects_in_headless_boot_projection() {
     let _lock = launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -28,14 +28,14 @@ fn startup_tab_size_reflects_in_headless_boot_projection() {
     let config_path = unique_path("init.ts");
 
     std::fs::write(&target_path, "a\tb\n").expect("target file");
-    std::fs::write(&config_path, "saya.options.tabSize = 4;").expect("config file");
+    std::fs::write(&config_path, "saya.options.tabstop = 4;").expect("config file");
 
     let outcome = prepare_launch(LaunchRequest {
         input_source: InputSource::File(target_path.clone()),
         config_source: ConfigSource::File(config_path.clone()),
         ..LaunchRequest::default()
     })
-    .expect("startup with tabSize config");
+    .expect("startup with tabstop config");
 
     assert_eq!(outcome.initial_tab_size, 4);
     assert_eq!(outcome.initial_snapshot.mode, CoreMode::Normal);
@@ -95,4 +95,28 @@ fn startup_tab_size_falls_back_when_config_is_missing() {
     assert_eq!(model.lines, vec!["a       b".to_string()]);
 
     std::fs::remove_file(&target_path).expect("remove target");
+}
+
+#[test]
+fn startup_rejects_removed_tab_size_alias() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("removed-alias-target.txt");
+    let config_path = unique_path("removed-alias-init.ts");
+
+    std::fs::write(&target_path, "a\tb\n").expect("target file");
+    std::fs::write(&config_path, "saya.options.tabSize = 4;").expect("config file");
+
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path.clone()),
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup should continue with default fallback when tabSize is unsupported");
+
+    assert_eq!(outcome.initial_tab_size, 8);
+
+    std::fs::remove_file(&target_path).expect("remove target");
+    std::fs::remove_file(&config_path).expect("remove config");
 }

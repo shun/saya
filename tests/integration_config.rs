@@ -22,7 +22,7 @@ fn unique_path(name: &str) -> PathBuf {
 fn valid_config_applied_correctly() {
     let config_path = unique_path("valid");
     let json_content = r#"{
-        "tabSize": 4,
+        "tabstop": 4,
         "lineNumbers": true
     }"#;
     std::fs::write(&config_path, json_content).unwrap();
@@ -48,7 +48,7 @@ fn invalid_config_falls_back_to_defaults_with_warning() {
     let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
 
     assert!(!warnings.is_empty(), "Should produce warnings");
-    assert_eq!(state.tab_size, 8, "Should fallback to default tabSize");
+    assert_eq!(state.tab_size, 8, "Should fallback to default tabstop");
     assert!(
         !state.line_numbers,
         "Should fallback to default lineNumbers"
