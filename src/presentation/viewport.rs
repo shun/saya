@@ -158,11 +158,31 @@ impl ViewportState {
         }
 
         let midpoint = body_height / 2;
+        let movement_delta = previous_cursor_row.map(|row| row.abs_diff(window.cursor_row));
+        let is_single_line_motion = movement_delta == Some(1);
+        let core_topline_delta = core_top_line.abs_diff(self.top_line);
+        if is_single_line_motion && core_topline_delta == 1 {
+            log::debug!(
+                "[viewport] sync active cursor movement from one-line core scroll: window_id={}, cursor_row={}, previous_cursor_row={:?}, movement_delta={:?}, body_height={}, total_lines={}, core_topline={}, top_line_before={}, top_line_after={}",
+                window.id,
+                window.cursor_row,
+                previous_cursor_row,
+                movement_delta,
+                body_height,
+                total_lines,
+                window.topline,
+                self.top_line,
+                core_top_line
+            );
+            self.top_line = core_top_line;
+            self.bottom_line = self.top_line.saturating_add(body_height.saturating_sub(1));
+            self.last_cursor_row = Some(window.cursor_row);
+            return;
+        }
+
         let previous_anchor = previous_cursor_row
             .and_then(|row| row.checked_sub(self.top_line))
             .filter(|relative_row| *relative_row < body_height);
-        let movement_delta = previous_cursor_row.map(|row| row.abs_diff(window.cursor_row));
-        let is_single_line_motion = movement_delta == Some(1);
         let stable_band_start = body_height / 3;
         let stable_band_end = body_height.saturating_sub(stable_band_start + 1);
         let stable_anchor = previous_anchor.filter(|relative_row| {

@@ -12,7 +12,7 @@ use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::app::session::EditorSessionState;
 use saya::input::router::{EditorIntent, KeyInput, resolve_intent};
 use saya::presentation::screen_model::{ProjectionInput, project};
-use saya::presentation::viewport::ViewportState;
+use saya::presentation::viewport::{ViewportState, ViewportSyncMode, WindowViewportStore};
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -239,6 +239,578 @@ fn page_scroll_uses_core_window_topline_for_forward_and_backward_motion() {
         Some("line1"),
         "Ctrl+B で元の先頭行が再び表示されること"
     );
+}
+
+#[test]
+fn ctrl_f_to_last_page_then_k_scrolls_viewport_one_line() {
+    let _lock = test_lock();
+    let content = (1..=120)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut outcome = launch_with_content(&content);
+    let mut viewport_store = WindowViewportStore::new();
+    let mut line_counts = std::collections::BTreeMap::new();
+    line_counts.insert(1, content.lines().count());
+
+    outcome.core_bridge.set_screen_size(12, 80);
+
+    for _ in 0..20 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{6}")
+            .expect("Ctrl+F dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after Ctrl+F");
+        if window.botline >= content.lines().count() {
+            break;
+        }
+    }
+
+    let before_snapshot = outcome.core_bridge.snapshot();
+    let before_window = before_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| before_snapshot.windows.first())
+        .expect("active window should exist on last page");
+    let before_viewport_top = viewport_store
+        .get(before_window.id)
+        .expect("viewport should be synced")
+        .top_line();
+    assert!(
+        before_window.botline >= content.lines().count(),
+        "test setup should reach the last page: topline={}, botline={}, cursor_row={}",
+        before_window.topline,
+        before_window.botline,
+        before_window.cursor_row
+    );
+
+    outcome.core_bridge.dispatch_key("k").expect("k dispatch");
+
+    let after_snapshot = outcome.core_bridge.snapshot();
+    viewport_store.sync_from_windows_for_render(
+        &after_snapshot.windows,
+        &std::collections::BTreeSet::new(),
+        &line_counts,
+        ViewportSyncMode::SmoothLineMotion,
+    );
+    let after_window = after_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| after_snapshot.windows.first())
+        .expect("active window should exist after k");
+    let after_viewport_top = viewport_store
+        .get(after_window.id)
+        .expect("viewport should be synced after k")
+        .top_line();
+
+    assert_eq!(
+        after_viewport_top,
+        before_viewport_top.saturating_sub(1),
+        "k after Ctrl+F reaches the last page should scroll the viewport up by one line: before_top={}, after_top={}, before_cursor={}, after_cursor={}",
+        before_viewport_top,
+        after_viewport_top,
+        before_window.cursor_row,
+        after_window.cursor_row
+    );
+}
+
+#[test]
+fn ctrl_f_to_last_page_then_repeated_k_scrolls_viewport_one_line_per_key() {
+    let _lock = test_lock();
+    let content = (1..=120)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut outcome = launch_with_content(&content);
+    let mut viewport_store = WindowViewportStore::new();
+    let mut line_counts = std::collections::BTreeMap::new();
+    line_counts.insert(1, content.lines().count());
+
+    outcome.core_bridge.set_screen_size(12, 80);
+
+    for _ in 0..20 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{6}")
+            .expect("Ctrl+F dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after Ctrl+F");
+        if window.botline >= content.lines().count() {
+            break;
+        }
+    }
+
+    let before_snapshot = outcome.core_bridge.snapshot();
+    let before_window = before_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| before_snapshot.windows.first())
+        .expect("active window should exist on last page");
+    assert!(
+        before_window.botline >= content.lines().count(),
+        "test setup should reach the last page: topline={}, botline={}, cursor_row={}",
+        before_window.topline,
+        before_window.botline,
+        before_window.cursor_row
+    );
+
+    let mut observed = Vec::new();
+    for _ in 0..11 {
+        outcome.core_bridge.dispatch_key("k").expect("k dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after k");
+        let viewport_top = viewport_store
+            .get(window.id)
+            .expect("viewport should be synced after k")
+            .top_line();
+        observed.push((
+            window.topline,
+            window.cursor_row,
+            viewport_top,
+            window.cursor_row.saturating_sub(viewport_top),
+        ));
+    }
+
+    assert_eq!(
+        observed,
+        vec![
+            (108, 117, 107, 10),
+            (107, 116, 106, 10),
+            (106, 115, 105, 10),
+            (105, 114, 104, 10),
+            (104, 113, 103, 10),
+            (103, 112, 102, 10),
+            (102, 111, 101, 10),
+            (101, 110, 100, 10),
+            (100, 109, 99, 10),
+            (99, 108, 98, 10),
+            (98, 107, 97, 10),
+        ],
+        "k after Ctrl+F reaches the last page should scroll the viewport up one line per key while preserving the cursor screen row"
+    );
+}
+
+#[test]
+fn ctrl_f_to_last_page_then_repeated_k_should_scroll_viewport_one_line_per_key() {
+    let _lock = test_lock();
+    let content = (1..=120)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut outcome = launch_with_content(&content);
+    let mut viewport_store = WindowViewportStore::new();
+    let mut line_counts = std::collections::BTreeMap::new();
+    line_counts.insert(1, content.lines().count());
+
+    outcome.core_bridge.set_screen_size(12, 80);
+
+    for _ in 0..20 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{6}")
+            .expect("Ctrl+F dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after Ctrl+F");
+        if window.botline >= content.lines().count() {
+            break;
+        }
+    }
+
+    let before_snapshot = outcome.core_bridge.snapshot();
+    let before_window = before_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| before_snapshot.windows.first())
+        .expect("active window should exist on last page");
+    let before_viewport_top = viewport_store
+        .get(before_window.id)
+        .expect("viewport should be synced")
+        .top_line();
+    let expected_relative = before_window.cursor_row.saturating_sub(before_viewport_top);
+    assert!(
+        before_window.botline >= content.lines().count(),
+        "test setup should reach the last page: topline={}, botline={}, cursor_row={}",
+        before_window.topline,
+        before_window.botline,
+        before_window.cursor_row
+    );
+
+    for step in 1..=3 {
+        outcome.core_bridge.dispatch_key("k").expect("k dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after k");
+        let viewport_top = viewport_store
+            .get(window.id)
+            .expect("viewport should be synced after k")
+            .top_line();
+        assert_eq!(
+            viewport_top,
+            before_viewport_top.saturating_sub(step),
+            "k after Ctrl+F reaches the last page should scroll the viewport up by one line per key: step={step}, before_top={before_viewport_top}, actual_top={viewport_top}, cursor_row={}",
+            window.cursor_row
+        );
+        assert_eq!(
+            window.cursor_row.saturating_sub(viewport_top),
+            expected_relative,
+            "k after Ctrl+F reaches the last page should preserve cursor screen position while scrolling: step={step}, expected_relative={expected_relative}, actual_relative={}, cursor_row={}, viewport_top={viewport_top}",
+            window.cursor_row.saturating_sub(viewport_top),
+            window.cursor_row
+        );
+    }
+}
+
+#[test]
+fn ctrl_f_to_one_line_last_page_then_k_scrolls_viewport_one_line_per_key() {
+    let _lock = test_lock();
+    let content = (1..=59)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut outcome = launch_with_content(&content);
+    let mut viewport_store = WindowViewportStore::new();
+    let mut line_counts = std::collections::BTreeMap::new();
+    line_counts.insert(1, content.lines().count());
+
+    outcome.core_bridge.set_screen_size(55, 96);
+
+    for _ in 0..5 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{6}")
+            .expect("Ctrl+F dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after Ctrl+F");
+        if window.topline >= content.lines().count() {
+            break;
+        }
+    }
+
+    let before_snapshot = outcome.core_bridge.snapshot();
+    let before_window = before_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| before_snapshot.windows.first())
+        .expect("active window should exist on one-line last page");
+    let before_viewport_top = viewport_store
+        .get(before_window.id)
+        .expect("viewport should be synced")
+        .top_line();
+    assert_eq!(
+        before_viewport_top, 58,
+        "test setup should render the one-line last page: core_topline={}, viewport_top={}, cursor_row={}",
+        before_window.topline, before_viewport_top, before_window.cursor_row
+    );
+
+    let mut observed = Vec::new();
+    for _ in 0..3 {
+        outcome.core_bridge.dispatch_key("k").expect("k dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after k");
+        let viewport_top = viewport_store
+            .get(window.id)
+            .expect("viewport should be synced after k")
+            .top_line();
+        observed.push((
+            window.topline,
+            window.cursor_row,
+            viewport_top,
+            window.cursor_row.saturating_sub(viewport_top),
+        ));
+    }
+
+    assert_eq!(
+        observed,
+        vec![(58, 57, 57, 0), (57, 56, 56, 0), (56, 55, 55, 0)],
+        "k after Ctrl+F reaches a one-line last page should move the viewport up one line per key"
+    );
+}
+
+#[test]
+fn ctrl_b_to_first_page_then_repeated_j_scrolls_viewport_one_line_per_key() {
+    let _lock = test_lock();
+    let content = (1..=120)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut outcome = launch_with_content(&content);
+    let mut viewport_store = WindowViewportStore::new();
+    let mut line_counts = std::collections::BTreeMap::new();
+    line_counts.insert(1, content.lines().count());
+
+    outcome.core_bridge.set_screen_size(12, 80);
+
+    for _ in 0..6 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{6}")
+            .expect("Ctrl+F dispatch");
+    }
+    for _ in 0..20 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{2}")
+            .expect("Ctrl+B dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after Ctrl+B");
+        if window.topline == 1 {
+            break;
+        }
+    }
+
+    let before_snapshot = outcome.core_bridge.snapshot();
+    let before_window = before_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| before_snapshot.windows.first())
+        .expect("active window should exist on first page");
+    assert_eq!(
+        before_window.topline, 1,
+        "test setup should reach the first page: topline={}, botline={}, cursor_row={}",
+        before_window.topline, before_window.botline, before_window.cursor_row
+    );
+
+    let mut observed = Vec::new();
+    for _ in 0..11 {
+        outcome.core_bridge.dispatch_key("j").expect("j dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after j");
+        let viewport_top = viewport_store
+            .get(window.id)
+            .expect("viewport should be synced after j")
+            .top_line();
+        observed.push((
+            window.topline,
+            window.cursor_row,
+            viewport_top,
+            window.cursor_row.saturating_sub(viewport_top),
+        ));
+    }
+
+    assert_eq!(
+        observed,
+        vec![
+            (2, 1, 1, 0),
+            (3, 2, 2, 0),
+            (4, 3, 3, 0),
+            (5, 4, 4, 0),
+            (6, 5, 5, 0),
+            (7, 6, 6, 0),
+            (8, 7, 7, 0),
+            (9, 8, 8, 0),
+            (10, 9, 9, 0),
+            (11, 10, 10, 0),
+            (12, 11, 11, 0),
+        ],
+        "j after Ctrl+B reaches the first page should scroll the viewport down one line per key while preserving the cursor screen row"
+    );
+}
+
+#[test]
+fn ctrl_b_to_first_page_then_repeated_j_should_scroll_viewport_one_line_per_key() {
+    let _lock = test_lock();
+    let content = (1..=120)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let mut outcome = launch_with_content(&content);
+    let mut viewport_store = WindowViewportStore::new();
+    let mut line_counts = std::collections::BTreeMap::new();
+    line_counts.insert(1, content.lines().count());
+
+    outcome.core_bridge.set_screen_size(12, 80);
+
+    for _ in 0..6 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{6}")
+            .expect("Ctrl+F dispatch");
+    }
+    for _ in 0..20 {
+        outcome
+            .core_bridge
+            .dispatch_key("\u{2}")
+            .expect("Ctrl+B dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::Core,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after Ctrl+B");
+        if window.topline == 1 {
+            break;
+        }
+    }
+
+    let before_snapshot = outcome.core_bridge.snapshot();
+    let before_window = before_snapshot
+        .windows
+        .iter()
+        .find(|window| window.is_active)
+        .or_else(|| before_snapshot.windows.first())
+        .expect("active window should exist on first page");
+    let before_viewport_top = viewport_store
+        .get(before_window.id)
+        .expect("viewport should be synced")
+        .top_line();
+    let expected_relative = before_window.cursor_row.saturating_sub(before_viewport_top);
+    assert_eq!(
+        before_window.topline, 1,
+        "test setup should reach the first page: topline={}, botline={}, cursor_row={}",
+        before_window.topline, before_window.botline, before_window.cursor_row
+    );
+
+    for step in 1..=3 {
+        outcome.core_bridge.dispatch_key("j").expect("j dispatch");
+        let snapshot = outcome.core_bridge.snapshot();
+        viewport_store.sync_from_windows_for_render(
+            &snapshot.windows,
+            &std::collections::BTreeSet::new(),
+            &line_counts,
+            ViewportSyncMode::SmoothLineMotion,
+        );
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.is_active)
+            .or_else(|| snapshot.windows.first())
+            .expect("active window should exist after j");
+        let viewport_top = viewport_store
+            .get(window.id)
+            .expect("viewport should be synced after j")
+            .top_line();
+        assert_eq!(
+            viewport_top,
+            before_viewport_top.saturating_add(step),
+            "j after Ctrl+B reaches the first page should scroll the viewport down by one line per key: step={step}, before_top={before_viewport_top}, actual_top={viewport_top}, cursor_row={}",
+            window.cursor_row
+        );
+        assert_eq!(
+            window.cursor_row.saturating_sub(viewport_top),
+            expected_relative,
+            "j after Ctrl+B reaches the first page should preserve cursor screen position while scrolling: step={step}, expected_relative={expected_relative}, actual_relative={}, cursor_row={}, viewport_top={viewport_top}",
+            window.cursor_row.saturating_sub(viewport_top),
+            window.cursor_row
+        );
+    }
 }
 
 // host-integration: visual selection projection for rendering is host-side
