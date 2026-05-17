@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::runtime::config::{StartupRegistry, StartupRegistryEntry};
+use saya::runtime::config::{
+    StartupPluginDeclaration, StartupPluginSource, StartupRegistry, StartupRegistryEntry,
+};
 use saya::runtime::plugin::{
     BundledPluginManifest, LazyIndex, LazyTarget, LockedPlugin, PluginCacheRoot, PluginCommand,
     PluginHost, PluginLockfile, PluginManagerReport, StartupPlan, StartupPlanEntry,
@@ -288,4 +290,93 @@ fn plugin_sync_regenerates_bundled_startup_and_lazy_artifacts_without_locking_bu
         .expect("operation log should be written");
     assert!(operation_log.contains("[saya-plugin-manager][operation] sync"));
     assert!(operation_log.contains("regenerated bundled artifacts"));
+}
+
+#[test]
+fn plugin_sync_writes_artifacts_from_startup_plugin_declarations() {
+    let root = PluginCacheRoot::new(unique_cache_root("sync-startup-declarations"));
+    let host = PluginHost::new(root.clone());
+    let registry = StartupRegistry::from_entries(vec![
+        StartupRegistryEntry::PluginUse {
+            declaration: StartupPluginDeclaration {
+                name: "workspace-tools".to_string(),
+                source: StartupPluginSource::Local {
+                    path: "~/.config/saya/plugins/workspace-tools".to_string(),
+                },
+                module: "mod.ts".to_string(),
+                setup: "setup".to_string(),
+                commands: Vec::new(),
+                events: Vec::new(),
+                options: None,
+            },
+        },
+        StartupRegistryEntry::PluginLazy {
+            declaration: StartupPluginDeclaration {
+                name: "git-tools".to_string(),
+                source: StartupPluginSource::Github {
+                    repo: "shun/git-tools".to_string(),
+                    rev: Some("v0.1.0".to_string()),
+                },
+                module: "mod.ts".to_string(),
+                setup: "setup".to_string(),
+                commands: vec!["GitStatus".to_string()],
+                events: vec!["bufferOpen".to_string()],
+                options: None,
+            },
+        },
+    ]);
+
+    let report = host
+        .sync_startup_plugin_declarations(&registry, "hash-config".to_string())
+        .expect("startup plugin declarations should sync to cache artifacts");
+
+    assert!(matches!(
+        report,
+        PluginManagerReport::Sync {
+            plugin_count: 2,
+            ..
+        }
+    ));
+    let lockfile = host
+        .read_lockfile()
+        .expect("lockfile should be readable")
+        .expect("lockfile should be written");
+    assert!(lockfile.plugins.iter().any(|plugin| {
+        plugin.name == "workspace-tools"
+            && plugin.source == "local:~/.config/saya/plugins/workspace-tools"
+            && plugin.revision == "workspace"
+    }));
+    assert!(lockfile.plugins.iter().any(|plugin| {
+        plugin.name == "git-tools"
+            && plugin.source == "github:shun/git-tools"
+            && plugin.revision == "v0.1.0"
+    }));
+
+    let startup_plan = host
+        .read_startup_plan()
+        .expect("startup plan should be readable")
+        .expect("startup plan should be written");
+    assert_eq!(startup_plan.source_hash, "hash-config");
+    assert!(startup_plan.entries.iter().any(|entry| matches!(
+        entry,
+        StartupPlanEntry::Command { name, callback_source }
+            if name == "workspace-tools.setup"
+                && callback_source.contains("workspace-tools")
+                && callback_source.contains("mod.ts")
+    )));
+
+    let lazy_index = host
+        .read_lazy_index()
+        .expect("lazy index should be readable")
+        .expect("lazy index should be written");
+    assert_eq!(lazy_index.commands["GitStatus"].plugin, "git-tools");
+    assert!(
+        lazy_index.events["bufferOpen"]
+            .iter()
+            .any(|target| target.plugin == "git-tools")
+    );
+    assert!(
+        lazy_index.commands.contains_key("dired.open"),
+        "sync should keep bundled lazy fallback entries"
+    );
 }

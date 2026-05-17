@@ -1,15 +1,14 @@
 use saya::features::lsp::float::{
-    LspDiagnosticFloatRequest, LspHoverFloatRequest, LspHoverOpenOutcome,
+    LspDiagnosticFloatRequest, LspHoverFloatRequest, LspHoverOpenOutcome, ResolvedPopupSizeLimit,
     hover_lines_from_lsp_value, open_lsp_diagnostic_float, open_lsp_hover_float,
 };
 use saya::input::router::KeyInput;
 use saya::presentation::floating_window::{
-    FloatingCloseEvents, FloatingInlineStyleKind, FloatingLifecycle, FloatingLifecycleEvent,
-    FloatingLifecycleOutcome, FloatingRelativeTo, FloatingWindowManager, WorkspaceFocus,
+    FloatingCloseEvents, FloatingLifecycle, FloatingLifecycleEvent, FloatingLifecycleOutcome,
+    FloatingRelativeTo, FloatingWindowManager, WorkspaceFocus,
 };
 use saya::presentation::screen_model::PaneRect;
 use serde_json::json;
-use unicode_width::UnicodeWidthStr;
 
 fn pane(window_id: i32) -> (i32, PaneRect) {
     (
@@ -21,6 +20,10 @@ fn pane(window_id: i32) -> (i32, PaneRect) {
             height: 12,
         },
     )
+}
+
+fn default_limit() -> ResolvedPopupSizeLimit {
+    ResolvedPopupSizeLimit::lsp_default()
 }
 
 #[test]
@@ -62,6 +65,7 @@ fn lsp_hover_at_a_different_cursor_position_replaces_previous_hover_and_closes_o
             cursor_row: 4,
             cursor_col: 9,
             response: json!({ "result": { "contents": "old hover" } }),
+            size_limit: default_limit(),
         },
     )
     .expect("first hover should open")
@@ -74,6 +78,7 @@ fn lsp_hover_at_a_different_cursor_position_replaces_previous_hover_and_closes_o
             cursor_row: 6,
             cursor_col: 0,
             response: json!({ "result": { "contents": "new hover\nsecond line" } }),
+            size_limit: default_limit(),
         },
     )
     .expect("second hover should open");
@@ -113,6 +118,7 @@ fn lsp_hover_at_same_cursor_position_focuses_existing_float_for_neovim_style_tog
             cursor_row: 4,
             cursor_col: 9,
             response: json!({ "result": { "contents": "hover content" } }),
+            size_limit: default_limit(),
         },
     )
     .expect("first hover should open");
@@ -132,6 +138,7 @@ fn lsp_hover_at_same_cursor_position_focuses_existing_float_for_neovim_style_tog
             cursor_row: 4,
             cursor_col: 9,
             response: json!({ "result": { "contents": "hover content" } }),
+            size_limit: default_limit(),
         },
     )
     .expect("second hover at same anchor should focus existing float");
@@ -159,6 +166,7 @@ fn empty_lsp_hover_response_does_not_open_float() {
                 cursor_row: 0,
                 cursor_col: 0,
                 response: json!({ "result": null }),
+                size_limit: default_limit(),
             },
         ),
         None
@@ -178,6 +186,7 @@ fn diagnostic_float_opens_at_buffer_position_and_replaces_previous_diagnostics()
             diagnostics: json!([
                 { "severity": 1, "message": "first error" }
             ]),
+            size_limit: default_limit(),
         },
     )
     .expect("first diagnostics should open");
@@ -191,6 +200,7 @@ fn diagnostic_float_opens_at_buffer_position_and_replaces_previous_diagnostics()
                 { "severity": 2, "message": "warning" },
                 { "message": "hint" }
             ]),
+            size_limit: default_limit(),
         },
     )
     .expect("second diagnostics should replace first");
@@ -224,6 +234,7 @@ fn lsp_hover_uses_close_on_events_lifecycle_with_cursor_move_and_mode_change_and
             cursor_row: 1,
             cursor_col: 1,
             response: json!({ "result": { "contents": "hover" } }),
+            size_limit: default_limit(),
         },
     )
     .expect("hover should open")
@@ -259,6 +270,7 @@ fn lsp_hover_float_close_keys_include_q_for_neovim_style_dismiss() {
             cursor_row: 1,
             cursor_col: 1,
             response: json!({ "result": { "contents": "hover" } }),
+            size_limit: default_limit(),
         },
     )
     .expect("hover should open")
@@ -296,6 +308,7 @@ fn lsp_hover_wraps_long_lines_to_max_float_width_to_keep_text_visible() {
             cursor_row: 1,
             cursor_col: 1,
             response,
+            size_limit: default_limit(),
         },
     )
     .expect("hover should open")
@@ -322,6 +335,45 @@ fn lsp_hover_wraps_long_lines_to_max_float_width_to_keep_text_visible() {
 }
 
 #[test]
+fn lsp_hover_respects_absolute_size_limit_for_wrapping_and_outer_size() {
+    let mut manager = FloatingWindowManager::default();
+    let response = json!({
+        "result": {
+            "contents": { "kind": "plaintext", "value": "x".repeat(80) },
+        }
+    });
+    let id = open_lsp_hover_float(
+        &mut manager,
+        LspHoverFloatRequest {
+            window_id: 7,
+            cursor_row: 1,
+            cursor_col: 1,
+            response,
+            size_limit: ResolvedPopupSizeLimit::bordered(20, 5),
+        },
+    )
+    .expect("hover should open")
+    .id();
+    let window = manager.debug_window(id).expect("hover float should exist");
+    assert_eq!(window.size.width, 20);
+    assert_eq!(window.size.height, 5);
+
+    let floats =
+        manager.resolve_screen_models_with_cursors(80, 24, &[pane(7)], &[(7, 1, 1)], Some(7));
+    let lines = &floats[0].lines;
+    for (index, line) in lines.iter().enumerate() {
+        let width: usize = line
+            .chars()
+            .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum();
+        assert!(
+            width <= 18,
+            "wrapped line[{index}] width {width} must not exceed configured inner width 18: {line:?}"
+        );
+    }
+}
+
+#[test]
 fn lsp_hover_renders_markdown_content_via_markdown_render_pipeline() {
     let mut manager = FloatingWindowManager::default();
     let response = json!({
@@ -339,6 +391,7 @@ fn lsp_hover_renders_markdown_content_via_markdown_render_pipeline() {
             cursor_row: 1,
             cursor_col: 1,
             response,
+            size_limit: default_limit(),
         },
     )
     .expect("hover should open")

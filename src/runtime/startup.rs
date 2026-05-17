@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use deno_core::{OpState, RuntimeOptions, op2};
 use deno_error::JsErrorBox;
 use log::LevelFilter;
+use serde::Deserialize;
 
 use crate::presentation::theme::{
     MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
 };
 pub use crate::runtime::config::{
-    SayaKeyMode, SayaKeymapAction, SayaOptionName, SayaOptionValue, StartupRegistry,
-    StartupRegistryEntry,
+    SayaKeyMode, SayaKeymapAction, SayaOptionName, SayaOptionValue, StartupPluginDeclaration,
+    StartupPluginSource, StartupRegistry, StartupRegistryEntry,
 };
 pub use crate::runtime::config::{
     SayaOptionName as StartupOptionName, SayaOptionValue as StartupOptionValue,
@@ -49,6 +50,8 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.theme.markdown",
     "saya.log.file",
     "saya.log.level",
+    "saya.plugins.use",
+    "saya.plugins.lazy",
 ];
 
 const STARTUP_COMMAND_REFERENCE_PREFIX: &str = "__SAYA_STARTUP_COMMAND_REF__:";
@@ -75,6 +78,8 @@ const {
     op_collect_startup_theme_markdown,
     op_collect_startup_log_file,
     op_collect_startup_log_level,
+    op_collect_startup_plugin_use,
+    op_collect_startup_plugin_lazy,
     op_collect_startup_warning,
 } = Deno.core.ops;
 
@@ -144,7 +149,81 @@ globalThis.saya = {
     },
     theme: {},
     log: {},
+    plugins: {},
 };
+
+function normalizePluginDeclaration(spec, lazy) {
+    if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+        throw new TypeError("plugin spec must be an object");
+    }
+    const hasLocal = typeof spec.local === "string" && spec.local.trim().length > 0;
+    const hasGithub = typeof spec.github === "string" && spec.github.trim().length > 0;
+    if (hasLocal === hasGithub) {
+        throw new TypeError("plugin spec must set exactly one of local or github");
+    }
+    if (hasGithub && !/^[^/\s]+\/[^/\s]+$/.test(spec.github)) {
+        throw new TypeError("plugin github source must use owner/repository form");
+    }
+    const sourcePath = hasLocal ? spec.local.trim() : spec.github.trim();
+    const inferredName = sourcePath
+        .replace(/\/+$/, "")
+        .split("/")
+        .pop()
+        .replace(/\.git$/, "");
+    const name = typeof spec.name === "string" && spec.name.trim().length > 0
+        ? spec.name.trim()
+        : inferredName;
+    if (!name) {
+        throw new TypeError("plugin name could not be inferred");
+    }
+    const declaration = {
+        name,
+        module: typeof spec.module === "string" && spec.module.trim().length > 0
+            ? spec.module.trim()
+            : "mod.ts",
+        setup: typeof spec.setup === "string" && spec.setup.trim().length > 0
+            ? spec.setup.trim()
+            : "setup",
+        commands: lazy ? [...(spec.commands ?? [])] : [],
+        events: lazy ? [...(spec.events ?? [])] : [],
+        options: Object.prototype.hasOwnProperty.call(spec, "options") ? spec.options : null,
+    };
+    if (hasLocal) {
+        declaration.source = { kind: "local", path: spec.local.trim() };
+    } else {
+        declaration.source = {
+            kind: "github",
+            repo: spec.github.trim(),
+            rev: typeof spec.rev === "string" && spec.rev.trim().length > 0
+                ? spec.rev.trim()
+                : null,
+        };
+    }
+    for (const command of declaration.commands) {
+        if (typeof command !== "string" || command.trim().length === 0) {
+            throw new TypeError("lazy plugin commands must be non-empty strings");
+        }
+    }
+    for (const event of declaration.events) {
+        if (typeof event !== "string" || event.trim().length === 0) {
+            throw new TypeError("lazy plugin events must be non-empty strings");
+        }
+    }
+    return declaration;
+}
+
+function collectPluginDeclarations(specs, lazy) {
+    if (!Array.isArray(specs)) {
+        throw new TypeError("plugin declarations must be an array");
+    }
+    const declarations = specs.map((spec) => normalizePluginDeclaration(spec, lazy));
+    const encoded = JSON.stringify(declarations);
+    if (lazy) {
+        op_collect_startup_plugin_lazy(encoded);
+    } else {
+        op_collect_startup_plugin_use(encoded);
+    }
+}
 
 Object.defineProperty(globalThis.saya.theme, "palette", {
     configurable: true,
@@ -215,6 +294,22 @@ Object.defineProperty(globalThis.saya.log, "level", {
             throw new TypeError("log.level must be a string");
         }
         op_collect_startup_log_level(value);
+    },
+});
+
+Object.defineProperty(globalThis.saya.plugins, "use", {
+    configurable: true,
+    enumerable: true,
+    value(specs) {
+        collectPluginDeclarations(specs, false);
+    },
+});
+
+Object.defineProperty(globalThis.saya.plugins, "lazy", {
+    configurable: true,
+    enumerable: true,
+    value(specs) {
+        collectPluginDeclarations(specs, true);
     },
 });
 
@@ -352,11 +447,13 @@ Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.events);
 Object.freeze(globalThis.saya.theme);
 Object.freeze(globalThis.saya.log);
+Object.freeze(globalThis.saya.plugins);
 Object.freeze(globalThis.saya);
 "#;
 
-const STARTUP_PUBLIC_SURFACE_NAMES: &[&str] =
-    &["options", "keymap", "commands", "events", "theme", "log"];
+const STARTUP_PUBLIC_SURFACE_NAMES: &[&str] = &[
+    "options", "keymap", "commands", "events", "theme", "log", "plugins",
+];
 const STARTUP_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
 pub const STARTUP_SAYA_TYPE_DECLARATION: &str = r#"
@@ -482,6 +579,26 @@ declare global {
         level?: "error" | "warn" | "info" | "debug" | "trace";
     }
 
+    interface SayaPluginUseSpec {
+        name?: string;
+        local?: string;
+        github?: `${string}/${string}`;
+        rev?: string;
+        module?: string;
+        setup?: string;
+        options?: unknown;
+    }
+
+    interface SayaPluginLazySpec extends SayaPluginUseSpec {
+        commands?: string[];
+        events?: Array<"bufferOpen" | "bufferChanged" | "bufferWritePost" | "bufferClosed" | string>;
+    }
+
+    interface SayaStartupPluginsSurface {
+        use(specs: SayaPluginUseSpec[]): void;
+        lazy(specs: SayaPluginLazySpec[]): void;
+    }
+
     interface SayaStartupSurface {
         options: SayaStartupOptionsSurface;
         keymap: SayaStartupKeymapSurface;
@@ -489,6 +606,7 @@ declare global {
         events: SayaStartupEventsSurface;
         theme: SayaStartupThemeSurface;
         log: SayaStartupLogSurface;
+        plugins: SayaStartupPluginsSurface;
     }
 
     var saya: SayaStartupSurface;
@@ -829,6 +947,22 @@ fn op_collect_startup_log_level(
 }
 
 #[op2(fast)]
+fn op_collect_startup_plugin_use(
+    state: &mut OpState,
+    #[string] declarations_json: String,
+) -> Result<(), JsErrorBox> {
+    collect_startup_plugin_declarations(state, &declarations_json, false)
+}
+
+#[op2(fast)]
+fn op_collect_startup_plugin_lazy(
+    state: &mut OpState,
+    #[string] declarations_json: String,
+) -> Result<(), JsErrorBox> {
+    collect_startup_plugin_declarations(state, &declarations_json, true)
+}
+
+#[op2(fast)]
 fn op_collect_startup_warning(
     state: &mut OpState,
     #[string] message: String,
@@ -840,6 +974,108 @@ fn op_collect_startup_warning(
         .push(StartupRegistryEntry::Warning { message });
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupPluginDeclarationWire {
+    name: String,
+    source: StartupPluginSourceWire,
+    module: String,
+    setup: String,
+    #[serde(default)]
+    commands: Vec<String>,
+    #[serde(default)]
+    events: Vec<String>,
+    #[serde(default)]
+    options: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum StartupPluginSourceWire {
+    Local { path: String },
+    Github { repo: String, rev: Option<String> },
+}
+
+fn collect_startup_plugin_declarations(
+    state: &mut OpState,
+    declarations_json: &str,
+    lazy: bool,
+) -> Result<(), JsErrorBox> {
+    let declarations = serde_json::from_str::<Vec<StartupPluginDeclarationWire>>(declarations_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid plugin declarations: {error}")))?;
+    log::debug!(
+        "[startup_runtime] collect startup plugin declarations: lazy={}, count={}",
+        lazy,
+        declarations.len()
+    );
+    let registry = state.borrow_mut::<StartupRegistry>();
+    for declaration in declarations {
+        let declaration = normalize_startup_plugin_declaration(declaration)?;
+        let entry = if lazy {
+            StartupRegistryEntry::PluginLazy { declaration }
+        } else {
+            StartupRegistryEntry::PluginUse { declaration }
+        };
+        registry.push(entry);
+    }
+    Ok(())
+}
+
+fn normalize_startup_plugin_declaration(
+    declaration: StartupPluginDeclarationWire,
+) -> Result<StartupPluginDeclaration, JsErrorBox> {
+    let name = non_empty_plugin_field("plugin name", declaration.name)?;
+    let module = non_empty_plugin_field("plugin module", declaration.module)?;
+    let setup = non_empty_plugin_field("plugin setup", declaration.setup)?;
+    let commands = declaration
+        .commands
+        .into_iter()
+        .map(|command| non_empty_plugin_field("plugin command", command))
+        .collect::<Result<Vec<_>, _>>()?;
+    let events = declaration
+        .events
+        .into_iter()
+        .map(|event| non_empty_plugin_field("plugin event", event))
+        .collect::<Result<Vec<_>, _>>()?;
+    let source = match declaration.source {
+        StartupPluginSourceWire::Local { path } => StartupPluginSource::Local {
+            path: non_empty_plugin_field("plugin local path", path)?,
+        },
+        StartupPluginSourceWire::Github { repo, rev } => {
+            let repo = non_empty_plugin_field("plugin github repo", repo)?;
+            if repo.split('/').count() != 2 {
+                return Err(JsErrorBox::generic(
+                    "plugin github repo must use owner/repository form",
+                ));
+            }
+            StartupPluginSource::Github {
+                repo,
+                rev: rev.and_then(|value| {
+                    let trimmed = value.trim().to_string();
+                    (!trimmed.is_empty()).then_some(trimmed)
+                }),
+            }
+        }
+    };
+    Ok(StartupPluginDeclaration {
+        name,
+        source,
+        module,
+        setup,
+        commands,
+        events,
+        options: declaration.options,
+    })
+}
+
+fn non_empty_plugin_field(label: &str, value: String) -> Result<String, JsErrorBox> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(JsErrorBox::generic(format!("{label} must be non-empty")));
+    }
+    Ok(trimmed)
 }
 
 fn parse_startup_log_level(level: &str) -> Option<LevelFilter> {
@@ -926,6 +1162,8 @@ deno_core::extension!(
         op_collect_startup_theme_markdown,
         op_collect_startup_log_file,
         op_collect_startup_log_level,
+        op_collect_startup_plugin_use,
+        op_collect_startup_plugin_lazy,
         op_collect_startup_warning
     ],
     state = |state| state.put(StartupRegistry::default())
@@ -1209,6 +1447,11 @@ fn strip_type_declarations(source_text: &str) -> String {
 
     for line in source_text.lines() {
         let trimmed = line.trim_start();
+        if !skipping_type_block
+            && (trimmed.starts_with("type ") || trimmed.starts_with("export type "))
+        {
+            continue;
+        }
         if !skipping_type_block
             && (trimmed.starts_with("interface ") || trimmed.starts_with("export interface "))
         {

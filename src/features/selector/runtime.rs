@@ -23,6 +23,8 @@ pub struct RuntimeSelectorOpenRequest {
     pub query: String,
     #[serde(default)]
     pub limits: RuntimeSelectorLimits,
+    #[serde(default)]
+    pub ui: RuntimeSelectorUiOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +68,64 @@ pub struct RuntimeSelectorItem {
 pub struct RuntimeSelectorLimits {
     #[serde(default = "default_max_rendered_items")]
     pub max_rendered_items: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSelectorUiOptions {
+    #[serde(default)]
+    pub window: Option<RuntimeSelectorWindowUiOptions>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSelectorWindowUiOptions {
+    #[serde(default)]
+    pub width: Option<RuntimeSelectorWindowSizeValue>,
+    #[serde(default)]
+    pub height: Option<RuntimeSelectorWindowSizeValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RuntimeSelectorWindowSizeValue {
+    Cells(u16),
+    Percent(RuntimeSelectorWindowPercent),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeSelectorWindowPercent(pub u8);
+
+impl Serialize for RuntimeSelectorWindowPercent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{}%", self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeSelectorWindowPercent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let Some(percent_text) = value.strip_suffix('%') else {
+            return Err(serde::de::Error::custom(
+                "selector window percentage must end with %",
+            ));
+        };
+        let percent = percent_text
+            .parse::<u8>()
+            .map_err(|_| serde::de::Error::custom("selector window percentage must be numeric"))?;
+        if !(1..=100).contains(&percent) {
+            return Err(serde::de::Error::custom(
+                "selector window percentage must be from 1% through 100%",
+            ));
+        }
+        Ok(Self(percent))
+    }
 }
 
 impl Default for RuntimeSelectorLimits {
@@ -122,6 +182,7 @@ pub struct RuntimeSelectorSnapshot {
     pub selected_item: Option<RuntimeRenderedSelectorItem>,
     pub view: RuntimeSelectorViewState,
     pub status: RuntimeSelectorStatus,
+    pub ui: RuntimeSelectorUiOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +325,7 @@ pub struct SelectorViewBackendInput {
     pub hidden: bool,
     pub cancelled: bool,
     pub status: RuntimeSelectorStatus,
+    pub ui: RuntimeSelectorUiOptions,
 }
 
 pub trait SelectorViewBackend: Send + Sync + 'static {
@@ -373,6 +435,7 @@ impl RuntimeSelectorSessions {
             query: request.query,
             matcher: request.matcher,
             limits: request.limits.into(),
+            ui: request.ui,
             store,
             rendered_items: Vec::new(),
             view: SelectorViewState::new(0),
@@ -590,6 +653,7 @@ struct RuntimeSelectorSession {
     query: String,
     matcher: RuntimeSelectorMatcherName,
     limits: SelectorLimits,
+    ui: RuntimeSelectorUiOptions,
     store: InMemoryResultStore<Value>,
     rendered_items: Vec<RuntimeRenderedSelectorItem>,
     view: SelectorViewState,
@@ -693,6 +757,7 @@ impl RuntimeSelectorSession {
                 match_status: self.match_status.clone().into(),
                 store: self.store.status().into(),
             },
+            ui: self.ui,
         }
     }
 
@@ -802,6 +867,7 @@ impl From<RuntimeSelectorSnapshot> for SelectorViewBackendInput {
             hidden: value.view.hidden,
             cancelled: value.view.cancelled,
             status: value.status,
+            ui: value.ui,
         }
     }
 }

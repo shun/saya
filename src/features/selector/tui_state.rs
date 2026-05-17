@@ -4,6 +4,9 @@ use crate::features::selector::host_adapter::{
     SelectorUiIntent, SelectorUiProjection, SelectorUiProjectionSink, SelectorUiRow,
 };
 use crate::features::selector::runtime::RuntimeSelectorStatus;
+use crate::features::selector::runtime::{
+    RuntimeSelectorUiOptions, RuntimeSelectorWindowSizeValue,
+};
 use crate::{
     presentation::floating_window::{
         FloatingBorder, FloatingChrome, FloatingContentRef, FloatingInlineStyle,
@@ -17,9 +20,13 @@ use unicode_width::UnicodeWidthStr;
 pub struct SelectorTuiViewModel {
     pub session_id: u64,
     pub query: String,
+    pub rendered_items: Vec<crate::features::selector::runtime::RuntimeRenderedSelectorItem>,
     pub visible_rows: Vec<SelectorUiRow>,
     pub selected_row: Option<SelectorUiRow>,
+    pub cursor: usize,
+    pub offset: usize,
     pub status: RuntimeSelectorStatus,
+    pub ui: RuntimeSelectorUiOptions,
     pub status_text: String,
     pub hidden: bool,
     pub cancelled: bool,
@@ -32,9 +39,13 @@ impl From<SelectorUiProjection> for SelectorTuiViewModel {
         Self {
             session_id: projection.session_id,
             query: projection.query,
+            rendered_items: projection.rendered_items,
             visible_rows: projection.visible_rows,
             selected_row: projection.selected_row,
+            cursor: projection.cursor,
+            offset: projection.offset,
             status: projection.status,
+            ui: projection.ui,
             status_text: projection.status_text,
             hidden: projection.hidden,
             cancelled: projection.cancelled,
@@ -128,19 +139,37 @@ pub fn selector_tui_model_to_workspace_float(
         return None;
     }
 
-    let lines = selector_tui_static_lines(model);
+    let window = model.ui.window;
+    let configured_height = window
+        .and_then(|window| window.height)
+        .map(|value| resolve_selector_window_size_value(value, terminal_height));
+    let content_row_limit = configured_height
+        .map(selector_content_row_limit_for_height)
+        .unwrap_or(model.visible_rows.len().max(1));
+    let rows = selector_tui_visible_rows(model, content_row_limit);
+    let lines = selector_tui_static_lines(model, &rows);
     let content_width = lines
         .iter()
         .map(|line| UnicodeWidthStr::width(line.as_str()))
         .max()
         .unwrap_or(1);
     let border_padding = 2usize;
-    let width = u16::try_from(content_width.saturating_add(border_padding))
+    let content_based_width = u16::try_from(content_width.saturating_add(border_padding))
         .unwrap_or(u16::MAX)
         .min(terminal_width.max(1))
         .max(1);
-    let height = u16::try_from(lines.len().saturating_add(border_padding))
+    let content_based_height = u16::try_from(lines.len().saturating_add(border_padding))
         .unwrap_or(u16::MAX)
+        .min(terminal_height.max(1))
+        .max(1);
+    let width = window
+        .and_then(|window| window.width)
+        .map(|value| resolve_selector_window_size_value(value, terminal_width))
+        .unwrap_or(content_based_width)
+        .min(terminal_width.max(1))
+        .max(1);
+    let height = configured_height
+        .unwrap_or(content_based_height)
         .min(terminal_height.max(1))
         .max(1);
     let x = terminal_width.saturating_sub(width) / 2;
@@ -181,10 +210,79 @@ pub fn selector_tui_model_to_workspace_float(
     })
 }
 
-fn selector_tui_static_lines(model: &SelectorTuiViewModel) -> Vec<String> {
-    let mut lines = Vec::with_capacity(model.visible_rows.len().saturating_add(2));
+fn selector_content_row_limit_for_height(height: u16) -> usize {
+    usize::from(height.saturating_sub(2))
+        .saturating_sub(2)
+        .max(1)
+}
+
+fn selector_tui_visible_rows(model: &SelectorTuiViewModel, row_limit: usize) -> Vec<SelectorUiRow> {
+    let row_limit = row_limit.max(1);
+    let start = selector_tui_visible_start(model, row_limit);
+    model
+        .rendered_items
+        .iter()
+        .cloned()
+        .enumerate()
+        .skip(start)
+        .take(row_limit)
+        .map(|(index, item)| SelectorUiRow {
+            index,
+            item,
+            selected: model.cursor == index,
+        })
+        .collect()
+}
+
+fn selector_tui_visible_start(model: &SelectorTuiViewModel, row_limit: usize) -> usize {
+    let row_limit = row_limit.max(1);
+    let item_len = model.rendered_items.len();
+    if item_len <= row_limit {
+        return 0;
+    }
+
+    let max_start = item_len.saturating_sub(row_limit);
+    let cursor = model.cursor.min(item_len.saturating_sub(1));
+
+    if row_limit > model.visible_rows.len().max(1) {
+        return cursor
+            .saturating_add(1)
+            .saturating_sub(row_limit)
+            .min(max_start);
+    }
+
+    let offset = model.offset.min(max_start);
+    if cursor < offset {
+        return cursor;
+    }
+    if cursor < offset.saturating_add(row_limit) {
+        return offset;
+    }
+
+    cursor
+        .saturating_add(1)
+        .saturating_sub(row_limit)
+        .min(max_start)
+}
+
+fn resolve_selector_window_size_value(
+    value: RuntimeSelectorWindowSizeValue,
+    terminal_dimension: u16,
+) -> u16 {
+    match value {
+        RuntimeSelectorWindowSizeValue::Cells(cells) => cells.max(1),
+        RuntimeSelectorWindowSizeValue::Percent(percent) => {
+            let dimension = usize::from(terminal_dimension.max(1));
+            let resolved = dimension.saturating_mul(usize::from(percent.0)) / 100;
+            u16::try_from(resolved.max(1)).unwrap_or(u16::MAX)
+        }
+    }
+}
+
+fn selector_tui_static_lines(model: &SelectorTuiViewModel, rows: &[SelectorUiRow]) -> Vec<String> {
+    let mut lines = Vec::with_capacity(rows.len().saturating_add(2));
     lines.push(format!("query: {}", model.query));
-    lines.extend(model.visible_rows.iter().map(|row| {
+    lines.extend(rows.iter().map(|row| {
         let marker = if row.selected { '>' } else { ' ' };
         format!("{marker} {}", row.item.label)
     }));

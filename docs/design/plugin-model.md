@@ -110,6 +110,18 @@ startup and runtime registries. The TypeScript manager remains responsible for
 artifact generation, dependency ordering, cache invalidation, and protocol
 policy.
 
+User configuration declares plugins with two startup methods:
+
+- `saya.plugins.use(...)` declares plugins that must be active during startup.
+- `saya.plugins.lazy(...)` declares plugins that load after command or event
+  triggers.
+
+The names are intentionally user-facing. `use` means the user wants the plugin
+enabled as part of the normal editor session. `lazy` means the plugin is
+available through generated lazy placeholders without loading during startup.
+The manager normalizes both forms into startup plan, lazy index, and lockfile
+artifacts.
+
 ## Startup cache policy
 
 `saya` optimizes for a hot startup path while keeping cache-miss behavior

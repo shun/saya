@@ -625,7 +625,7 @@ fn merge_plugin_startup_cache(loaded_config: &LoadedConfig, registry: &mut Start
         Ok((lazy_registry, report)) => {
             loaded_plugin_entries += report.loaded_entries;
             for entry in lazy_registry {
-                registry.push(entry);
+                push_plugin_registry_entry_if_unclaimed(registry, entry);
             }
             log::debug!(
                 "[bootstrap][plugin-host] lazy index merge completed: loaded_entries={}, cache_root={}",
@@ -652,7 +652,7 @@ fn merge_plugin_startup_cache(loaded_config: &LoadedConfig, registry: &mut Start
         match host.startup_registry_from_bundled_manifests() {
             Ok((bundled_registry, report)) => {
                 for entry in bundled_registry {
-                    registry.push(entry);
+                    push_plugin_registry_entry_if_unclaimed(registry, entry);
                 }
                 log::debug!(
                     "[bootstrap][plugin-host] bundled manifest fallback completed: loaded_entries={}, cache_root={}",
@@ -673,10 +673,61 @@ fn merge_plugin_startup_cache(loaded_config: &LoadedConfig, registry: &mut Start
     }
 }
 
+fn push_plugin_registry_entry_if_unclaimed(
+    registry: &mut StartupRegistry,
+    entry: StartupRegistryEntry,
+) {
+    let claimed = match &entry {
+        StartupRegistryEntry::Command { name, .. } => registry.entries().iter().any(|existing| {
+            matches!(existing, StartupRegistryEntry::Command { name: existing_name, .. } if existing_name == name)
+        }),
+        StartupRegistryEntry::Event { name, .. } => registry.entries().iter().any(|existing| {
+            matches!(existing, StartupRegistryEntry::Event { name: existing_name, .. } if existing_name == name)
+        }),
+        _ => false,
+    };
+    if claimed {
+        log::debug!(
+            "[bootstrap][plugin-host] skipped plugin registry entry because startup config already registered same command/event: {:?}",
+            entry
+        );
+        return;
+    }
+    registry.push(entry);
+}
+
 fn source_hash_for_startup_cache(source: &str) -> String {
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+pub fn collect_startup_registry_for_plugin_operation(
+    config_source: ConfigSource,
+) -> Result<Option<(StartupRegistry, String)>, String> {
+    let mut warnings = Vec::new();
+    let loaded_config = load_config_with_fallback(config_source, &mut warnings);
+    let LoadedConfig::File { path, source } = loaded_config else {
+        return Ok(None);
+    };
+    match evaluate_bootstrap_capability_from_path(&path) {
+        Some(CapabilityLoadResult::Success { registry, .. }) => {
+            Ok(Some((registry, source_hash_for_startup_cache(&source))))
+        }
+        Some(CapabilityLoadResult::ReadFailed { path, message })
+        | Some(CapabilityLoadResult::EvalFailed { path, message }) => {
+            Err(format!("{}: {}", path.display(), message))
+        }
+        Some(CapabilityLoadResult::UnsupportedCapability {
+            path,
+            capability,
+            message,
+        }) => Err(format!(
+            "{}: unsupported {capability}: {message}",
+            path.display()
+        )),
+        Some(CapabilityLoadResult::DefaultUsed) | None => Ok(None),
+    }
 }
 
 fn evaluate_bootstrap_capability(loaded_config: &LoadedConfig) -> CapabilityLoadResult {
@@ -801,6 +852,8 @@ fn config_commands_from_registry(
             | StartupRegistryEntry::ThemeSyntaxStyle { .. }
             | StartupRegistryEntry::LogFile { .. }
             | StartupRegistryEntry::LogLevel { .. }
+            | StartupRegistryEntry::PluginUse { .. }
+            | StartupRegistryEntry::PluginLazy { .. }
             | StartupRegistryEntry::Warning { .. } => None,
         })
         .collect()
@@ -1090,7 +1143,7 @@ mod tests {
 
     use vim_core_rs::CoreMode;
 
-    use super::startup_registry_from_registry;
+    use super::{merge_plugin_startup_cache, startup_registry_from_registry};
     use crate::app::bootstrap::{
         BootstrapError, BootstrapWarning, LoadedConfig, StartupKeymapAction, StartupKeymapMode,
         StartupKeymapSnapshot, StartupRegistrySnapshot, bootstrap_warning_message, prepare_launch,
@@ -1551,6 +1604,51 @@ mod tests {
             ],
             "startup registry must preserve registration order and duplicates"
         );
+    }
+
+    #[test]
+    fn plugin_fallback_does_not_override_config_registered_lsp_command() {
+        let _guard = session_test_lock();
+        let cache_root = unique_path("plugin-fallback-no-override-cache");
+        let mut registry = StartupRegistry::default();
+        registry.push(StartupRegistryEntry::Command {
+            name: "lsp.hover".to_string(),
+            callback_source: "async () => { await saya.commands.execute('lsp.floatHover {\"result\":{\"contents\":\"config hover\"}}'); }".to_string(),
+        });
+
+        with_env_var_set("SAYA_CACHE_DIR", &cache_root, || {
+            merge_plugin_startup_cache(
+                &LoadedConfig::File {
+                    path: PathBuf::from("init.ts"),
+                    source: "setupSayaLspClient({});".to_string(),
+                },
+                &mut registry,
+            );
+        });
+
+        let hover_commands = registry
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                StartupRegistryEntry::Command {
+                    name,
+                    callback_source,
+                } if name == "lsp.hover" => Some(callback_source),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hover_commands.len(),
+            1,
+            "plugin fallback must not add a duplicate lsp.hover command after user config"
+        );
+        assert!(
+            hover_commands[0].contains("config hover"),
+            "user-configured lsp.hover callback must stay active: {:?}",
+            hover_commands
+        );
+
+        let _ = std::fs::remove_dir_all(cache_root);
     }
 
     #[test]

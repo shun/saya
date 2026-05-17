@@ -49,6 +49,9 @@ fn startup_public_api_type_declaration_covers_formal_configuration_surface() {
     assert!(declaration.contains("commands"));
     assert!(declaration.contains("events"));
     assert!(declaration.contains("theme"));
+    assert!(declaration.contains("plugins"));
+    assert!(declaration.contains("use(specs: SayaPluginUseSpec[])"));
+    assert!(declaration.contains("lazy(specs: SayaPluginLazySpec[])"));
     assert!(declaration.contains("SayaStartupThemeSurface"));
     assert!(declaration.contains("inlineCode"));
     assert!(declaration.contains("SayaStartupSurface"));

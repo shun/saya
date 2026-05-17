@@ -7,7 +7,9 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::config::{StartupRegistry, StartupRegistryEntry};
+use crate::runtime::config::{
+    StartupPluginDeclaration, StartupPluginSource, StartupRegistry, StartupRegistryEntry,
+};
 
 const CACHE_SUBDIR: &str = "plugins";
 const LOCKFILE_NAME: &str = "plugin-lock.json";
@@ -287,6 +289,7 @@ impl PluginManagerReport {
 pub enum PluginHostError {
     Io { path: PathBuf, message: String },
     Json { path: PathBuf, message: String },
+    Operation { message: String },
 }
 
 impl fmt::Display for PluginHostError {
@@ -294,6 +297,7 @@ impl fmt::Display for PluginHostError {
         match self {
             Self::Io { path, message } => write!(formatter, "{}: {}", path.display(), message),
             Self::Json { path, message } => write!(formatter, "{}: {}", path.display(), message),
+            Self::Operation { message } => write!(formatter, "{message}"),
         }
     }
 }
@@ -537,6 +541,49 @@ impl PluginHost {
         PluginHostReport::empty(logs)
     }
 
+    pub fn sync_startup_plugin_declarations(
+        &self,
+        registry: &StartupRegistry,
+        source_hash: String,
+    ) -> Result<PluginManagerReport, PluginHostError> {
+        self.root.ensure_plugins_dir()?;
+        let use_declarations = registry
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                StartupRegistryEntry::PluginUse { declaration } => Some(declaration.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let lazy_declarations = registry
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                StartupRegistryEntry::PluginLazy { declaration } => Some(declaration.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let artifacts = self.artifacts_from_startup_plugin_declarations(
+            &use_declarations,
+            &lazy_declarations,
+            source_hash,
+        )?;
+        let plugin_count = artifacts.lockfile.plugins.len();
+        self.write_lockfile(&artifacts.lockfile)?;
+        self.write_startup_plan(&artifacts.startup_plan)?;
+        self.write_lazy_index(&artifacts.lazy_index)?;
+
+        let mut logs = artifacts.logs;
+        logs.push(format!(
+            "[saya-plugin-manager][operation] sync startup declarations: cache_root={}, plugin_count={plugin_count}",
+            self.root.path().display()
+        ));
+        let report = PluginManagerReport::Sync { plugin_count, logs };
+        self.append_operation_logs(report.logs())?;
+        emit_logs(report.logs());
+        Ok(report)
+    }
+
     pub fn run_operation(
         &self,
         command: PluginCommand,
@@ -608,6 +655,75 @@ impl PluginHost {
         self.append_operation_logs(report.logs())?;
         emit_logs(report.logs());
         Ok(report)
+    }
+
+    fn artifacts_from_startup_plugin_declarations(
+        &self,
+        use_declarations: &[StartupPluginDeclaration],
+        lazy_declarations: &[StartupPluginDeclaration],
+        source_hash: String,
+    ) -> Result<PluginDeclarationArtifacts, PluginHostError> {
+        let manifests = self.read_bundled_manifests()?;
+        let mut lazy_index = lazy_index_from_bundled_manifests(&manifests);
+        let mut lockfile = PluginLockfile {
+            version: PluginLockfile::CURRENT_VERSION,
+            plugins: Vec::new(),
+        };
+        let mut startup_plan = StartupPlan {
+            version: StartupPlan::CURRENT_VERSION,
+            source_hash,
+            entries: Vec::new(),
+        };
+        let mut logs = vec![format!(
+            "[saya-plugin-manager][sync] build startup declaration artifacts: bundled_count={} use_count={} lazy_count={}",
+            manifests.len(),
+            use_declarations.len(),
+            lazy_declarations.len()
+        )];
+
+        for declaration in use_declarations {
+            lockfile
+                .plugins
+                .push(locked_plugin_from_declaration(declaration));
+            startup_plan.entries.push(StartupPlanEntry::Command {
+                name: format!("{}.setup", declaration.name),
+                callback_source: startup_declaration_callback_source(declaration),
+            });
+        }
+
+        for declaration in lazy_declarations {
+            lockfile
+                .plugins
+                .push(locked_plugin_from_declaration(declaration));
+            let target = lazy_target_from_declaration(declaration);
+            for command in &declaration.commands {
+                lazy_index.commands.insert(command.clone(), target.clone());
+            }
+            for event in &declaration.events {
+                lazy_index
+                    .events
+                    .entry(event.clone())
+                    .or_default()
+                    .push(target.clone());
+            }
+        }
+
+        dedupe_locked_plugins(&mut lockfile.plugins);
+        logs.push(format!(
+            "[saya-plugin-manager][lazy] startup declaration index generated: commands={} events={}",
+            lazy_index.commands.len(),
+            lazy_index.events.len()
+        ));
+        logs.push(format!(
+            "[saya-plugin-manager][lockfile] startup declaration plugins locked: plugin_count={}",
+            lockfile.plugins.len()
+        ));
+        Ok(PluginDeclarationArtifacts {
+            lockfile,
+            startup_plan,
+            lazy_index,
+            logs,
+        })
     }
 
     fn write_json<T>(&self, path: PathBuf, value: &T) -> Result<(), PluginHostError>
@@ -758,6 +874,65 @@ fn remove_optional_file(path: PathBuf) -> Result<usize, PluginHostError> {
             message: error.to_string(),
         }),
     }
+}
+
+struct PluginDeclarationArtifacts {
+    lockfile: PluginLockfile,
+    startup_plan: StartupPlan,
+    lazy_index: LazyIndex,
+    logs: Vec<String>,
+}
+
+fn locked_plugin_from_declaration(declaration: &StartupPluginDeclaration) -> LockedPlugin {
+    LockedPlugin {
+        name: declaration.name.clone(),
+        source: source_string_from_declaration(declaration),
+        revision: revision_from_declaration(declaration),
+        depends: Vec::new(),
+        before: Vec::new(),
+        after: Vec::new(),
+    }
+}
+
+fn source_string_from_declaration(declaration: &StartupPluginDeclaration) -> String {
+    match &declaration.source {
+        StartupPluginSource::Local { path } => format!("local:{path}"),
+        StartupPluginSource::Github { repo, .. } => format!("github:{repo}"),
+    }
+}
+
+fn revision_from_declaration(declaration: &StartupPluginDeclaration) -> String {
+    match &declaration.source {
+        StartupPluginSource::Local { .. } => "workspace".to_string(),
+        StartupPluginSource::Github { rev, .. } => {
+            rev.clone().unwrap_or_else(|| "HEAD".to_string())
+        }
+    }
+}
+
+fn startup_declaration_callback_source(declaration: &StartupPluginDeclaration) -> String {
+    format!(
+        r#"async () => {{
+                console.info("[saya-plugin-manager][startup] eager setup plugin={} module={}");
+            }}"#,
+        declaration.name, declaration.module
+    )
+}
+
+fn lazy_target_from_declaration(declaration: &StartupPluginDeclaration) -> LazyTarget {
+    LazyTarget {
+        plugin: declaration.name.clone(),
+        module: declaration.module.clone(),
+        export_name: declaration.setup.clone(),
+    }
+}
+
+fn dedupe_locked_plugins(plugins: &mut Vec<LockedPlugin>) {
+    let mut deduped = BTreeMap::new();
+    for plugin in plugins.drain(..) {
+        deduped.insert(plugin.name.clone(), plugin);
+    }
+    plugins.extend(deduped.into_values());
 }
 
 fn emit_logs(logs: &[String]) {

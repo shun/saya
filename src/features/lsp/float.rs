@@ -20,6 +20,8 @@ const LSP_LOCATION_GROUP: &str = "lsp:locations";
 const LSP_SYMBOL_GROUP: &str = "lsp:symbols";
 const MAX_FLOAT_WIDTH: u16 = 72;
 const MAX_FLOAT_HEIGHT: u16 = 12;
+const MIN_BORDERED_FLOAT_WIDTH: u16 = 3;
+const MIN_BORDERED_FLOAT_HEIGHT: u16 = 3;
 
 /// LSP hover float の close 触発イベント集合。Neovim の
 /// `close_events = { "CursorMoved", "ModeChanged", "BufLeave" }` 相当。
@@ -53,12 +55,65 @@ impl LspHoverOpenOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupSizeBasis {
+    Window,
+    Editor,
+    Available,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupSizeValue {
+    Cells(u16),
+    Percent(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PopupSizeSpec {
+    pub width: PopupSizeValue,
+    pub height: PopupSizeValue,
+    pub basis: PopupSizeBasis,
+}
+
+impl PopupSizeSpec {
+    pub const fn lsp_default(basis: PopupSizeBasis) -> Self {
+        Self {
+            width: PopupSizeValue::Cells(MAX_FLOAT_WIDTH),
+            height: PopupSizeValue::Cells(MAX_FLOAT_HEIGHT),
+            basis,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedPopupSizeLimit {
+    pub max_width: u16,
+    pub max_height: u16,
+}
+
+impl ResolvedPopupSizeLimit {
+    pub const fn lsp_default() -> Self {
+        Self {
+            max_width: MAX_FLOAT_WIDTH,
+            max_height: MAX_FLOAT_HEIGHT,
+        }
+    }
+
+    pub fn bordered(width: u16, height: u16) -> Self {
+        Self {
+            max_width: width.max(MIN_BORDERED_FLOAT_WIDTH),
+            max_height: height.max(MIN_BORDERED_FLOAT_HEIGHT),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LspHoverFloatRequest {
     pub window_id: i32,
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub response: Value,
+    pub size_limit: ResolvedPopupSizeLimit,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +122,7 @@ pub struct LspDiagnosticFloatRequest {
     pub line: usize,
     pub column: usize,
     pub diagnostics: Value,
+    pub size_limit: ResolvedPopupSizeLimit,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,12 +130,14 @@ pub struct LspLocationListRequest {
     pub window_id: i32,
     pub title: String,
     pub response: Value,
+    pub size_limit: ResolvedPopupSizeLimit,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LspSymbolOutlineRequest {
     pub window_id: i32,
     pub response: Value,
+    pub size_limit: ResolvedPopupSizeLimit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +201,11 @@ impl LspDiagnosticStore {
         self.diagnostics.get(index)
     }
 
-    pub fn diagnostic_at_position(&self, line: usize, column: usize) -> Option<&LspDiagnosticEntry> {
+    pub fn diagnostic_at_position(
+        &self,
+        line: usize,
+        column: usize,
+    ) -> Option<&LspDiagnosticEntry> {
         self.diagnostics.iter().find(|diagnostic| {
             let starts_before_or_at =
                 diagnostic.line < line || (diagnostic.line == line && diagnostic.column <= column);
@@ -181,9 +243,9 @@ fn floating_inline_styles_from_markdown(
         .collect()
 }
 
-/// hover float の内部表示幅（border 込み `MAX_FLOAT_WIDTH` から左右枠 2 列を引いた値）。
-pub fn hover_float_inner_width() -> usize {
-    usize::from(MAX_FLOAT_WIDTH.saturating_sub(2))
+/// hover float の内部表示幅（border 込み上限から左右枠 2 列を引いた値）。
+pub fn hover_float_inner_width(limit: ResolvedPopupSizeLimit) -> usize {
+    usize::from(limit.max_width.saturating_sub(2).max(1))
 }
 
 pub fn open_lsp_hover_float(
@@ -192,7 +254,7 @@ pub fn open_lsp_hover_float(
 ) -> Option<LspHoverOpenOutcome> {
     let rendered = wrap_rendered_content_to_width(
         render_lsp_hover_response(&request.response),
-        hover_float_inner_width(),
+        hover_float_inner_width(request.size_limit),
     );
     if rendered.lines.is_empty() {
         log::debug!(
@@ -205,7 +267,7 @@ pub fn open_lsp_hover_float(
         return None;
     }
 
-    let size = size_for_lines(&rendered.lines);
+    let size = size_for_lines(&rendered.lines, request.size_limit);
     let RenderedFloatContent {
         lines: rendered_lines,
         inline_styles: markdown_styles,
@@ -335,7 +397,7 @@ pub fn open_lsp_diagnostic_float(
         return None;
     }
 
-    let size = size_for_lines(&lines);
+    let size = size_for_lines(&lines, request.size_limit);
     log::debug!(
         "[lsp_float] opening diagnostic float: window_id={}, position=({},{}), lines={}, size=({},{})",
         request.window_id,
@@ -394,6 +456,7 @@ pub fn open_lsp_location_list_float(
         lines,
         LSP_LOCATION_GROUP,
         "locations",
+        request.size_limit,
     )
 }
 
@@ -416,6 +479,7 @@ pub fn open_lsp_symbol_outline_float(
         lines,
         LSP_SYMBOL_GROUP,
         "symbols",
+        request.size_limit,
     )
 }
 
@@ -425,8 +489,9 @@ fn open_static_lsp_list_float(
     lines: Vec<String>,
     replacement_group: &'static str,
     label: &str,
+    size_limit: ResolvedPopupSizeLimit,
 ) -> Option<FloatingWindowId> {
-    let size = size_for_lines(&lines);
+    let size = size_for_lines(&lines, size_limit);
     log::debug!(
         "[lsp_float] opening {label} float: window_id={}, lines={}, size=({},{})",
         window_id,
@@ -736,18 +801,18 @@ pub fn wrap_lines_to_width(lines: Vec<String>, max_width: usize) -> Vec<String> 
     wrapped
 }
 
-fn size_for_lines(lines: &[String]) -> FloatingSize {
+fn size_for_lines(lines: &[String], limit: ResolvedPopupSizeLimit) -> FloatingSize {
     let content_width = lines
         .iter()
         .map(|line| UnicodeWidthStr::width(line.as_str()))
         .max()
         .unwrap_or(1)
-        .clamp(1, usize::from(MAX_FLOAT_WIDTH.saturating_sub(2)));
+        .clamp(1, usize::from(limit.max_width.saturating_sub(2).max(1)));
     let content_height = lines
         .len()
-        .clamp(1, usize::from(MAX_FLOAT_HEIGHT.saturating_sub(2)));
+        .clamp(1, usize::from(limit.max_height.saturating_sub(2).max(1)));
     FloatingSize {
-        width: u16::try_from(content_width + 2).unwrap_or(MAX_FLOAT_WIDTH),
-        height: u16::try_from(content_height + 2).unwrap_or(MAX_FLOAT_HEIGHT),
+        width: u16::try_from(content_width + 2).unwrap_or(limit.max_width),
+        height: u16::try_from(content_height + 2).unwrap_or(limit.max_height),
     }
 }

@@ -51,6 +51,23 @@ export interface SayaLspKeymap {
   lsifDefinition?: string;
 }
 
+export type SayaPopupSizeValue = number | `${number}%`;
+export type SayaPopupSizeBasis = "window" | "editor" | "available";
+
+export interface SayaPopupSizeOptions {
+  width?: SayaPopupSizeValue;
+  height?: SayaPopupSizeValue;
+  basis?: SayaPopupSizeBasis;
+}
+
+export interface SayaLspPopupUiOptions {
+  hover?: SayaPopupSizeOptions;
+  diagnostics?: SayaPopupSizeOptions;
+  locations?: SayaPopupSizeOptions;
+  symbols?: SayaPopupSizeOptions;
+  signatureHelp?: SayaPopupSizeOptions;
+}
+
 export interface SayaLspClientOptions {
   commands?: SayaLspCommandNames;
   keymap?: SayaLspKeymap;
@@ -68,6 +85,9 @@ export interface SayaLspClientOptions {
   renameNewName?: string;
   codeActionKinds?: string[];
   lsif?: SayaLsifClientOptions;
+  ui?: {
+    popups?: SayaLspPopupUiOptions;
+  };
 }
 
 export interface SayaLspLanguageServerOptions {
@@ -328,6 +348,73 @@ function normalizeLspServers(options, commandNames) {
       hasCommand: true,
     };
   });
+}
+
+function validatePopupSizeValue(value, field) {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`invalid LSP configuration: ${field} must be a positive integer`);
+    }
+    return value;
+  }
+  if (typeof value === "string") {
+    const match = value.match(/^([0-9]+)%$/);
+    const percent = match ? Number(match[1]) : NaN;
+    if (!Number.isInteger(percent) || percent < 1 || percent > 100) {
+      throw new Error(`invalid LSP configuration: ${field} must be a percentage from 1% through 100%`);
+    }
+    return `${percent}%`;
+  }
+  throw new Error(`invalid LSP configuration: ${field} must be a positive integer or percentage string`);
+}
+
+function normalizePopupSizeOptions(value, field, defaultBasis) {
+  if (value == null) {
+    const defaults = { width: 72, height: 12 };
+    defaults.basis = defaultBasis;
+    return defaults;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`invalid LSP configuration: ${field} must be an object`);
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "width" && key !== "height" && key !== "basis") {
+      throw new Error(`invalid LSP configuration: unknown ${field}.${key}`);
+    }
+  }
+  const basis = value.basis ?? defaultBasis;
+  if (basis !== "window" && basis !== "editor" && basis !== "available") {
+    throw new Error(`invalid LSP configuration: ${field}.basis must be "window", "editor", or "available"`);
+  }
+  const normalized = {};
+  normalized.width = value.width == null ? 72 : validatePopupSizeValue(value.width, `${field}.width`);
+  normalized.height = value.height == null ? 12 : validatePopupSizeValue(value.height, `${field}.height`);
+  normalized.basis = basis;
+  return normalized;
+}
+
+function normalizeLspPopupUi(options = {}) {
+  const ui = options.ui ?? {};
+  if (ui == null || typeof ui !== "object" || Array.isArray(ui)) {
+    throw new Error("invalid LSP configuration: ui must be an object");
+  }
+  const popups = ui.popups ?? {};
+  if (popups == null || typeof popups !== "object" || Array.isArray(popups)) {
+    throw new Error("invalid LSP configuration: ui.popups must be an object");
+  }
+  const allowedPopupKeys = new Set(["hover", "diagnostics", "locations", "symbols", "signatureHelp"]);
+  for (const key of Object.keys(popups)) {
+    if (!allowedPopupKeys.has(key)) {
+      throw new Error(`invalid LSP configuration: unknown ui.popups.${key}`);
+    }
+  }
+  const normalized = {};
+  normalized.hover = normalizePopupSizeOptions(popups.hover, "ui.popups.hover", "window");
+  normalized.diagnostics = normalizePopupSizeOptions(popups.diagnostics, "ui.popups.diagnostics", "window");
+  normalized.locations = normalizePopupSizeOptions(popups.locations, "ui.popups.locations", "editor");
+  normalized.symbols = normalizePopupSizeOptions(popups.symbols, "ui.popups.symbols", "editor");
+  normalized.signatureHelp = normalizePopupSizeOptions(popups.signatureHelp, "ui.popups.signatureHelp", "window");
+  return normalized;
 }
 
 function fileUri(path) {
@@ -771,6 +858,7 @@ function createRuntimeBridgeCallbackSource(
   formattingOptions,
   renameNewName,
   codeActionKinds,
+  normalizedPopupUi,
   dumpPath,
 ) {
   return new Function(
@@ -989,13 +1077,13 @@ function createRuntimeBridgeCallbackSource(
       "  const routeFeatureResponse = async (response) => {\n" +
       "    const responseMethod = response && response.method ? response.method : method;\n" +
       "    if (responseMethod === 'textDocument/hover') {\n" +
-      "      await executeUiCommand('lsp.floatHover', { response });\n" +
+      "      await executeUiCommand('lsp.floatHover', { kind: 'hover', response, ui: normalizedPopupUi.hover });\n" +
       "    } else if (responseMethod === 'textDocument/definition') {\n" +
       "      await executeUiCommand('lsp.gotoDefinition', { response });\n" +
       "    } else if (responseMethod === 'textDocument/references') {\n" +
-      "      await executeUiCommand('lsp.floatLocations', { title: 'References', response });\n" +
+      "      await executeUiCommand('lsp.floatLocations', { title: 'References', response, ui: normalizedPopupUi.locations });\n" +
       "    } else if (responseMethod === 'textDocument/documentSymbol') {\n" +
-      "      await executeUiCommand('lsp.floatSymbols', { response });\n" +
+      "      await executeUiCommand('lsp.floatSymbols', { response, ui: normalizedPopupUi.symbols });\n" +
       "    } else if (responseMethod === 'textDocument/completion') {\n" +
       "      const result = response?.result ?? response;\n" +
       "      const items = Array.isArray(result) ? result : (Array.isArray(result?.items) ? result.items : []);\n" +
@@ -1009,7 +1097,7 @@ function createRuntimeBridgeCallbackSource(
       "      const signature = signatures[active];\n" +
       "      const label = signature?.label ?? '';\n" +
       "      const doc = typeof signature?.documentation === 'string' ? signature.documentation : (signature?.documentation?.value ?? '');\n" +
-      "      await executeUiCommand('lsp.floatHover', { response: { result: { contents: [label, doc].filter(Boolean).join('\\n') } } });\n" +
+      "      await executeUiCommand('lsp.floatHover', { kind: 'signatureHelp', response: { result: { contents: [label, doc].filter(Boolean).join('\\n') } }, ui: normalizedPopupUi.signatureHelp });\n" +
       "    } else if (responseMethod === 'textDocument/formatting' || responseMethod === 'textDocument/rangeFormatting') {\n" +
       "      await executeUiCommand('lsp.previewWorkspaceEdit', { title: 'Formatting preview', response });\n" +
       "    } else if (responseMethod === 'textDocument/rename') {\n" +
@@ -1033,6 +1121,9 @@ function createRuntimeBridgeCallbackSource(
       quoteRuntimeValue(source === "lsp" ? "3.17" : "0.6.0") +
       ";\n" +
       "  const eventPayload = payload ?? null;\n" +
+      "  const normalizedPopupUi = " +
+      quoteRuntimeValue(normalizedPopupUi) +
+      ";\n" +
       "  const buffer = eventPayload && eventPayload.buffer ? eventPayload.buffer : await saya.buffer.current();\n" +
       "  const editor = await saya.editor.current();\n" +
       "  const languageByExtension = " +
@@ -1281,6 +1372,7 @@ export function setupSayaLspClient(options = {}) {
     "refactor",
     "source.organizeImports",
   ];
+  const normalizedPopupUi = normalizeLspPopupUi(options);
   const enableBufferEvents = options.enableBufferEvents ?? true;
   const lsifEnabled = options.lsif?.enabled ?? false;
   const lsifBridgeCommand = options.lsif?.bridgeCommand ?? "lsif.request";
@@ -1320,16 +1412,17 @@ export function setupSayaLspClient(options = {}) {
         formattingOptions,
         renameNewName,
         codeActionKinds,
+        normalizedPopupUi,
         "",
       ),
     );
   }
 
   saya.commands.register(commandNames.nextDiagnostic, async () => {
-    await saya.commands.execute("lsp.nextDiagnostic");
+    await saya.commands.execute(`lsp.nextDiagnostic ${JSON.stringify({ ui: normalizedPopupUi.diagnostics })}`);
   });
   saya.commands.register(commandNames.previousDiagnostic, async () => {
-    await saya.commands.execute("lsp.previousDiagnostic");
+    await saya.commands.execute(`lsp.previousDiagnostic ${JSON.stringify({ ui: normalizedPopupUi.diagnostics })}`);
   });
 
   if (enableBufferEvents) {
@@ -1350,6 +1443,7 @@ export function setupSayaLspClient(options = {}) {
         formattingOptions,
         renameNewName,
         codeActionKinds,
+        normalizedPopupUi,
         "",
       ),
     );
@@ -1370,6 +1464,7 @@ export function setupSayaLspClient(options = {}) {
         formattingOptions,
         renameNewName,
         codeActionKinds,
+        normalizedPopupUi,
         "",
       ),
     );
@@ -1390,6 +1485,7 @@ export function setupSayaLspClient(options = {}) {
         formattingOptions,
         renameNewName,
         codeActionKinds,
+        normalizedPopupUi,
         "",
       ),
     );
@@ -1410,6 +1506,7 @@ export function setupSayaLspClient(options = {}) {
         formattingOptions,
         renameNewName,
         codeActionKinds,
+        normalizedPopupUi,
         "",
       ),
     );
@@ -1490,6 +1587,7 @@ export function setupSayaLspClient(options = {}) {
         formattingOptions,
         renameNewName,
         codeActionKinds,
+        normalizedPopupUi,
         lsifDumpPath,
       ),
     );
@@ -1510,6 +1608,7 @@ export function setupSayaLspClient(options = {}) {
         formattingOptions,
         renameNewName,
         codeActionKinds,
+        normalizedPopupUi,
         lsifDumpPath,
       ),
     );

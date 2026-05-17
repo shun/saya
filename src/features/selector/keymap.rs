@@ -54,12 +54,16 @@ pub fn selector_control_command_for_key(
         KeyInput::Char('k') | KeyInput::Up => {
             Some(RuntimeSelectorControllerCommand::CursorPrevious)
         }
-        KeyInput::PageDown | KeyInput::Ctrl('d') | KeyInput::Ctrl('D') => {
-            Some(RuntimeSelectorControllerCommand::PageDown)
-        }
-        KeyInput::PageUp | KeyInput::Ctrl('u') | KeyInput::Ctrl('U') => {
-            Some(RuntimeSelectorControllerCommand::PageUp)
-        }
+        KeyInput::PageDown
+        | KeyInput::Ctrl('d')
+        | KeyInput::Ctrl('D')
+        | KeyInput::Ctrl('f')
+        | KeyInput::Ctrl('F') => Some(RuntimeSelectorControllerCommand::PageDown),
+        KeyInput::PageUp
+        | KeyInput::Ctrl('u')
+        | KeyInput::Ctrl('U')
+        | KeyInput::Ctrl('b')
+        | KeyInput::Ctrl('B') => Some(RuntimeSelectorControllerCommand::PageUp),
         KeyInput::Char('g') => Some(RuntimeSelectorControllerCommand::CursorFirst),
         KeyInput::Char('G') => Some(RuntimeSelectorControllerCommand::CursorLast),
         KeyInput::Escape => Some(RuntimeSelectorControllerCommand::Cancel),
@@ -102,11 +106,19 @@ mod tests {
             Some(RuntimeSelectorControllerCommand::PageDown)
         );
         assert_eq!(
+            selector_control_command_for_key(&KeyInput::Ctrl('f')),
+            Some(RuntimeSelectorControllerCommand::PageDown)
+        );
+        assert_eq!(
             selector_control_command_for_key(&KeyInput::PageUp),
             Some(RuntimeSelectorControllerCommand::PageUp)
         );
         assert_eq!(
             selector_control_command_for_key(&KeyInput::Ctrl('u')),
+            Some(RuntimeSelectorControllerCommand::PageUp)
+        );
+        assert_eq!(
+            selector_control_command_for_key(&KeyInput::Ctrl('b')),
             Some(RuntimeSelectorControllerCommand::PageUp)
         );
         assert_eq!(

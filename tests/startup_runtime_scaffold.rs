@@ -11,8 +11,9 @@ use saya::runtime::live::{
 };
 use saya::runtime::startup::{
     SayaKeyMode, SayaKeymapAction, StartupModuleLoadResult, StartupModulePrepareResult,
-    StartupOptionName, StartupOptionValue, StartupRegistryEntry, collect_startup_registry,
-    evaluate_startup_module, load_init_module, prepare_init_module, resolve_init_module_specifier,
+    StartupOptionName, StartupOptionValue, StartupPluginSource, StartupRegistryEntry,
+    collect_startup_registry, evaluate_startup_module, load_init_module, prepare_init_module,
+    resolve_init_module_specifier,
 };
 
 fn unique_path(name: &str) -> PathBuf {
@@ -329,6 +330,38 @@ async fn init_ts_module_can_import_repository_lsp_client_plugin() {
                 if (range.start.character !== 0 || range.end.character !== 3) {{
                     throw new Error("LSP range helper must convert editor byte columns");
                 }}
+                try {{
+                    setupSayaLspClient({{ ui: {{ popups: {{ hover: {{ width: "101%" }} }} }} }});
+                    throw new Error("invalid LSP popup percentage should be rejected");
+                }} catch (error) {{
+                    if (!String(error && error.message).includes("1% through 100%")) {{
+                        throw error;
+                    }}
+                }}
+                try {{
+                    setupSayaLspClient({{ ui: {{ popups: {{ hover: {{ width: 12.5 }} }} }} }});
+                    throw new Error("fractional LSP popup width should be rejected");
+                }} catch (error) {{
+                    if (!String(error && error.message).includes("positive integer")) {{
+                        throw error;
+                    }}
+                }}
+                try {{
+                    setupSayaLspClient({{ ui: {{ popups: {{ hover: {{ basis: "screen" }} }} }} }});
+                    throw new Error("unknown LSP popup basis should be rejected");
+                }} catch (error) {{
+                    if (!String(error && error.message).includes("basis must be")) {{
+                        throw error;
+                    }}
+                }}
+                try {{
+                    setupSayaLspClient({{ ui: {{ popups: {{ hovre: {{ width: 10 }} }} }} }});
+                    throw new Error("misspelled LSP popup key should be rejected");
+                }} catch (error) {{
+                    if (!String(error && error.message).includes("unknown ui.popups.hovre")) {{
+                        throw error;
+                    }}
+                }}
                 setupSayaLspClient({{
                     bridgeCommand: "host.lsp",
                     clientName: "saya-test",
@@ -341,6 +374,15 @@ async fn init_ts_module_can_import_repository_lsp_client_plugin() {
                         enabled: true,
                         bridgeCommand: "host.lsif",
                         dumpPath: ".cache/index.lsif",
+                    }},
+                    ui: {{
+                        popups: {{
+                            hover: {{ width: "60%", height: "35%" }},
+                            diagnostics: {{ width: 72, height: 12 }},
+                            locations: {{ width: "80%", height: "50%", basis: "editor" }},
+                            symbols: {{ width: "70%", height: "60%", basis: "window" }},
+                            signatureHelp: {{ width: 88, height: 14 }},
+                        }},
                     }},
                     commands: {{
                         hover: "code.hover",
@@ -373,9 +415,7 @@ async fn init_ts_module_can_import_repository_lsp_client_plugin() {
         );
     };
     assert!(
-        module
-            .executable_source_text
-            .contains("setupSayaLspClient"),
+        module.executable_source_text.contains("setupSayaLspClient"),
         "plugin function should be inlined into the executable source"
     );
     assert!(
@@ -460,6 +500,12 @@ async fn init_ts_module_can_import_repository_lsp_client_plugin() {
     assert!(hover_callback.contains(r#"const method = "textDocument/hover";"#));
     assert!(hover_callback.contains("host.lsp"));
     assert!(hover_callback.contains("[saya-lsp] dispatch"));
+    assert!(hover_callback.contains(r#""hover":{"width":"60%","height":"35%","basis":"window"}"#));
+    assert!(
+        hover_callback.contains(r#""signatureHelp":{"width":88,"height":14,"basis":"window"}"#)
+    );
+    assert!(hover_callback.contains(r#""diagnostics":{"width":72,"height":12,"basis":"window"}"#));
+    assert!(hover_callback.contains("kind: 'signatureHelp'"));
 
     let lsif_hover_callback = registry
         .entries()
@@ -492,8 +538,8 @@ fn lsp_client_shim_exposes_normal_typescript_named_exports() {
 
 #[test]
 fn lsp_client_manager_routes_server_notifications_to_ui_commands() {
-    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("plugins/bundled/lsp-client/index.ts");
+    let plugin_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/lsp-client/index.ts");
     let source = std::fs::read_to_string(plugin_path).expect("lsp client should be readable");
 
     assert!(
@@ -505,6 +551,21 @@ fn lsp_client_manager_routes_server_notifications_to_ui_commands() {
                 < source.find("await routeFeatureResponse(response)")
             && source.contains("textDocument/publishDiagnostics"),
         "LSP server notifications such as publishDiagnostics should update UI state before feature responses render"
+    );
+    assert!(
+        source.contains("export type SayaPopupSizeValue")
+            && source.contains("interface SayaLspPopupUiOptions")
+            && source.contains("ui?:")
+            && source.contains("normalizedPopupUi"),
+        "LSP client source should expose and transport popup UI configuration"
+    );
+    assert!(
+        source.contains(
+            "lsp.nextDiagnostic ${JSON.stringify({ ui: normalizedPopupUi.diagnostics })}"
+        ) && source.contains(
+            "lsp.previousDiagnostic ${JSON.stringify({ ui: normalizedPopupUi.diagnostics })}"
+        ),
+        "diagnostic navigation commands should carry diagnostics popup UI configuration"
     );
 }
 
@@ -557,6 +618,10 @@ fn repository_lsp_client_plugin_public_helpers_cover_lsp_and_lsif_protocol_shape
         "textDocument/references",
         "textDocument/documentSymbol",
         "servers",
+        "normalizedPopupUi",
+        "ui: normalizedPopupUi.hover",
+        "ui: normalizedPopupUi.locations",
+        "ui: normalizedPopupUi.symbols",
         "rootMarkers",
         "initializationOptions",
         "lspPositionFromSayaCursor",
@@ -578,8 +643,8 @@ fn repository_lsp_client_plugin_public_helpers_cover_lsp_and_lsif_protocol_shape
 
 #[test]
 fn repository_dired_plugin_public_options_cover_phase6_surface() {
-    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("plugins/bundled/dired/index.ts");
+    let plugin_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/dired/index.ts");
     let source = std::fs::read_to_string(plugin_path).expect("repository dired plugin");
 
     for expected in [
@@ -861,6 +926,84 @@ async fn startup_unknown_option_warns_without_failing_evaluation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_plugins_use_collects_local_plugin_declaration() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.plugins.use([
+                { local: "~/.config/saya/plugins/workspace-tools" },
+            ]);
+        "#,
+    )
+    .await
+    .expect("startup plugin use declaration should evaluate");
+
+    assert!(registry.entries().iter().any(|entry| matches!(
+        entry,
+        StartupRegistryEntry::PluginUse { declaration }
+            if declaration.name == "workspace-tools"
+                && declaration.source == StartupPluginSource::Local {
+                    path: "~/.config/saya/plugins/workspace-tools".to_string()
+                }
+                && declaration.module == "mod.ts"
+                && declaration.setup == "setup"
+                && declaration.commands.is_empty()
+                && declaration.events.is_empty()
+    )));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_plugins_lazy_collects_github_triggers_and_options() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.plugins.lazy([
+                {
+                    github: "shun/saya-git-tools",
+                    rev: "v0.1.0",
+                    commands: ["GitStatus", "GitBlame"],
+                    events: ["bufferOpen"],
+                    options: { trace: "messages" },
+                },
+            ]);
+        "#,
+    )
+    .await
+    .expect("startup plugin lazy declaration should evaluate");
+
+    assert!(registry.entries().iter().any(|entry| matches!(
+        entry,
+        StartupRegistryEntry::PluginLazy { declaration }
+            if declaration.name == "saya-git-tools"
+                && declaration.source == StartupPluginSource::Github {
+                    repo: "shun/saya-git-tools".to_string(),
+                    rev: Some("v0.1.0".to_string())
+                }
+                && declaration.commands == ["GitStatus".to_string(), "GitBlame".to_string()]
+                && declaration.events == ["bufferOpen".to_string()]
+                && declaration.options.as_ref()
+                    .and_then(|options| options.get("trace"))
+                    .and_then(|value| value.as_str()) == Some("messages")
+    )));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_plugins_rejects_ambiguous_source_declaration() {
+    let error = collect_startup_registry(
+        r#"
+            saya.plugins.use([
+                { local: "./plugins/a", github: "owner/repo" },
+            ]);
+        "#,
+    )
+    .await
+    .expect_err("ambiguous plugin source should fail startup evaluation");
+
+    assert!(
+        error.contains("exactly one of local or github"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_saya_namespace_exposes_command_reference_helper_without_runtime_capabilities() {
     let result = evaluate_startup_module(
         r#"
@@ -902,6 +1045,9 @@ async fn startup_surface_is_frozen_and_does_not_expose_runtime_api() {
             }
             if (!Object.isFrozen(saya.theme)) {
                 throw new Error("startup theme surface should be frozen");
+            }
+            if (!Object.isFrozen(saya.plugins)) {
+                throw new Error("startup plugins surface should be frozen");
             }
             if (typeof saya.buffer !== "undefined") {
                 throw new Error("runtime buffer api leaked into startup namespace");

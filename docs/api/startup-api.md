@@ -181,6 +181,7 @@ top-level areas.
 - `saya.events`
 - `saya.theme`
 - `saya.log`
+- `saya.plugins`
 
 ## Options
 
@@ -274,6 +275,46 @@ saya.events.on("bufferOpen", (payload) => {
   console.log(payload.buffer.id);
 });
 ```
+
+## Plugins
+
+The plugins surface lets you declare startup and lazy plugin intent from
+`init.ts`. The declarations are inputs to the plugin manager. They don't install
+or update external plugins during editor startup.
+
+### `saya.plugins.use(specs)`
+
+Use this method to declare plugins that must be active during startup.
+
+```ts
+saya.plugins.use([
+  { github: "shun/saya-theme-tokyo-night" },
+  { local: "~/.config/saya/plugins/workspace-tools" },
+]);
+```
+
+### `saya.plugins.lazy(specs)`
+
+Use this method to declare plugins that load after command or event triggers.
+
+```ts
+saya.plugins.lazy([
+  {
+    github: "shun/saya-git-tools",
+    commands: ["GitStatus", "GitBlame"],
+  },
+  {
+    local: "~/.config/saya/plugins/workspace-tools",
+    events: ["bufferOpen"],
+  },
+]);
+```
+
+Plugin declarations support `local` for local directories and `github` for
+GitHub repositories in `owner/repository` form. Add `rev` to pin a GitHub
+plugin to a branch, tag, or commit. When `rev` is absent, plugin sync and update
+commands resolve the latest default-branch revision and record it in the plugin
+cache.
 
 ## Theme
 

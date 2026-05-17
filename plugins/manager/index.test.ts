@@ -1,6 +1,7 @@
 import {
   buildPluginArtifacts,
   definePlugins,
+  defineUserPlugins,
   doctorPlugins,
   type SayaBundledPluginManifest,
   type SayaPluginSpec,
@@ -28,6 +29,74 @@ Deno.test("definePlugins rejects duplicate names", () => {
   } catch (error) {
     if (!String(error).includes("duplicate plugin name")) {
       throw error;
+    }
+  }
+});
+
+Deno.test("defineUserPlugins normalizes use and lazy declarations", () => {
+  const plugins = defineUserPlugins(
+    [
+      { local: "~/.config/saya/plugins/workspace-tools" },
+      { github: "shun/saya-theme-tokyo-night", rev: "v0.1.0" },
+    ],
+    [
+      {
+        github: "shun/saya-git-tools",
+        commands: ["GitStatus", "GitBlame"],
+        events: ["bufferOpen"],
+        options: { trace: "messages" },
+      },
+    ],
+  );
+
+  const byName = new Map(plugins.map((plugin) => [plugin.name, plugin]));
+  const workspaceTools = byName.get("workspace-tools");
+  if (workspaceTools?.module !== "mod.ts") {
+    throw new Error("local user plugin did not default to mod.ts");
+  }
+  if (
+    JSON.stringify(workspaceTools?.source) !==
+      JSON.stringify({
+        kind: "local",
+        path: "~/.config/saya/plugins/workspace-tools",
+      })
+  ) {
+    throw new Error("local user plugin source was not normalized");
+  }
+
+  const theme = byName.get("saya-theme-tokyo-night");
+  if (
+    JSON.stringify(theme?.source) !==
+      JSON.stringify({
+        kind: "github",
+        repo: "shun/saya-theme-tokyo-night",
+        rev: "v0.1.0",
+      })
+  ) {
+    throw new Error("github user plugin source was not normalized");
+  }
+
+  const gitTools = byName.get("saya-git-tools");
+  if (!gitTools?.lazy?.commands?.includes("GitStatus")) {
+    throw new Error("lazy command was not normalized");
+  }
+  if (gitTools.protocols?.options == null) {
+    throw new Error("plugin options were not preserved for manager policy");
+  }
+});
+
+Deno.test("defineUserPlugins rejects ambiguous and invalid public sources", () => {
+  for (const declaration of [
+    { local: "./plugins/a", github: "owner/repo" },
+    { github: "missing-owner" },
+  ]) {
+    try {
+      defineUserPlugins([declaration as never]);
+      throw new Error("invalid user plugin declaration should fail");
+    } catch (error) {
+      if (!String(error).includes("plugin")) {
+        throw error;
+      }
     }
   }
 });

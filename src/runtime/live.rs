@@ -625,11 +625,23 @@ declare global {
         maxRenderedItems?: number;
     }
 
+    type SayaSelectorWindowSizeValue = number | `${number}%`;
+
+    interface SayaSelectorWindowUiOptions {
+        width?: SayaSelectorWindowSizeValue;
+        height?: SayaSelectorWindowSizeValue;
+    }
+
+    interface SayaSelectorUiOptions {
+        window?: SayaSelectorWindowUiOptions;
+    }
+
     interface SayaSelectorOpenOptions<TDetail = unknown> {
         source: SayaStaticSelectorSource<TDetail> | SayaRgSelectorSource;
         matcher?: SayaSelectorMatcherName;
         query?: string;
         limits?: SayaSelectorLimits;
+        ui?: SayaSelectorUiOptions;
     }
 
     interface SayaSelectorUpdateOptions {
@@ -707,6 +719,7 @@ declare global {
         selectedItem?: SayaRenderedSelectorItem | null;
         view: SayaSelectorViewState;
         status: SayaSelectorStatus;
+        ui: SayaSelectorUiOptions;
     }
 
     interface SayaRuntimeSelectorSurface {

@@ -1106,6 +1106,73 @@ async fn runtime_selector_tui_state_projects_visible_and_hidden_workspace_float_
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_selector_open_ui_window_configures_tui_workspace_float() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let selector_backend = Arc::new(SelectorHostViewAdapter::new(tui_state.clone(), 10));
+    let host_bridge = Arc::new(RecordingHostBridge::with_selector_view_backend(
+        selector_backend.clone(),
+    ));
+    let seed = CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Event {
+        name: "bufferOpen".to_string(),
+        callback_source: r#"
+            async () => {
+                const opened = await saya.selector.open({
+                    source: {
+                        kind: "static",
+                        items: [
+                            { id: "alpha", value: "alpha row", kind: "test", detail: null },
+                            { id: "beta", value: "beta row", kind: "test", detail: null },
+                            { id: "gamma", value: "gamma row", kind: "test", detail: null },
+                            { id: "delta", value: "delta row", kind: "test", detail: null },
+                            { id: "epsilon", value: "epsilon row", kind: "test", detail: null },
+                        ],
+                    },
+                    matcher: "substringAnd",
+                    query: "row",
+                    ui: {
+                        window: {
+                            width: "75%",
+                            height: 9,
+                        },
+                    },
+                });
+                await saya.commands.execute(`selector-window:${opened.id}:${opened.renderedItems.length}`);
+            }
+        "#
+        .to_string(),
+    }]);
+
+    let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), seed)
+        .expect("seed runtime should initialize");
+
+    runtime
+        .dispatch_event(RuntimeEventPayload::BufferOpen(BufferEventPayload {
+            buffer: snapshot_buffer(),
+        }))
+        .expect("dispatch queued")
+        .await_result()
+        .await
+        .expect("dispatch result");
+
+    let model = tui_state
+        .current_model()
+        .expect("selector should publish TUI state with window options");
+    let visible_float = selector_tui_model_to_workspace_float(&model, 120, 30)
+        .expect("configured selector should project to workspace float");
+    assert_eq!(visible_float.rect.width, 90);
+    assert_eq!(visible_float.rect.height, 9);
+    assert_eq!(
+        visible_float.lines.len(),
+        7,
+        "height 9 leaves 5 content rows after border/query/status"
+    );
+    assert_eq!(
+        host_bridge.executed_commands.lock().await.clone(),
+        vec!["selector-window:1:5".to_string()]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn runtime_session_owner_wires_selector_host_adapter_to_tui_workspace_projection() {
     let seed = CallbackRegistrySeed::from_startup_entries(vec![
         StartupRegistryEntry::Event {
@@ -1255,8 +1322,10 @@ async fn runtime_session_owner_controls_active_selector_from_tui_key_routes_head
         (KeyInput::Up, 0),
         (KeyInput::PageDown, 10),
         (KeyInput::Ctrl('d'), 11),
+        (KeyInput::Ctrl('f'), 11),
         (KeyInput::PageUp, 1),
         (KeyInput::Ctrl('u'), 0),
+        (KeyInput::Ctrl('b'), 0),
         (KeyInput::Char('G'), 11),
         (KeyInput::Char('g'), 0),
     ] {

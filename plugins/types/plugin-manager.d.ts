@@ -32,6 +32,23 @@ export interface SayaPluginSpec {
   protocols?: Record<string, unknown>;
 }
 
+export interface SayaPluginUseDeclaration {
+  name?: string;
+  local?: string;
+  github?: `${string}/${string}`;
+  rev?: string;
+  module?: string;
+  setup?: string;
+  options?: unknown;
+}
+
+export interface SayaPluginLazyDeclaration extends SayaPluginUseDeclaration {
+  commands?: string[];
+  events?: Array<
+    "bufferOpen" | "bufferChanged" | "bufferWritePost" | "bufferClosed" | string
+  >;
+}
+
 export interface SayaPluginOperationContext {
   cacheRoot: string;
   sourceHash: string;

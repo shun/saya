@@ -24,7 +24,9 @@ Rust host responsibilities:
 
 TypeScript manager responsibilities:
 
-- Define plugin specs with `definePlugins()`.
+- Collect user-facing plugin declarations from `saya.plugins.use()` and
+  `saya.plugins.lazy()`.
+- Normalize plugin specs for artifact generation.
 - Resolve source declarations and protocol metadata.
 - Generate `plugin-lock.json`, `startup-plan.json`, and `lazy-index.json`.
 - Implement `sync`, `update`, `list`, `clean`, and `doctor` behavior.
@@ -91,11 +93,54 @@ official LSP client bridge. Use external plugins for optional language,
 theme, formatter, navigation, and integration features. See
 [Plugin model](../design/plugin-model.md) for the classification rules.
 
+## User-facing declarations
+
+Declare plugins from `init.ts` with `saya.plugins.use()` and
+`saya.plugins.lazy()`. These methods describe desired plugin state. They don't
+clone repositories or touch the network during editor startup.
+
+Use `saya.plugins.use()` for plugins that must be active during startup. Use
+`saya.plugins.lazy()` for plugins that load only after a command or event
+trigger.
+
+```ts
+saya.plugins.use([
+  { github: "shun/saya-theme-tokyo-night" },
+  { local: "~/.config/saya/plugins/workspace-tools" },
+]);
+
+saya.plugins.lazy([
+  {
+    github: "shun/saya-git-tools",
+    commands: ["GitStatus", "GitBlame"],
+  },
+  {
+    local: "~/.config/saya/plugins/workspace-tools",
+    events: ["bufferOpen"],
+  },
+]);
+```
+
+The declaration surface supports these source forms:
+
+- `local`, which points to a local plugin directory and never clones.
+- `github`, which uses the `owner/repository` shorthand and clones into the
+  plugin cache during `sy plugin sync` or `sy plugin update`.
+- `rev`, which optionally pins a GitHub plugin to a branch, tag, or commit.
+
+When `rev` is absent, `sy plugin sync` and `sy plugin update` resolve the
+latest revision from the repository's default branch. Normal editor startup
+uses generated cache files and doesn't check the network.
+
+The default plugin entry point is `mod.ts`, and the default setup export is
+`setup`. You only need to specify alternate entry metadata for non-standard
+plugin layouts.
+
 ## TypeScript manager
 
-Use `definePlugins()` to declare plugin specs. Source declarations can be local
-paths, git URLs, GitHub shorthand metadata, or protocol strings owned by the
-manager.
+The TypeScript manager normalizes user-facing declarations into the internal
+plugin spec used for artifact generation. The lower-level manager accepts local
+paths, GitHub shorthand metadata, and manager-owned protocol strings.
 
 ```ts
 import {

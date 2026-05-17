@@ -27,7 +27,8 @@ use saya::features::completion::float::{
 };
 use saya::features::lsp::float::{
     LspDiagnosticFloatRequest, LspDiagnosticStore, LspHoverFloatRequest, LspLocationListRequest,
-    LspSymbolOutlineRequest, file_uri_to_path, open_lsp_diagnostic_float, open_lsp_hover_float,
+    LspSymbolOutlineRequest, PopupSizeBasis, PopupSizeSpec, PopupSizeValue, ResolvedPopupSizeLimit,
+    file_uri_to_path, open_lsp_diagnostic_float, open_lsp_hover_float,
     open_lsp_location_list_float, open_lsp_symbol_outline_float,
 };
 use saya::features::lsp::lsif_index::LsifIndexCache;
@@ -68,8 +69,8 @@ use saya::presentation::overlay::optional_graphics::{
 use saya::presentation::render::coordinator::{RenderFrameError, TuiRenderCoordinator};
 use saya::presentation::render::renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::presentation::screen_model::{
-    CommandLineModel, ProjectionInput, WorkspaceProjectionError, WorkspaceProjectionInput,
-    WorkspaceScreenModel, project, project_workspace,
+    CommandLineModel, PaneRect, ProjectionInput, WorkspaceProjectionError,
+    WorkspaceProjectionInput, WorkspaceScreenModel, project, project_workspace,
 };
 use saya::presentation::structural_refresh::{
     RedrawPlan, RedrawPlanSource, StructuralRefresh, StructuralRefreshOutcome,
@@ -158,7 +159,23 @@ async fn main() {
         }
         StartupAction::Plugin(command) => {
             let host = PluginHost::default_from_env();
-            match host.run_operation(*command) {
+            let result = match command {
+                saya::runtime::plugin::PluginCommand::Sync => {
+                    match saya::app::bootstrap::collect_startup_registry_for_plugin_operation(
+                        launch_request.config_source.clone(),
+                    ) {
+                        Ok(Some((registry, source_hash))) => {
+                            host.sync_startup_plugin_declarations(&registry, source_hash)
+                        }
+                        Ok(None) => host.run_operation(*command),
+                        Err(message) => {
+                            Err(saya::runtime::plugin::PluginHostError::Operation { message })
+                        }
+                    }
+                }
+                _ => host.run_operation(*command),
+            };
+            match result {
                 Ok(report) => {
                     println!("{}", render_plugin_report(&report));
                     std::process::exit(0);
@@ -1117,17 +1134,16 @@ async fn main() {
                                     }
 
                                     if after_snapshot.revision != before_snapshot.revision {
-                                        if let Some(reason) =
-                                            dispatch_buffer_changed_with_runtime(
-                                                runtime_session.as_mut(),
-                                                &mut outcome,
-                                                &mut session_state,
-                                                &mut transient_msg,
-                                                &mut need_redraw,
-                                                &mut runtime_presentation_intents,
-                                                Some(&lsif_bridge),
-                                            )
-                                            .await
+                                        if let Some(reason) = dispatch_buffer_changed_with_runtime(
+                                            runtime_session.as_mut(),
+                                            &mut outcome,
+                                            &mut session_state,
+                                            &mut transient_msg,
+                                            &mut need_redraw,
+                                            &mut runtime_presentation_intents,
+                                            Some(&lsif_bridge),
+                                        )
+                                        .await
                                         {
                                             break 'main reason;
                                         }
@@ -3343,8 +3359,8 @@ enum MainHostCommand {
     LspWorkspaceEditPreview(String),
     LspCodeActionsFloat(String),
     LspPublishDiagnostics(String),
-    LspNextDiagnostic,
-    LspPreviousDiagnostic,
+    LspNextDiagnostic(Option<String>),
+    LspPreviousDiagnostic(Option<String>),
     LspStatus(String),
 }
 
@@ -3473,13 +3489,28 @@ fn parse_lsp_float_host_command(command: &str) -> Option<MainHostCommand> {
     if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
         return Some(MainHostCommand::LspStatus(payload.to_string()));
     }
-    match trimmed {
-        "lsp.nextDiagnostic" => Some(MainHostCommand::LspNextDiagnostic),
-        "lsp.previousDiagnostic" | "lsp.prevDiagnostic" => {
-            Some(MainHostCommand::LspPreviousDiagnostic)
-        }
-        _ => None,
+    if trimmed == "lsp.nextDiagnostic" {
+        return Some(MainHostCommand::LspNextDiagnostic(None));
     }
+    if trimmed == "lsp.previousDiagnostic" || trimmed == "lsp.prevDiagnostic" {
+        return Some(MainHostCommand::LspPreviousDiagnostic(None));
+    }
+    let payload = trimmed.strip_prefix("lsp.nextDiagnostic ").map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspNextDiagnostic(Some(
+            payload.to_string(),
+        )));
+    }
+    let payload = trimmed
+        .strip_prefix("lsp.previousDiagnostic ")
+        .or_else(|| trimmed.strip_prefix("lsp.prevDiagnostic "))
+        .map(str::trim);
+    if let Some(payload) = payload.filter(|payload| !payload.is_empty()) {
+        return Some(MainHostCommand::LspPreviousDiagnostic(Some(
+            payload.to_string(),
+        )));
+    }
+    None
 }
 
 fn parse_runtime_edit_command(normalized: &str) -> Option<std::path::PathBuf> {
@@ -3814,14 +3845,12 @@ fn execute_runtime_host_command_with_floats(
                 terminal_float_manager,
             )
         }
-        Some(MainHostCommand::LspHoverFloat(payload)) => {
-            execute_lsp_hover_float_host_command(
-                &payload,
-                outcome,
-                floating_window_manager,
-                lsp_diagnostic_store.as_deref(),
-            )
-        }
+        Some(MainHostCommand::LspHoverFloat(payload)) => execute_lsp_hover_float_host_command(
+            &payload,
+            outcome,
+            floating_window_manager,
+            lsp_diagnostic_store.as_deref(),
+        ),
         Some(MainHostCommand::LspDiagnosticFloat(payload)) => {
             execute_lsp_diagnostic_float_host_command(&payload, outcome, floating_window_manager)
         }
@@ -3856,18 +3885,24 @@ fn execute_runtime_host_command_with_floats(
                 lsp_diagnostic_store,
             )
         }
-        Some(MainHostCommand::LspNextDiagnostic) => execute_lsp_cycle_diagnostic_host_command(
-            outcome,
-            floating_window_manager,
-            lsp_diagnostic_store,
-            true,
-        ),
-        Some(MainHostCommand::LspPreviousDiagnostic) => execute_lsp_cycle_diagnostic_host_command(
-            outcome,
-            floating_window_manager,
-            lsp_diagnostic_store,
-            false,
-        ),
+        Some(MainHostCommand::LspNextDiagnostic(payload)) => {
+            execute_lsp_cycle_diagnostic_host_command(
+                outcome,
+                floating_window_manager,
+                lsp_diagnostic_store,
+                true,
+                payload.as_deref(),
+            )
+        }
+        Some(MainHostCommand::LspPreviousDiagnostic(payload)) => {
+            execute_lsp_cycle_diagnostic_host_command(
+                outcome,
+                floating_window_manager,
+                lsp_diagnostic_store,
+                false,
+                payload.as_deref(),
+            )
+        }
         Some(MainHostCommand::LspStatus(payload)) => execute_lsp_status_host_command(&payload),
         None => Err(RuntimeCommandError::UnknownCommand {
             name: command.to_string(),
@@ -4275,6 +4310,226 @@ fn execute_completion_menu_float_host_command(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LspHoverPopupKind {
+    Hover,
+    SignatureHelp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LspPopupKind {
+    Hover,
+    Diagnostics,
+    Locations,
+    Symbols,
+    SignatureHelp,
+}
+
+struct PopupSizingContext {
+    terminal_width: u16,
+    terminal_height: u16,
+    parent_window_rect: PaneRect,
+}
+
+fn parse_lsp_hover_popup_kind(
+    value: &serde_json::Value,
+) -> Result<LspHoverPopupKind, RuntimeCommandError> {
+    match value.get("kind").and_then(serde_json::Value::as_str) {
+        None | Some("hover") => Ok(LspHoverPopupKind::Hover),
+        Some("signatureHelp") => Ok(LspHoverPopupKind::SignatureHelp),
+        Some(kind) => Err(RuntimeCommandError::CommandFailed {
+            name: "lsp.floatHover".to_string(),
+            message: format!("invalid LSP hover float payload: unsupported kind {kind:?}"),
+        }),
+    }
+}
+
+fn default_lsp_popup_basis(kind: LspPopupKind) -> PopupSizeBasis {
+    match kind {
+        LspPopupKind::Locations | LspPopupKind::Symbols => PopupSizeBasis::Editor,
+        LspPopupKind::Hover | LspPopupKind::Diagnostics | LspPopupKind::SignatureHelp => {
+            PopupSizeBasis::Window
+        }
+    }
+}
+
+fn resolve_lsp_popup_size_limit_from_payload(
+    command_name: &str,
+    value: &serde_json::Value,
+    kind: LspPopupKind,
+    snapshot: &vim_core_rs::CoreLightSnapshot,
+    window_id: i32,
+) -> Result<ResolvedPopupSizeLimit, RuntimeCommandError> {
+    let spec = parse_lsp_popup_size_spec(
+        value.get("ui"),
+        default_lsp_popup_basis(kind),
+        &format!("{command_name}.ui"),
+    )
+    .map_err(|message| RuntimeCommandError::CommandFailed {
+        name: command_name.to_string(),
+        message,
+    })?;
+    let context = lsp_popup_sizing_context(snapshot, window_id);
+    let limit = resolve_lsp_popup_size_limit(spec, &context);
+    log::debug!(
+        "[main][lsp_float] resolved popup size: command={}, kind={:?}, spec={:?}, terminal=({},{}), parent_rect=({},{} {}x{}), limit=({},{})",
+        command_name,
+        kind,
+        spec,
+        context.terminal_width,
+        context.terminal_height,
+        context.parent_window_rect.x,
+        context.parent_window_rect.y,
+        context.parent_window_rect.width,
+        context.parent_window_rect.height,
+        limit.max_width,
+        limit.max_height
+    );
+    Ok(limit)
+}
+
+fn parse_lsp_popup_size_spec(
+    value: Option<&serde_json::Value>,
+    default_basis: PopupSizeBasis,
+    field: &str,
+) -> Result<PopupSizeSpec, String> {
+    let Some(value) = value else {
+        return Ok(PopupSizeSpec::lsp_default(default_basis));
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("invalid LSP popup size config: {field} must be an object"))?;
+    for key in object.keys() {
+        if !matches!(key.as_str(), "width" | "height" | "basis") {
+            return Err(format!(
+                "invalid LSP popup size config: unknown {field}.{key}"
+            ));
+        }
+    }
+    let basis = match object.get("basis").and_then(serde_json::Value::as_str) {
+        None => default_basis,
+        Some("window") => PopupSizeBasis::Window,
+        Some("editor") => PopupSizeBasis::Editor,
+        Some("available") => PopupSizeBasis::Available,
+        Some(basis) => {
+            return Err(format!(
+                "invalid LSP popup size config: {field}.basis must be \"window\", \"editor\", or \"available\", got {basis:?}"
+            ));
+        }
+    };
+    Ok(PopupSizeSpec {
+        width: parse_lsp_popup_size_value(object.get("width"), &format!("{field}.width"))?
+            .unwrap_or(PopupSizeValue::Cells(72)),
+        height: parse_lsp_popup_size_value(object.get("height"), &format!("{field}.height"))?
+            .unwrap_or(PopupSizeValue::Cells(12)),
+        basis,
+    })
+}
+
+fn parse_lsp_popup_size_value(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Option<PopupSizeValue>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if let Some(cells) = value.as_u64() {
+        let cells = u16::try_from(cells).map_err(|_| {
+            format!("invalid LSP popup size config: {field} must fit in terminal cells")
+        })?;
+        if cells == 0 {
+            return Err(format!(
+                "invalid LSP popup size config: {field} must be at least 1"
+            ));
+        }
+        return Ok(Some(PopupSizeValue::Cells(cells)));
+    }
+    if let Some(percent) = value.as_str().and_then(parse_lsp_popup_percent) {
+        return Ok(Some(PopupSizeValue::Percent(percent)));
+    }
+    Err(format!(
+        "invalid LSP popup size config: {field} must be a positive integer or a percentage string from 1% through 100%"
+    ))
+}
+
+fn parse_lsp_popup_percent(value: &str) -> Option<u8> {
+    let digits = value.strip_suffix('%')?;
+    if digits.is_empty() || !digits.chars().all(|char| char.is_ascii_digit()) {
+        return None;
+    }
+    let percent = digits.parse::<u8>().ok()?;
+    (1..=100).contains(&percent).then_some(percent)
+}
+
+fn lsp_popup_sizing_context(
+    snapshot: &vim_core_rs::CoreLightSnapshot,
+    window_id: i32,
+) -> PopupSizingContext {
+    let (terminal_width, terminal_height) = current_terminal_size();
+    let parent_window_rect = snapshot
+        .window(window_id)
+        .map(PaneRect::from_core_window)
+        .unwrap_or(PaneRect {
+            x: 0,
+            y: 0,
+            width: terminal_width,
+            height: terminal_height,
+        });
+    PopupSizingContext {
+        terminal_width,
+        terminal_height,
+        parent_window_rect,
+    }
+}
+
+fn resolve_lsp_popup_size_limit(
+    spec: PopupSizeSpec,
+    context: &PopupSizingContext,
+) -> ResolvedPopupSizeLimit {
+    if matches!(spec.basis, PopupSizeBasis::Available) {
+        log::debug!(
+            "[main][lsp_float] popup size basis \"available\" is accepted but origin-based resolution is not available yet; falling back to \"window\""
+        );
+    }
+    let width = resolve_lsp_popup_size_value(
+        spec.width,
+        spec.basis,
+        context.terminal_width,
+        context.parent_window_rect.width,
+    );
+    let height = resolve_lsp_popup_size_value(
+        spec.height,
+        spec.basis,
+        context.terminal_height,
+        context.parent_window_rect.height,
+    );
+    let limit = ResolvedPopupSizeLimit::bordered(width, height);
+    ResolvedPopupSizeLimit {
+        max_width: limit.max_width.min(context.terminal_width.max(1)),
+        max_height: limit.max_height.min(context.terminal_height.max(1)),
+    }
+}
+
+fn resolve_lsp_popup_size_value(
+    value: PopupSizeValue,
+    basis: PopupSizeBasis,
+    editor_dimension: u16,
+    window_dimension: u16,
+) -> u16 {
+    let resolved = match value {
+        PopupSizeValue::Cells(cells) => cells,
+        PopupSizeValue::Percent(percent) => {
+            let basis_dimension = match basis {
+                PopupSizeBasis::Editor => editor_dimension,
+                PopupSizeBasis::Window | PopupSizeBasis::Available => window_dimension,
+            };
+            let cells = u32::from(basis_dimension) * u32::from(percent) / 100;
+            u16::try_from(cells).unwrap_or(u16::MAX).max(1)
+        }
+    };
+    resolved.max(1).min(editor_dimension.max(1))
+}
+
 fn execute_lsp_hover_float_host_command(
     payload: &str,
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
@@ -4292,14 +4547,26 @@ fn execute_lsp_hover_float_host_command(
         })?;
     let snapshot = outcome.core_bridge.light_snapshot();
     let window_id = snapshot.active_window_id().unwrap_or(1);
+    let hover_kind = parse_lsp_hover_popup_kind(&value)?;
+    let size_limit = resolve_lsp_popup_size_limit_from_payload(
+        "lsp.floatHover",
+        &value,
+        match hover_kind {
+            LspHoverPopupKind::Hover => LspPopupKind::Hover,
+            LspHoverPopupKind::SignatureHelp => LspPopupKind::SignatureHelp,
+        },
+        &snapshot,
+        window_id,
+    )?;
     let response = value
         .get("response")
         .or_else(|| value.get("result"))
         .cloned()
         .unwrap_or(value);
     if hover_response_is_plain_any(&response)
-        && let Some(diagnostic) = lsp_diagnostic_store
-            .and_then(|store| store.diagnostic_at_position(snapshot.cursor_row, snapshot.cursor_col))
+        && let Some(diagnostic) = lsp_diagnostic_store.and_then(|store| {
+            store.diagnostic_at_position(snapshot.cursor_row, snapshot.cursor_col)
+        })
     {
         let response = serde_json::json!({
             "result": {
@@ -4313,6 +4580,7 @@ fn execute_lsp_hover_float_host_command(
                 cursor_row: snapshot.cursor_row,
                 cursor_col: snapshot.cursor_col,
                 response,
+                size_limit,
             },
         );
         log::debug!(
@@ -4338,6 +4606,7 @@ fn execute_lsp_hover_float_host_command(
             cursor_row: snapshot.cursor_row,
             cursor_col: snapshot.cursor_col,
             response,
+            size_limit,
         },
     );
     log::debug!(
@@ -4418,6 +4687,13 @@ fn execute_lsp_diagnostic_float_host_command(
         })?;
     let snapshot = outcome.core_bridge.light_snapshot();
     let window_id = snapshot.active_window_id().unwrap_or(1);
+    let size_limit = resolve_lsp_popup_size_limit_from_payload(
+        "lsp.floatDiagnostics",
+        &value,
+        LspPopupKind::Diagnostics,
+        &snapshot,
+        window_id,
+    )?;
     let line = value
         .get("line")
         .and_then(serde_json::Value::as_u64)
@@ -4440,6 +4716,7 @@ fn execute_lsp_diagnostic_float_host_command(
             line,
             column,
             diagnostics,
+            size_limit,
         },
     );
     log::debug!(
@@ -4473,6 +4750,13 @@ fn execute_lsp_location_list_float_host_command(
         })?;
     let snapshot = outcome.core_bridge.light_snapshot();
     let window_id = snapshot.active_window_id().unwrap_or(1);
+    let size_limit = resolve_lsp_popup_size_limit_from_payload(
+        "lsp.floatLocations",
+        &value,
+        LspPopupKind::Locations,
+        &snapshot,
+        window_id,
+    )?;
     let title = value
         .get("title")
         .and_then(serde_json::Value::as_str)
@@ -4489,6 +4773,7 @@ fn execute_lsp_location_list_float_host_command(
             window_id,
             title,
             response,
+            size_limit,
         },
     );
     log::debug!(
@@ -4520,6 +4805,13 @@ fn execute_lsp_symbol_outline_float_host_command(
         })?;
     let snapshot = outcome.core_bridge.light_snapshot();
     let window_id = snapshot.active_window_id().unwrap_or(1);
+    let size_limit = resolve_lsp_popup_size_limit_from_payload(
+        "lsp.floatSymbols",
+        &value,
+        LspPopupKind::Symbols,
+        &snapshot,
+        window_id,
+    )?;
     let response = value
         .get("response")
         .or_else(|| value.get("result"))
@@ -4530,6 +4822,7 @@ fn execute_lsp_symbol_outline_float_host_command(
         LspSymbolOutlineRequest {
             window_id,
             response,
+            size_limit,
         },
     );
     log::debug!(
@@ -4848,6 +5141,7 @@ fn execute_lsp_cycle_diagnostic_host_command(
     floating_window_manager: Option<&mut FloatingWindowManager>,
     lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
     next: bool,
+    payload: Option<&str>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
     let store = lsp_diagnostic_store.ok_or_else(|| RuntimeCommandError::CommandFailed {
         name: "lsp.diagnosticNavigation".to_string(),
@@ -4867,15 +5161,36 @@ fn execute_lsp_cycle_diagnostic_host_command(
             presentation_intents: Vec::new(),
         });
     };
-    let payload = serde_json::json!({
+    let ui =
+        match payload {
+            Some(payload) => {
+                let value: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
+                    RuntimeCommandError::CommandFailed {
+                        name: "lsp.diagnosticNavigation".to_string(),
+                        message: format!("invalid LSP diagnostic navigation payload: {error}"),
+                    }
+                })?;
+                Some(value.get("ui").cloned().ok_or_else(|| {
+                    RuntimeCommandError::CommandFailed {
+                        name: "lsp.diagnosticNavigation".to_string(),
+                        message: "diagnostic navigation payload must include ui".to_string(),
+                    }
+                })?)
+            }
+            None => None,
+        };
+    let mut payload = serde_json::json!({
         "line": diagnostic.line,
         "column": diagnostic.column,
         "diagnostics": [{
             "severity": diagnostic.severity,
             "message": diagnostic.message,
         }],
-    })
-    .to_string();
+    });
+    if let Some(ui) = ui {
+        payload["ui"] = ui;
+    }
+    let payload = payload.to_string();
     let mut effect =
         execute_lsp_diagnostic_float_host_command(&payload, outcome, floating_window_manager)?;
     effect.transient_message = Some(format!(
@@ -9910,6 +10225,12 @@ mod tests {
             ))
         );
         assert_eq!(
+            parse_main_host_command(r#"lsp.nextDiagnostic {"ui":{"width":40,"height":8}}"#),
+            Some(MainHostCommand::LspNextDiagnostic(Some(
+                r#"{"ui":{"width":40,"height":8}}"#.to_string()
+            )))
+        );
+        assert_eq!(
             parse_main_host_command(r#"lsp.previewWorkspaceEdit {"title":"Rename"}"#),
             Some(MainHostCommand::LspWorkspaceEditPreview(
                 r#"{"title":"Rename"}"#.to_string()
@@ -10008,6 +10329,96 @@ mod tests {
     }
 
     #[test]
+    fn lsp_popup_size_percent_resolves_against_window_by_default() {
+        let context = PopupSizingContext {
+            terminal_width: 100,
+            terminal_height: 40,
+            parent_window_rect: saya::presentation::screen_model::PaneRect {
+                x: 0,
+                y: 0,
+                width: 60,
+                height: 20,
+            },
+        };
+
+        let limit = resolve_lsp_popup_size_limit(
+            PopupSizeSpec {
+                width: PopupSizeValue::Percent(50),
+                height: PopupSizeValue::Percent(50),
+                basis: default_lsp_popup_basis(LspPopupKind::Hover),
+            },
+            &context,
+        );
+
+        assert_eq!(
+            limit,
+            ResolvedPopupSizeLimit {
+                max_width: 30,
+                max_height: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn lsp_popup_size_percent_can_resolve_against_editor_grid() {
+        let context = PopupSizingContext {
+            terminal_width: 100,
+            terminal_height: 40,
+            parent_window_rect: saya::presentation::screen_model::PaneRect {
+                x: 0,
+                y: 0,
+                width: 60,
+                height: 20,
+            },
+        };
+
+        let limit = resolve_lsp_popup_size_limit(
+            PopupSizeSpec {
+                width: PopupSizeValue::Percent(50),
+                height: PopupSizeValue::Percent(50),
+                basis: PopupSizeBasis::Editor,
+            },
+            &context,
+        );
+
+        assert_eq!(
+            limit,
+            ResolvedPopupSizeLimit {
+                max_width: 50,
+                max_height: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn lsp_popup_size_payload_rejects_invalid_percentages() {
+        let error = parse_lsp_popup_size_spec(
+            Some(&serde_json::json!({ "width": "0%", "height": "101%" })),
+            PopupSizeBasis::Window,
+            "lsp.floatHover.ui",
+        )
+        .expect_err("invalid percentage should fail");
+
+        assert!(
+            error.contains("percentage string from 1% through 100%"),
+            "error should explain percentage bounds: {error}"
+        );
+    }
+
+    #[test]
+    fn lsp_hover_payload_kind_accepts_signature_help_for_dedicated_ui_size() {
+        assert_eq!(
+            parse_lsp_hover_popup_kind(&serde_json::json!({ "kind": "signatureHelp" }))
+                .expect("signatureHelp kind should be accepted"),
+            LspHoverPopupKind::SignatureHelp
+        );
+        assert!(
+            parse_lsp_hover_popup_kind(&serde_json::json!({ "kind": "typo" })).is_err(),
+            "unknown hover kind should be rejected"
+        );
+    }
+
+    #[test]
     fn runtime_lsp_hover_any_prefers_diagnostic_at_cursor() {
         let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
@@ -10067,10 +10478,9 @@ mod tests {
 
         assert_eq!(floats.len(), 1);
         assert!(
-            floats[0]
-                .lines
-                .join(" ")
-                .contains("Error: Property 'lineNumber' does not exist on type 'SayaStartupOptionsSurface'."),
+            floats[0].lines.join(" ").contains(
+                "Error: Property 'lineNumber' does not exist on type 'SayaStartupOptionsSurface'."
+            ),
             "diagnostic hover should render the TypeScript error: {:?}",
             floats[0].lines
         );
@@ -11402,18 +11812,16 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let seed =
             saya::runtime::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(
-                vec![
-                    saya::runtime::config::StartupRegistryEntry::Event {
-                        name: "bufferChanged".to_string(),
-                        callback_source: r#"
+                vec![saya::runtime::config::StartupRegistryEntry::Event {
+                    name: "bufferChanged".to_string(),
+                    callback_source: r#"
                             async () => {
                                 globalThis.__sayaBufferChangedObserved =
                                     (globalThis.__sayaBufferChangedObserved ?? 0) + 1;
                             }
                         "#
-                        .to_string(),
-                    },
-                ],
+                    .to_string(),
+                }],
             );
         let mut runtime_session =
             RuntimeSessionOwner::spawn(seed).expect("runtime owner should initialize");

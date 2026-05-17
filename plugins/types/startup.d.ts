@@ -122,6 +122,26 @@ declare global {
         level?: "error" | "warn" | "info" | "debug" | "trace";
     }
 
+    interface SayaPluginUseSpec {
+        name?: string;
+        local?: string;
+        github?: `${string}/${string}`;
+        rev?: string;
+        module?: string;
+        setup?: string;
+        options?: unknown;
+    }
+
+    interface SayaPluginLazySpec extends SayaPluginUseSpec {
+        commands?: string[];
+        events?: Array<"bufferOpen" | "bufferChanged" | "bufferWritePost" | "bufferClosed" | string>;
+    }
+
+    interface SayaStartupPluginsSurface {
+        use(specs: SayaPluginUseSpec[]): void;
+        lazy(specs: SayaPluginLazySpec[]): void;
+    }
+
     interface SayaStartupSurface {
         options: SayaStartupOptionsSurface;
         keymap: SayaStartupKeymapSurface;
@@ -129,6 +149,7 @@ declare global {
         events: SayaStartupEventsSurface;
         theme: SayaStartupThemeSurface;
         log: SayaStartupLogSurface;
+        plugins: SayaStartupPluginsSurface;
     }
 
     var saya: SayaStartupSurface;

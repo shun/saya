@@ -1,14 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use crate::features::selector::runtime::{
-    RuntimeRenderedSelectorItem, RuntimeSelectorStatus, SelectorViewBackend,
-    SelectorViewBackendInput,
+    RuntimeRenderedSelectorItem, RuntimeSelectorStatus, RuntimeSelectorUiOptions,
+    SelectorViewBackend, SelectorViewBackendInput,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorUiProjection {
     pub session_id: u64,
     pub query: String,
+    pub rendered_items: Vec<RuntimeRenderedSelectorItem>,
     pub visible_rows: Vec<SelectorUiRow>,
     pub selected_row: Option<SelectorUiRow>,
     pub selected_item: Option<RuntimeRenderedSelectorItem>,
@@ -17,6 +18,7 @@ pub struct SelectorUiProjection {
     pub hidden: bool,
     pub cancelled: bool,
     pub status: RuntimeSelectorStatus,
+    pub ui: RuntimeSelectorUiOptions,
     pub status_text: String,
     pub intent: SelectorUiIntent,
     pub should_dispose_session: bool,
@@ -122,10 +124,12 @@ fn project_selector_view_input(
         hidden,
         cancelled,
         status,
+        ui,
     } = input;
 
     let visible_rows = rendered_items
-        .into_iter()
+        .iter()
+        .cloned()
         .enumerate()
         .skip(offset)
         .take(visible_row_limit)
@@ -148,6 +152,7 @@ fn project_selector_view_input(
     SelectorUiProjection {
         session_id,
         query,
+        rendered_items,
         visible_rows,
         selected_row,
         selected_item,
@@ -156,6 +161,7 @@ fn project_selector_view_input(
         hidden,
         cancelled,
         status,
+        ui,
         status_text,
         intent,
         should_dispose_session: false,

@@ -4,8 +4,8 @@ use saya::features::selector::host_adapter::{
 use saya::features::selector::runtime::{
     RuntimeRenderedSelectorItem, RuntimeSelectorCollectStatus, RuntimeSelectorHighlight,
     RuntimeSelectorMatchStatus, RuntimeSelectorStatus, RuntimeSelectorStorageMode,
-    RuntimeSelectorStoreStatus, RuntimeSelectorWorkState, SelectorViewBackend,
-    SelectorViewBackendInput,
+    RuntimeSelectorStoreStatus, RuntimeSelectorUiOptions, RuntimeSelectorWorkState,
+    SelectorViewBackend, SelectorViewBackendInput,
 };
 use std::sync::Arc;
 
@@ -157,5 +157,6 @@ fn selector_input(
                 temp_file_path: None,
             },
         },
+        ui: RuntimeSelectorUiOptions::default(),
     }
 }

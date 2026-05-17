@@ -4,8 +4,9 @@ use saya::features::selector::host_adapter::{SelectorHostViewAdapter, SelectorUi
 use saya::features::selector::runtime::{
     RuntimeRenderedSelectorItem, RuntimeSelectorCollectStatus, RuntimeSelectorHighlight,
     RuntimeSelectorMatchStatus, RuntimeSelectorStatus, RuntimeSelectorStorageMode,
-    RuntimeSelectorStoreStatus, RuntimeSelectorWorkState, SelectorViewBackend,
-    SelectorViewBackendInput,
+    RuntimeSelectorStoreStatus, RuntimeSelectorUiOptions, RuntimeSelectorWindowPercent,
+    RuntimeSelectorWindowSizeValue, RuntimeSelectorWindowUiOptions, RuntimeSelectorWorkState,
+    SelectorViewBackend, SelectorViewBackendInput,
 };
 use saya::features::selector::tui_state::{
     SelectorTuiProjectionSink, selector_tui_model_to_workspace_float,
@@ -165,6 +166,80 @@ fn visible_tui_selector_model_projects_to_static_workspace_float() {
 }
 
 #[test]
+fn selector_window_ui_options_control_float_rect_and_derives_rows_from_height() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 10);
+
+    let mut input = selector_input(
+        "needle",
+        0,
+        0,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    );
+    input.ui.window = Some(RuntimeSelectorWindowUiOptions {
+        width: Some(RuntimeSelectorWindowSizeValue::Percent(
+            RuntimeSelectorWindowPercent(75),
+        )),
+        height: Some(RuntimeSelectorWindowSizeValue::Cells(9)),
+    });
+    adapter.render(input);
+
+    let model = tui_state
+        .current_model()
+        .expect("render projection should produce TUI selector model");
+    let float = selector_tui_model_to_workspace_float(&model, 120, 30)
+        .expect("visible selector model should project to workspace float");
+    assert_eq!(float.rect.width, 90);
+    assert_eq!(float.rect.height, 9);
+    assert_eq!(float.rect.x, 15);
+    assert_eq!(float.rect.y, 7);
+    assert_eq!(
+        float.lines.len(),
+        7,
+        "height 9 leaves 5 content rows after border/query/status"
+    );
+}
+
+#[test]
+fn selector_window_height_keeps_cursor_visible_without_ten_row_page_jump() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 10);
+
+    let mut input = selector_input_with_len(
+        "needle",
+        10,
+        10,
+        50,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    );
+    input.ui.window = Some(RuntimeSelectorWindowUiOptions {
+        width: None,
+        height: Some(RuntimeSelectorWindowSizeValue::Cells(20)),
+    });
+    adapter.render(input);
+
+    let model = tui_state
+        .current_model()
+        .expect("render projection should produce TUI selector model");
+    let float = selector_tui_model_to_workspace_float(&model, 120, 30)
+        .expect("visible selector model should project to workspace float");
+
+    assert_eq!(float.rect.height, 20);
+    assert_eq!(
+        float.lines[1], "  row 0",
+        "height-derived rows should not treat the fixed controller offset as a page reset"
+    );
+    assert_eq!(
+        float.lines[11], "> row 10",
+        "cursor should remain at its natural row instead of jumping to the top"
+    );
+}
+
+#[test]
 fn hidden_or_cancelled_tui_selector_model_projects_to_no_workspace_float() {
     let tui_state = Arc::new(SelectorTuiProjectionSink::new());
     let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 3);
@@ -206,7 +281,19 @@ fn selector_input(
     cancelled: bool,
     match_state: RuntimeSelectorWorkState,
 ) -> SelectorViewBackendInput {
-    let rendered_items = (0..6)
+    selector_input_with_len(query, cursor, offset, 6, hidden, cancelled, match_state)
+}
+
+fn selector_input_with_len(
+    query: &str,
+    cursor: usize,
+    offset: usize,
+    item_len: usize,
+    hidden: bool,
+    cancelled: bool,
+    match_state: RuntimeSelectorWorkState,
+) -> SelectorViewBackendInput {
+    let rendered_items = (0..item_len)
         .map(|index| RuntimeRenderedSelectorItem {
             id: format!("row-{index}"),
             label: format!("row {index}"),
@@ -229,23 +316,24 @@ fn selector_input(
         status: RuntimeSelectorStatus {
             collect: RuntimeSelectorCollectStatus {
                 state: RuntimeSelectorWorkState::Completed,
-                total_seen: 6,
-                total_stored: 6,
+                total_seen: item_len,
+                total_stored: item_len,
                 storage: RuntimeSelectorStorageMode::Memory,
                 error_message: None,
             },
             match_status: RuntimeSelectorMatchStatus {
                 state: match_state,
-                total_matched: 6,
-                total_rendered: 6,
+                total_matched: item_len,
+                total_rendered: item_len,
                 error_message: None,
             },
             store: RuntimeSelectorStoreStatus {
                 storage: RuntimeSelectorStorageMode::Memory,
-                total_stored: 6,
+                total_stored: item_len,
                 estimated_bytes: Some(48),
                 temp_file_path: None,
             },
         },
+        ui: RuntimeSelectorUiOptions::default(),
     }
 }

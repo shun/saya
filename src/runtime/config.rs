@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use serde_json::Value as JsonValue;
+
 use crate::presentation::theme::{
     MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
 };
@@ -174,9 +176,32 @@ pub enum StartupRegistryEntry {
     LogLevel {
         level: log::LevelFilter,
     },
+    PluginUse {
+        declaration: StartupPluginDeclaration,
+    },
+    PluginLazy {
+        declaration: StartupPluginDeclaration,
+    },
     Warning {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupPluginDeclaration {
+    pub name: String,
+    pub source: StartupPluginSource,
+    pub module: String,
+    pub setup: String,
+    pub commands: Vec<String>,
+    pub events: Vec<String>,
+    pub options: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupPluginSource {
+    Local { path: String },
+    Github { repo: String, rev: Option<String> },
 }
 
 /// startup keymap のモード。

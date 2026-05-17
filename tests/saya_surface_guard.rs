@@ -298,7 +298,9 @@ fn startup_surface_excludes_filesystem_and_network_capabilities() {
 
     assert_eq!(
         surface,
-        &["options", "keymap", "commands", "events", "theme", "log"]
+        &[
+            "options", "keymap", "commands", "events", "theme", "log", "plugins"
+        ]
     );
     assert_eq!(
         startup_forbidden_surface_names(),

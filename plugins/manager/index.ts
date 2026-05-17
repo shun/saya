@@ -6,6 +6,7 @@ import { syncLocalPlugin } from "./protocols/local.ts";
 import { buildStartupPlan, type SayaStartupPlan } from "./startup-plan.ts";
 import {
   definePlugins,
+  defineUserPlugins,
   normalizeBundledPlugins,
   type NormalizedPluginSpec,
   normalizeExternalPlugins,
@@ -21,6 +22,7 @@ export { buildStartupPlan } from "./startup-plan.ts";
 export type { SayaStartupPlan } from "./startup-plan.ts";
 export {
   definePlugins,
+  defineUserPlugins,
   encodeSource,
   normalizeBundledPlugins,
   normalizeExternalPlugins,
@@ -28,9 +30,11 @@ export {
 } from "./spec.ts";
 export type {
   SayaBundledPluginManifest,
+  SayaPluginLazyDeclaration,
   SayaPluginLazySpec,
   SayaPluginSource,
   SayaPluginSpec,
+  SayaPluginUseDeclaration,
 } from "./spec.ts";
 
 export interface SayaPluginManagerArtifacts {
