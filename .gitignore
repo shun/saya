@@ -3,7 +3,10 @@ target/
 .kiro/
 .claude/
 .gemini/
-.codex/
+.codex/*
+!.codex/hooks.json
+!.codex/hooks/
+!.codex/hooks/**
 .agents/
 scripts/
 tmp/
