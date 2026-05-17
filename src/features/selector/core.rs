@@ -201,7 +201,7 @@ impl SelectorViewState {
         if self.cursor < self.offset {
             self.offset = self.cursor;
         } else if self.cursor >= self.offset.saturating_add(page_size) {
-            self.offset = self.cursor;
+            self.offset = self.cursor.saturating_add(1).saturating_sub(page_size);
         }
     }
 }

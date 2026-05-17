@@ -240,6 +240,62 @@ fn selector_window_height_keeps_cursor_visible_without_ten_row_page_jump() {
 }
 
 #[test]
+fn selector_workspace_float_preserves_large_viewport_when_moving_up_from_bottom() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 10);
+
+    let mut bottom = selector_input_with_len(
+        "needle",
+        105,
+        96,
+        106,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    );
+    bottom.ui.window = Some(RuntimeSelectorWindowUiOptions {
+        width: None,
+        height: Some(RuntimeSelectorWindowSizeValue::Cells(41)),
+    });
+    adapter.render(bottom);
+
+    let first_float = tui_state
+        .workspace_float(120, 55)
+        .expect("visible selector model should project to workspace float");
+    assert_eq!(
+        first_float.lines[37], "> row 105",
+        "initial bottom cursor should be drawn on the bottom visible row"
+    );
+
+    let mut moved_up = selector_input_with_len(
+        "needle",
+        104,
+        96,
+        106,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    );
+    moved_up.ui.window = Some(RuntimeSelectorWindowUiOptions {
+        width: None,
+        height: Some(RuntimeSelectorWindowSizeValue::Cells(41)),
+    });
+    adapter.render(moved_up);
+
+    let second_float = tui_state
+        .workspace_float(120, 55)
+        .expect("visible selector model should project to workspace float");
+    assert_eq!(
+        second_float.lines[36], "> row 104",
+        "moving up should keep the large popup viewport stable and move the cursor off the bottom"
+    );
+    assert_eq!(
+        second_float.lines[37], "  row 105",
+        "the previous bottom row should remain visible below the cursor"
+    );
+}
+
+#[test]
 fn hidden_or_cancelled_tui_selector_model_projects_to_no_workspace_float() {
     let tui_state = Arc::new(SelectorTuiProjectionSink::new());
     let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 3);

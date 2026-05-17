@@ -58,8 +58,16 @@ impl From<SelectorUiProjection> for SelectorTuiViewModel {
 #[derive(Debug, Default)]
 struct SelectorTuiProjectionSinkState {
     current_model: Option<SelectorTuiViewModel>,
+    viewport: Option<SelectorTuiViewportState>,
     projection_count: usize,
     visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectorTuiViewportState {
+    session_id: u64,
+    row_limit: usize,
+    start: usize,
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +105,36 @@ impl SelectorTuiProjectionSink {
     pub fn float_launch_count(&self) -> usize {
         0
     }
+
+    pub fn workspace_float(
+        &self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<FloatingScreenModel> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("selector TUI projection sink poisoned");
+        let model = state.current_model.clone()?;
+        let row_limit = selector_tui_content_row_limit(&model, terminal_height);
+        let previous_start = state.viewport.and_then(|viewport| {
+            (viewport.session_id == model.session_id && viewport.row_limit == row_limit)
+                .then_some(viewport.start)
+        });
+        let start = selector_tui_visible_start_with_previous(&model, row_limit, previous_start);
+        state.viewport = Some(SelectorTuiViewportState {
+            session_id: model.session_id,
+            row_limit,
+            start,
+        });
+        selector_tui_model_to_workspace_float_with_start(
+            &model,
+            terminal_width,
+            terminal_height,
+            row_limit,
+            start,
+        )
+    }
 }
 
 impl SelectorUiProjectionSink for SelectorTuiProjectionSink {
@@ -117,6 +155,9 @@ impl SelectorUiProjectionSink for SelectorTuiProjectionSink {
             .state
             .lock()
             .expect("selector TUI projection sink poisoned");
+        if !visible {
+            state.viewport = None;
+        }
         state.current_model = Some(model);
         state.visible = visible;
         state.projection_count += 1;
@@ -127,6 +168,24 @@ pub fn selector_tui_model_to_workspace_float(
     model: &SelectorTuiViewModel,
     terminal_width: u16,
     terminal_height: u16,
+) -> Option<FloatingScreenModel> {
+    let row_limit = selector_tui_content_row_limit(model, terminal_height);
+    let start = selector_tui_visible_start(model, row_limit);
+    selector_tui_model_to_workspace_float_with_start(
+        model,
+        terminal_width,
+        terminal_height,
+        row_limit,
+        start,
+    )
+}
+
+fn selector_tui_model_to_workspace_float_with_start(
+    model: &SelectorTuiViewModel,
+    terminal_width: u16,
+    terminal_height: u16,
+    row_limit: usize,
+    start: usize,
 ) -> Option<FloatingScreenModel> {
     if !matches!(model.intent, SelectorUiIntent::Render) || model.hidden || model.cancelled {
         log::debug!(
@@ -140,13 +199,8 @@ pub fn selector_tui_model_to_workspace_float(
     }
 
     let window = model.ui.window;
-    let configured_height = window
-        .and_then(|window| window.height)
-        .map(|value| resolve_selector_window_size_value(value, terminal_height));
-    let content_row_limit = configured_height
-        .map(selector_content_row_limit_for_height)
-        .unwrap_or(model.visible_rows.len().max(1));
-    let rows = selector_tui_visible_rows(model, content_row_limit);
+    let configured_height = selector_tui_configured_height(model, terminal_height);
+    let rows = selector_tui_visible_rows_from_start(model, row_limit, start);
     let lines = selector_tui_static_lines(model, &rows);
     let content_width = lines
         .iter()
@@ -177,10 +231,14 @@ pub fn selector_tui_model_to_workspace_float(
     let float_id = selector_tui_float_id(model.session_id);
 
     log::debug!(
-        "[selector_tui_state] project selector model to workspace float: id={}, float_id={}, lines={}, rect=({}, {}, {}, {})",
+        "[selector_tui_state] project selector model to workspace float: id={}, float_id={}, lines={}, row_limit={}, start={}, cursor={}, offset={}, rect=({}, {}, {}, {})",
         model.session_id,
         float_id.0,
         lines.len(),
+        row_limit,
+        start,
+        model.cursor,
+        model.offset,
         x,
         y,
         width,
@@ -210,15 +268,34 @@ pub fn selector_tui_model_to_workspace_float(
     })
 }
 
+fn selector_tui_configured_height(
+    model: &SelectorTuiViewModel,
+    terminal_height: u16,
+) -> Option<u16> {
+    model
+        .ui
+        .window
+        .and_then(|window| window.height)
+        .map(|value| resolve_selector_window_size_value(value, terminal_height))
+}
+
+fn selector_tui_content_row_limit(model: &SelectorTuiViewModel, terminal_height: u16) -> usize {
+    selector_tui_configured_height(model, terminal_height)
+        .map(selector_content_row_limit_for_height)
+        .unwrap_or(model.visible_rows.len().max(1))
+}
+
 fn selector_content_row_limit_for_height(height: u16) -> usize {
     usize::from(height.saturating_sub(2))
         .saturating_sub(2)
         .max(1)
 }
 
-fn selector_tui_visible_rows(model: &SelectorTuiViewModel, row_limit: usize) -> Vec<SelectorUiRow> {
-    let row_limit = row_limit.max(1);
-    let start = selector_tui_visible_start(model, row_limit);
+fn selector_tui_visible_rows_from_start(
+    model: &SelectorTuiViewModel,
+    row_limit: usize,
+    start: usize,
+) -> Vec<SelectorUiRow> {
     model
         .rendered_items
         .iter()
@@ -232,6 +309,32 @@ fn selector_tui_visible_rows(model: &SelectorTuiViewModel, row_limit: usize) -> 
             selected: model.cursor == index,
         })
         .collect()
+}
+
+fn selector_tui_visible_start_with_previous(
+    model: &SelectorTuiViewModel,
+    row_limit: usize,
+    previous_start: Option<usize>,
+) -> usize {
+    let Some(previous_start) = previous_start else {
+        return selector_tui_visible_start(model, row_limit);
+    };
+
+    let row_limit = row_limit.max(1);
+    let item_len = model.rendered_items.len();
+    if item_len <= row_limit {
+        return 0;
+    }
+
+    let max_start = item_len.saturating_sub(row_limit);
+    let cursor = model.cursor.min(item_len.saturating_sub(1));
+    let mut start = previous_start.min(max_start);
+    if cursor < start {
+        start = cursor;
+    } else if cursor >= start.saturating_add(row_limit) {
+        start = cursor.saturating_add(1).saturating_sub(row_limit);
+    }
+    start.min(max_start)
 }
 
 fn selector_tui_visible_start(model: &SelectorTuiViewModel, row_limit: usize) -> usize {

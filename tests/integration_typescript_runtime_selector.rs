@@ -836,7 +836,7 @@ async fn runtime_selector_headless_view_backend_receives_controller_snapshots() 
         Some("row-1")
     );
     assert_eq!(frames[2].cursor, 11);
-    assert_eq!(frames[2].offset, 11);
+    assert_eq!(frames[2].offset, 2);
     assert_eq!(
         frames[2]
             .selected_item
@@ -845,7 +845,7 @@ async fn runtime_selector_headless_view_backend_receives_controller_snapshots() 
         Some("row-11")
     );
     assert_eq!(frames[3].cursor, 10);
-    assert_eq!(frames[3].offset, 10);
+    assert_eq!(frames[3].offset, 2);
     assert_eq!(frames[4].cursor, 0);
     assert_eq!(frames[4].offset, 0);
     assert_eq!(frames[5].cursor, 10);

@@ -230,6 +230,30 @@ fn selector_controller_moves_cursor_and_offset_within_rendered_items() {
 }
 
 #[test]
+fn selector_controller_keeps_cursor_moving_inside_last_page_when_going_up() {
+    let mut view = SelectorViewState::new(25);
+    let controller = SelectorController::new(5);
+
+    controller.apply(&mut view, SelectorControllerCommand::CursorLast);
+    assert_eq!(view.cursor, 24);
+    assert_eq!(
+        view.offset, 20,
+        "last item should be shown at the bottom of the final page"
+    );
+
+    controller.apply(&mut view, SelectorControllerCommand::CursorPrevious);
+    assert_eq!(view.cursor, 23);
+    assert_eq!(
+        view.offset, 20,
+        "moving up inside the visible final page must not keep the cursor pinned to the bottom"
+    );
+
+    controller.apply(&mut view, SelectorControllerCommand::CursorPrevious);
+    assert_eq!(view.cursor, 22);
+    assert_eq!(view.offset, 20);
+}
+
+#[test]
 fn selector_controller_distinguishes_hide_from_cancel_state() {
     let mut view = SelectorViewState::new(2);
     let controller = SelectorController::new(10);

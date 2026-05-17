@@ -43,9 +43,7 @@ use saya::features::selector::keymap::{
 use saya::features::selector::runtime::{
     RuntimeRgLocation, RuntimeSelectorControllerCommand, parse_rg_selector_location_detail,
 };
-use saya::features::selector::tui_state::{
-    SelectorTuiProjectionSink, SelectorTuiViewModel, selector_tui_model_to_workspace_float,
-};
+use saya::features::selector::tui_state::{SelectorTuiProjectionSink, SelectorTuiViewModel};
 use saya::input::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
 use saya::input::command_line_history::{
     history_direction_for_key, load_histories_from_default_cache,
@@ -7240,11 +7238,7 @@ fn build_workspace_render_output(
         if let Some(sink) = selector_tui_projection_sink
             && let Some(selector_model) = sink.current_model()
         {
-            if let Some(selector_float) = selector_tui_model_to_workspace_float(
-                &selector_model,
-                terminal_width,
-                terminal_height,
-            ) {
+            if let Some(selector_float) = sink.workspace_float(terminal_width, terminal_height) {
                 log::debug!(
                     "[main][selector] appended selector TUI float to workspace model: session_id={}, rows={}, floats_before={}",
                     selector_model.session_id,
