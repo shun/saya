@@ -1,6 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+use crate::runtime::plugin::PluginCommand;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRequest {
     pub input_source: InputSource,
@@ -56,14 +58,17 @@ pub enum StartupAction {
     Edit,
     PrintHelp,
     PrintVersion,
+    Plugin(PluginCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliParseError {
     MissingConfigPath,
     MissingLineNumber,
+    MissingPluginCommand,
     InvalidLineNumber(OsString),
     MultipleTargetPaths,
+    UnknownPluginCommand(OsString),
     UnknownFlag(OsString),
 }
 
@@ -122,6 +127,22 @@ where
 
         if matches!(arg.to_str(), Some("--version")) {
             request.startup_action = StartupAction::PrintVersion;
+            continue;
+        }
+
+        if matches!(arg.to_str(), Some("plugin")) {
+            let Some(command) = args.next() else {
+                return Err(CliParseError::MissingPluginCommand);
+            };
+            let Some(command_text) = command.as_ref().to_str() else {
+                return Err(CliParseError::UnknownPluginCommand(
+                    command.as_ref().to_os_string(),
+                ));
+            };
+            request.startup_action =
+                StartupAction::Plugin(PluginCommand::parse(command_text).ok_or_else(|| {
+                    CliParseError::UnknownPluginCommand(command.as_ref().to_os_string())
+                })?);
             continue;
         }
 
@@ -355,6 +376,36 @@ mod tests {
                 startup_action: StartupAction::PrintVersion,
                 ..LaunchRequest::default()
             }
+        );
+    }
+
+    #[test]
+    fn parses_plugin_sync_action() {
+        let request = parse_launch_request(["plugin", "sync"]).unwrap();
+
+        assert_eq!(
+            request,
+            LaunchRequest {
+                startup_action: StartupAction::Plugin(PluginCommand::Sync),
+                ..LaunchRequest::default()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_missing_plugin_command() {
+        let err = parse_launch_request(["plugin"]).unwrap_err();
+
+        assert_eq!(err, CliParseError::MissingPluginCommand);
+    }
+
+    #[test]
+    fn rejects_unknown_plugin_command() {
+        let err = parse_launch_request(["plugin", "packadd"]).unwrap_err();
+
+        assert_eq!(
+            err,
+            CliParseError::UnknownPluginCommand(OsString::from("packadd"))
         );
     }
 

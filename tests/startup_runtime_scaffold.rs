@@ -375,7 +375,7 @@ async fn init_ts_module_can_import_repository_lsp_client_plugin() {
     assert!(
         module
             .executable_source_text
-            .contains("function setupSayaLspClient"),
+            .contains("setupSayaLspClient"),
         "plugin function should be inlined into the executable source"
     );
     assert!(
@@ -485,14 +485,15 @@ fn lsp_client_shim_exposes_normal_typescript_named_exports() {
     assert!(
         source.contains("export {")
             && source.contains("setupSayaLspClient")
-            && source.contains("from \"./saya-lsp/index.ts\""),
+            && source.contains("from \"./bundled/lsp-client/index.ts\""),
         "lsp client shim should expose named exports for external TypeScript language servers"
     );
 }
 
 #[test]
 fn lsp_client_manager_routes_server_notifications_to_ui_commands() {
-    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-lsp/index.ts");
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("plugins/bundled/lsp-client/index.ts");
     let source = std::fs::read_to_string(plugin_path).expect("lsp client should be readable");
 
     assert!(
@@ -510,7 +511,7 @@ fn lsp_client_manager_routes_server_notifications_to_ui_commands() {
 #[test]
 fn repository_lsp_client_plugin_public_helpers_cover_lsp_and_lsif_protocol_shape() {
     // プラグインは plugins/saya-lsp-client.ts （シム）から
-    // plugins/saya-lsp/ 配下のモジュール群へ分割されている。
+    // plugins/bundled/lsp-client/ 配下のモジュール群へ分割されている。
     // 物理ファイル構造ではなく、展開後の実行ソースに API surface が
     // 含まれていることを検証する。
     let current_dir = unique_path("lsp-surface-cwd");
@@ -577,7 +578,8 @@ fn repository_lsp_client_plugin_public_helpers_cover_lsp_and_lsif_protocol_shape
 
 #[test]
 fn repository_dired_plugin_public_options_cover_phase6_surface() {
-    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-dired.ts");
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("plugins/bundled/dired/index.ts");
     let source = std::fs::read_to_string(plugin_path).expect("repository dired plugin");
 
     for expected in [

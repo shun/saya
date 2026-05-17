@@ -100,6 +100,7 @@ fn runtime_surface_excludes_compatibility_string_apis() {
         "saya.selector.control",
         "saya.selector.cancel",
         "saya.selector.dispose",
+        "saya.plugins.loadLazy",
     ] {
         assert!(
             surface.contains(&expected),

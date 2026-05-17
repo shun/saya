@@ -1,3 +1,5 @@
+// deno-fmt-ignore-file
+
 // UTF-8 codec ヘルパ。
 //
 // seed runtime / production runtime のいずれにも TextEncoder / TextDecoder

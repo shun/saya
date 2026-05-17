@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "lsp-client",
+  "module": "plugins/bundled/lsp-client/index.ts",
+  "setup": "setupSayaLspClient",
+  "lazy": {
+    "commands": [
+      "lsp.start",
+      "lsp.hover",
+      "lsp.definition",
+      "lsp.references",
+      "lsp.rename"
+    ],
+    "events": [
+      "bufferOpen"
+    ]
+  }
+}

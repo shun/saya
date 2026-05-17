@@ -4,6 +4,7 @@ pub mod integration;
 pub mod live;
 pub mod message;
 pub mod options;
+pub mod plugin;
 pub mod process_pool;
 pub mod refresh;
 pub mod startup;

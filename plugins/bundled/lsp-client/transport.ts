@@ -1,3 +1,5 @@
+// deno-fmt-ignore-file
+
 // LSP の transport 層。
 //
 // 名前空間規約: top-level に '__lspTransport' 1 個のみ。

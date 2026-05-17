@@ -177,6 +177,19 @@ preview, actions, and resumable selector sessions.
 Use [LSP preview](api/lsp-preview.md) for the current LSP setup surface,
 runtime boundary, supported feature matrix, LSIF limitations, and headless
 verification commands.
+Use [Plugin model](design/plugin-model.md) for the distinction between bundled
+TypeScript plugins that ship with `saya` and external plugins installed through
+the plugin manager.
+
+The plugin manager foundation follows the same boundary. Rust provides only the
+host primitives for cache files under `~/.cache/saya`, cached startup plan
+loading, bundled manifest fallback, lazy trigger bridging, and failure
+reporting. Bundled plugin code lives under `plugins/bundled/` with
+`manifest.json` files that Rust can read on a cache miss. External plugin
+policy, source and protocol resolution, dependency metadata, artifact
+generation, and operational workflow live in `plugins/manager/`. See
+[Plugin manager API](api/plugin-manager.md) for the cache layout and public
+TypeScript surface.
 
 ## Next steps
 

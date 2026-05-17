@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 
 use crate::app::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
 use crate::app::session::EditorSessionState;
@@ -15,6 +16,7 @@ use crate::runtime::config::{
     evaluate_capability_source,
 };
 use crate::runtime::options::{SayaOptionName, SayaOptionValue};
+use crate::runtime::plugin::{PluginHost, StartupPlanValidation};
 use crate::runtime::startup::{
     StartupModulePrepareResult, collect_startup_registry, prepare_init_module,
 };
@@ -489,9 +491,10 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
     match evaluate_bootstrap_capability(loaded_config) {
         CapabilityLoadResult::Success {
             path,
-            registry,
+            mut registry,
             commands,
         } => {
+            merge_plugin_startup_cache(loaded_config, &mut registry);
             let result = apply_config_commands(&commands, &mut state);
             let startup_registry = startup_registry_from_registry(&state, &registry);
             let callback_registry = callback_registry_from_registry(&registry);
@@ -516,21 +519,28 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
             };
         }
         CapabilityLoadResult::DefaultUsed => {
+            let mut plugin_registry = StartupRegistry::default();
+            merge_plugin_startup_cache(loaded_config, &mut plugin_registry);
             let startup_registry = StartupRegistrySnapshot::from_apply_state(&state);
-            let callback_registry = CallbackRegistrySeed::empty();
+            let callback_registry = callback_registry_from_registry(&plugin_registry);
             let resolved_theme = ResolvedTheme::default();
+            let warning_path =
+                default_init_ts_path().unwrap_or_else(|| PathBuf::from("<default-init>"));
+            let warnings = startup_warnings_from_registry(&warning_path, &plugin_registry);
             log::debug!(
-                "[bootstrap] resolved startup state from default config: tab_size={}, line_numbers={}, keymaps={}",
+                "[bootstrap] resolved startup state from default config: tab_size={}, line_numbers={}, keymaps={}, plugin_commands={}, plugin_events={}",
                 state.tab_size,
                 state.line_numbers,
-                startup_registry.keymaps.len()
+                startup_registry.keymaps.len(),
+                callback_registry.commands().len(),
+                callback_registry.events().len()
             );
             return ResolvedStartupState {
                 apply_state: state,
                 startup_registry,
                 callback_registry,
                 resolved_theme,
-                warnings: Vec::new(),
+                warnings,
             };
         }
         CapabilityLoadResult::ReadFailed { path, message } => {
@@ -579,6 +589,94 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
         resolved_theme,
         warnings: Vec::new(),
     }
+}
+
+fn merge_plugin_startup_cache(loaded_config: &LoadedConfig, registry: &mut StartupRegistry) {
+    let host = PluginHost::default_from_env();
+    let validation = match loaded_config {
+        LoadedConfig::Default => StartupPlanValidation::Any,
+        LoadedConfig::File { source, .. } => {
+            StartupPlanValidation::SourceHash(source_hash_for_startup_cache(source))
+        }
+    };
+
+    let mut loaded_plugin_entries = 0usize;
+    match host.merge_cached_startup_plan(registry, validation) {
+        Ok(report) => {
+            loaded_plugin_entries += report.loaded_entries;
+            log::debug!(
+                "[bootstrap][plugin-host] startup plan merge completed: loaded_entries={}, cache_root={}",
+                report.loaded_entries,
+                host.root().path().display()
+            );
+        }
+        Err(error) => {
+            log::debug!(
+                "[bootstrap][plugin-host] startup plan merge failed and was reported as warning: error={}",
+                error
+            );
+            registry.push(StartupRegistryEntry::Warning {
+                message: format!("plugin startup cache failed: {error}"),
+            });
+        }
+    }
+
+    match host.startup_registry_from_lazy_index() {
+        Ok((lazy_registry, report)) => {
+            loaded_plugin_entries += report.loaded_entries;
+            for entry in lazy_registry {
+                registry.push(entry);
+            }
+            log::debug!(
+                "[bootstrap][plugin-host] lazy index merge completed: loaded_entries={}, cache_root={}",
+                report.loaded_entries,
+                host.root().path().display()
+            );
+        }
+        Err(error) => {
+            log::debug!(
+                "[bootstrap][plugin-host] lazy index merge failed and was reported as warning: error={}",
+                error
+            );
+            registry.push(StartupRegistryEntry::Warning {
+                message: format!("plugin lazy cache failed: {error}"),
+            });
+        }
+    }
+
+    if loaded_plugin_entries == 0 {
+        let disabled = host.external_disabled_report("cache_missing");
+        for line in disabled.logs {
+            registry.push(StartupRegistryEntry::Warning { message: line });
+        }
+        match host.startup_registry_from_bundled_manifests() {
+            Ok((bundled_registry, report)) => {
+                for entry in bundled_registry {
+                    registry.push(entry);
+                }
+                log::debug!(
+                    "[bootstrap][plugin-host] bundled manifest fallback completed: loaded_entries={}, cache_root={}",
+                    report.loaded_entries,
+                    host.root().path().display()
+                );
+            }
+            Err(error) => {
+                log::debug!(
+                    "[bootstrap][plugin-host] bundled manifest fallback failed and was reported as warning: error={}",
+                    error
+                );
+                registry.push(StartupRegistryEntry::Warning {
+                    message: format!("plugin bundled manifest fallback failed: {error}"),
+                });
+            }
+        }
+    }
+}
+
+fn source_hash_for_startup_cache(source: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn evaluate_bootstrap_capability(loaded_config: &LoadedConfig) -> CapabilityLoadResult {

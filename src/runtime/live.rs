@@ -64,6 +64,7 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.selector.cancel",
     "saya.selector.dispose",
     "saya.process.spawn",
+    "saya.plugins.loadLazy",
 ];
 
 /// Formal runtime surface は read-only/command 実行に限定し、compat 文字列 DSL は含めない。
@@ -284,6 +285,19 @@ globalThis.saya = {
             return makeProcessHandle(handle);
         },
     },
+    plugins: {
+        async loadLazy(request) {
+            const payload = {
+                kind: String(request?.kind ?? ""),
+                name: String(request?.name ?? ""),
+                plugin: String(request?.plugin ?? ""),
+                module: String(request?.module ?? ""),
+                exportName: String(request?.exportName ?? ""),
+            };
+            console.info(`[saya-plugin-host][lazy] bridge request kind=${payload.kind} name=${payload.name} plugin=${payload.plugin}`);
+            return await Deno.core.ops.op_runtime_plugin_load_lazy(JSON.stringify(payload));
+        },
+    },
 };
 
 function makeProcessHandle(id) {
@@ -335,6 +349,7 @@ Object.freeze(globalThis.saya.lsif);
 Object.freeze(globalThis.saya.input);
 Object.freeze(globalThis.saya.selector);
 Object.freeze(globalThis.saya.process);
+Object.freeze(globalThis.saya.plugins);
 Object.freeze(globalThis.saya);
 
 // プラグインの console.* をすべて diagnostic logger に流す。
@@ -387,6 +402,7 @@ Object.freeze(globalThis.saya);
 
 const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &[
     "commands", "buffer", "window", "editor", "filer", "lsif", "input", "selector", "process",
+    "plugins",
 ];
 const RUNTIME_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
@@ -737,6 +753,20 @@ declare global {
         spawn(spec: SayaProcessSpec): Promise<SayaProcessHandle>;
     }
 
+    type SayaLazyPluginTriggerKind = "command" | "event";
+
+    interface SayaLazyPluginLoadRequest {
+        kind: SayaLazyPluginTriggerKind;
+        name: string;
+        plugin: string;
+        module: string;
+        exportName: string;
+    }
+
+    interface SayaRuntimePluginsSurface {
+        loadLazy(request: SayaLazyPluginLoadRequest): Promise<void>;
+    }
+
     type SayaFilerEntryKind = "directory" | "file" | "symlink" | "other";
 
     type SayaFilerSortKey = "name" | "kind" | "modifiedTime" | "size";
@@ -863,6 +893,7 @@ declare global {
         input: SayaRuntimeInputSurface;
         selector: SayaRuntimeSelectorSurface;
         process: SayaRuntimeProcessSurface;
+        plugins: SayaRuntimePluginsSurface;
     }
 
     var saya: SayaRuntimeSurface;
@@ -1527,6 +1558,16 @@ struct LiveRuntimeOpState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeLazyPluginLoadRequest {
+    pub kind: String,
+    pub name: String,
+    pub plugin: String,
+    pub module: String,
+    pub export_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeInputPromptRequest {
     pub title: String,
     pub placeholder: Option<String>,
@@ -1565,6 +1606,47 @@ async fn op_runtime_execute_host_command(
         .execute_host_command(&name)
         .await
         .map_err(runtime_command_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+async fn op_runtime_plugin_load_lazy(#[string] request_json: String) -> Result<(), JsErrorBox> {
+    let request = serde_json::from_str::<RuntimeLazyPluginLoadRequest>(&request_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid lazy plugin request: {error}")))?;
+    if request.kind != "command" && request.kind != "event" {
+        log::debug!(
+            "[saya-plugin-host][lazy] lazy bridge rejected unsupported trigger kind: kind={}, name={}, plugin={}",
+            request.kind,
+            request.name,
+            request.plugin
+        );
+        return Err(JsErrorBox::generic(format!(
+            "unsupported lazy plugin trigger kind: {}",
+            request.kind
+        )));
+    }
+    if request.plugin.trim().is_empty()
+        || request.module.trim().is_empty()
+        || request.export_name.trim().is_empty()
+    {
+        log::debug!(
+            "[saya-plugin-host][lazy] lazy bridge rejected incomplete target: kind={}, name={}, plugin={}, module={}, export={}",
+            request.kind,
+            request.name,
+            request.plugin,
+            request.module,
+            request.export_name
+        );
+        return Err(JsErrorBox::generic("incomplete lazy plugin target"));
+    }
+    log::info!(
+        "[saya-plugin-host][lazy] lazy bridge accepted: kind={}, name={}, plugin={}, module={}, export={}",
+        request.kind,
+        request.name,
+        request.plugin,
+        request.module,
+        request.export_name
+    );
+    Ok(())
 }
 
 #[op2(async(deferred), fast)]
@@ -2518,6 +2600,7 @@ deno_core::extension!(
     live_saya_extension,
     ops = [
         op_runtime_execute_host_command,
+        op_runtime_plugin_load_lazy,
         op_runtime_lsif_request,
         op_runtime_input_prompt,
         op_runtime_selector_open,
@@ -4309,6 +4392,73 @@ mod tests {
         std::fs::remove_file(file_path).expect("cleanup file");
         std::fs::remove_dir(dir_path).expect("cleanup dir");
         std::fs::remove_dir(root).expect("cleanup root");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn seed_runtime_lazy_plugin_bridge_accepts_logged_lazy_command_trigger() {
+        let host_bridge = Arc::new(RecordingHostBridge::new());
+        let seed = CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Command {
+            name: "GitStatus".to_string(),
+            callback_source: r#"
+                async () => {
+                    console.info("[saya-plugin-host][lazy] command trigger: name=GitStatus plugin=git-tools module=plugins/git-tools.ts");
+                    await saya.plugins.loadLazy({
+                        kind: "command",
+                        name: "GitStatus",
+                        plugin: "git-tools",
+                        module: "plugins/git-tools.ts",
+                        exportName: "setup",
+                    });
+                }
+            "#
+            .to_string(),
+        }]);
+
+        let runtime =
+            SayaLiveRuntime::spawn_from_seed(host_bridge, seed).expect("runtime should initialize");
+        let receipt = runtime
+            .execute_command("GitStatus")
+            .expect("lazy command should queue");
+        receipt
+            .await_result()
+            .await
+            .expect("lazy command bridge should accept target");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn seed_runtime_lazy_plugin_bridge_reports_invalid_target_as_command_failure() {
+        let host_bridge = Arc::new(RecordingHostBridge::new());
+        let seed = CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Command {
+            name: "BrokenLazy".to_string(),
+            callback_source: r#"
+                async () => {
+                    console.info("[saya-plugin-host][lazy] command trigger: name=BrokenLazy plugin= module=");
+                    await saya.plugins.loadLazy({
+                        kind: "command",
+                        name: "BrokenLazy",
+                        plugin: "",
+                        module: "",
+                        exportName: "setup",
+                    });
+                }
+            "#
+            .to_string(),
+        }]);
+
+        let runtime =
+            SayaLiveRuntime::spawn_from_seed(host_bridge, seed).expect("runtime should initialize");
+        let receipt = runtime
+            .execute_command("BrokenLazy")
+            .expect("lazy command should queue");
+        let error = receipt
+            .await_result()
+            .await
+            .expect_err("invalid lazy target should fail command");
+
+        assert!(
+            format!("{error:?}").contains("incomplete lazy plugin target"),
+            "failure should expose lazy bridge message: {error:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

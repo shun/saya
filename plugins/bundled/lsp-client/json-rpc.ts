@@ -1,3 +1,5 @@
+// deno-fmt-ignore-file
+
 // LSP の JSON-RPC framing / parser / client。
 //
 // 名前空間規約: top-level に '__lspJsonRpc' 1 個のみ。

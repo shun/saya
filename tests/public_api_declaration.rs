@@ -7,10 +7,17 @@ fn startup_public_api_type_declaration_is_published_for_external_language_server
         .expect("startup API declaration should be published for TypeScript language servers");
 
     assert_eq!(
-        declaration.trim(),
+        strip_deno_fmt_ignore_file(&declaration),
         STARTUP_SAYA_TYPE_DECLARATION.trim(),
         "published startup declaration must stay in sync with the runtime startup surface"
     );
+}
+
+fn strip_deno_fmt_ignore_file(declaration: &str) -> &str {
+    declaration
+        .strip_prefix("// deno-fmt-ignore-file\n\n")
+        .unwrap_or(declaration)
+        .trim()
 }
 
 #[test]

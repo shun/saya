@@ -1,3 +1,5 @@
+// deno-fmt-ignore-file
+
 // LSP セッションの lifecycle 状態機械。
 //
 // 名前空間規約: top-level に '__lspLifecycle' 1 個のみ。

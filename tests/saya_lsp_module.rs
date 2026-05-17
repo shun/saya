@@ -1,4 +1,4 @@
-//! Phase B: `plugins/saya-lsp/` 配下の名前空間モジュール群の単体テスト。
+//! Phase B: `plugins/bundled/lsp-client/` 配下の名前空間モジュール群の単体テスト。
 //!
 //! 各 namespace（`__lspUtf8` / `__lspJsonRpc` / `__lspTransport` /
 //! `__lspLifecycle` / `__lspSession` 等）の振る舞いを、seed runtime を介さず

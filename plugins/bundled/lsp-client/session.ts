@@ -1,3 +1,5 @@
+// deno-fmt-ignore-file
+
 // LSP セッションオーケストレータ。
 //
 // 名前空間規約: top-level に '__lspSession' 1 個のみ。

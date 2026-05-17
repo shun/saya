@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "dired",
+  "module": "plugins/bundled/dired/index.ts",
+  "setup": "setupSayaDired",
+  "lazy": {
+    "commands": [
+      "dired.open",
+      "dired.enter",
+      "dired.up",
+      "dired.refresh",
+      "dired.mark",
+      "dired.unmark",
+      "dired.clearMarks",
+      "dired.bulkDeletePreview"
+    ],
+    "events": []
+  }
+}

@@ -1,4 +1,6 @@
-// Phase B: plugins/saya-lsp/ 配下のサブモジュールを inline 展開する。
+// deno-fmt-ignore-file
+
+// Phase B: plugins/bundled/lsp-client/ 配下のサブモジュールを inline 展開する。
 // import 行はローダ (expand_local_startup_imports_from_path) によって
 // 対象ファイルの内容に置換され、const __lspXxx = { ... }; という
 // top-level namespace 宣言が現在の評価スコープに持ち込まれる。
@@ -7,6 +9,8 @@ import {} from "./json-rpc.ts";
 import {} from "./transport.ts";
 import {} from "./lifecycle.ts";
 import {} from "./session.ts";
+
+// deno-fmt-ignore-file
 
 export interface SayaLspCommandNames {
   initialize?: string;

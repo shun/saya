@@ -1118,7 +1118,9 @@ fn expand_local_startup_imports_from_path(
 
     let mut output = String::with_capacity(source_text.len());
     for line in source_text.lines() {
-        let Some(specifier) = parse_static_import_specifier(line) else {
+        let Some(specifier) =
+            parse_static_import_specifier(line).or_else(|| parse_static_re_export_specifier(line))
+        else {
             output.push_str(line);
             output.push('\n');
             continue;
@@ -1159,6 +1161,15 @@ fn parse_static_import_specifier(line: &str) -> Option<&str> {
         .map(|(_, specifier)| specifier.trim())
         .unwrap_or_else(|| trimmed.trim_start_matches("import").trim());
     parse_quoted_module_specifier(after_from.trim_end_matches(';').trim())
+}
+
+fn parse_static_re_export_specifier(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("export ") {
+        return None;
+    }
+    let (_, specifier) = trimmed.split_once(" from ")?;
+    parse_quoted_module_specifier(specifier.trim_end_matches(';').trim())
 }
 
 fn parse_quoted_module_specifier(value: &str) -> Option<&str> {

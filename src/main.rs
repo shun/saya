@@ -88,6 +88,7 @@ use saya::runtime::live::{
     RuntimeFloatSnapshot, RuntimeFloatZIndexRequest, RuntimeInputPromptRequest,
     RuntimeInputPromptResponse, RuntimeMode,
 };
+use saya::runtime::plugin::{PluginHost, render_plugin_report};
 use saya::support::diagnostic_log::{
     configure_from_startup as configure_diagnostic_log_from_startup,
     init_from_env as init_diagnostic_log_from_env,
@@ -154,6 +155,19 @@ async fn main() {
         StartupAction::PrintVersion => {
             println!("{}", render_version_text());
             std::process::exit(0);
+        }
+        StartupAction::Plugin(command) => {
+            let host = PluginHost::default_from_env();
+            match host.run_operation(*command) {
+                Ok(report) => {
+                    println!("{}", render_plugin_report(&report));
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("[saya-plugin-manager] {error}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
 
@@ -8204,10 +8218,19 @@ fn format_cli_error(error: CliParseError) -> String {
     match error {
         CliParseError::MissingConfigPath => "設定ファイルのパスが指定されていません".to_string(),
         CliParseError::MissingLineNumber => "開始行番号が指定されていません".to_string(),
+        CliParseError::MissingPluginCommand => {
+            "plugin サブコマンドが指定されていません".to_string()
+        }
         CliParseError::InvalidLineNumber(value) => {
             format!("開始行番号が不正です: {}", value.to_string_lossy())
         }
         CliParseError::MultipleTargetPaths => "対象ファイルは 1 つだけ指定できます".to_string(),
+        CliParseError::UnknownPluginCommand(command) => {
+            format!(
+                "未対応の plugin サブコマンドです: {}",
+                command.to_string_lossy()
+            )
+        }
         CliParseError::UnknownFlag(flag) => {
             format!("未対応のオプションです: {}", flag.to_string_lossy())
         }
@@ -8269,6 +8292,13 @@ fn render_help_text() -> String {
         "  -R               Read-only mode",
         "  -h, --help       Print help and exit",
         "  --version        Print version information and exit",
+        "",
+        "Plugin commands:",
+        "  plugin sync      Generate plugin cache artifacts via the manager",
+        "  plugin update    Update plugin cache artifacts via the manager",
+        "  plugin list      List cached plugins",
+        "  plugin clean     Remove generated startup and lazy cache artifacts",
+        "  plugin doctor    Check plugin cache health",
     ]
     .join("\n")
 }

@@ -332,7 +332,7 @@ fn runtime_surface_excludes_filesystem_and_network_capabilities() {
         surface,
         &[
             "commands", "buffer", "window", "editor", "filer", "lsif", "input", "selector",
-            "process"
+            "process", "plugins"
         ]
     );
     assert_eq!(
