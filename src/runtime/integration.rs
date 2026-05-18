@@ -6,7 +6,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::features::lsp::runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
 use crate::features::selector::host_adapter::SelectorHostViewAdapter;
 use crate::features::selector::runtime::{
-    RuntimeSelectorControlRequest, RuntimeSelectorControllerCommand, SelectorViewBackend,
+    RuntimeSelectorControlRequest, RuntimeSelectorControllerCommand, RuntimeSelectorUpdateRequest,
+    SelectorViewBackend,
 };
 use crate::features::selector::tui_state::SelectorTuiProjectionSink;
 use crate::presentation::overlay::effect::RuntimePresentationIntent;
@@ -762,6 +763,73 @@ impl RuntimeSessionOwner {
                 );
                 RuntimeDispatchOutcome {
                     transient_message: Some(format!("Selector control failed: {:?}", error)),
+                    requires_redraw: true,
+                    shutdown_intent: None,
+                    presentation_intents: Vec::new(),
+                }
+            }
+        }
+    }
+
+    pub async fn update_selector_query<H: RuntimeHostSession>(
+        &mut self,
+        id: u64,
+        query: String,
+        host_session: &mut H,
+    ) -> RuntimeDispatchOutcome {
+        self.refresh_cached_snapshots(host_session);
+        log::info!(
+            "[runtime_integration][selector] host selector query update start: id={}, query_len={}",
+            id,
+            query.len()
+        );
+        let projection_count_before = self.selector_tui_projection_sink.projection_count();
+        let receipt = match self
+            .runtime
+            .update_selector(id, RuntimeSelectorUpdateRequest { query })
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                log::debug!(
+                    "[runtime_integration][selector] selector update failed before queue: id={}, error={:?}",
+                    id,
+                    error
+                );
+                return RuntimeDispatchOutcome {
+                    transient_message: Some(format!("Selector update failed: {:?}", error)),
+                    requires_redraw: true,
+                    shutdown_intent: None,
+                    presentation_intents: Vec::new(),
+                };
+            }
+        };
+        match receipt.await_result().await {
+            Ok(snapshot) => {
+                let projection_count_after = self.selector_tui_projection_sink.projection_count();
+                log::info!(
+                    "[runtime_integration][selector] selector query update succeeded: id={}, query_len={}, matched={}, rendered={}, cursor={}, offset={}",
+                    snapshot.id,
+                    snapshot.query.len(),
+                    snapshot.status.match_status.total_matched,
+                    snapshot.rendered_items.len(),
+                    snapshot.view.cursor,
+                    snapshot.view.offset
+                );
+                RuntimeDispatchOutcome {
+                    transient_message: None,
+                    requires_redraw: projection_count_after != projection_count_before,
+                    shutdown_intent: None,
+                    presentation_intents: Vec::new(),
+                }
+            }
+            Err(error) => {
+                log::debug!(
+                    "[runtime_integration][selector] selector query update failed: id={}, error={:?}",
+                    id,
+                    error
+                );
+                RuntimeDispatchOutcome {
+                    transient_message: Some(format!("Selector update failed: {:?}", error)),
                     requires_redraw: true,
                     shutdown_intent: None,
                     presentation_intents: Vec::new(),

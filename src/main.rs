@@ -38,12 +38,14 @@ use saya::features::search::refresh::{
     SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore,
 };
 use saya::features::selector::keymap::{
-    SelectorAction, SelectorKeyRoute, selector_key_route_for_model,
+    SelectorAction, SelectorKeyRoute, SelectorModeSwitch, selector_key_route_for_model,
 };
 use saya::features::selector::runtime::{
     RuntimeRgLocation, RuntimeSelectorControllerCommand, parse_rg_selector_location_detail,
 };
-use saya::features::selector::tui_state::{SelectorTuiProjectionSink, SelectorTuiViewModel};
+use saya::features::selector::tui_state::{
+    SelectorMode, SelectorTuiProjectionSink, SelectorTuiViewModel,
+};
 use saya::input::command_line_editor::{CommandLineEdit, command_line_edit_action_for_key};
 use saya::input::command_line_history::{
     history_direction_for_key, load_histories_from_default_cache,
@@ -579,6 +581,128 @@ async fn main() {
                                         );
                                         need_redraw = true;
                                     }
+                                }
+                                SelectorKeyRoute::QueryEdit { session_id, edit } => {
+                                    handled = true;
+                                    if let (Some(runtime_session), Some(selector_model)) =
+                                        (runtime_session.as_mut(), selector_model.as_ref())
+                                    {
+                                        let next_query = edit.apply_to(&selector_model.query);
+                                        log::info!(
+                                            "[main][selector] selector query edit routing start: key={:?}, session_id={}, edit={:?}, prev_query_len={}, next_query_len={}",
+                                            key,
+                                            session_id,
+                                            edit,
+                                            selector_model.query.len(),
+                                            next_query.len()
+                                        );
+                                        let mut host_session = MainRuntimeHostSession::new(
+                                            &mut outcome,
+                                            &mut session_state,
+                                        );
+                                        let dispatch_outcome = runtime_session
+                                            .update_selector_query(
+                                                session_id,
+                                                next_query,
+                                                &mut host_session,
+                                            )
+                                            .await;
+                                        if dispatch_outcome.transient_message.is_some() {
+                                            log::debug!(
+                                                "[main][selector] selector query edit failed from key routing: key={:?}, session_id={}, edit={:?}",
+                                                key,
+                                                session_id,
+                                                edit
+                                            );
+                                        } else {
+                                            log::info!(
+                                                "[main][selector] selector query edit succeeded from key routing: key={:?}, session_id={}, edit={:?}",
+                                                key,
+                                                session_id,
+                                                edit
+                                            );
+                                        }
+                                        let _ = apply_runtime_dispatch_outcome(
+                                            &mut transient_msg,
+                                            &mut need_redraw,
+                                            &mut runtime_presentation_intents,
+                                            dispatch_outcome,
+                                        );
+                                    } else {
+                                        log::debug!(
+                                            "[main][selector] selector query edit route resolved without runtime session/model: key={:?}, session_id={}, edit={:?}",
+                                            key,
+                                            session_id,
+                                            edit
+                                        );
+                                        transient_msg = Some(
+                                            "Selector runtime session is not available".to_string(),
+                                        );
+                                        need_redraw = true;
+                                    }
+                                }
+                                SelectorKeyRoute::ModeSwitch { session_id, switch } => {
+                                    handled = true;
+                                    let mode = match switch {
+                                        SelectorModeSwitch::EnterInsert => SelectorMode::Insert,
+                                        SelectorModeSwitch::EnterNormal => SelectorMode::Normal,
+                                    };
+                                    log::info!(
+                                        "[main][selector] selector mode switch routing start: key={:?}, session_id={}, switch={:?}, mode={:?}",
+                                        key,
+                                        session_id,
+                                        switch,
+                                        mode
+                                    );
+                                    if let Some(runtime_session) = runtime_session.as_ref() {
+                                        match runtime_session
+                                            .selector_tui_projection_sink()
+                                            .set_mode(session_id, mode)
+                                        {
+                                            Ok(()) => {
+                                                log::info!(
+                                                    "[main][selector] selector mode switch succeeded: key={:?}, session_id={}, mode={:?}",
+                                                    key,
+                                                    session_id,
+                                                    mode
+                                                );
+                                                need_redraw = true;
+                                            }
+                                            Err(error) => {
+                                                log::debug!(
+                                                    "[main][selector] selector mode switch failed: key={:?}, session_id={}, mode={:?}, error={:?}",
+                                                    key,
+                                                    session_id,
+                                                    mode,
+                                                    error
+                                                );
+                                                transient_msg = Some(format!(
+                                                    "Selector mode switch failed: {:?}",
+                                                    error
+                                                ));
+                                                need_redraw = true;
+                                            }
+                                        }
+                                    } else {
+                                        log::debug!(
+                                            "[main][selector] selector mode switch route resolved without runtime session: key={:?}, session_id={}, switch={:?}",
+                                            key,
+                                            session_id,
+                                            switch
+                                        );
+                                        transient_msg = Some(
+                                            "Selector runtime session is not available".to_string(),
+                                        );
+                                        need_redraw = true;
+                                    }
+                                }
+                                SelectorKeyRoute::Noop { session_id } => {
+                                    handled = true;
+                                    log::debug!(
+                                        "[main][selector] selector consumed unmapped key as noop: key={:?}, session_id={}",
+                                        key,
+                                        session_id
+                                    );
                                 }
                                 SelectorKeyRoute::Inactive => {
                                     log::debug!(

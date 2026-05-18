@@ -3657,6 +3657,11 @@ impl SayaLiveRuntime {
                             control_selector_session(&worker_shared.selector_sessions, id, request);
                         let _ = reply.send(result);
                     }
+                    RuntimeMessage::UpdateSelector { id, request, reply } => {
+                        let result =
+                            update_selector_session(&worker_shared.selector_sessions, id, request);
+                        let _ = reply.send(result);
+                    }
                 }
             }
             log::debug!("[saya_live_runtime] live runtime worker stopped");
@@ -3734,6 +3739,15 @@ impl SayaLiveRuntime {
                                 );
                                 let result =
                                     control_selector_session(&selector_sessions, id, request);
+                                let _ = reply.send(result);
+                            }
+                            RuntimeMessage::UpdateSelector { id, request, reply } => {
+                                log::debug!(
+                                    "[saya_live_runtime][selector] seed runtime received host selector update: id={}, query_len={}",
+                                    id,
+                                    request.query.len()
+                                );
+                                let result = update_selector_session(&selector_sessions, id, request);
                                 let _ = reply.send(result);
                             }
                         }
@@ -3838,6 +3852,26 @@ impl SayaLiveRuntime {
             })?;
         Ok(RuntimeSelectorControlReceipt { receiver })
     }
+
+    pub fn update_selector(
+        &self,
+        id: u64,
+        request: RuntimeSelectorUpdateRequest,
+    ) -> Result<RuntimeSelectorUpdateReceipt, RuntimeCommandError> {
+        log::info!(
+            "[saya_live_runtime][selector] queue host selector update: id={}, query_len={}",
+            id,
+            request.query.len()
+        );
+        let (reply, receiver) = oneshot::channel();
+        self.sender
+            .send(RuntimeMessage::UpdateSelector { id, request, reply })
+            .map_err(|_| RuntimeCommandError::CommandFailed {
+                name: "selector.update".to_string(),
+                message: "runtime selector update queue closed".to_string(),
+            })?;
+        Ok(RuntimeSelectorUpdateReceipt { receiver })
+    }
 }
 
 pub struct RuntimeDispatchReceipt {
@@ -3886,6 +3920,21 @@ impl RuntimeSelectorControlReceipt {
     }
 }
 
+pub struct RuntimeSelectorUpdateReceipt {
+    receiver: oneshot::Receiver<Result<RuntimeSelectorSnapshot, RuntimeCommandError>>,
+}
+
+impl RuntimeSelectorUpdateReceipt {
+    pub async fn await_result(self) -> Result<RuntimeSelectorSnapshot, RuntimeCommandError> {
+        self.receiver
+            .await
+            .map_err(|_| RuntimeCommandError::CommandFailed {
+                name: "selector.update".to_string(),
+                message: "runtime selector update worker stopped".to_string(),
+            })?
+    }
+}
+
 enum RuntimeMessage {
     Dispatch {
         event: RuntimeEventPayload,
@@ -3898,6 +3947,11 @@ enum RuntimeMessage {
     ControlSelector {
         id: u64,
         request: RuntimeSelectorControlRequest,
+        reply: oneshot::Sender<Result<RuntimeSelectorSnapshot, RuntimeCommandError>>,
+    },
+    UpdateSelector {
+        id: u64,
+        request: RuntimeSelectorUpdateRequest,
         reply: oneshot::Sender<Result<RuntimeSelectorSnapshot, RuntimeCommandError>>,
     },
 }
@@ -3919,6 +3973,26 @@ fn control_selector_session(
         .control(id, request)
         .map_err(|error| RuntimeCommandError::CommandFailed {
             name: "selector.control".to_string(),
+            message: error.to_string(),
+        })
+}
+
+fn update_selector_session(
+    selector_sessions: &Arc<StdMutex<RuntimeSelectorSessions>>,
+    id: u64,
+    request: RuntimeSelectorUpdateRequest,
+) -> Result<RuntimeSelectorSnapshot, RuntimeCommandError> {
+    log::debug!(
+        "[saya_live_runtime][selector] host selector update start: id={}, query_len={}",
+        id,
+        request.query.len()
+    );
+    selector_sessions
+        .lock()
+        .expect("selector sessions poisoned")
+        .update(id, request)
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "selector.update".to_string(),
             message: error.to_string(),
         })
 }

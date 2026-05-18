@@ -5,12 +5,12 @@ use crate::features::selector::host_adapter::{
 };
 use crate::features::selector::runtime::RuntimeSelectorStatus;
 use crate::features::selector::runtime::{
-    RuntimeSelectorUiOptions, RuntimeSelectorWindowSizeValue,
+    RuntimeSelectorHighlightKind, RuntimeSelectorUiOptions, RuntimeSelectorWindowSizeValue,
 };
 use crate::{
     presentation::floating_window::{
-        FloatingBorder, FloatingChrome, FloatingContentRef, FloatingInlineStyle,
-        FloatingScreenModel, FloatingWindowId,
+        FloatingBorder, FloatingChrome, FloatingContentRef, FloatingCursor, FloatingInlineStyle,
+        FloatingInlineStyleKind, FloatingScreenModel, FloatingWindowId,
     },
     presentation::screen_model::PaneRect,
 };
@@ -20,6 +20,8 @@ use unicode_width::UnicodeWidthStr;
 pub struct SelectorTuiViewModel {
     pub session_id: u64,
     pub query: String,
+    pub mode: SelectorMode,
+    pub focused_part: SelectorTuiPart,
     pub rendered_items: Vec<crate::features::selector::runtime::RuntimeRenderedSelectorItem>,
     pub visible_rows: Vec<SelectorUiRow>,
     pub selected_row: Option<SelectorUiRow>,
@@ -34,11 +36,25 @@ pub struct SelectorTuiViewModel {
     pub should_dispose_session: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorMode {
+    Insert,
+    Normal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorTuiPart {
+    FilterInput,
+    CandidateList,
+}
+
 impl From<SelectorUiProjection> for SelectorTuiViewModel {
     fn from(projection: SelectorUiProjection) -> Self {
         Self {
             session_id: projection.session_id,
             query: projection.query,
+            mode: SelectorMode::Insert,
+            focused_part: SelectorTuiPart::FilterInput,
             rendered_items: projection.rendered_items,
             visible_rows: projection.visible_rows,
             selected_row: projection.selected_row,
@@ -58,9 +74,16 @@ impl From<SelectorUiProjection> for SelectorTuiViewModel {
 #[derive(Debug, Default)]
 struct SelectorTuiProjectionSinkState {
     current_model: Option<SelectorTuiViewModel>,
+    mode: Option<SelectorTuiModeState>,
     viewport: Option<SelectorTuiViewportState>,
     projection_count: usize,
     visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectorTuiModeState {
+    session_id: u64,
+    mode: SelectorMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +127,33 @@ impl SelectorTuiProjectionSink {
 
     pub fn float_launch_count(&self) -> usize {
         0
+    }
+
+    pub fn set_mode(&self, session_id: u64, mode: SelectorMode) -> Result<(), SelectorModeError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("selector TUI projection sink poisoned");
+        let Some(model) = state.current_model.as_mut() else {
+            return Err(SelectorModeError::NoActiveSelector);
+        };
+        if model.session_id != session_id {
+            return Err(SelectorModeError::SessionMismatch {
+                expected: model.session_id,
+                actual: session_id,
+            });
+        }
+        log::info!(
+            "[selector_tui_state] switch selector mode: id={}, from={:?}, to={:?}",
+            session_id,
+            model.mode,
+            mode
+        );
+        model.mode = mode;
+        model.focused_part = selector_tui_part_for_mode(mode);
+        state.mode = Some(SelectorTuiModeState { session_id, mode });
+        state.projection_count += 1;
+        Ok(())
     }
 
     pub fn workspace_float(
@@ -150,7 +200,7 @@ impl SelectorUiProjectionSink for SelectorTuiProjectionSink {
         );
 
         let visible = matches!(projection.intent, SelectorUiIntent::Render);
-        let model = SelectorTuiViewModel::from(projection);
+        let mut model = SelectorTuiViewModel::from(projection);
         let mut state = self
             .state
             .lock()
@@ -158,9 +208,29 @@ impl SelectorUiProjectionSink for SelectorTuiProjectionSink {
         if !visible {
             state.viewport = None;
         }
+        let mode = state
+            .mode
+            .filter(|mode| mode.session_id == model.session_id)
+            .map(|mode| mode.mode)
+            .unwrap_or(SelectorMode::Insert);
+        model.mode = mode;
+        model.focused_part = selector_tui_part_for_mode(mode);
         state.current_model = Some(model);
         state.visible = visible;
         state.projection_count += 1;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorModeError {
+    NoActiveSelector,
+    SessionMismatch { expected: u64, actual: u64 },
+}
+
+fn selector_tui_part_for_mode(mode: SelectorMode) -> SelectorTuiPart {
+    match mode {
+        SelectorMode::Insert => SelectorTuiPart::FilterInput,
+        SelectorMode::Normal => SelectorTuiPart::CandidateList,
     }
 }
 
@@ -202,6 +272,8 @@ fn selector_tui_model_to_workspace_float_with_start(
     let configured_height = selector_tui_configured_height(model, terminal_height);
     let rows = selector_tui_visible_rows_from_start(model, row_limit, start);
     let lines = selector_tui_static_lines(model, &rows);
+    let inline_styles = selector_tui_inline_styles(&rows);
+    let cursor = selector_tui_cursor(model, &rows);
     let content_width = lines
         .iter()
         .map(|line| UnicodeWidthStr::width(line.as_str()))
@@ -231,10 +303,11 @@ fn selector_tui_model_to_workspace_float_with_start(
     let float_id = selector_tui_float_id(model.session_id);
 
     log::debug!(
-        "[selector_tui_state] project selector model to workspace float: id={}, float_id={}, lines={}, row_limit={}, start={}, cursor={}, offset={}, rect=({}, {}, {}, {})",
+        "[selector_tui_state] project selector model to workspace float: id={}, float_id={}, lines={}, inline_styles={}, row_limit={}, start={}, cursor={}, offset={}, rect=({}, {}, {}, {})",
         model.session_id,
         float_id.0,
         lines.len(),
+        inline_styles.len(),
         row_limit,
         start,
         model.cursor,
@@ -257,7 +330,8 @@ fn selector_tui_model_to_workspace_float_with_start(
             height,
         },
         lines,
-        inline_styles: Vec::<FloatingInlineStyle>::new(),
+        inline_styles,
+        cursor,
         focusable: false,
         mouse: false,
         chrome: FloatingChrome {
@@ -391,6 +465,47 @@ fn selector_tui_static_lines(model: &SelectorTuiViewModel, rows: &[SelectorUiRow
     }));
     lines.push(model.status_text.clone());
     lines
+}
+
+fn selector_tui_cursor(
+    model: &SelectorTuiViewModel,
+    rows: &[SelectorUiRow],
+) -> Option<FloatingCursor> {
+    match model.mode {
+        SelectorMode::Insert => Some(FloatingCursor {
+            line: 0,
+            column: "query: ".len().saturating_add(model.query.len()),
+        }),
+        SelectorMode::Normal => rows
+            .iter()
+            .position(|row| row.selected)
+            .map(|visible_index| FloatingCursor {
+                line: visible_index.saturating_add(1),
+                column: 0,
+            }),
+    }
+}
+
+fn selector_tui_inline_styles(rows: &[SelectorUiRow]) -> Vec<FloatingInlineStyle> {
+    rows.iter()
+        .enumerate()
+        .flat_map(|(visible_index, row)| {
+            let line = visible_index + 1;
+            row.item
+                .highlights
+                .iter()
+                .filter(|highlight| highlight.kind == RuntimeSelectorHighlightKind::Match)
+                .map(move |highlight| {
+                    let column_start = 2usize.saturating_add(highlight.column);
+                    FloatingInlineStyle {
+                        kind: FloatingInlineStyleKind::Match,
+                        line,
+                        column_start,
+                        column_end: column_start.saturating_add(highlight.width),
+                    }
+                })
+        })
+        .collect()
 }
 
 fn selector_tui_float_id(session_id: u64) -> FloatingWindowId {

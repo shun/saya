@@ -358,9 +358,14 @@ fn render_workspace(f: &mut Frame<'_>, model: &WorkspaceScreenModel, text_mode: 
         None
     };
 
-    render_floats(f, &model.floats, text_mode, theme);
+    let float_cursor = render_floats(f, &model.floats, text_mode, theme);
 
     if let Some((cursor_x, cursor_y)) = command_cursor {
+        f.set_cursor_position((cursor_x, cursor_y));
+        return;
+    }
+
+    if let Some((cursor_x, cursor_y)) = float_cursor {
         f.set_cursor_position((cursor_x, cursor_y));
         return;
     }
@@ -375,9 +380,10 @@ fn render_floats(
     floats: &[FloatingScreenModel],
     text_mode: RenderTextMode,
     theme: &ResolvedTheme,
-) {
+) -> Option<(u16, u16)> {
     let mut sorted = floats.iter().collect::<Vec<_>>();
     sorted.sort_by_key(|float| (float.zindex, float.creation_order));
+    let mut cursor = None;
 
     for float in sorted {
         let rect = Rect {
@@ -428,7 +434,26 @@ fn render_floats(
             ),
         };
         f.render_widget(paragraph, rect);
+        if let Some(float_cursor) = float.cursor {
+            let content_origin_x = rect.x
+                + match float.chrome.border {
+                    FloatingBorder::None => 0,
+                    FloatingBorder::Single => 1,
+                };
+            let content_origin_y = rect.y
+                + match float.chrome.border {
+                    FloatingBorder::None => 0,
+                    FloatingBorder::Single => 1,
+                };
+            cursor = Some((
+                content_origin_x
+                    .saturating_add(u16::try_from(float_cursor.column).unwrap_or(u16::MAX)),
+                content_origin_y
+                    .saturating_add(u16::try_from(float_cursor.line).unwrap_or(u16::MAX)),
+            ));
+        }
     }
+    cursor
 }
 
 /// 行を `FloatingInlineStyle` に従って Span に分割する。Span 自体は
@@ -478,6 +503,9 @@ fn line_to_styled_spans<'a>(
 fn inline_kind_modifier_style(kind: FloatingInlineStyleKind) -> Style {
     use ratatui::style::Modifier;
     match kind {
+        FloatingInlineStyleKind::Match => Style::default()
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::UNDERLINED),
         FloatingInlineStyleKind::Code => Style::default().add_modifier(Modifier::BOLD),
         FloatingInlineStyleKind::Emphasis => Style::default().add_modifier(Modifier::ITALIC),
         FloatingInlineStyleKind::Heading { .. } => Style::default().add_modifier(Modifier::BOLD),
@@ -1514,7 +1542,8 @@ mod tests {
     };
     use crate::features::search::query::SearchMatchKind;
     use crate::presentation::floating_window::{
-        FloatingBorder, FloatingChrome, FloatingContentRef, FloatingScreenModel, FloatingWindowId,
+        FloatingBorder, FloatingChrome, FloatingContentRef, FloatingCursor, FloatingScreenModel,
+        FloatingWindowId,
     };
     use crate::presentation::markdown::structure::MarkdownDocumentMap;
     use crate::presentation::screen_model::{
@@ -3507,6 +3536,7 @@ mod tests {
                 },
                 lines: vec!["low".to_string()],
                 inline_styles: Vec::new(),
+                cursor: None,
                 focusable: false,
                 mouse: false,
                 chrome: FloatingChrome {
@@ -3526,6 +3556,7 @@ mod tests {
                 },
                 lines: vec!["top".to_string()],
                 inline_styles: Vec::new(),
+                cursor: None,
                 focusable: false,
                 mouse: false,
                 chrome: FloatingChrome {
@@ -3573,6 +3604,7 @@ mod tests {
             },
             lines: vec!["hover".to_string()],
             inline_styles: Vec::new(),
+            cursor: Some(FloatingCursor { line: 0, column: 5 }),
             focusable: false,
             mouse: false,
             chrome: FloatingChrome {
@@ -3595,6 +3627,9 @@ mod tests {
             rendered.contains("│hover"),
             "bordered float should draw content inside the border: {rendered:?}"
         );
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(7, 2));
     }
 
     #[test]
@@ -3636,6 +3671,7 @@ mod tests {
                     column_end: 16,
                 },
             ],
+            cursor: None,
             focusable: false,
             mouse: false,
             chrome: FloatingChrome {

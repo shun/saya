@@ -3,14 +3,15 @@ use std::sync::Arc;
 use saya::features::selector::host_adapter::{SelectorHostViewAdapter, SelectorUiIntent};
 use saya::features::selector::runtime::{
     RuntimeRenderedSelectorItem, RuntimeSelectorCollectStatus, RuntimeSelectorHighlight,
-    RuntimeSelectorMatchStatus, RuntimeSelectorStatus, RuntimeSelectorStorageMode,
-    RuntimeSelectorStoreStatus, RuntimeSelectorUiOptions, RuntimeSelectorWindowPercent,
-    RuntimeSelectorWindowSizeValue, RuntimeSelectorWindowUiOptions, RuntimeSelectorWorkState,
-    SelectorViewBackend, SelectorViewBackendInput,
+    RuntimeSelectorHighlightKind, RuntimeSelectorMatchStatus, RuntimeSelectorStatus,
+    RuntimeSelectorStorageMode, RuntimeSelectorStoreStatus, RuntimeSelectorUiOptions,
+    RuntimeSelectorWindowPercent, RuntimeSelectorWindowSizeValue, RuntimeSelectorWindowUiOptions,
+    RuntimeSelectorWorkState, SelectorViewBackend, SelectorViewBackendInput,
 };
 use saya::features::selector::tui_state::{
-    SelectorTuiProjectionSink, selector_tui_model_to_workspace_float,
+    SelectorMode, SelectorTuiProjectionSink, selector_tui_model_to_workspace_float,
 };
+use saya::presentation::floating_window::FloatingInlineStyleKind;
 
 #[test]
 fn tui_selector_state_keeps_render_projection_as_draw_ready_model() {
@@ -149,6 +150,15 @@ fn visible_tui_selector_model_projects_to_static_workspace_float() {
         .expect("visible selector model should project to workspace float");
 
     assert_eq!(float.lines[0], "query: needle");
+    assert_eq!(model.mode, SelectorMode::Insert);
+    assert_eq!(
+        float.cursor,
+        Some(saya::presentation::floating_window::FloatingCursor {
+            line: 0,
+            column: "query: needle".len(),
+        }),
+        "filter input part should expose a cursor at the query tail"
+    );
     assert_eq!(
         &float.lines[1..4],
         ["  row 2", "> row 3", "  row 4"],
@@ -163,6 +173,70 @@ fn visible_tui_selector_model_projects_to_static_workspace_float() {
         "status summary should include runtime selector counts"
     );
     assert!(!float.focusable);
+
+    tui_state
+        .set_mode(model.session_id, SelectorMode::Normal)
+        .expect("selector TUI mode should switch locally");
+    let normal_model = tui_state
+        .current_model()
+        .expect("mode switch should keep selector model");
+    assert_eq!(normal_model.mode, SelectorMode::Normal);
+    let normal_float = selector_tui_model_to_workspace_float(&normal_model, 80, 24)
+        .expect("normal mode selector model should still project to workspace float");
+    assert_eq!(
+        normal_float.cursor,
+        Some(saya::presentation::floating_window::FloatingCursor { line: 2, column: 0 }),
+        "selector normal mode should keep the terminal cursor inside the selected candidate row"
+    );
+}
+
+#[test]
+fn visible_tui_selector_model_projects_match_highlights_to_inline_styles() {
+    let tui_state = Arc::new(SelectorTuiProjectionSink::new());
+    let adapter = SelectorHostViewAdapter::new(tui_state.clone(), 3);
+    let mut input = selector_input(
+        "needle parser",
+        1,
+        0,
+        false,
+        false,
+        RuntimeSelectorWorkState::Completed,
+    );
+    input.rendered_items[1].label = "alpha needle parser".to_string();
+    input.rendered_items[1].highlights = vec![
+        RuntimeSelectorHighlight {
+            column: 6,
+            width: 6,
+            kind: RuntimeSelectorHighlightKind::Match,
+        },
+        RuntimeSelectorHighlight {
+            column: 13,
+            width: 6,
+            kind: RuntimeSelectorHighlightKind::Match,
+        },
+    ];
+
+    adapter.render(input);
+
+    let model = tui_state
+        .current_model()
+        .expect("render projection should produce TUI selector model");
+    let float = selector_tui_model_to_workspace_float(&model, 80, 24)
+        .expect("visible selector model should project to workspace float");
+
+    assert_eq!(float.lines[2], "> alpha needle parser");
+    assert_eq!(
+        float
+            .inline_styles
+            .iter()
+            .map(|style| { (style.kind, style.line, style.column_start, style.column_end,) })
+            .collect::<Vec<_>>(),
+        vec![
+            (FloatingInlineStyleKind::Match, 2, 8, 14),
+            (FloatingInlineStyleKind::Match, 2, 15, 21),
+        ],
+        "selector match highlights should be projected over the rendered row label"
+    );
 }
 
 #[test]

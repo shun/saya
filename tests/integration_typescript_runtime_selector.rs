@@ -11,14 +11,15 @@ use saya::features::selector::host_adapter::{
     HeadlessSelectorUiProjectionSink, SelectorHostViewAdapter,
 };
 use saya::features::selector::keymap::{
-    SelectorAction, SelectorKeyRoute, selector_key_route_for_model,
+    SelectorAction, SelectorKeyRoute, SelectorModeSwitch, SelectorQueryEdit,
+    selector_key_route_for_model,
 };
 use saya::features::selector::runtime::{
     HeadlessSelectorViewBackend, RuntimeRenderedSelectorItem, SelectorViewBackend,
     parse_rg_selector_location_detail, parse_rg_vimgrep_output,
 };
 use saya::features::selector::tui_state::{
-    SelectorTuiProjectionSink, selector_tui_model_to_workspace_float,
+    SelectorMode, SelectorTuiProjectionSink, selector_tui_model_to_workspace_float,
 };
 use saya::input::router::KeyInput;
 use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
@@ -63,8 +64,19 @@ async fn runtime_selector_static_source_can_open_update_read_cancel_and_dispose_
                     throw new Error(`unexpected updated items: ${JSON.stringify(updated.renderedItems)}`);
                 }
 
+                const refined = await saya.selector.update(opened.id, { query: "alpha query" });
+                if (refined.renderedItems.map((item) => item.id).join(",") !== "c") {
+                    throw new Error(`space-separated AND query should keep only items containing every term: ${JSON.stringify(refined.renderedItems)}`);
+                }
+                const refinedHighlights = refined.renderedItems[0].highlights
+                    .map((highlight) => `${highlight.kind}:${highlight.column}:${highlight.width}`)
+                    .join(",");
+                if (refinedHighlights !== "match:0:5,match:6:5") {
+                    throw new Error(`substring AND query should expose match highlights: ${JSON.stringify(refined.renderedItems[0].highlights)}`);
+                }
+
                 const current = await saya.selector.current(opened.id);
-                if (current.query !== "query" || current.status.match.totalMatched !== 2) {
+                if (current.query !== "alpha query" || current.status.match.totalMatched !== 1) {
                     throw new Error(`unexpected current selector snapshot: ${JSON.stringify(current)}`);
                 }
 
@@ -90,7 +102,7 @@ async fn runtime_selector_static_source_can_open_update_read_cancel_and_dispose_
                 }
                 await saya.selector.dispose(suffix.id);
 
-                await saya.commands.execute(`selector:${opened.id}:${updated.renderedItems.length}:${current.status.collect.totalStored}:${suffix.renderedItems.length}`);
+                await saya.commands.execute(`selector:${opened.id}:${updated.renderedItems.length}:${refined.renderedItems.length}:${current.status.collect.totalStored}:${suffix.renderedItems.length}`);
             }
         "#
         .to_string(),
@@ -110,7 +122,7 @@ async fn runtime_selector_static_source_can_open_update_read_cancel_and_dispose_
 
     assert_eq!(
         host_bridge.executed_commands.lock().await.clone(),
-        vec!["selector:1:2:3:1".to_string()]
+        vec!["selector:1:2:1:3:1".to_string()]
     );
 }
 
@@ -1298,8 +1310,9 @@ async fn runtime_session_owner_controls_active_selector_from_tui_key_routes_head
     let initial_model = sink
         .current_model()
         .expect("opened selector should publish TUI state");
+    assert_eq!(initial_model.mode, SelectorMode::Insert);
     assert_eq!(
-        selector_key_route_for_model(Some(&initial_model), &KeyInput::Char('j')),
+        selector_key_route_for_model(Some(&initial_model), &KeyInput::Down),
         SelectorKeyRoute::Control {
             session_id: initial_model.session_id,
             command:
@@ -1314,11 +1327,131 @@ async fn runtime_session_owner_controls_active_selector_from_tui_key_routes_head
         },
         "Enter should route to selector action instead of controller or normal input"
     );
+    assert_eq!(
+        selector_key_route_for_model(Some(&initial_model), &KeyInput::Char('j')),
+        SelectorKeyRoute::QueryEdit {
+            session_id: initial_model.session_id,
+            edit: SelectorQueryEdit::Insert('j'),
+        },
+        "filter input focus should let printable selector navigation letters edit the query"
+    );
+    assert_eq!(
+        selector_key_route_for_model(Some(&initial_model), &KeyInput::Backspace),
+        SelectorKeyRoute::QueryEdit {
+            session_id: initial_model.session_id,
+            edit: SelectorQueryEdit::Backspace,
+        },
+        "Backspace should edit the active selector query"
+    );
+    assert_eq!(
+        selector_key_route_for_model(Some(&initial_model), &KeyInput::Escape),
+        SelectorKeyRoute::ModeSwitch {
+            session_id: initial_model.session_id,
+            switch: SelectorModeSwitch::EnterNormal,
+        },
+        "Escape in selector insert mode should switch to selector normal mode"
+    );
+    sink.set_mode(initial_model.session_id, SelectorMode::Normal)
+        .expect("active selector mode should be switchable");
+    let normal_model = sink
+        .current_model()
+        .expect("selector mode switch should keep current model");
+    assert_eq!(normal_model.mode, SelectorMode::Normal);
+    assert_eq!(
+        selector_key_route_for_model(Some(&normal_model), &KeyInput::Char('j')),
+        SelectorKeyRoute::Control {
+            session_id: normal_model.session_id,
+            command:
+                saya::features::selector::runtime::RuntimeSelectorControllerCommand::CursorNext,
+        },
+        "j should navigate in selector normal mode"
+    );
+    assert_eq!(
+        selector_key_route_for_model(Some(&normal_model), &KeyInput::Char('h')),
+        SelectorKeyRoute::Noop {
+            session_id: normal_model.session_id,
+        },
+        "h should be consumed by selector normal mode instead of editing the query or buffer"
+    );
+    assert_eq!(
+        selector_key_route_for_model(Some(&normal_model), &KeyInput::Char('l')),
+        SelectorKeyRoute::Noop {
+            session_id: normal_model.session_id,
+        },
+        "l should be consumed by selector normal mode instead of editing the query or buffer"
+    );
+    assert_eq!(
+        selector_key_route_for_model(Some(&normal_model), &KeyInput::Backspace),
+        SelectorKeyRoute::Noop {
+            session_id: normal_model.session_id,
+        },
+        "Backspace should not edit the query while selector normal mode owns focus"
+    );
+    assert_eq!(
+        selector_key_route_for_model(Some(&normal_model), &KeyInput::Char('i')),
+        SelectorKeyRoute::ModeSwitch {
+            session_id: normal_model.session_id,
+            switch: SelectorModeSwitch::EnterInsert,
+        },
+        "i should return to selector insert mode"
+    );
+    assert_eq!(
+        selector_key_route_for_model(Some(&normal_model), &KeyInput::Escape),
+        SelectorKeyRoute::Control {
+            session_id: normal_model.session_id,
+            command: saya::features::selector::runtime::RuntimeSelectorControllerCommand::Cancel,
+        },
+        "Escape in selector normal mode should cancel"
+    );
+    sink.set_mode(normal_model.session_id, SelectorMode::Insert)
+        .expect("selector should return to insert mode for query edit coverage");
+
+    let edit_outcome = owner
+        .update_selector_query(
+            initial_model.session_id,
+            "row 1".to_string(),
+            &mut host_session,
+        )
+        .await;
+    assert!(edit_outcome.requires_redraw);
+    let edited_model = sink
+        .current_model()
+        .expect("selector query edit should publish updated TUI state");
+    assert_eq!(edited_model.query, "row 1");
+    assert_eq!(
+        edited_model
+            .visible_rows
+            .iter()
+            .map(|row| row.item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["row-1", "row-10", "row-11"],
+        "query edit should re-run substring AND matching through the selector session"
+    );
+    let edited_float = selector_tui_model_to_workspace_float(&edited_model, 80, 24)
+        .expect("edited selector model should remain visible");
+    assert_eq!(edited_float.lines[0], "query: row 1");
+    assert!(
+        edited_float.inline_styles.iter().any(|style| matches!(
+            style.kind,
+            saya::presentation::floating_window::FloatingInlineStyleKind::Match
+        )),
+        "updated selector float should retain match highlights"
+    );
+    let reset_outcome = owner
+        .update_selector_query(
+            initial_model.session_id,
+            "row".to_string(),
+            &mut host_session,
+        )
+        .await;
+    assert!(reset_outcome.requires_redraw);
 
     for (key, expected_cursor) in [
-        (KeyInput::Char('j'), 1),
-        (KeyInput::Down, 2),
-        (KeyInput::Char('k'), 1),
+        (KeyInput::Ctrl('n'), 1),
+        (KeyInput::Ctrl('N'), 2),
+        (KeyInput::Ctrl('p'), 1),
+        (KeyInput::Ctrl('P'), 0),
+        (KeyInput::Down, 1),
         (KeyInput::Up, 0),
         (KeyInput::PageDown, 10),
         (KeyInput::Ctrl('d'), 11),
@@ -1326,8 +1459,6 @@ async fn runtime_session_owner_controls_active_selector_from_tui_key_routes_head
         (KeyInput::PageUp, 1),
         (KeyInput::Ctrl('u'), 0),
         (KeyInput::Ctrl('b'), 0),
-        (KeyInput::Char('G'), 11),
-        (KeyInput::Char('g'), 0),
     ] {
         let before = sink
             .current_model()
@@ -1353,6 +1484,11 @@ async fn runtime_session_owner_controls_active_selector_from_tui_key_routes_head
         );
     }
 
+    let before_cancel_mode = sink
+        .current_model()
+        .expect("selector should remain active before cancel mode switch");
+    sink.set_mode(before_cancel_mode.session_id, SelectorMode::Normal)
+        .expect("selector should enter normal mode before Escape cancel");
     let before_cancel = sink
         .current_model()
         .expect("selector should remain active before escape");

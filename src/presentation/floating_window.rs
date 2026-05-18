@@ -74,6 +74,8 @@ impl FloatingAnchorSignature {
 /// theme key にマップして実際の色 / 太字 / 下線を決定する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FloatingInlineStyleKind {
+    /// 検索や selector の一致範囲
+    Match,
     /// インラインコード相当（モノスペース強調）
     Code,
     /// 強調（太字 / 斜体相当）
@@ -399,11 +401,18 @@ pub struct FloatingScreenModel {
     pub rect: PaneRect,
     pub lines: Vec<String>,
     pub inline_styles: Vec<FloatingInlineStyle>,
+    pub cursor: Option<FloatingCursor>,
     pub focusable: bool,
     pub mouse: bool,
     pub chrome: FloatingChrome,
     pub zindex: i32,
     pub creation_order: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatingCursor {
+    pub line: usize,
+    pub column: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1221,6 +1230,7 @@ impl FloatingWindowManager {
                             }
                         })
                         .collect(),
+                    cursor: None,
                     focusable: window.focusable,
                     mouse: window.mouse,
                     chrome: window.chrome,
