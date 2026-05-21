@@ -44,9 +44,48 @@ impl PanelSize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PanelNode {
+    Text { text: String },
+    Heading { text: String },
+    Divider,
+    Image { src: String, alt: Option<String> },
+    Badge { label: String },
+    Progress { label: Option<String>, value: u16 },
+    Button { label: String },
+}
+
+impl PanelNode {
+    fn rendered_line(&self) -> String {
+        match self {
+            Self::Text { text } | Self::Heading { text } => text.clone(),
+            Self::Divider => "--------".to_string(),
+            Self::Image { src, alt } => match alt.as_deref().filter(|alt| !alt.is_empty()) {
+                Some(alt) => format!("[image: {alt}] {src}"),
+                None => format!("[image] {src}"),
+            },
+            Self::Badge { label } => format!("[{label}]"),
+            Self::Progress { label, value } => {
+                let clamped = (*value).min(100);
+                let filled = usize::from(clamped / 10);
+                let empty = 10usize.saturating_sub(filled);
+                let bar = format!("{}{}", "#".repeat(filled), "-".repeat(empty));
+                match label.as_deref().filter(|label| !label.is_empty()) {
+                    Some(label) => format!("{label} [{bar}] {clamped}%"),
+                    None => format!("[{bar}] {clamped}%"),
+                }
+            }
+            Self::Button { label } => format!("[ {label} ]"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelContent {
     Lines {
         lines: Vec<String>,
+    },
+    View {
+        nodes: Vec<PanelNode>,
     },
     Terminal {
         terminal_id: u64,
@@ -59,6 +98,9 @@ pub enum PanelContentRef {
     Lines {
         lines: Vec<String>,
     },
+    View {
+        nodes: Vec<PanelNode>,
+    },
     Terminal {
         terminal_id: u64,
         close_behavior: PanelCloseBehavior,
@@ -70,13 +112,14 @@ impl PanelContentRef {
     pub fn terminal_id(&self) -> Option<u64> {
         match self {
             Self::Terminal { terminal_id, .. } => Some(*terminal_id),
-            Self::Lines { .. } => None,
+            Self::Lines { .. } | Self::View { .. } => None,
         }
     }
 
     fn rendered_lines(&self) -> Vec<String> {
         match self {
             Self::Lines { lines } | Self::Terminal { lines, .. } => lines.clone(),
+            Self::View { nodes } => nodes.iter().map(PanelNode::rendered_line).collect(),
         }
     }
 }
@@ -160,6 +203,7 @@ impl PanelManager {
             .unwrap_or_else(|| self.allocate_creation_order());
         let content = match request.content {
             PanelContent::Lines { lines } => PanelContentRef::Lines { lines },
+            PanelContent::View { nodes } => PanelContentRef::View { nodes },
             PanelContent::Terminal {
                 terminal_id,
                 close_behavior,
@@ -258,6 +302,7 @@ impl PanelManager {
                 size: panel.size,
                 kind: match panel.content {
                     PanelContentRef::Lines { .. } => "lines",
+                    PanelContentRef::View { .. } => "view",
                     PanelContentRef::Terminal { .. } => "terminal",
                 },
                 focused: self.focus.as_deref() == Some(panel.id.as_str()),
@@ -356,6 +401,9 @@ impl PanelManager {
                         FloatingContentRef::Terminal { terminal_id }
                     }
                     PanelContentRef::Lines { .. } => FloatingContentRef::StaticLines {
+                        content_id: panel.id,
+                    },
+                    PanelContentRef::View { .. } => FloatingContentRef::StaticLines {
                         content_id: panel.id,
                     },
                 },

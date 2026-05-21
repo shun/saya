@@ -180,6 +180,16 @@ globalThis.saya = {
                     kind: String(content?.kind ?? ""),
                     command: Array.isArray(content?.command) ? content.command.map((arg) => String(arg)) : [],
                     lines: Array.isArray(content?.lines) ? content.lines.map((line) => String(line)) : [],
+                    nodes: Array.isArray(content?.nodes)
+                        ? content.nodes.map((node) => ({
+                            type: String(node?.type ?? ""),
+                            text: node?.text === undefined || node?.text === null ? null : String(node.text),
+                            label: node?.label === undefined || node?.label === null ? null : String(node.label),
+                            src: node?.src === undefined || node?.src === null ? null : String(node.src),
+                            alt: node?.alt === undefined || node?.alt === null ? null : String(node.alt),
+                            value: Number.isFinite(Number(node?.value)) ? Number(node.value) : null,
+                        }))
+                        : [],
                     closeBehavior: content?.closeBehavior === undefined || content?.closeBehavior === null
                         ? null
                         : String(content.closeBehavior),
@@ -839,9 +849,19 @@ declare global {
     type SayaPanelPosition = "left" | "right" | "top" | "bottom";
     type SayaPanelCloseBehavior = "kill" | "detach";
 
+    type SayaPanelNode =
+        | { type: "text"; text: string }
+        | { type: "heading"; text: string }
+        | { type: "divider" }
+        | { type: "image"; src: string; alt?: string }
+        | { type: "badge"; label: string }
+        | { type: "progress"; value: number; label?: string }
+        | { type: "button"; label: string };
+
     type SayaPanelContent =
         | { kind: "terminal"; command: string[]; closeBehavior?: SayaPanelCloseBehavior }
-        | { kind: "lines"; lines: string[] };
+        | { kind: "lines"; lines: string[] }
+        | { kind: "view"; nodes: SayaPanelNode[] };
 
     interface SayaPanelOpenOptions {
         id: string;
@@ -856,7 +876,7 @@ declare global {
         numericId: number;
         position: SayaPanelPosition;
         size: string;
-        kind: "terminal" | "lines";
+        kind: "terminal" | "lines" | "view";
         focused: boolean;
     }
 
@@ -1133,7 +1153,26 @@ pub struct RuntimePanelContentRequest {
     #[serde(default)]
     pub lines: Vec<String>,
     #[serde(default)]
+    pub nodes: Vec<RuntimePanelNodeRequest>,
+    #[serde(default)]
     pub close_behavior: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePanelNodeRequest {
+    #[serde(rename = "type")]
+    pub node_type: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub src: Option<String>,
+    #[serde(default)]
+    pub alt: Option<String>,
+    #[serde(default)]
+    pub value: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

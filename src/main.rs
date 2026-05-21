@@ -67,7 +67,8 @@ use saya::presentation::overlay::optional_graphics::{
     OptionalGraphicsAdapter, OverlayTerminalWriter,
 };
 use saya::presentation::panel::{
-    PanelCloseBehavior, PanelContent, PanelManager, PanelOpenRequest, PanelPosition, PanelSize,
+    PanelCloseBehavior, PanelContent, PanelManager, PanelNode, PanelOpenRequest, PanelPosition,
+    PanelSize,
 };
 use saya::presentation::render::coordinator::{RenderFrameError, TuiRenderCoordinator};
 use saya::presentation::render::renderer::{CrosstermBackendImpl, TuiRenderer};
@@ -90,8 +91,8 @@ use saya::runtime::live::{
     RuntimeFilerOperationKind, RuntimeFilerOperationReport, RuntimeFilerSortKey,
     RuntimeFloatContentRequest, RuntimeFloatOpenRequest, RuntimeFloatRelativeToRequest,
     RuntimeFloatSnapshot, RuntimeFloatZIndexRequest, RuntimeInputPromptRequest,
-    RuntimeInputPromptResponse, RuntimeMode, RuntimePanelContentRequest, RuntimePanelOpenRequest,
-    RuntimePanelSnapshot,
+    RuntimeInputPromptResponse, RuntimeMode, RuntimePanelContentRequest, RuntimePanelNodeRequest,
+    RuntimePanelOpenRequest, RuntimePanelSnapshot,
 };
 use saya::runtime::plugin::{PluginHost, render_plugin_report};
 use saya::support::diagnostic_log::{
@@ -6444,6 +6445,18 @@ fn runtime_panel_content(
         "lines" => Ok(PanelContent::Lines {
             lines: request.lines,
         }),
+        "view" => {
+            let nodes = request
+                .nodes
+                .into_iter()
+                .map(runtime_panel_node)
+                .collect::<Result<Vec<_>, _>>()?;
+            log::debug!(
+                "[main][panel] converted runtime view content: nodes={}",
+                nodes.len()
+            );
+            Ok(PanelContent::View { nodes })
+        }
         "terminal" => {
             let terminal_manager =
                 terminal_float_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
@@ -6481,6 +6494,44 @@ fn runtime_panel_content(
         other => Err(RuntimeCommandError::CommandFailed {
             name: "panel.open".to_string(),
             message: format!("unsupported panel content kind: {other}"),
+        }),
+    }
+}
+
+fn runtime_panel_node(request: RuntimePanelNodeRequest) -> Result<PanelNode, RuntimeCommandError> {
+    let required_text = |field: Option<String>, node_type: &str, name: &str| {
+        field
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| RuntimeCommandError::CommandFailed {
+                name: "panel.open".to_string(),
+                message: format!("panel view node {node_type} requires {name}"),
+            })
+    };
+    match request.node_type.as_str() {
+        "text" => Ok(PanelNode::Text {
+            text: required_text(request.text, "text", "text")?,
+        }),
+        "heading" => Ok(PanelNode::Heading {
+            text: required_text(request.text, "heading", "text")?,
+        }),
+        "divider" => Ok(PanelNode::Divider),
+        "image" => Ok(PanelNode::Image {
+            src: required_text(request.src, "image", "src")?,
+            alt: request.alt,
+        }),
+        "badge" => Ok(PanelNode::Badge {
+            label: required_text(request.label, "badge", "label")?,
+        }),
+        "progress" => Ok(PanelNode::Progress {
+            label: request.label,
+            value: request.value.unwrap_or(0).min(100),
+        }),
+        "button" => Ok(PanelNode::Button {
+            label: required_text(request.label, "button", "label")?,
+        }),
+        other => Err(RuntimeCommandError::CommandFailed {
+            name: "panel.open".to_string(),
+            message: format!("unsupported panel view node type: {other}"),
         }),
     }
 }
@@ -8119,6 +8170,7 @@ fn handle_terminal_panel_key(
     terminal_manager: &mut TerminalFloatManager,
     key: &KeyInput,
 ) -> Option<FloatingWindowKeyHandling> {
+    let terminal_id = manager.focused_terminal_id()?;
     if matches!(key, KeyInput::Ctrl('w') | KeyInput::Ctrl('W')) {
         let had_focus = manager.unfocus();
         log::debug!(
@@ -8128,7 +8180,6 @@ fn handle_terminal_panel_key(
         );
         return had_focus.then_some(FloatingWindowKeyHandling::Consumed);
     }
-    let terminal_id = manager.focused_terminal_id()?;
     let result = match key {
         KeyInput::PageUp => terminal_manager.scroll(terminal_id, -8),
         KeyInput::PageDown => terminal_manager.scroll(terminal_id, 8),
@@ -12176,6 +12227,93 @@ mod tests {
             None
         );
         assert_eq!(panel_manager.focused_terminal_id(), Some(77));
+    }
+
+    #[test]
+    fn focused_view_panel_does_not_enter_terminal_input_semantics() {
+        let mut panel_manager = PanelManager::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        panel_manager.open(PanelOpenRequest {
+            id: "dashboard".to_string(),
+            position: PanelPosition::Right,
+            size: PanelSize::Percent(35),
+            content: PanelContent::View {
+                nodes: vec![PanelNode::Text {
+                    text: "status".to_string(),
+                }],
+            },
+            focus: true,
+        });
+
+        assert_eq!(panel_manager.focused_panel_id(), Some("dashboard"));
+        assert_eq!(panel_manager.focused_terminal_id(), None);
+        assert_eq!(
+            handle_terminal_panel_key(
+                &mut panel_manager,
+                &mut terminal_float_manager,
+                &KeyInput::Ctrl('w')
+            ),
+            None
+        );
+        assert_eq!(
+            begin_command_line_from_focused_panel(
+                &mut panel_manager,
+                &KeyInput::Char(':'),
+                CoreMode::Normal
+            ),
+            None
+        );
+        assert_eq!(panel_manager.focused_panel_id(), Some("dashboard"));
+    }
+
+    #[test]
+    fn runtime_panel_open_accepts_view_content_and_lists_rendered_view_panel() {
+        let mut panel_manager = PanelManager::default();
+        let snapshot = execute_runtime_panel_open(
+            RuntimePanelOpenRequest {
+                id: "dashboard".to_string(),
+                position: "right".to_string(),
+                size: "35%".to_string(),
+                content: RuntimePanelContentRequest {
+                    kind: "view".to_string(),
+                    command: Vec::new(),
+                    lines: Vec::new(),
+                    nodes: vec![
+                        RuntimePanelNodeRequest {
+                            node_type: "heading".to_string(),
+                            text: Some("Weather".to_string()),
+                            label: None,
+                            src: None,
+                            alt: None,
+                            value: None,
+                        },
+                        RuntimePanelNodeRequest {
+                            node_type: "progress".to_string(),
+                            text: None,
+                            label: Some("build".to_string()),
+                            src: None,
+                            alt: None,
+                            value: Some(140),
+                        },
+                    ],
+                    close_behavior: None,
+                },
+                focus: true,
+            },
+            Some(&mut panel_manager),
+            None,
+        )
+        .expect("runtime panel open should accept view content");
+
+        assert_eq!(snapshot.id, "dashboard");
+        assert_eq!(snapshot.kind, "view");
+        assert!(snapshot.focused);
+        assert_eq!(panel_manager.focused_terminal_id(), None);
+        assert_eq!(panel_manager.snapshots()[0].kind, "view");
+        assert_eq!(
+            panel_manager.resolve_screen_models(100, 30)[0].lines,
+            vec!["Weather".to_string(), "build [##########] 100%".to_string()]
+        );
     }
 
     #[test]

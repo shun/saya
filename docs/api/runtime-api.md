@@ -268,12 +268,12 @@ startup. Use these commands from normal Ex command-line input:
 
 `panel.toggle` opens or closes the configured panel without stealing editor
 focus. This lets you run another editor command immediately after opening the
-panel. Use `panel.focus` only when you want typed keys to go to the
-terminal-backed panel. From a focused terminal panel, press `:` to enter the
-editor command line, press `/` to enter editor search, or press `Ctrl-w` to
-return focus to the editor while leaving the panel open. Runtime code can also
-call `panel.unfocus`. Use `panel.close` to close the panel from the editor
-command line.
+panel. `panel.focus` selects the panel as the active persistent display area.
+Only terminal-backed panels use that focus as terminal input mode. From a
+focused terminal panel, press `:` to enter the editor command line, press `/`
+to enter editor search, or press `Ctrl-w` to return focus to the editor while
+leaving the panel open. Runtime code can also call `panel.unfocus`. Use
+`panel.close` to close the panel from the editor command line.
 
 The older `agent.toggle`, `agent.focus`, `agent.close`, and `agent.detach`
 aliases are not registered. Agent-specific commands remain available only for
@@ -306,10 +306,40 @@ Supported content kinds are:
 
 - `lines`: Static read-only lines.
 - `terminal`: A PTY-backed terminal panel with an explicit command array.
+- `view`: Structured plugin-controlled UI nodes rendered by the host TUI.
 
 For terminal panels, pass the command as an array. The host owns the PTY,
 parses terminal output, routes key input to the terminal only when the panel is
 focused, and applies the close policy when the panel closes.
+
+For view panels, pass a declarative `nodes` array. The host owns layout,
+rendering, focus routing, and lifecycle. Plugins don't receive raw renderer or
+terminal drawing access.
+
+```ts
+await saya.panel.open({
+  id: "dashboard",
+  position: "right",
+  size: "35%",
+  content: {
+    kind: "view",
+    nodes: [
+      { type: "heading", text: "Weather" },
+      { type: "text", text: "16C" },
+      { type: "badge", label: "rain" },
+      { type: "progress", label: "build", value: 50 },
+      { type: "divider" },
+      { type: "button", label: "Refresh" },
+      { type: "image", src: "/tmp/moon.png", alt: "Moon phase" },
+    ],
+  },
+  focus: true,
+});
+```
+
+The initial view node subset is `text`, `heading`, `divider`, `image`,
+`badge`, `progress`, and `button`. Image nodes render as text fallback in the
+TUI until terminal image rendering is introduced.
 
 ### `saya.panel.focus(id)`
 
@@ -320,8 +350,10 @@ const focused = await saya.panel.focus(panel.id);
 ```
 
 The method returns `true` when the host focused the panel. A focused terminal
-panel receives typed keys. The `:` and `/` keys are reserved for returning to
-the editor command line and editor search.
+panel receives typed keys. A focused `lines` or `view` panel is selected, but
+it doesn't enter terminal input mode. The `:` and `/` keys are reserved for
+returning from a focused terminal panel to the editor command line and editor
+search.
 
 ### `saya.panel.unfocus()`
 
@@ -365,7 +397,7 @@ await saya.panel.send(panel.id, "Review the current file\n");
 ```
 
 The method returns `true` when the panel exists and accepts terminal input.
-Static line panels don't accept sent text.
+`lines` and `view` panels don't accept sent text.
 
 ## Editor
 

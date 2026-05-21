@@ -88,6 +88,9 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("window"));
     assert!(declaration.contains("SayaRuntimeOpenFloatOptions"));
     assert!(declaration.contains("SayaReadonlyFloatSnapshot"));
+    assert!(declaration.contains("type SayaPanelNode"));
+    assert!(declaration.contains("{ kind: \"view\"; nodes: SayaPanelNode[] }"));
+    assert!(declaration.contains("kind: \"terminal\" | \"lines\" | \"view\""));
     assert!(declaration.contains("openFloat"));
     assert!(declaration.contains("close(id: number)"));
     assert!(declaration.contains("focus(id: number)"));

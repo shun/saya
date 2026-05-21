@@ -241,14 +241,22 @@ impl HostCapabilityBridge for RecordingHostBridge {
     ) -> BoxFuture<Result<RuntimePanelSnapshot, RuntimeCommandError>> {
         let opened_panels = self.opened_panels.clone();
         Box::pin(async move {
+            let snapshot = RuntimePanelSnapshot {
+                id: request.id.clone(),
+                numeric_id: 90,
+                position: request.position.clone(),
+                size: request.size.clone(),
+                kind: request.content.kind.clone(),
+                focused: request.focus,
+            };
             opened_panels.lock().await.push(request);
             Ok(RuntimePanelSnapshot {
-                id: "ai-agent".to_string(),
-                numeric_id: 90,
-                position: "right".to_string(),
-                size: "35%".to_string(),
-                kind: "terminal".to_string(),
-                focused: true,
+                id: snapshot.id,
+                numeric_id: snapshot.numeric_id,
+                position: snapshot.position,
+                size: snapshot.size,
+                kind: snapshot.kind,
+                focused: snapshot.focused,
             })
         })
     }
@@ -490,6 +498,100 @@ async fn runtime_panel_api_forwards_open_focus_list_send_and_close_to_host() {
     assert_eq!(
         *host_bridge.executed_commands.lock().await,
         vec!["panel:ai-agent:1:terminal".to_string()]
+    );
+
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_panel_api_forwards_structured_view_content_to_host() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let config_path = unique_path("panel-view-init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.events.on("bufferOpen", async () => {
+                const panel = await saya.panel.open({
+                    id: "dashboard",
+                    position: "right",
+                    size: "35%",
+                    content: {
+                        kind: "view",
+                        nodes: [
+                            { type: "heading", text: "Weather" },
+                            { type: "text", text: "16C" },
+                            { type: "badge", label: "rain" },
+                            { type: "progress", label: "build", value: 50 },
+                            { type: "divider" },
+                            { type: "button", label: "Refresh" },
+                            { type: "image", src: "/tmp/moon.png", alt: "Moon phase" },
+                        ],
+                    },
+                    focus: true,
+                });
+                await saya.panel.focus(panel.id);
+                await saya.commands.execute(`panel-view:${panel.id}:${panel.kind}`);
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let mut terminal_backend = DummyTerminalBackend::default();
+    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
+        LaunchRequest {
+            input_source: InputSource::Empty,
+            config_source: ConfigSource::File(config_path.clone()),
+            ..LaunchRequest::default()
+        },
+        &mut terminal_backend,
+    )
+    .expect("startup config should prepare callback seed");
+    drop(terminal_broker);
+    let host_bridge = Arc::new(RecordingHostBridge::new());
+    let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), outcome.callback_registry)
+        .expect("runtime should spawn");
+
+    runtime
+        .dispatch_event(RuntimeEventPayload::BufferOpen(BufferEventPayload {
+            buffer: ReadonlyBufferSnapshot {
+                id: 1,
+                path: Some(PathBuf::from("panel-view.md")),
+                line_count: 1,
+                cursor_row: 0,
+                cursor_col: 0,
+                current_line: "hello".to_string(),
+                text: "hello\n".to_string(),
+            },
+        }))
+        .expect("dispatch should enqueue")
+        .await_result()
+        .await
+        .expect("panel callback should complete");
+
+    let opened = host_bridge.opened_panels.lock().await;
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].id, "dashboard");
+    assert_eq!(opened[0].content.kind, "view");
+    assert_eq!(opened[0].content.nodes.len(), 7);
+    assert_eq!(opened[0].content.nodes[0].node_type, "heading");
+    assert_eq!(opened[0].content.nodes[0].text.as_deref(), Some("Weather"));
+    assert_eq!(opened[0].content.nodes[3].label.as_deref(), Some("build"));
+    assert_eq!(opened[0].content.nodes[3].value, Some(50));
+    assert_eq!(
+        opened[0].content.nodes[6].src.as_deref(),
+        Some("/tmp/moon.png")
+    );
+    drop(opened);
+
+    assert_eq!(
+        *host_bridge.focused_panels.lock().await,
+        vec!["dashboard".to_string()]
+    );
+    assert_eq!(
+        *host_bridge.executed_commands.lock().await,
+        vec!["panel-view:dashboard:view".to_string()]
     );
 
     std::fs::remove_file(&config_path).expect("remove config");
