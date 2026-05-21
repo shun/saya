@@ -25,6 +25,7 @@ top-level areas.
 - `saya.editor`
 - `saya.workspace`
 - `saya.lsp`
+- `saya.panel`
 - `saya.filer`
 
 ## Commands
@@ -243,6 +244,128 @@ for (const float of floats) {
   console.log(float.id, float.kind, float.focused);
 }
 ```
+
+## Panels
+
+The panel surface lets runtime callbacks open persistent side panels. Panels
+are different from transient floating windows: they are intended for longer
+running tool surfaces such as terminal-backed assistants, status views, and
+plugin work areas.
+
+> **Note:** This is a preview feature currently under active development.
+
+### Panel command behavior
+
+The bundled agent panel setup registers user-facing panel commands during
+startup. Use these commands from normal Ex command-line input:
+
+```vim
+:panel.toggle
+:panel.close
+:panel.focus
+:panel.unfocus
+```
+
+`panel.toggle` opens or closes the configured panel without stealing editor
+focus. This lets you run another editor command immediately after opening the
+panel. Use `panel.focus` only when you want typed keys to go to the
+terminal-backed panel. From a focused terminal panel, press `:` to enter the
+editor command line, press `/` to enter editor search, or press `Ctrl-w` to
+return focus to the editor while leaving the panel open. Runtime code can also
+call `panel.unfocus`. Use `panel.close` to close the panel from the editor
+command line.
+
+The older `agent.toggle`, `agent.focus`, `agent.close`, and `agent.detach`
+aliases are not registered. Agent-specific commands remain available only for
+sending editor context, such as `agent.sendCurrentLine` and
+`agent.sendSelectedRange`.
+
+### `saya.panel.open(options)`
+
+Use this method to open or replace a persistent panel. The host owns placement,
+rendering, terminal process state, focus, and lifecycle.
+
+```ts
+const panel = await saya.panel.open({
+  id: "review-panel",
+  position: "right",
+  size: "35%",
+  content: {
+    kind: "terminal",
+    command: ["codex"],
+    closeBehavior: "detach",
+  },
+  focus: false,
+});
+```
+
+The method returns a read-only panel snapshot with `id`, `numericId`,
+`position`, `size`, `kind`, and `focused`.
+
+Supported content kinds are:
+
+- `lines`: Static read-only lines.
+- `terminal`: A PTY-backed terminal panel with an explicit command array.
+
+For terminal panels, pass the command as an array. The host owns the PTY,
+parses terminal output, routes key input to the terminal only when the panel is
+focused, and applies the close policy when the panel closes.
+
+### `saya.panel.focus(id)`
+
+Use this method to move input focus to an existing panel.
+
+```ts
+const focused = await saya.panel.focus(panel.id);
+```
+
+The method returns `true` when the host focused the panel. A focused terminal
+panel receives typed keys. The `:` and `/` keys are reserved for returning to
+the editor command line and editor search.
+
+### `saya.panel.unfocus()`
+
+Use this method to clear panel focus while keeping the panel open.
+
+```ts
+const unfocused = await saya.panel.unfocus();
+```
+
+The method returns `true` when a panel had focus. Terminal panel users can also
+press `Ctrl-w` to return focus to the editor without closing the panel.
+
+### `saya.panel.close(id)`
+
+Use this method to close a panel.
+
+```ts
+const closed = await saya.panel.close(panel.id);
+```
+
+The method returns `true` when the host closed the panel. Closing a terminal
+panel applies the close policy chosen when the panel was opened.
+
+### `saya.panel.list()`
+
+Use this method to retrieve read-only snapshots for the currently open panels.
+
+```ts
+const panels = await saya.panel.list();
+for (const panel of panels) {
+  console.log(panel.id, panel.position, panel.focused);
+}
+```
+
+### `saya.panel.send(id, text)`
+
+Use this method to send text to a terminal-backed panel.
+
+```ts
+await saya.panel.send(panel.id, "Review the current file\n");
+```
+
+The method returns `true` when the panel exists and accepts terminal input.
+Static line panels don't accept sent text.
 
 ## Editor
 

@@ -13,12 +13,13 @@ use crate::features::selector::tui_state::SelectorTuiProjectionSink;
 use crate::presentation::overlay::effect::RuntimePresentationIntent;
 use crate::runtime::callback_registry_seed::CallbackRegistrySeed;
 use crate::runtime::live::{
-    HostCapabilityBridge, ReadonlyBufferSnapshot, ReadonlyEditorSnapshot, ReadonlyWindowSnapshot,
-    RuntimeCommandError, RuntimeDispatchError, RuntimeDispatchReport, RuntimeEventPayload,
-    RuntimeFilerCurrentEntry, RuntimeFilerEntry, RuntimeFilerError, RuntimeFilerErrorKind,
-    RuntimeFilerListOptions, RuntimeFilerOperation, RuntimeFilerOperationKind,
-    RuntimeFilerOperationReport, RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeInitError,
-    RuntimeInputPromptRequest, RuntimeInputPromptResponse, RuntimeMode, SayaLiveRuntime,
+    HostCapabilityBridge, ReadonlyBufferSnapshot, ReadonlyEditorSnapshot,
+    ReadonlySelectionSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeDispatchError,
+    RuntimeDispatchReport, RuntimeEventPayload, RuntimeFilerCurrentEntry, RuntimeFilerEntry,
+    RuntimeFilerError, RuntimeFilerErrorKind, RuntimeFilerListOptions, RuntimeFilerOperation,
+    RuntimeFilerOperationKind, RuntimeFilerOperationReport, RuntimeFloatOpenRequest,
+    RuntimeFloatSnapshot, RuntimeInitError, RuntimeInputPromptRequest, RuntimeInputPromptResponse,
+    RuntimeMode, RuntimePanelOpenRequest, RuntimePanelSnapshot, SayaLiveRuntime,
 };
 use crate::runtime::message::runtime_callback_failure_message;
 use crate::runtime::refresh::runtime_dispatch_requests_redraw;
@@ -47,6 +48,9 @@ pub enum RuntimeShutdownIntent {
 
 pub trait RuntimeHostSession {
     fn current_buffer_snapshot(&mut self) -> ReadonlyBufferSnapshot;
+    fn current_selection_snapshot(&mut self) -> Option<ReadonlySelectionSnapshot> {
+        None
+    }
     fn current_window_snapshot(&mut self) -> ReadonlyWindowSnapshot;
     fn open_float(
         &mut self,
@@ -82,6 +86,59 @@ pub trait RuntimeHostSession {
         log::debug!("[runtime_integration][window] float snapshots unsupported by host session");
         Err(RuntimeCommandError::UnknownCommand {
             name: "window.floats".to_string(),
+        })
+    }
+    fn open_panel(
+        &mut self,
+        request: RuntimePanelOpenRequest,
+    ) -> Result<RuntimePanelSnapshot, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][panel] open unsupported by host session: id={}, content={:?}",
+            request.id,
+            request.content
+        );
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "panel.open".to_string(),
+        })
+    }
+    fn focus_panel(&mut self, id: String) -> Result<bool, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][panel] focus unsupported by host session: id={}",
+            id
+        );
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "panel.focus".to_string(),
+        })
+    }
+    fn unfocus_panel(&mut self) -> Result<bool, RuntimeCommandError> {
+        log::debug!("[runtime_integration][panel] unfocus unsupported by host session");
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "panel.unfocus".to_string(),
+        })
+    }
+    fn close_panel(&mut self, id: String) -> Result<bool, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][panel] close unsupported by host session: id={}",
+            id
+        );
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "panel.close".to_string(),
+        })
+    }
+    fn list_panel_snapshots(&mut self) -> Result<Vec<RuntimePanelSnapshot>, RuntimeCommandError> {
+        log::debug!("[runtime_integration][panel] snapshots unsupported by host session");
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "panel.list".to_string(),
+        })
+    }
+    fn send_panel_text(&mut self, id: String, text: String) -> Result<bool, RuntimeCommandError> {
+        log::debug!(
+            "[runtime_integration][panel] send unsupported by host session: id={}, bytes={}",
+            id,
+            text.len()
+        );
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "panel.send".to_string(),
         })
     }
     fn current_editor_snapshot(&mut self) -> ReadonlyEditorSnapshot;
@@ -193,6 +250,7 @@ impl RuntimeOutcomeProjector {
 #[derive(Debug, Clone)]
 struct CachedRuntimeSnapshots {
     buffer: ReadonlyBufferSnapshot,
+    selection: Option<ReadonlySelectionSnapshot>,
     window: ReadonlyWindowSnapshot,
     editor: ReadonlyEditorSnapshot,
     current_filer_entry: Option<RuntimeFilerCurrentEntry>,
@@ -210,6 +268,7 @@ impl Default for CachedRuntimeSnapshots {
                 current_line: String::new(),
                 text: String::new(),
             },
+            selection: None,
             window: ReadonlyWindowSnapshot { id: 1 },
             editor: ReadonlyEditorSnapshot {
                 mode: RuntimeMode::Normal,
@@ -253,6 +312,27 @@ struct RuntimeFloatIdChannelRequest {
 
 struct RuntimeFloatSnapshotsChannelRequest {
     reply: oneshot::Sender<Result<Vec<RuntimeFloatSnapshot>, RuntimeCommandError>>,
+}
+
+struct RuntimePanelOpenChannelRequest {
+    request: RuntimePanelOpenRequest,
+    reply: oneshot::Sender<Result<RuntimePanelSnapshot, RuntimeCommandError>>,
+}
+
+struct RuntimePanelIdChannelRequest {
+    id: String,
+    operation: &'static str,
+    reply: oneshot::Sender<Result<bool, RuntimeCommandError>>,
+}
+
+struct RuntimePanelSendChannelRequest {
+    id: String,
+    text: String,
+    reply: oneshot::Sender<Result<bool, RuntimeCommandError>>,
+}
+
+struct RuntimePanelSnapshotsChannelRequest {
+    reply: oneshot::Sender<Result<Vec<RuntimePanelSnapshot>, RuntimeCommandError>>,
 }
 
 struct RuntimeLsifRequest {
@@ -330,6 +410,11 @@ struct ChannelBackedHostBridge {
     float_focus_sender: mpsc::UnboundedSender<RuntimeFloatIdChannelRequest>,
     float_close_sender: mpsc::UnboundedSender<RuntimeFloatIdChannelRequest>,
     float_snapshots_sender: mpsc::UnboundedSender<RuntimeFloatSnapshotsChannelRequest>,
+    panel_open_sender: mpsc::UnboundedSender<RuntimePanelOpenChannelRequest>,
+    panel_focus_sender: mpsc::UnboundedSender<RuntimePanelIdChannelRequest>,
+    panel_close_sender: mpsc::UnboundedSender<RuntimePanelIdChannelRequest>,
+    panel_send_sender: mpsc::UnboundedSender<RuntimePanelSendChannelRequest>,
+    panel_snapshots_sender: mpsc::UnboundedSender<RuntimePanelSnapshotsChannelRequest>,
 }
 
 impl HostCapabilityBridge for ChannelBackedHostBridge {
@@ -416,6 +501,19 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
                 .lock()
                 .expect("runtime snapshots mutex should not poison")
                 .buffer
+                .clone()
+        })
+    }
+
+    fn current_selection(
+        &self,
+    ) -> crate::runtime::live::BoxFuture<Option<ReadonlySelectionSnapshot>> {
+        let snapshots = self.snapshots.clone();
+        Box::pin(async move {
+            snapshots
+                .lock()
+                .expect("runtime snapshots mutex should not poison")
+                .selection
                 .clone()
         })
     }
@@ -527,6 +625,148 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
         })
     }
 
+    fn open_panel(
+        &self,
+        request: RuntimePanelOpenRequest,
+    ) -> crate::runtime::live::BoxFuture<Result<RuntimePanelSnapshot, RuntimeCommandError>> {
+        let panel_open_sender = self.panel_open_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            panel_open_sender
+                .send(RuntimePanelOpenChannelRequest { request, reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.open".to_string(),
+                    message: "host panel open channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.open".to_string(),
+                    message: "host panel open reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn focus_panel(
+        &self,
+        id: String,
+    ) -> crate::runtime::live::BoxFuture<Result<bool, RuntimeCommandError>> {
+        let panel_focus_sender = self.panel_focus_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            panel_focus_sender
+                .send(RuntimePanelIdChannelRequest {
+                    id,
+                    operation: "panel.focus",
+                    reply,
+                })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.focus".to_string(),
+                    message: "host panel focus channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.focus".to_string(),
+                    message: "host panel focus reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn unfocus_panel(&self) -> crate::runtime::live::BoxFuture<Result<bool, RuntimeCommandError>> {
+        let panel_focus_sender = self.panel_focus_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            panel_focus_sender
+                .send(RuntimePanelIdChannelRequest {
+                    id: String::new(),
+                    operation: "panel.unfocus",
+                    reply,
+                })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.unfocus".to_string(),
+                    message: "host panel unfocus channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.unfocus".to_string(),
+                    message: "host panel unfocus reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn close_panel(
+        &self,
+        id: String,
+    ) -> crate::runtime::live::BoxFuture<Result<bool, RuntimeCommandError>> {
+        let panel_close_sender = self.panel_close_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            panel_close_sender
+                .send(RuntimePanelIdChannelRequest {
+                    id,
+                    operation: "panel.close",
+                    reply,
+                })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.close".to_string(),
+                    message: "host panel close channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.close".to_string(),
+                    message: "host panel close reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn list_panel_snapshots(
+        &self,
+    ) -> crate::runtime::live::BoxFuture<Result<Vec<RuntimePanelSnapshot>, RuntimeCommandError>>
+    {
+        let panel_snapshots_sender = self.panel_snapshots_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            panel_snapshots_sender
+                .send(RuntimePanelSnapshotsChannelRequest { reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.list".to_string(),
+                    message: "host panel snapshots channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.list".to_string(),
+                    message: "host panel snapshots reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn send_panel_text(
+        &self,
+        id: String,
+        text: String,
+    ) -> crate::runtime::live::BoxFuture<Result<bool, RuntimeCommandError>> {
+        let panel_send_sender = self.panel_send_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            panel_send_sender
+                .send(RuntimePanelSendChannelRequest { id, text, reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.send".to_string(),
+                    message: "host panel send channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "panel.send".to_string(),
+                    message: "host panel send reply channel closed".to_string(),
+                })?
+        })
+    }
+
     fn current_editor(&self) -> crate::runtime::live::BoxFuture<ReadonlyEditorSnapshot> {
         let snapshots = self.snapshots.clone();
         Box::pin(async move {
@@ -633,6 +873,16 @@ pub struct RuntimeSessionOwner {
     float_close_receiver: mpsc::UnboundedReceiver<RuntimeFloatIdChannelRequest>,
     _float_snapshots_sender: mpsc::UnboundedSender<RuntimeFloatSnapshotsChannelRequest>,
     float_snapshots_receiver: mpsc::UnboundedReceiver<RuntimeFloatSnapshotsChannelRequest>,
+    _panel_open_sender: mpsc::UnboundedSender<RuntimePanelOpenChannelRequest>,
+    panel_open_receiver: mpsc::UnboundedReceiver<RuntimePanelOpenChannelRequest>,
+    _panel_focus_sender: mpsc::UnboundedSender<RuntimePanelIdChannelRequest>,
+    panel_focus_receiver: mpsc::UnboundedReceiver<RuntimePanelIdChannelRequest>,
+    _panel_close_sender: mpsc::UnboundedSender<RuntimePanelIdChannelRequest>,
+    panel_close_receiver: mpsc::UnboundedReceiver<RuntimePanelIdChannelRequest>,
+    _panel_send_sender: mpsc::UnboundedSender<RuntimePanelSendChannelRequest>,
+    panel_send_receiver: mpsc::UnboundedReceiver<RuntimePanelSendChannelRequest>,
+    _panel_snapshots_sender: mpsc::UnboundedSender<RuntimePanelSnapshotsChannelRequest>,
+    panel_snapshots_receiver: mpsc::UnboundedReceiver<RuntimePanelSnapshotsChannelRequest>,
 }
 
 impl RuntimeSessionOwner {
@@ -657,6 +907,11 @@ impl RuntimeSessionOwner {
         let (float_focus_sender, float_focus_receiver) = mpsc::unbounded_channel();
         let (float_close_sender, float_close_receiver) = mpsc::unbounded_channel();
         let (float_snapshots_sender, float_snapshots_receiver) = mpsc::unbounded_channel();
+        let (panel_open_sender, panel_open_receiver) = mpsc::unbounded_channel();
+        let (panel_focus_sender, panel_focus_receiver) = mpsc::unbounded_channel();
+        let (panel_close_sender, panel_close_receiver) = mpsc::unbounded_channel();
+        let (panel_send_sender, panel_send_receiver) = mpsc::unbounded_channel();
+        let (panel_snapshots_sender, panel_snapshots_receiver) = mpsc::unbounded_channel();
         let bridge = Arc::new(ChannelBackedHostBridge {
             snapshots: snapshots.clone(),
             selector_view_backend,
@@ -669,6 +924,11 @@ impl RuntimeSessionOwner {
             float_focus_sender: float_focus_sender.clone(),
             float_close_sender: float_close_sender.clone(),
             float_snapshots_sender: float_snapshots_sender.clone(),
+            panel_open_sender: panel_open_sender.clone(),
+            panel_focus_sender: panel_focus_sender.clone(),
+            panel_close_sender: panel_close_sender.clone(),
+            panel_send_sender: panel_send_sender.clone(),
+            panel_snapshots_sender: panel_snapshots_sender.clone(),
         });
         let runtime = SayaLiveRuntime::spawn_from_seed(bridge, seed)?;
         Ok(Self {
@@ -695,6 +955,16 @@ impl RuntimeSessionOwner {
             float_close_receiver,
             _float_snapshots_sender: float_snapshots_sender,
             float_snapshots_receiver,
+            _panel_open_sender: panel_open_sender,
+            panel_open_receiver,
+            _panel_focus_sender: panel_focus_sender,
+            panel_focus_receiver,
+            _panel_close_sender: panel_close_sender,
+            panel_close_receiver,
+            _panel_send_sender: panel_send_sender,
+            panel_send_receiver,
+            _panel_snapshots_sender: panel_snapshots_sender,
+            panel_snapshots_receiver,
         })
     }
 
@@ -1210,6 +1480,102 @@ impl RuntimeSessionOwner {
                     );
                     let _ = request.reply.send(host_session.list_float_snapshots());
                 }
+                request = self.panel_open_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel open channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime open request during event dispatch: id={}, content={:?}",
+                        request.request.id,
+                        request.request.content
+                    );
+                    match host_session.open_panel(request.request) {
+                        Ok(snapshot) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(snapshot));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_focus_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel focus channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime {} request during event dispatch: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    let result = if request.operation == "panel.unfocus" {
+                        host_session.unfocus_panel()
+                    } else {
+                        host_session.focus_panel(request.id)
+                    };
+                    match result {
+                        Ok(focused) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= focused;
+                            let _ = request.reply.send(Ok(focused));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_close_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel close channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime {} request during event dispatch: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    match host_session.close_panel(request.id) {
+                        Ok(closed) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= closed;
+                            let _ = request.reply.send(Ok(closed));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_send_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel send channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime send request during event dispatch: id={}, bytes={}",
+                        request.id,
+                        request.text.len()
+                    );
+                    match host_session.send_panel_text(request.id, request.text) {
+                        Ok(sent) => {
+                            projected.requires_redraw |= sent;
+                            let _ = request.reply.send(Ok(sent));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_snapshots_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel snapshots channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!("[runtime_integration][panel] servicing runtime panel list request during event dispatch");
+                    let _ = request.reply.send(host_session.list_panel_snapshots());
+                }
             }
         }
 
@@ -1218,6 +1584,7 @@ impl RuntimeSessionOwner {
 
     fn refresh_cached_snapshots<H: RuntimeHostSession>(&self, host_session: &mut H) {
         let buffer = host_session.current_buffer_snapshot();
+        let selection = host_session.current_selection_snapshot();
         let window = host_session.current_window_snapshot();
         let editor = host_session.current_editor_snapshot();
         let current_filer_entry = match host_session.current_filer_entry() {
@@ -1242,6 +1609,7 @@ impl RuntimeSessionOwner {
             .lock()
             .expect("runtime snapshots mutex should not poison") = CachedRuntimeSnapshots {
             buffer,
+            selection,
             window,
             editor,
             current_filer_entry,
@@ -1475,6 +1843,102 @@ impl RuntimeSessionOwner {
                         "[runtime_integration][window] servicing runtime floats snapshot request during command execution"
                     );
                     let _ = request.reply.send(host_session.list_float_snapshots());
+                }
+                request = self.panel_open_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel open channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime open request during command execution: id={}, content={:?}",
+                        request.request.id,
+                        request.request.content
+                    );
+                    match host_session.open_panel(request.request) {
+                        Ok(snapshot) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw = true;
+                            let _ = request.reply.send(Ok(snapshot));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_focus_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel focus channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime {} request during command execution: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    let result = if request.operation == "panel.unfocus" {
+                        host_session.unfocus_panel()
+                    } else {
+                        host_session.focus_panel(request.id)
+                    };
+                    match result {
+                        Ok(focused) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= focused;
+                            let _ = request.reply.send(Ok(focused));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_close_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel close channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime {} request during command execution: id={}",
+                        request.operation,
+                        request.id
+                    );
+                    match host_session.close_panel(request.id) {
+                        Ok(closed) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= closed;
+                            let _ = request.reply.send(Ok(closed));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_send_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel send channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][panel] servicing runtime send request during command execution: id={}, bytes={}",
+                        request.id,
+                        request.text.len()
+                    );
+                    match host_session.send_panel_text(request.id, request.text) {
+                        Ok(sent) => {
+                            projected.requires_redraw |= sent;
+                            let _ = request.reply.send(Ok(sent));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.panel_snapshots_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] panel snapshots channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!("[runtime_integration][panel] servicing runtime panel list request during command execution");
+                    let _ = request.reply.send(host_session.list_panel_snapshots());
                 }
             }
         }

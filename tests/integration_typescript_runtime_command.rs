@@ -19,7 +19,8 @@ use saya::runtime::integration::{
 use saya::runtime::live::{
     BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
     ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
-    RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeMode, SayaLiveRuntime,
+    RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeMode, RuntimePanelOpenRequest,
+    RuntimePanelSnapshot, SayaLiveRuntime,
 };
 use saya::terminal::lifecycle::TerminalBackend;
 use tokio::sync::Mutex as TokioMutex;
@@ -67,6 +68,11 @@ struct RecordingHostBridge {
     opened_floats: Arc<TokioMutex<Vec<RuntimeFloatOpenRequest>>>,
     focused_floats: Arc<TokioMutex<Vec<u64>>>,
     closed_floats: Arc<TokioMutex<Vec<u64>>>,
+    opened_panels: Arc<TokioMutex<Vec<RuntimePanelOpenRequest>>>,
+    focused_panels: Arc<TokioMutex<Vec<String>>>,
+    unfocused_panels: Arc<TokioMutex<usize>>,
+    closed_panels: Arc<TokioMutex<Vec<String>>>,
+    sent_panel_text: Arc<TokioMutex<Vec<(String, String)>>>,
 }
 
 impl RecordingHostBridge {
@@ -76,6 +82,11 @@ impl RecordingHostBridge {
             opened_floats: Arc::new(TokioMutex::new(Vec::new())),
             focused_floats: Arc::new(TokioMutex::new(Vec::new())),
             closed_floats: Arc::new(TokioMutex::new(Vec::new())),
+            opened_panels: Arc::new(TokioMutex::new(Vec::new())),
+            focused_panels: Arc::new(TokioMutex::new(Vec::new())),
+            unfocused_panels: Arc::new(TokioMutex::new(0)),
+            closed_panels: Arc::new(TokioMutex::new(Vec::new())),
+            sent_panel_text: Arc::new(TokioMutex::new(Vec::new())),
         }
     }
 }
@@ -223,6 +234,75 @@ impl HostCapabilityBridge for RecordingHostBridge {
             }])
         })
     }
+
+    fn open_panel(
+        &self,
+        request: RuntimePanelOpenRequest,
+    ) -> BoxFuture<Result<RuntimePanelSnapshot, RuntimeCommandError>> {
+        let opened_panels = self.opened_panels.clone();
+        Box::pin(async move {
+            opened_panels.lock().await.push(request);
+            Ok(RuntimePanelSnapshot {
+                id: "ai-agent".to_string(),
+                numeric_id: 90,
+                position: "right".to_string(),
+                size: "35%".to_string(),
+                kind: "terminal".to_string(),
+                focused: true,
+            })
+        })
+    }
+
+    fn focus_panel(&self, id: String) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let focused_panels = self.focused_panels.clone();
+        Box::pin(async move {
+            focused_panels.lock().await.push(id);
+            Ok(true)
+        })
+    }
+
+    fn unfocus_panel(&self) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let unfocused_panels = self.unfocused_panels.clone();
+        Box::pin(async move {
+            *unfocused_panels.lock().await += 1;
+            Ok(true)
+        })
+    }
+
+    fn close_panel(&self, id: String) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let closed_panels = self.closed_panels.clone();
+        Box::pin(async move {
+            closed_panels.lock().await.push(id);
+            Ok(true)
+        })
+    }
+
+    fn list_panel_snapshots(
+        &self,
+    ) -> BoxFuture<Result<Vec<RuntimePanelSnapshot>, RuntimeCommandError>> {
+        Box::pin(async move {
+            Ok(vec![RuntimePanelSnapshot {
+                id: "ai-agent".to_string(),
+                numeric_id: 90,
+                position: "right".to_string(),
+                size: "35%".to_string(),
+                kind: "terminal".to_string(),
+                focused: true,
+            }])
+        })
+    }
+
+    fn send_panel_text(
+        &self,
+        id: String,
+        text: String,
+    ) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let sent_panel_text = self.sent_panel_text.clone();
+        Box::pin(async move {
+            sent_panel_text.lock().await.push((id, text));
+            Ok(true)
+        })
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -312,6 +392,104 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
     assert_eq!(
         host_bridge.executed_commands.lock().await.clone(),
         vec!["write".to_string(), "opened:17:4".to_string()]
+    );
+
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_panel_api_forwards_open_focus_list_send_and_close_to_host() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let config_path = unique_path("panel-init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.events.on("bufferOpen", async () => {
+                const panel = await saya.panel.open({
+                    id: "ai-agent",
+                    position: "right",
+                    size: "35%",
+                    content: {
+                        kind: "terminal",
+                        command: ["codex"],
+                        closeBehavior: "detach",
+                    },
+                    focus: true,
+                });
+                const listed = await saya.panel.list();
+                await saya.panel.send(panel.id, "Review the current file\n");
+                await saya.panel.focus(panel.id);
+                await saya.panel.unfocus();
+                await saya.panel.close(panel.id);
+                await saya.commands.execute(`panel:${panel.id}:${listed.length}:${listed[0].kind}`);
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let mut terminal_backend = DummyTerminalBackend::default();
+    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
+        LaunchRequest {
+            input_source: InputSource::Empty,
+            config_source: ConfigSource::File(config_path.clone()),
+            ..LaunchRequest::default()
+        },
+        &mut terminal_backend,
+    )
+    .expect("startup config should prepare callback seed");
+    drop(terminal_broker);
+    let host_bridge = Arc::new(RecordingHostBridge::new());
+    let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), outcome.callback_registry)
+        .expect("runtime should spawn");
+
+    runtime
+        .dispatch_event(RuntimeEventPayload::BufferOpen(BufferEventPayload {
+            buffer: ReadonlyBufferSnapshot {
+                id: 1,
+                path: Some(PathBuf::from("panel.md")),
+                line_count: 1,
+                cursor_row: 0,
+                cursor_col: 0,
+                current_line: "hello".to_string(),
+                text: "hello\n".to_string(),
+            },
+        }))
+        .expect("dispatch should enqueue")
+        .await_result()
+        .await
+        .expect("panel callback should complete");
+
+    let opened = host_bridge.opened_panels.lock().await;
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].id, "ai-agent");
+    assert_eq!(opened[0].position, "right");
+    assert_eq!(opened[0].size, "35%");
+    assert_eq!(opened[0].content.kind, "terminal");
+    assert_eq!(opened[0].content.command, vec!["codex".to_string()]);
+    assert_eq!(opened[0].content.close_behavior.as_deref(), Some("detach"));
+    drop(opened);
+
+    assert_eq!(
+        *host_bridge.sent_panel_text.lock().await,
+        vec![(
+            "ai-agent".to_string(),
+            "Review the current file\n".to_string()
+        )]
+    );
+    assert_eq!(
+        *host_bridge.focused_panels.lock().await,
+        vec!["ai-agent".to_string()]
+    );
+    assert_eq!(*host_bridge.unfocused_panels.lock().await, 1);
+    assert_eq!(
+        *host_bridge.closed_panels.lock().await,
+        vec!["ai-agent".to_string()]
+    );
+    assert_eq!(
+        *host_bridge.executed_commands.lock().await,
+        vec!["panel:ai-agent:1:terminal".to_string()]
     );
 
     std::fs::remove_file(&config_path).expect("remove config");

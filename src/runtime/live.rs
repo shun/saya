@@ -34,11 +34,18 @@ const RUNTIME_CALLBACK_ERROR_PREFIX: &str = "__SAYA_RUNTIME_CALLBACK_ERROR__";
 const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.commands.execute",
     "saya.buffer.current",
+    "saya.buffer.selection",
     "saya.window.current",
     "saya.window.openFloat",
     "saya.window.close",
     "saya.window.focus",
     "saya.window.floats",
+    "saya.panel.open",
+    "saya.panel.focus",
+    "saya.panel.unfocus",
+    "saya.panel.close",
+    "saya.panel.list",
+    "saya.panel.send",
     "saya.editor.current",
     "saya.editor.mode",
     "saya.workspace.findRoot",
@@ -138,6 +145,9 @@ globalThis.saya = {
         current() {
             return Deno.core.ops.op_runtime_current_buffer();
         },
+        selection() {
+            return Deno.core.ops.op_runtime_current_selection();
+        },
     },
     window: {
         current() {
@@ -156,6 +166,42 @@ globalThis.saya = {
         },
         floats() {
             return Deno.core.ops.op_runtime_window_floats();
+        },
+    },
+    panel: {
+        open(options) {
+            const content = options?.content ?? {};
+            const normalized = {
+                id: String(options?.id ?? ""),
+                position: String(options?.position ?? ""),
+                size: String(options?.size ?? ""),
+                content: {
+                    ...content,
+                    kind: String(content?.kind ?? ""),
+                    command: Array.isArray(content?.command) ? content.command.map((arg) => String(arg)) : [],
+                    lines: Array.isArray(content?.lines) ? content.lines.map((line) => String(line)) : [],
+                    closeBehavior: content?.closeBehavior === undefined || content?.closeBehavior === null
+                        ? null
+                        : String(content.closeBehavior),
+                },
+                focus: Boolean(options?.focus),
+            };
+            return Deno.core.ops.op_runtime_panel_open(JSON.stringify(normalized));
+        },
+        focus(id) {
+            return Deno.core.ops.op_runtime_panel_focus(String(id));
+        },
+        unfocus() {
+            return Deno.core.ops.op_runtime_panel_unfocus();
+        },
+        close(id) {
+            return Deno.core.ops.op_runtime_panel_close(String(id));
+        },
+        list() {
+            return Deno.core.ops.op_runtime_panel_list();
+        },
+        send(id, text) {
+            return Deno.core.ops.op_runtime_panel_send(String(id), String(text));
         },
     },
     editor: {
@@ -401,8 +447,8 @@ Object.freeze(globalThis.saya);
 "#;
 
 const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &[
-    "commands", "buffer", "window", "editor", "filer", "lsif", "input", "selector", "process",
-    "plugins",
+    "commands", "buffer", "window", "panel", "editor", "filer", "lsif", "input", "selector",
+    "process", "plugins",
 ];
 const RUNTIME_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
@@ -527,6 +573,16 @@ declare global {
 
     interface SayaRuntimeBufferSurface {
         current(): Promise<SayaReadonlyBufferSnapshot>;
+        selection(): Promise<SayaReadonlySelectionSnapshot | null>;
+    }
+
+    interface SayaReadonlySelectionSnapshot {
+        mode: "visual" | "visualLine" | "visualBlock";
+        startLine: number;
+        startColumn: number;
+        endLine: number;
+        endColumn: number;
+        text: string;
     }
 
     interface SayaRuntimeWindowSurface {
@@ -780,6 +836,39 @@ declare global {
         loadLazy(request: SayaLazyPluginLoadRequest): Promise<void>;
     }
 
+    type SayaPanelPosition = "left" | "right" | "top" | "bottom";
+    type SayaPanelCloseBehavior = "kill" | "detach";
+
+    type SayaPanelContent =
+        | { kind: "terminal"; command: string[]; closeBehavior?: SayaPanelCloseBehavior }
+        | { kind: "lines"; lines: string[] };
+
+    interface SayaPanelOpenOptions {
+        id: string;
+        position: SayaPanelPosition;
+        size: number | `${number}%` | string;
+        content: SayaPanelContent;
+        focus?: boolean;
+    }
+
+    interface SayaPanelSnapshot {
+        id: string;
+        numericId: number;
+        position: SayaPanelPosition;
+        size: string;
+        kind: "terminal" | "lines";
+        focused: boolean;
+    }
+
+    interface SayaRuntimePanelSurface {
+        open(options: SayaPanelOpenOptions): Promise<SayaPanelSnapshot>;
+        focus(id: string): Promise<boolean>;
+        unfocus(): Promise<boolean>;
+        close(id: string): Promise<boolean>;
+        list(): Promise<SayaPanelSnapshot[]>;
+        send(id: string, text: string): Promise<boolean>;
+    }
+
     type SayaFilerEntryKind = "directory" | "file" | "symlink" | "other";
 
     type SayaFilerSortKey = "name" | "kind" | "modifiedTime" | "size";
@@ -899,6 +988,7 @@ declare global {
         commands: SayaRuntimeCommandsSurface;
         buffer: SayaRuntimeBufferSurface;
         window: SayaRuntimeWindowSurface;
+        panel: SayaRuntimePanelSurface;
         editor: SayaRuntimeEditorSurface;
         workspace: SayaRuntimeWorkspaceSurface;
         filer: SayaRuntimeFilerSurface;
@@ -924,6 +1014,17 @@ pub struct ReadonlyBufferSnapshot {
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub current_line: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadonlySelectionSnapshot {
+    pub mode: String,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
     pub text: String,
 }
 
@@ -1010,6 +1111,40 @@ pub struct RuntimeFloatSnapshot {
     pub z_index: i32,
     pub lifecycle: String,
     pub replacement_group: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePanelOpenRequest {
+    pub id: String,
+    pub position: String,
+    pub size: String,
+    pub content: RuntimePanelContentRequest,
+    #[serde(default)]
+    pub focus: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePanelContentRequest {
+    pub kind: String,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub lines: Vec<String>,
+    #[serde(default)]
+    pub close_behavior: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePanelSnapshot {
+    pub id: String,
+    pub numeric_id: u64,
+    pub position: String,
+    pub size: String,
+    pub kind: String,
+    pub focused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1304,6 +1439,9 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
         })
     }
     fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot>;
+    fn current_selection(&self) -> BoxFuture<Option<ReadonlySelectionSnapshot>> {
+        Box::pin(async move { None })
+    }
     fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot>;
     fn open_float(
         &self,
@@ -1348,6 +1486,71 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
             log::debug!("[saya_live_runtime][window] typed float snapshots unavailable");
             Err(RuntimeCommandError::UnknownCommand {
                 name: "window.floats".to_string(),
+            })
+        })
+    }
+    fn open_panel(
+        &self,
+        request: RuntimePanelOpenRequest,
+    ) -> BoxFuture<Result<RuntimePanelSnapshot, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][panel] typed open unavailable: id={}, content={:?}",
+                request.id,
+                request.content
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "panel.open".to_string(),
+            })
+        })
+    }
+    fn focus_panel(&self, id: String) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!("[saya_live_runtime][panel] focus unavailable: id={}", id);
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "panel.focus".to_string(),
+            })
+        })
+    }
+    fn unfocus_panel(&self) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!("[saya_live_runtime][panel] unfocus unavailable");
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "panel.unfocus".to_string(),
+            })
+        })
+    }
+    fn close_panel(&self, id: String) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!("[saya_live_runtime][panel] close unavailable: id={}", id);
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "panel.close".to_string(),
+            })
+        })
+    }
+    fn list_panel_snapshots(
+        &self,
+    ) -> BoxFuture<Result<Vec<RuntimePanelSnapshot>, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!("[saya_live_runtime][panel] list unavailable");
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "panel.list".to_string(),
+            })
+        })
+    }
+    fn send_panel_text(
+        &self,
+        id: String,
+        text: String,
+    ) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][panel] send unavailable: id={}, bytes={}",
+                id,
+                text.len()
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "panel.send".to_string(),
             })
         })
     }
@@ -2005,6 +2208,16 @@ async fn op_runtime_current_buffer(
 
 #[op2(async(deferred), fast)]
 #[serde]
+async fn op_runtime_current_selection(
+    state: Rc<RefCell<OpState>>,
+) -> Result<Option<ReadonlySelectionSnapshot>, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime] runtime op current_selection");
+    Ok(bridge.current_selection().await)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
 async fn op_runtime_current_window(
     state: Rc<RefCell<OpState>>,
 ) -> Result<ReadonlyWindowSnapshot, JsErrorBox> {
@@ -2084,6 +2297,106 @@ async fn op_runtime_window_floats(
         .list_float_snapshots()
         .await
         .map_err(runtime_command_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_panel_open(
+    state: Rc<RefCell<OpState>>,
+    #[string] request_json: String,
+) -> Result<RuntimePanelSnapshot, JsErrorBox> {
+    let request = serde_json::from_str::<RuntimePanelOpenRequest>(&request_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid panel.open options: {error}")))?;
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!(
+        "[saya_live_runtime][panel] runtime op open: id={}, position={}, size={}, content={:?}, focus={}",
+        request.id,
+        request.position,
+        request.size,
+        request.content,
+        request.focus
+    );
+    bridge
+        .open_panel(request)
+        .await
+        .map_err(runtime_command_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_panel_focus(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][panel] runtime op focus: id={}", id);
+    let focused = bridge
+        .focus_panel(id)
+        .await
+        .map_err(runtime_command_error_to_js_error)?;
+    Ok(serde_json::Value::Bool(focused))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_panel_unfocus(
+    state: Rc<RefCell<OpState>>,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][panel] runtime op unfocus");
+    let unfocused = bridge
+        .unfocus_panel()
+        .await
+        .map_err(runtime_command_error_to_js_error)?;
+    Ok(serde_json::Value::Bool(unfocused))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_panel_close(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][panel] runtime op close: id={}", id);
+    let closed = bridge
+        .close_panel(id)
+        .await
+        .map_err(runtime_command_error_to_js_error)?;
+    Ok(serde_json::Value::Bool(closed))
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_panel_list(
+    state: Rc<RefCell<OpState>>,
+) -> Result<Vec<RuntimePanelSnapshot>, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][panel] runtime op list");
+    bridge
+        .list_panel_snapshots()
+        .await
+        .map_err(runtime_command_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_panel_send(
+    state: Rc<RefCell<OpState>>,
+    #[string] id: String,
+    #[string] text: String,
+) -> Result<serde_json::Value, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!(
+        "[saya_live_runtime][panel] runtime op send: id={}, bytes={}",
+        id,
+        text.len()
+    );
+    let sent = bridge
+        .send_panel_text(id, text)
+        .await
+        .map_err(runtime_command_error_to_js_error)?;
+    Ok(serde_json::Value::Bool(sent))
 }
 
 #[op2(async(deferred), fast)]
@@ -2624,11 +2937,18 @@ deno_core::extension!(
         op_runtime_selector_dispose,
         op_runtime_workspace_find_root,
         op_runtime_current_buffer,
+        op_runtime_current_selection,
         op_runtime_current_window,
         op_runtime_window_open_float,
         op_runtime_window_close_float,
         op_runtime_window_focus_float,
         op_runtime_window_floats,
+        op_runtime_panel_open,
+        op_runtime_panel_focus,
+        op_runtime_panel_unfocus,
+        op_runtime_panel_close,
+        op_runtime_panel_list,
+        op_runtime_panel_send,
         op_runtime_current_editor,
         op_runtime_filer_list,
         op_runtime_filer_current_entry,

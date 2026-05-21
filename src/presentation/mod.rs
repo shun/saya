@@ -1,6 +1,7 @@
 pub mod floating_window;
 pub mod markdown;
 pub mod overlay;
+pub mod panel;
 pub mod render;
 pub mod screen_model;
 pub mod structural_refresh;

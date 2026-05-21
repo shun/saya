@@ -284,6 +284,72 @@ async fn init_ts_module_can_import_repository_dired_plugin() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn init_ts_module_can_import_repository_agent_plugin() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let plugin_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-agent.ts");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaAgent }} from "{}";
+                setupSayaAgent({{
+                    defaultTool: "codex",
+                    layout: {{ position: "right", size: "35%" }},
+                }});
+            "#,
+            plugin_path.display()
+        ),
+    )
+    .expect("config file");
+
+    let prepared = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!(
+            "repository agent plugin should prepare, got: {:?}",
+            prepared
+        );
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("repository agent plugin should evaluate");
+
+    for expected_command in [
+        "panel.toggle",
+        "panel.focus",
+        "panel.unfocus",
+        "panel.close",
+        "panel.detach",
+        "agent.sendCurrentFile",
+        "agent.sendCurrentLine",
+        "agent.sendSelectedRange",
+        "agent.sendPrompt",
+    ] {
+        assert!(
+            registry.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    StartupRegistryEntry::Command { name, .. } if name == expected_command
+                )
+            }),
+            "missing command {expected_command}"
+        );
+    }
+    for removed_command in ["agent.toggle", "agent.focus", "agent.close", "agent.detach"] {
+        assert!(
+            !registry.entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    StartupRegistryEntry::Command { name, .. } if name == removed_command
+                )
+            }),
+            "removed compatibility command should not be registered: {removed_command}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn init_ts_module_can_import_repository_lsp_client_plugin() {
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");

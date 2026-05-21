@@ -66,6 +66,9 @@ use saya::presentation::overlay::effect::RuntimePresentationIntent;
 use saya::presentation::overlay::optional_graphics::{
     OptionalGraphicsAdapter, OverlayTerminalWriter,
 };
+use saya::presentation::panel::{
+    PanelCloseBehavior, PanelContent, PanelManager, PanelOpenRequest, PanelPosition, PanelSize,
+};
 use saya::presentation::render::coordinator::{RenderFrameError, TuiRenderCoordinator};
 use saya::presentation::render::renderer::{CrosstermBackendImpl, TuiRenderer};
 use saya::presentation::screen_model::{
@@ -87,7 +90,8 @@ use saya::runtime::live::{
     RuntimeFilerOperationKind, RuntimeFilerOperationReport, RuntimeFilerSortKey,
     RuntimeFloatContentRequest, RuntimeFloatOpenRequest, RuntimeFloatRelativeToRequest,
     RuntimeFloatSnapshot, RuntimeFloatZIndexRequest, RuntimeInputPromptRequest,
-    RuntimeInputPromptResponse, RuntimeMode,
+    RuntimeInputPromptResponse, RuntimeMode, RuntimePanelContentRequest, RuntimePanelOpenRequest,
+    RuntimePanelSnapshot,
 };
 use saya::runtime::plugin::{PluginHost, render_plugin_report};
 use saya::support::diagnostic_log::{
@@ -242,6 +246,7 @@ async fn main() {
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
     let mut floating_window_manager = FloatingWindowManager::default();
+    let mut panel_manager = PanelManager::default();
     let mut completion_float_manager = CompletionFloatManager::default();
     let mut lsp_diagnostic_store = LspDiagnosticStore::default();
     let lsif_bridge = LsifBridgeHandle::default();
@@ -258,6 +263,8 @@ async fn main() {
         &mut transient_msg,
         &mut startup_runtime_redraw,
         &mut runtime_presentation_intents,
+        &mut panel_manager,
+        &mut terminal_float_manager,
         Some(&lsif_bridge),
     )
     .await;
@@ -314,6 +321,7 @@ async fn main() {
         terminal_width,
         terminal_height,
         Some(&mut floating_window_manager),
+        Some(&mut panel_manager),
         Some(&mut terminal_float_manager),
         runtime_session
             .as_ref()
@@ -840,12 +848,46 @@ async fn main() {
                                                 );
                                             }
                                             ExCommandRoute::CoreOwned => {
-                                                let _ = outcome.core_bridge.apply_ex_command(&cmd);
-                                                consume_core_outcomes_from_core(
-                                                    &mut outcome.core_bridge,
-                                                    &mut outcome_accumulator,
-                                                    &mut need_redraw,
-                                                );
+                                                if let Some(command_name) =
+                                                    startup_registered_command_name_for_ex_command(
+                                                        &cmd,
+                                                        &outcome.callback_registry,
+                                                    )
+                                                {
+                                                    log::info!(
+                                                        "[main][command_line] executing startup registered command from ex command: command={}",
+                                                        command_name
+                                                    );
+                                                    if let Some(reason) =
+                                                        execute_startup_keymap_registered_command(
+                                                            runtime_session.as_mut(),
+                                                            &command_name,
+                                                            &mut outcome,
+                                                            &mut session_state,
+                                                            &mut floating_window_manager,
+                                                            &mut completion_float_manager,
+                                                            &mut lsp_diagnostic_store,
+                                                            &mut terminal_float_manager,
+                                                            &mut panel_manager,
+                                                            Some(&mut runtime_input_prompt),
+                                                            &mut transient_msg,
+                                                            &mut need_redraw,
+                                                            &mut runtime_presentation_intents,
+                                                            Some(&lsif_bridge),
+                                                        )
+                                                        .await
+                                                    {
+                                                        break 'main reason;
+                                                    }
+                                                } else {
+                                                    let _ =
+                                                        outcome.core_bridge.apply_ex_command(&cmd);
+                                                    consume_core_outcomes_from_core(
+                                                        &mut outcome.core_bridge,
+                                                        &mut outcome_accumulator,
+                                                        &mut need_redraw,
+                                                    );
+                                                }
                                             }
                                             ExCommandRoute::UnsupportedPlanned => {
                                                 log::debug!(
@@ -947,6 +989,46 @@ async fn main() {
                             .await
                             {
                                 break 'main reason;
+                            }
+                        }
+
+                        if !handled {
+                            if let Some(prompt) = begin_command_line_from_focused_panel(
+                                &mut panel_manager,
+                                &key,
+                                outcome.core_bridge.mode(),
+                            ) {
+                                command_line_prompt = Some(prompt);
+                                command_line_edit.clear();
+                                command_line_histories.reset_navigation();
+                                handled = true;
+                                need_redraw = true;
+                                workspace_projection_dirty = true;
+                            }
+                        }
+
+                        if !handled {
+                            if let Some(effect) = handle_terminal_panel_key(
+                                &mut panel_manager,
+                                &mut terminal_float_manager,
+                                &key,
+                            ) {
+                                match effect {
+                                    FloatingWindowKeyHandling::Consumed => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                    }
+                                    FloatingWindowKeyHandling::Closed { id } => {
+                                        handled = true;
+                                        need_redraw = true;
+                                        workspace_projection_dirty = true;
+                                        log::debug!(
+                                            "[main][panel] terminal panel closed from focused input: pseudo_float_id={}",
+                                            id.0
+                                        );
+                                    }
+                                }
                             }
                         }
 
@@ -1171,6 +1253,7 @@ async fn main() {
                                         &mut completion_float_manager,
                                         &mut lsp_diagnostic_store,
                                         &mut terminal_float_manager,
+                                        &mut panel_manager,
                                         Some(&mut runtime_input_prompt),
                                         &mut transient_msg,
                                         &mut need_redraw,
@@ -1539,6 +1622,7 @@ async fn main() {
                     terminal_width,
                     terminal_height,
                     Some(&mut floating_window_manager),
+                    Some(&mut panel_manager),
                     Some(&mut terminal_float_manager),
                     runtime_session
                         .as_ref()
@@ -1943,6 +2027,7 @@ async fn run_binary_pty_smoke(launch_request: saya::app::cli::LaunchRequest) -> 
                 None,
                 None,
                 None,
+                None,
             ),
             &capability_profile,
             &runtime_presentation_intents,
@@ -1997,6 +2082,7 @@ async fn run_binary_pty_smoke(launch_request: saya::app::cli::LaunchRequest) -> 
                 None,
                 terminal_width,
                 terminal_height,
+                None,
                 None,
                 None,
                 None,
@@ -2056,6 +2142,7 @@ async fn run_binary_pty_smoke(launch_request: saya::app::cli::LaunchRequest) -> 
                 None,
                 resized_width,
                 resized_height,
+                None,
                 None,
                 None,
                 None,
@@ -3663,6 +3750,18 @@ fn normalize_main_host_command(command: &str) -> Option<String> {
     }
 
     Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn startup_registered_command_name_for_ex_command(
+    command: &str,
+    registry: &saya::runtime::callback_registry_seed::CallbackRegistrySeed,
+) -> Option<String> {
+    let normalized = normalize_main_host_command(command)?;
+    registry
+        .commands()
+        .iter()
+        .find(|registered| registered.name() == normalized)
+        .map(|registered| registered.name().to_string())
 }
 
 fn runtime_shutdown_intent_from_quit_decision(
@@ -5652,6 +5751,8 @@ async fn dispatch_buffer_open_with_runtime(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    panel_manager: &mut PanelManager,
+    terminal_float_manager: &mut TerminalFloatManager,
     lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
@@ -5659,6 +5760,8 @@ async fn dispatch_buffer_open_with_runtime(
     };
     let mut host_session =
         MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsif_bridge);
+    host_session.panel_manager = Some(panel_manager);
+    host_session.terminal_float_manager = Some(terminal_float_manager);
     let payload = RuntimeEventMapper::buffer_open(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
     apply_runtime_dispatch_outcome(
@@ -5776,6 +5879,7 @@ async fn execute_startup_keymap_registered_command(
     completion_float_manager: &mut CompletionFloatManager,
     lsp_diagnostic_store: &mut LspDiagnosticStore,
     terminal_float_manager: &mut TerminalFloatManager,
+    panel_manager: &mut PanelManager,
     runtime_input_prompt: Option<&mut Option<RuntimeInputPromptUiState>>,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
@@ -5802,6 +5906,7 @@ async fn execute_startup_keymap_registered_command(
         completion_float_manager,
         lsp_diagnostic_store,
         terminal_float_manager,
+        panel_manager,
         lsif_bridge,
     );
     host_session.runtime_input_prompt = runtime_input_prompt;
@@ -6206,6 +6311,187 @@ fn runtime_terminal_close_behavior(close_behavior: Option<&str>) -> TerminalFloa
     }
 }
 
+fn execute_runtime_panel_open(
+    request: RuntimePanelOpenRequest,
+    panel_manager: Option<&mut PanelManager>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<RuntimePanelSnapshot, RuntimeCommandError> {
+    let manager = panel_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "panel.open".to_string(),
+        message: "panel manager is not available".to_string(),
+    })?;
+    let position = runtime_panel_position(&request.position)?;
+    let size = runtime_panel_size(&request.size)?;
+    let content = runtime_panel_content(request.content.clone(), terminal_float_manager)?;
+    let result = manager.open(PanelOpenRequest {
+        id: request.id.clone(),
+        position,
+        size,
+        content,
+        focus: request.focus,
+    });
+    log::debug!(
+        "[main][panel] open applied: id={}, numeric_id={}, position={:?}, size={:?}, focus={}",
+        result.id,
+        result.numeric_id,
+        result.position,
+        result.size,
+        result.focused
+    );
+    manager
+        .snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.id == request.id)
+        .map(runtime_panel_snapshot)
+        .ok_or_else(|| RuntimeCommandError::CommandFailed {
+            name: "panel.open".to_string(),
+            message: format!("opened panel is missing: id={}", request.id),
+        })
+}
+
+fn execute_runtime_panel_close(
+    id: String,
+    panel_manager: Option<&mut PanelManager>,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<bool, RuntimeCommandError> {
+    let manager = panel_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+        name: "panel.close".to_string(),
+        message: "panel manager is not available".to_string(),
+    })?;
+    let content = manager.close(&id);
+    if let Some(content) = content.as_ref()
+        && let Some(terminal_id) = content.terminal_id()
+        && let Some(terminal_manager) = terminal_float_manager
+    {
+        let _ = terminal_manager.close_view(terminal_id);
+    }
+    log::debug!(
+        "[main][panel] close applied: id={}, closed={}, content={:?}",
+        id,
+        content.is_some(),
+        content
+    );
+    Ok(content.is_some())
+}
+
+fn runtime_panel_snapshot(
+    snapshot: saya::presentation::panel::PanelSnapshot,
+) -> RuntimePanelSnapshot {
+    RuntimePanelSnapshot {
+        id: snapshot.id,
+        numeric_id: snapshot.numeric_id,
+        position: runtime_panel_position_label(snapshot.position).to_string(),
+        size: runtime_panel_size_label(snapshot.size),
+        kind: snapshot.kind.to_string(),
+        focused: snapshot.focused,
+    }
+}
+
+fn runtime_panel_position(value: &str) -> Result<PanelPosition, RuntimeCommandError> {
+    match value {
+        "left" => Ok(PanelPosition::Left),
+        "right" => Ok(PanelPosition::Right),
+        "top" => Ok(PanelPosition::Top),
+        "bottom" => Ok(PanelPosition::Bottom),
+        _ => Err(RuntimeCommandError::CommandFailed {
+            name: "panel.open".to_string(),
+            message: format!("unsupported panel position: {value}"),
+        }),
+    }
+}
+
+fn runtime_panel_position_label(position: PanelPosition) -> &'static str {
+    match position {
+        PanelPosition::Left => "left",
+        PanelPosition::Right => "right",
+        PanelPosition::Top => "top",
+        PanelPosition::Bottom => "bottom",
+    }
+}
+
+fn runtime_panel_size(value: &str) -> Result<PanelSize, RuntimeCommandError> {
+    let trimmed = value.trim();
+    if let Some(percent) = trimmed.strip_suffix('%') {
+        return percent
+            .parse::<u16>()
+            .map(PanelSize::Percent)
+            .map_err(|error| RuntimeCommandError::CommandFailed {
+                name: "panel.open".to_string(),
+                message: format!("invalid panel percent size: {error}"),
+            });
+    }
+    trimmed
+        .parse::<u16>()
+        .map(PanelSize::Cells)
+        .map_err(|error| RuntimeCommandError::CommandFailed {
+            name: "panel.open".to_string(),
+            message: format!("invalid panel size: {error}"),
+        })
+}
+
+fn runtime_panel_size_label(size: PanelSize) -> String {
+    match size {
+        PanelSize::Cells(cells) => cells.to_string(),
+        PanelSize::Percent(percent) => format!("{percent}%"),
+    }
+}
+
+fn runtime_panel_content(
+    request: RuntimePanelContentRequest,
+    terminal_float_manager: Option<&mut TerminalFloatManager>,
+) -> Result<PanelContent, RuntimeCommandError> {
+    match request.kind.as_str() {
+        "lines" => Ok(PanelContent::Lines {
+            lines: request.lines,
+        }),
+        "terminal" => {
+            let terminal_manager =
+                terminal_float_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
+                    name: "panel.open".to_string(),
+                    message: "terminal manager is not available".to_string(),
+                })?;
+            let (command, args) =
+                runtime_terminal_command_parts(request.command).ok_or_else(|| {
+                    RuntimeCommandError::CommandFailed {
+                        name: "panel.open".to_string(),
+                        message: "panel terminal command must not be empty".to_string(),
+                    }
+                })?;
+            let close_behavior = runtime_panel_close_behavior(request.close_behavior.as_deref());
+            let terminal_id = terminal_manager
+                .spawn(TerminalFloatSpawnRequest {
+                    command,
+                    args,
+                    width: 80,
+                    height: 24,
+                    close_behavior: match close_behavior {
+                        PanelCloseBehavior::Kill => TerminalFloatCloseBehavior::KillOnClose,
+                        PanelCloseBehavior::Detach => TerminalFloatCloseBehavior::DetachOnClose,
+                    },
+                })
+                .map_err(|error| RuntimeCommandError::CommandFailed {
+                    name: "panel.open".to_string(),
+                    message: format!("failed to spawn panel terminal: {error:?}"),
+                })?;
+            Ok(PanelContent::Terminal {
+                terminal_id,
+                close_behavior,
+            })
+        }
+        other => Err(RuntimeCommandError::CommandFailed {
+            name: "panel.open".to_string(),
+            message: format!("unsupported panel content kind: {other}"),
+        }),
+    }
+}
+
+fn runtime_panel_close_behavior(close_behavior: Option<&str>) -> PanelCloseBehavior {
+    match close_behavior.unwrap_or("kill") {
+        "detach" | "detachOnClose" | "detach-on-close" => PanelCloseBehavior::Detach,
+        _ => PanelCloseBehavior::Kill,
+    }
+}
+
 struct MainRuntimeHostSession<'a> {
     outcome: &'a mut saya::app::bootstrap::BootstrapOutcome,
     session_state: &'a mut saya::app::session::EditorSessionState,
@@ -6214,6 +6500,7 @@ struct MainRuntimeHostSession<'a> {
     completion_float_manager: Option<&'a mut CompletionFloatManager>,
     lsp_diagnostic_store: Option<&'a mut LspDiagnosticStore>,
     terminal_float_manager: Option<&'a mut TerminalFloatManager>,
+    panel_manager: Option<&'a mut PanelManager>,
     lsif_bridge: Option<&'a LsifBridgeHandle>,
 }
 
@@ -6230,6 +6517,7 @@ impl<'a> MainRuntimeHostSession<'a> {
             completion_float_manager: None,
             lsp_diagnostic_store: None,
             terminal_float_manager: None,
+            panel_manager: None,
             lsif_bridge: None,
         }
     }
@@ -6247,6 +6535,7 @@ impl<'a> MainRuntimeHostSession<'a> {
             completion_float_manager: None,
             lsp_diagnostic_store: None,
             terminal_float_manager: None,
+            panel_manager: None,
             lsif_bridge,
         }
     }
@@ -6258,6 +6547,7 @@ impl<'a> MainRuntimeHostSession<'a> {
         completion_float_manager: &'a mut CompletionFloatManager,
         lsp_diagnostic_store: &'a mut LspDiagnosticStore,
         terminal_float_manager: &'a mut TerminalFloatManager,
+        panel_manager: &'a mut PanelManager,
         lsif_bridge: Option<&'a LsifBridgeHandle>,
     ) -> Self {
         Self {
@@ -6268,6 +6558,7 @@ impl<'a> MainRuntimeHostSession<'a> {
             completion_float_manager: Some(completion_float_manager),
             lsp_diagnostic_store: Some(lsp_diagnostic_store),
             terminal_float_manager: Some(terminal_float_manager),
+            panel_manager: Some(panel_manager),
             lsif_bridge,
         }
     }
@@ -6285,6 +6576,7 @@ impl<'a> MainRuntimeHostSession<'a> {
             completion_float_manager: None,
             lsp_diagnostic_store: None,
             terminal_float_manager: None,
+            panel_manager: None,
             lsif_bridge: None,
         }
     }
@@ -6318,6 +6610,43 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
                 .unwrap_or_default(),
             text: self.outcome.core_bridge.buffer_text(),
         }
+    }
+
+    fn current_selection_snapshot(
+        &mut self,
+    ) -> Option<saya::runtime::live::ReadonlySelectionSnapshot> {
+        let snapshot = self.outcome.core_bridge.light_snapshot();
+        let active_buffer_id = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.is_active)
+            .map(|buffer| buffer.id as u64)
+            .unwrap_or(1);
+        let selection = self.outcome.core_bridge.current_visual_selection()?;
+        let line_count = selection
+            .end_row
+            .saturating_sub(selection.start_row)
+            .saturating_add(1);
+        let text = self
+            .outcome
+            .core_bridge
+            .buffer_line_range(active_buffer_id as i32, selection.start_row, line_count)
+            .map(|range| range.lines.join("\n"))
+            .unwrap_or_default();
+        let mode = match selection.mode {
+            CoreMode::VisualLine => "visualLine",
+            CoreMode::VisualBlock => "visualBlock",
+            _ => "visual",
+        }
+        .to_string();
+        Some(saya::runtime::live::ReadonlySelectionSnapshot {
+            mode,
+            start_line: selection.start_row,
+            start_column: selection.start_col,
+            end_line: selection.end_row,
+            end_column: selection.end_col,
+            text,
+        })
     }
 
     fn current_window_snapshot(&mut self) -> ReadonlyWindowSnapshot {
@@ -6369,6 +6698,91 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             }
         })?;
         Ok(runtime_float_snapshots(manager))
+    }
+
+    fn open_panel(
+        &mut self,
+        request: RuntimePanelOpenRequest,
+    ) -> Result<RuntimePanelSnapshot, RuntimeCommandError> {
+        execute_runtime_panel_open(
+            request,
+            self.panel_manager.as_deref_mut(),
+            self.terminal_float_manager.as_deref_mut(),
+        )
+    }
+
+    fn focus_panel(&mut self, id: String) -> Result<bool, RuntimeCommandError> {
+        let manager = self.panel_manager.as_deref_mut().ok_or_else(|| {
+            RuntimeCommandError::CommandFailed {
+                name: "panel.focus".to_string(),
+                message: "panel manager is not available".to_string(),
+            }
+        })?;
+        Ok(manager.focus(&id))
+    }
+
+    fn unfocus_panel(&mut self) -> Result<bool, RuntimeCommandError> {
+        let manager = self.panel_manager.as_deref_mut().ok_or_else(|| {
+            RuntimeCommandError::CommandFailed {
+                name: "panel.unfocus".to_string(),
+                message: "panel manager is not available".to_string(),
+            }
+        })?;
+        Ok(manager.unfocus())
+    }
+
+    fn close_panel(&mut self, id: String) -> Result<bool, RuntimeCommandError> {
+        execute_runtime_panel_close(
+            id,
+            self.panel_manager.as_deref_mut(),
+            self.terminal_float_manager.as_deref_mut(),
+        )
+    }
+
+    fn list_panel_snapshots(&mut self) -> Result<Vec<RuntimePanelSnapshot>, RuntimeCommandError> {
+        let manager =
+            self.panel_manager
+                .as_deref()
+                .ok_or_else(|| RuntimeCommandError::CommandFailed {
+                    name: "panel.list".to_string(),
+                    message: "panel manager is not available".to_string(),
+                })?;
+        Ok(manager
+            .snapshots()
+            .into_iter()
+            .map(runtime_panel_snapshot)
+            .collect())
+    }
+
+    fn send_panel_text(&mut self, id: String, text: String) -> Result<bool, RuntimeCommandError> {
+        let manager = self.panel_manager.as_deref_mut().ok_or_else(|| {
+            RuntimeCommandError::CommandFailed {
+                name: "panel.send".to_string(),
+                message: "panel manager is not available".to_string(),
+            }
+        })?;
+        let terminal_id =
+            manager
+                .send(&id, &text)
+                .map_err(|message| RuntimeCommandError::CommandFailed {
+                    name: "panel.send".to_string(),
+                    message,
+                })?;
+        if let Some(terminal_id) = terminal_id {
+            let terminal_manager = self.terminal_float_manager.as_deref_mut().ok_or_else(|| {
+                RuntimeCommandError::CommandFailed {
+                    name: "panel.send".to_string(),
+                    message: "terminal manager is not available".to_string(),
+                }
+            })?;
+            terminal_manager
+                .write_bytes(terminal_id, text.as_bytes())
+                .map_err(|error| RuntimeCommandError::CommandFailed {
+                    name: "panel.send".to_string(),
+                    message: format!("failed to send panel terminal input: {error:?}"),
+                })?;
+        }
+        Ok(terminal_id.is_some())
     }
 
     fn current_editor_snapshot(&mut self) -> ReadonlyEditorSnapshot {
@@ -7132,7 +7546,8 @@ fn build_workspace_render_output(
     terminal_width: u16,
     terminal_height: u16,
     floating_window_manager: Option<&mut FloatingWindowManager>,
-    terminal_float_manager: Option<&mut TerminalFloatManager>,
+    panel_manager: Option<&mut PanelManager>,
+    mut terminal_float_manager: Option<&mut TerminalFloatManager>,
     selector_tui_projection_sink: Option<Arc<SelectorTuiProjectionSink>>,
 ) -> Result<WorkspaceScreenModel, WorkspaceRedrawError> {
     let total_started_at = std::time::Instant::now();
@@ -7349,7 +7764,7 @@ fn build_workspace_render_output(
         }
         if let Some(manager) = floating_window_manager {
             refresh_buffer_backed_float_lines(manager, &outcome.core_bridge, &light_snapshot);
-            if let Some(terminal_manager) = terminal_float_manager {
+            if let Some(terminal_manager) = terminal_float_manager.as_deref_mut() {
                 refresh_terminal_float_lines(manager, terminal_manager);
             }
             apply_workspace_floating_window_models(
@@ -7358,6 +7773,20 @@ fn build_workspace_render_output(
                 terminal_height,
                 manager,
             );
+        }
+        if let Some(panel_manager) = panel_manager {
+            if let Some(terminal_manager) = terminal_float_manager.as_deref_mut() {
+                refresh_terminal_panel_lines(panel_manager, terminal_manager);
+            }
+            let panel_floats =
+                panel_manager.resolve_floating_screen_models(terminal_width, terminal_height);
+            log::trace!(
+                "[main][panel] applied workspace panels: panels={}, terminal=({},{})",
+                panel_floats.len(),
+                terminal_width,
+                terminal_height
+            );
+            workspace.floats.extend(panel_floats);
         }
         if let Some(sink) = selector_tui_projection_sink
             && let Some(selector_model) = sink.current_model()
@@ -7525,6 +7954,26 @@ fn refresh_terminal_float_lines(
     }
 }
 
+fn refresh_terminal_panel_lines(
+    panel_manager: &mut PanelManager,
+    terminal_manager: &mut TerminalFloatManager,
+) {
+    terminal_manager.drain();
+    for request in panel_manager.terminal_view_requests() {
+        let mut lines = terminal_manager.rendered_lines(request.terminal_id);
+        lines.truncate(usize::from(request.content_height));
+        let returned = lines.len();
+        let _ = panel_manager.replace_terminal_lines(&request.id, lines);
+        log::trace!(
+            "[main][panel] refreshed terminal panel lines: id={}, terminal_id={}, requested_lines={}, returned_lines={}",
+            request.id,
+            request.terminal_id,
+            request.content_height,
+            returned
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FloatingWindowKeyHandling {
     Consumed,
@@ -7663,6 +8112,68 @@ fn handle_floating_window_key(
         FloatingInputOutcome::Closed { id } => Some(FloatingWindowKeyHandling::Closed { id }),
         FloatingInputOutcome::Ignored => None,
     }
+}
+
+fn handle_terminal_panel_key(
+    manager: &mut PanelManager,
+    terminal_manager: &mut TerminalFloatManager,
+    key: &KeyInput,
+) -> Option<FloatingWindowKeyHandling> {
+    if matches!(key, KeyInput::Ctrl('w') | KeyInput::Ctrl('W')) {
+        let had_focus = manager.unfocus();
+        log::debug!(
+            "[main][panel] terminal panel unfocused from key: key={:?}, had_focus={}",
+            key,
+            had_focus
+        );
+        return had_focus.then_some(FloatingWindowKeyHandling::Consumed);
+    }
+    let terminal_id = manager.focused_terminal_id()?;
+    let result = match key {
+        KeyInput::PageUp => terminal_manager.scroll(terminal_id, -8),
+        KeyInput::PageDown => terminal_manager.scroll(terminal_id, 8),
+        _ => terminal_manager.write_key(terminal_id, key),
+    };
+    match result {
+        Ok(()) => {
+            log::debug!(
+                "[main][panel] focused terminal panel consumed key: terminal_id={}, key={:?}",
+                terminal_id,
+                key
+            );
+            Some(FloatingWindowKeyHandling::Consumed)
+        }
+        Err(error) => {
+            log::debug!(
+                "[main][panel] focused terminal panel failed to consume key: terminal_id={}, key={:?}, error={:?}",
+                terminal_id,
+                key,
+                error
+            );
+            None
+        }
+    }
+}
+
+fn begin_command_line_from_focused_panel(
+    manager: &mut PanelManager,
+    key: &KeyInput,
+    mode: CoreMode,
+) -> Option<char> {
+    let prompt = match (mode, key) {
+        (CoreMode::Normal, KeyInput::Char(':')) => ':',
+        (CoreMode::Normal, KeyInput::Char('/')) => '/',
+        _ => return None,
+    };
+    let terminal_id = manager.focused_terminal_id()?;
+    let had_focus = manager.unfocus();
+    log::debug!(
+        "[main][panel] focused terminal panel yielded command-line prompt: terminal_id={}, prompt={}, had_focus={}",
+        terminal_id,
+        prompt,
+        had_focus
+    );
+    had_focus.then_some(prompt)
 }
 
 fn focus_floating_window_from_mouse_click(
@@ -8876,6 +9387,7 @@ mod tests {
             Some(&mut floating_window_manager),
             None,
             None,
+            None,
         )
         .expect("workspace should render");
 
@@ -9153,6 +9665,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("syntax-off workspace should render");
         assert!(
@@ -9199,6 +9712,7 @@ mod tests {
                 None,
                 80,
                 24,
+                None,
                 None,
                 None,
                 None,
@@ -11536,6 +12050,135 @@ mod tests {
     }
 
     #[test]
+    fn startup_registered_command_name_for_ex_command_matches_runtime_command_names() {
+        let registry =
+            saya::runtime::callback_registry_seed::CallbackRegistrySeed::from_startup_entries(
+                vec![saya::runtime::config::StartupRegistryEntry::Command {
+                    name: "panel.toggle".to_string(),
+                    callback_source: "() => {}".to_string(),
+                }],
+            );
+
+        assert_eq!(
+            startup_registered_command_name_for_ex_command(":panel.toggle", &registry),
+            Some("panel.toggle".to_string())
+        );
+        assert_eq!(
+            startup_registered_command_name_for_ex_command("panel.toggle", &registry),
+            Some("panel.toggle".to_string())
+        );
+        assert_eq!(
+            startup_registered_command_name_for_ex_command(":panel.missing", &registry),
+            None
+        );
+    }
+
+    #[test]
+    fn focused_terminal_panel_ctrl_w_returns_focus_to_editor() {
+        let mut panel_manager = PanelManager::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        panel_manager.open(PanelOpenRequest {
+            id: "ai-agent".to_string(),
+            position: PanelPosition::Right,
+            size: PanelSize::Percent(35),
+            content: PanelContent::Terminal {
+                terminal_id: 77,
+                close_behavior: PanelCloseBehavior::Detach,
+            },
+            focus: true,
+        });
+
+        assert_eq!(panel_manager.focused_terminal_id(), Some(77));
+        assert_eq!(
+            handle_terminal_panel_key(
+                &mut panel_manager,
+                &mut terminal_float_manager,
+                &KeyInput::Ctrl('w')
+            ),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(panel_manager.focused_panel_id(), None);
+        assert_eq!(panel_manager.focused_terminal_id(), None);
+    }
+
+    #[test]
+    fn focused_terminal_panel_colon_enters_editor_command_line() {
+        let mut panel_manager = PanelManager::default();
+        panel_manager.open(PanelOpenRequest {
+            id: "ai-agent".to_string(),
+            position: PanelPosition::Right,
+            size: PanelSize::Percent(35),
+            content: PanelContent::Terminal {
+                terminal_id: 77,
+                close_behavior: PanelCloseBehavior::Detach,
+            },
+            focus: true,
+        });
+
+        assert_eq!(panel_manager.focused_terminal_id(), Some(77));
+        assert_eq!(
+            begin_command_line_from_focused_panel(
+                &mut panel_manager,
+                &KeyInput::Char(':'),
+                CoreMode::Normal
+            ),
+            Some(':')
+        );
+        assert_eq!(panel_manager.focused_panel_id(), None);
+        assert_eq!(panel_manager.focused_terminal_id(), None);
+    }
+
+    #[test]
+    fn focused_terminal_panel_search_enters_editor_command_line() {
+        let mut panel_manager = PanelManager::default();
+        panel_manager.open(PanelOpenRequest {
+            id: "ai-agent".to_string(),
+            position: PanelPosition::Right,
+            size: PanelSize::Percent(35),
+            content: PanelContent::Terminal {
+                terminal_id: 77,
+                close_behavior: PanelCloseBehavior::Detach,
+            },
+            focus: true,
+        });
+
+        assert_eq!(
+            begin_command_line_from_focused_panel(
+                &mut panel_manager,
+                &KeyInput::Char('/'),
+                CoreMode::Normal
+            ),
+            Some('/')
+        );
+        assert_eq!(panel_manager.focused_terminal_id(), None);
+    }
+
+    #[test]
+    fn focused_terminal_panel_plain_text_stays_terminal_input() {
+        let mut panel_manager = PanelManager::default();
+        panel_manager.open(PanelOpenRequest {
+            id: "ai-agent".to_string(),
+            position: PanelPosition::Right,
+            size: PanelSize::Percent(35),
+            content: PanelContent::Terminal {
+                terminal_id: 77,
+                close_behavior: PanelCloseBehavior::Detach,
+            },
+            focus: true,
+        });
+
+        assert_eq!(
+            begin_command_line_from_focused_panel(
+                &mut panel_manager,
+                &KeyInput::Char('x'),
+                CoreMode::Normal
+            ),
+            None
+        );
+        assert_eq!(panel_manager.focused_terminal_id(), Some(77));
+    }
+
+    #[test]
     fn startup_keymap_action_for_input_resolves_pending_two_key_sequence() {
         let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
@@ -11867,6 +12510,7 @@ mod tests {
         let mut completion_float_manager = CompletionFloatManager::default();
         let mut lsp_diagnostic_store = LspDiagnosticStore::default();
         let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
         let shutdown = execute_startup_keymap_registered_command(
             Some(runtime_session),
             command_name,
@@ -11876,6 +12520,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            &mut panel_manager,
             None,
             &mut transient_msg,
             &mut need_redraw,
@@ -11901,6 +12546,7 @@ mod tests {
         let mut completion_float_manager = CompletionFloatManager::default();
         let mut lsp_diagnostic_store = LspDiagnosticStore::default();
         let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
         let shutdown = execute_startup_keymap_registered_command(
             Some(runtime_session),
             command_name,
@@ -11910,6 +12556,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            &mut panel_manager,
             None,
             &mut transient_msg,
             &mut need_redraw,
@@ -13066,6 +13713,7 @@ mod tests {
         let mut completion_float_manager = CompletionFloatManager::default();
         let mut lsp_diagnostic_store = LspDiagnosticStore::default();
         let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
         execute_startup_keymap_registered_command(
             Some(&mut runtime_session),
             &command_name,
@@ -13075,6 +13723,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            &mut panel_manager,
             None,
             &mut transient_msg,
             &mut need_redraw,
@@ -13145,6 +13794,7 @@ mod tests {
         let mut completion_float_manager = CompletionFloatManager::default();
         let mut lsp_diagnostic_store = LspDiagnosticStore::default();
         let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
         execute_startup_keymap_registered_command(
             Some(&mut runtime_session),
             &command_name,
@@ -13154,6 +13804,7 @@ mod tests {
             &mut completion_float_manager,
             &mut lsp_diagnostic_store,
             &mut terminal_float_manager,
+            &mut panel_manager,
             None,
             &mut transient_msg,
             &mut need_redraw,
@@ -13222,6 +13873,7 @@ mod tests {
             let mut completion_float_manager = CompletionFloatManager::default();
             let mut lsp_diagnostic_store = LspDiagnosticStore::default();
             let mut terminal_float_manager = TerminalFloatManager::default();
+            let mut panel_manager = PanelManager::default();
             execute_startup_keymap_registered_command(
                 Some(&mut runtime_session),
                 &command_name,
@@ -13231,6 +13883,7 @@ mod tests {
                 &mut completion_float_manager,
                 &mut lsp_diagnostic_store,
                 &mut terminal_float_manager,
+                &mut panel_manager,
                 None,
                 &mut transient_msg,
                 &mut need_redraw,
