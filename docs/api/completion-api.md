@@ -1,6 +1,6 @@
 # Completion API
 
-This page documents the bundled completion plugin and the typed runtime
+This page documents the bundled `saya-completion` plugin and the typed runtime
 completion surface. The plugin owns source orchestration, filtering, sorting,
 and timeout policy. The Rust host owns the typed menu request, session
 lifecycle, stale request rejection, rendering, and confirm-time text edits.
@@ -9,8 +9,8 @@ lifecycle, stale request rejection, rendering, and confirm-time text edits.
 
 ## Setup
 
-Use `setupSayaCompletion()` from the bundled completion plugin in your startup
-configuration. The default setup registers `completion.trigger`, maps
+Use `setupSayaCompletion()` from the bundled `saya-completion` plugin in your
+startup configuration. The default setup registers `completion.trigger`, maps
 `<C-Space>` in insert mode, queries LSP completions when `lsp.completion` is
 available, and falls back to words from the current buffer.
 
@@ -49,7 +49,9 @@ The default source list is:
 - `createLspCompletionSource()`: Calls `lsp.completion`, converts LSP completion
   items to typed candidates, and uses the first LSP `textEdit.range` as the
   replacement range when present.
-- `createBufferWordSource()`: Extracts words from the current buffer.
+- `createBufferWordSource()`: Extracts identifier-like words from the current
+  buffer, excludes the current prefix as a standalone candidate, and
+  deduplicates labels.
 
 Use `sourceTimeoutMs` to cap how long one source can block a trigger. A timed
 out source contributes no candidates for that request.
@@ -84,7 +86,9 @@ setupSayaCompletion({
 });
 ```
 
-The built-in defaults are `prefixFilter` and `labelSorter`. The plugin
+The built-in defaults are `prefixFilter` and `labelSorter`. `prefixFilter` keeps
+prefix matches and removes exact-prefix no-op candidates. `labelSorter` prefers
+nearby buffer words, then shorter labels, then label order. The plugin
 deduplicates final candidates by label, limits the menu to `maxItems`, and then
 calls the typed runtime API.
 

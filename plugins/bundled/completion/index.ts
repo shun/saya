@@ -12,6 +12,20 @@ declare const saya: any;
 
 let nextCompletionRequestId = 1;
 
+interface CandidateRank {
+  distance: number;
+}
+
+const candidateRanks = new WeakMap<SayaCompletionCandidate, CandidateRank>();
+
+function setCandidateRank(
+  candidate: SayaCompletionCandidate,
+  rank: CandidateRank,
+): SayaCompletionCandidate {
+  candidateRanks.set(candidate, rank);
+  return candidate;
+}
+
 function wordPrefix(
   buffer: SayaReadonlyBufferSnapshot,
 ): { prefix: string; range: SayaCompletionRange } {
@@ -35,6 +49,50 @@ function wordPrefix(
   };
 }
 
+function offsetFromPosition(
+  text: string,
+  row: number,
+  col: number,
+): number {
+  const targetRow = Math.max(0, Number(row) || 0);
+  const targetCol = Math.max(0, Number(col) || 0);
+  let offset = 0;
+  let currentRow = 0;
+
+  while (currentRow < targetRow && offset < text.length) {
+    const nextLine = text.indexOf("\n", offset);
+    if (nextLine === -1) return text.length;
+    offset = nextLine + 1;
+    currentRow += 1;
+  }
+
+  const lineEnd = text.indexOf("\n", offset);
+  const maxCol = (lineEnd === -1 ? text.length : lineEnd) - offset;
+  return offset + Math.min(targetCol, Math.max(0, maxCol));
+}
+
+function distanceToCursor(start: number, end: number, cursor: number): number {
+  if (cursor < start) return start - cursor;
+  if (cursor > end) return cursor - end;
+  return 0;
+}
+
+function compareCandidates(
+  left: SayaCompletionCandidate,
+  right: SayaCompletionCandidate,
+): number {
+  const leftRank = candidateRanks.get(left);
+  const rightRank = candidateRanks.get(right);
+  if (!leftRank && !rightRank) return left.label.localeCompare(right.label);
+  const leftDistance = leftRank?.distance ?? Number.POSITIVE_INFINITY;
+  const rightDistance = rightRank?.distance ?? Number.POSITIVE_INFINITY;
+  if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+  if (left.label.length !== right.label.length) {
+    return left.label.length - right.label.length;
+  }
+  return left.label.localeCompare(right.label);
+}
+
 function uniqueByLabel(
   candidates: SayaCompletionCandidate[],
 ): SayaCompletionCandidate[] {
@@ -44,7 +102,10 @@ function uniqueByLabel(
     const label = String(candidate.label ?? "").trim();
     if (!label || seen.has(label)) continue;
     seen.add(label);
-    result.push({ ...candidate, label });
+    const normalized = { ...candidate, label };
+    const rank = candidateRanks.get(candidate);
+    if (rank) candidateRanks.set(normalized, rank);
+    result.push(normalized);
   }
   return result;
 }
@@ -53,15 +114,27 @@ export function createBufferWordSource(): SayaCompletionSource {
   return {
     name: "buffer",
     complete(context: SayaCompletionContext): SayaCompletionCandidate[] {
-      const words =
-        String(context.buffer.text ?? "").match(/[A-Za-z_][A-Za-z0-9_]*/g) ??
-          [];
-      return uniqueByLabel(words.map((label) => ({
-        label,
-        insertText: label,
-        kind: "Text",
-        source: "buffer",
-      })));
+      const text = String(context.buffer.text ?? "");
+      const cursor = offsetFromPosition(
+        text,
+        context.buffer.cursorRow,
+        context.buffer.cursorCol,
+      );
+      const candidates: SayaCompletionCandidate[] = [];
+      const words = text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g);
+      for (const word of words) {
+        const label = word[0];
+        if (label.toLowerCase() === context.prefix.toLowerCase()) continue;
+        const start = word.index ?? 0;
+        const end = start + label.length;
+        candidates.push(setCandidateRank({
+          label,
+          insertText: label,
+          kind: "Text",
+          source: "buffer",
+        }, { distance: distanceToCursor(start, end, cursor) }));
+      }
+      return uniqueByLabel(candidates.sort(compareCandidates));
     },
   };
 }
@@ -203,6 +276,7 @@ export function prefixFilter(
   const prefix = context.prefix.toLowerCase();
   if (!prefix) return candidates;
   return candidates.filter((candidate) =>
+    candidate.label.toLowerCase() !== prefix &&
     candidate.label.toLowerCase().startsWith(prefix)
   );
 }
@@ -210,7 +284,7 @@ export function prefixFilter(
 export function labelSorter(
   candidates: SayaCompletionCandidate[],
 ): SayaCompletionCandidate[] {
-  return [...candidates].sort((a, b) => a.label.localeCompare(b.label));
+  return [...candidates].sort(compareCandidates);
 }
 
 export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {

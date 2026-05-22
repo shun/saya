@@ -1,8 +1,15 @@
 // deno-lint-ignore-file no-explicit-any
 
-import { createLspCompletionSource, setupSayaCompletion } from "./index.ts";
+import {
+  createBufferWordSource,
+  createLspCompletionSource,
+  labelSorter,
+  prefixFilter,
+  setupSayaCompletion,
+} from "./index.ts";
+import type { SayaCompletionContext } from "./types.ts";
 
-function installSayaFake(response: unknown) {
+function installSayaFake(response: unknown, buffer?: Record<string, unknown>) {
   const executed: string[] = [];
   const registered = new Map<string, () => unknown>();
   const shown: unknown[] = [];
@@ -17,6 +24,7 @@ function installSayaFake(response: unknown) {
           cursorCol: 4,
           currentLine: "prin",
           text: "prin\nprintln\nprivate\n",
+          ...buffer,
         }),
     },
     editor: {
@@ -47,6 +55,120 @@ function installSayaFake(response: unknown) {
   };
   return { executed, registered, shown };
 }
+
+Deno.test("buffer source collects filtered deduped words ordered near the cursor", () => {
+  const context: SayaCompletionContext = {
+    buffer: {
+      id: 7,
+      path: "/workspace/main.ts",
+      lineCount: 3,
+      cursorRow: 2,
+      cursorCol: 3,
+      currentLine: "pri",
+      text: [
+        "private printer",
+        "private priority",
+        "pri",
+      ].join("\n"),
+    },
+    editor: { mode: "Insert" },
+    prefix: "pri",
+    replaceRange: {
+      start: { line: 2, character: 0 },
+      end: { line: 2, character: 3 },
+    },
+  };
+
+  const source = createBufferWordSource();
+  const candidates = labelSorter(
+    prefixFilter(source.complete(context) as any, context),
+  );
+  const labels = candidates.map((candidate) => candidate.label);
+
+  if (
+    JSON.stringify(labels) !==
+      JSON.stringify(["priority", "private", "printer"])
+  ) {
+    throw new Error(`unexpected buffer labels: ${JSON.stringify(labels)}`);
+  }
+  if (labels.includes("pri")) {
+    throw new Error("current prefix must not be included as a candidate");
+  }
+  if (labels.filter((label) => label === "private").length !== 1) {
+    throw new Error(
+      `expected private to be deduped, got ${JSON.stringify(labels)}`,
+    );
+  }
+});
+
+Deno.test("buffer completion request uses typed menu shape and max items", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 3,
+    currentLine: "pri",
+    text: "pri\nprintln\nprivate\npriority\n",
+  });
+  await setupSayaCompletion({
+    sources: [createBufferWordSource()],
+    sourceTimeoutMs: 0,
+    maxItems: 2,
+  });
+
+  const result = await fake.registered.get("completion.trigger")?.();
+  if (result !== true) {
+    throw new Error(
+      `expected completion trigger to show menu, got ${String(result)}`,
+    );
+  }
+  if (fake.shown.length !== 1) {
+    throw new Error(
+      `expected one typed completion show, got ${fake.shown.length}`,
+    );
+  }
+
+  const request = fake.shown[0] as any;
+  if (request.selectedIndex !== 0) {
+    throw new Error(`unexpected selectedIndex: ${request.selectedIndex}`);
+  }
+  if (
+    request.replaceRange.start.line !== 0 ||
+    request.replaceRange.start.character !== 0 ||
+    request.replaceRange.end.line !== 0 ||
+    request.replaceRange.end.character !== 3
+  ) {
+    throw new Error(
+      `unexpected replaceRange: ${JSON.stringify(request.replaceRange)}`,
+    );
+  }
+  const labels = request.candidates.map((candidate: any) => candidate.label);
+  if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
+    throw new Error(`unexpected request candidates: ${JSON.stringify(labels)}`);
+  }
+});
+
+Deno.test("buffer completion respects min prefix length", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 1,
+    currentLine: "p",
+    text: "p\nprintln\nprivate\n",
+  });
+  await setupSayaCompletion({
+    sources: [createBufferWordSource()],
+    sourceTimeoutMs: 0,
+    minPrefixLength: 2,
+  });
+
+  const result = await fake.registered.get("completion.trigger")?.();
+  if (result !== false) {
+    throw new Error(
+      `expected short prefix to skip completion, got ${String(result)}`,
+    );
+  }
+  if (fake.shown.length !== 0) {
+    throw new Error(
+      `short prefix must not open menu, got ${fake.shown.length}`,
+    );
+  }
+});
 
 Deno.test("LSP source maps completion response into typed completion menu", async () => {
   const fake = installSayaFake({

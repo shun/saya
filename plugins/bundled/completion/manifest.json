@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "name": "completion",
+  "name": "saya-completion",
   "module": "plugins/bundled/completion/index.ts",
   "setup": "setupSayaCompletion",
   "lazy": {
