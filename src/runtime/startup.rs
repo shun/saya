@@ -1554,7 +1554,10 @@ fn strip_type_annotations(source_text: &str) -> String {
                 while lookahead < chars.len() && chars[lookahead].is_whitespace() {
                     lookahead += 1;
                 }
-                if looks_like_object_literal_value(&chars, lookahead) {
+                if looks_like_object_literal_value(&chars, lookahead)
+                    || (looks_like_simple_identifier_object_value(&chars, lookahead)
+                        && colon_is_inside_brace_context(&chars, index))
+                {
                     output.push(ch);
                     index += 1;
                     continue;
@@ -1673,6 +1676,112 @@ fn looks_like_object_literal_value(chars: &[char], index: usize) -> bool {
         || tail.starts_with("false")
         || tail.starts_with("null")
         || tail.starts_with("undefined")
+}
+
+fn looks_like_simple_identifier_object_value(chars: &[char], index: usize) -> bool {
+    let mut cursor = index;
+    if !matches!(chars.get(cursor), Some('_' | '$' | 'a'..='z' | 'A'..='Z')) {
+        return false;
+    }
+
+    while cursor < chars.len() {
+        match chars[cursor] {
+            '_' | '$' | 'a'..='z' | 'A'..='Z' | '0'..='9' => cursor += 1,
+            '.' => {
+                cursor += 1;
+                if !matches!(chars.get(cursor), Some('_' | '$' | 'a'..='z' | 'A'..='Z')) {
+                    return false;
+                }
+            }
+            ch if ch.is_whitespace() => {
+                cursor += 1;
+                break;
+            }
+            _ => break,
+        }
+    }
+
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    matches!(chars.get(cursor), Some(',' | '}'))
+}
+
+fn colon_is_inside_brace_context(chars: &[char], colon_index: usize) -> bool {
+    let mut stack = Vec::new();
+    let mut index = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut escape = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while index < colon_index {
+        let ch = chars[index];
+        let next = chars.get(index + 1).copied();
+
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if in_block_comment {
+            if ch == '*' && next == Some('/') {
+                in_block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        if let Some(quote) = in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' => in_string = Some(ch),
+            '/' if next == Some('/') => {
+                in_line_comment = true;
+                index += 1;
+            }
+            '/' if next == Some('*') => {
+                in_block_comment = true;
+                index += 1;
+            }
+            '{' | '(' | '[' => stack.push(ch),
+            '}' => {
+                if stack.last() == Some(&'{') {
+                    stack.pop();
+                }
+            }
+            ')' => {
+                if stack.last() == Some(&'(') {
+                    stack.pop();
+                }
+            }
+            ']' => {
+                if stack.last() == Some(&'[') {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+
+        index += 1;
+    }
+
+    stack.last() == Some(&'{')
 }
 
 fn validate_executable_module(path: &Path, executable_source_text: &str) -> Result<(), String> {

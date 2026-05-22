@@ -107,8 +107,9 @@ export function normalizeSayaAgentConfig(
     throw new Error(`unknown default Saya agent tool: ${defaultTool}`);
   }
   const id = options.id ?? "ai-agent";
-  const position = options.layout?.position ?? "right";
-  const size = options.layout?.size ?? "35%";
+  const optionLayout = options.layout ?? {};
+  const position = optionLayout.position ?? "right";
+  const size = optionLayout.size ?? "35%";
   const layout = { position, size };
   const commands = { ...defaultCommands, ...(options.commands ?? {}) };
   const promptLibrary = options.promptLibrary ?? [];

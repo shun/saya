@@ -54,9 +54,10 @@ use saya::input::command_line_history::{
 use saya::input::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
 use saya::input::router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
 use saya::presentation::floating_window::{
-    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingFit, FloatingInputOutcome,
-    FloatingLifecycle, FloatingLifecycleEvent, FloatingMouseOutcome, FloatingPlacement,
-    FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager, FloatingZIndex,
+    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingCursor, FloatingFit,
+    FloatingInputOutcome, FloatingLifecycle, FloatingLifecycleEvent, FloatingMouseOutcome,
+    FloatingPlacement, FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager,
+    FloatingZIndex,
 };
 use saya::presentation::markdown::structure::{
     MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey,
@@ -252,6 +253,8 @@ async fn main() {
     let mut lsp_diagnostic_store = LspDiagnosticStore::default();
     let lsif_bridge = LsifBridgeHandle::default();
     let mut terminal_float_manager = TerminalFloatManager::default();
+    let (mut coordinator, sender) = EventLoopCoordinator::new();
+    terminal_float_manager.set_redraw_sender(sender.clone());
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
     let mut terminal_display_redraw_plan: Option<RedrawPlan> = None;
     let mut workspace_projection_dirty = false;
@@ -271,7 +274,6 @@ async fn main() {
     .await;
 
     // イベントループ初期化
-    let (mut coordinator, sender) = EventLoopCoordinator::new();
     let job_control_watcher = match start_job_control_signal_watcher(sender.clone()) {
         Ok(watcher) => watcher,
         Err(error) => {
@@ -7827,7 +7829,12 @@ fn build_workspace_render_output(
         }
         if let Some(panel_manager) = panel_manager {
             if let Some(terminal_manager) = terminal_float_manager.as_deref_mut() {
-                refresh_terminal_panel_lines(panel_manager, terminal_manager);
+                refresh_terminal_panel_lines(
+                    panel_manager,
+                    terminal_manager,
+                    terminal_width,
+                    terminal_height,
+                );
             }
             let panel_floats =
                 panel_manager.resolve_floating_screen_models(terminal_width, terminal_height);
@@ -7991,14 +7998,34 @@ fn refresh_terminal_float_lines(
 ) {
     terminal_manager.drain();
     for request in manager.terminal_float_view_requests() {
-        let mut lines = terminal_manager.rendered_lines(request.terminal_id);
+        let _ = terminal_manager.resize(
+            request.terminal_id,
+            request.content_width,
+            request.content_height,
+        );
+        let snapshot = terminal_manager.screen_snapshot(request.terminal_id);
+        let mut lines = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.rendered_lines())
+            .unwrap_or_else(|| terminal_manager.rendered_lines(request.terminal_id));
         lines.truncate(usize::from(request.content_height));
+        let inline_styles = snapshot
+            .map(|snapshot| {
+                snapshot
+                    .inline_styles()
+                    .into_iter()
+                    .filter(|style| style.line < usize::from(request.content_height))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let returned = lines.len();
         let _ = manager.replace_terminal_lines(request.float_id, lines);
+        let _ = manager.set_inline_styles(request.float_id, inline_styles);
         log::trace!(
-            "[main][terminal_float] refreshed terminal float lines: float_id={}, terminal_id={}, requested_lines={}, returned_lines={}",
+            "[main][terminal_float] refreshed terminal float lines: float_id={}, terminal_id={}, requested_size=({},{}), returned_lines={}",
             request.float_id.0,
             request.terminal_id,
+            request.content_width,
             request.content_height,
             returned
         );
@@ -8008,19 +8035,49 @@ fn refresh_terminal_float_lines(
 fn refresh_terminal_panel_lines(
     panel_manager: &mut PanelManager,
     terminal_manager: &mut TerminalFloatManager,
+    terminal_width: u16,
+    terminal_height: u16,
 ) {
     terminal_manager.drain();
-    for request in panel_manager.terminal_view_requests() {
-        let mut lines = terminal_manager.rendered_lines(request.terminal_id);
+    for request in panel_manager.terminal_view_requests(terminal_width, terminal_height) {
+        let _ = terminal_manager.resize(
+            request.terminal_id,
+            request.content_width,
+            request.content_height,
+        );
+        let snapshot = terminal_manager.screen_snapshot(request.terminal_id);
+        let mut lines = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.rendered_lines())
+            .unwrap_or_else(|| terminal_manager.rendered_lines(request.terminal_id));
         lines.truncate(usize::from(request.content_height));
+        let cursor = terminal_manager
+            .cursor_position(request.terminal_id)
+            .map(|(line, column)| FloatingCursor {
+                line: usize::from(line).min(usize::from(request.content_height.saturating_sub(1))),
+                column: usize::from(column),
+            });
+        let inline_styles = snapshot
+            .map(|snapshot| {
+                snapshot
+                    .inline_styles()
+                    .into_iter()
+                    .filter(|style| style.line < usize::from(request.content_height))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let returned = lines.len();
         let _ = panel_manager.replace_terminal_lines(&request.id, lines);
+        let _ = panel_manager.replace_terminal_inline_styles(&request.id, inline_styles);
+        let _ = panel_manager.replace_terminal_cursor(&request.id, cursor);
         log::trace!(
-            "[main][panel] refreshed terminal panel lines: id={}, terminal_id={}, requested_lines={}, returned_lines={}",
+            "[main][panel] refreshed terminal panel lines: id={}, terminal_id={}, requested_size=({},{}), returned_lines={}, cursor={:?}",
             request.id,
             request.terminal_id,
+            request.content_width,
             request.content_height,
-            returned
+            returned,
+            cursor
         );
     }
 }

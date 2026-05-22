@@ -13,6 +13,7 @@ tree-sitter-syntax = [
     "vim-core-rs/tree-sitter-rust",
     "vim-core-rs/tree-sitter-typescript",
 ]
+terminal-ghostty = []
 
 [[bin]]
 name = "sy"

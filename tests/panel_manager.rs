@@ -1,7 +1,11 @@
+use saya::presentation::floating_window::{
+    FloatingCursor, FloatingInlineStyle, FloatingInlineStyleKind,
+};
 use saya::presentation::panel::{
     PanelCloseBehavior, PanelContent, PanelContentRef, PanelManager, PanelNode, PanelOpenRequest,
     PanelPosition, PanelSize,
 };
+use saya::terminal::emulator::{TerminalCellStyle, TerminalColor};
 
 #[test]
 fn panel_manager_resolves_side_and_edge_panel_rects_without_using_float_identity() {
@@ -97,6 +101,121 @@ fn panel_manager_replaces_stable_plugin_id_and_routes_terminal_text() {
     assert!(manager.focus("agent"));
     assert_eq!(manager.focused_terminal_id(), Some(77));
     assert_eq!(manager.send("agent", "hello\n").unwrap(), Some(77));
+}
+
+#[test]
+fn panel_manager_requests_terminal_lines_for_visible_panel_content_height() {
+    let mut manager = PanelManager::default();
+
+    manager.open(PanelOpenRequest {
+        id: "terminal-demo".to_string(),
+        position: PanelPosition::Right,
+        size: PanelSize::Percent(35),
+        content: PanelContent::Terminal {
+            terminal_id: 42,
+            close_behavior: PanelCloseBehavior::Kill,
+        },
+        focus: true,
+    });
+
+    let requests = manager.terminal_view_requests(120, 40);
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].id, "terminal-demo");
+    assert_eq!(requests[0].terminal_id, 42);
+    assert_eq!(
+        requests[0].content_width, 40,
+        "right terminal panels should refresh all visible content columns inside the panel border"
+    );
+    assert_eq!(
+        requests[0].content_height, 38,
+        "terminal panels should refresh all visible content rows inside the panel border"
+    );
+}
+
+#[test]
+fn panel_manager_clamps_terminal_panel_content_height_to_one_row() {
+    let mut manager = PanelManager::default();
+
+    manager.open(PanelOpenRequest {
+        id: "tiny-terminal".to_string(),
+        position: PanelPosition::Bottom,
+        size: PanelSize::Cells(1),
+        content: PanelContent::Terminal {
+            terminal_id: 7,
+            close_behavior: PanelCloseBehavior::Kill,
+        },
+        focus: false,
+    });
+
+    let requests = manager.terminal_view_requests(120, 40);
+
+    assert_eq!(requests[0].content_height, 1);
+}
+
+#[test]
+fn panel_manager_projects_focused_terminal_cursor_from_terminal_content_ref() {
+    let mut manager = PanelManager::default();
+
+    manager.open(PanelOpenRequest {
+        id: "terminal-demo".to_string(),
+        position: PanelPosition::Right,
+        size: PanelSize::Percent(35),
+        content: PanelContent::Terminal {
+            terminal_id: 42,
+            close_behavior: PanelCloseBehavior::Kill,
+        },
+        focus: true,
+    });
+    assert!(manager.replace_terminal_lines(
+        "terminal-demo",
+        vec!["prompt".to_string(), "> input".to_string()]
+    ));
+    assert!(
+        manager
+            .replace_terminal_cursor("terminal-demo", Some(FloatingCursor { line: 1, column: 3 }))
+    );
+
+    let models = manager.resolve_floating_screen_models(120, 40);
+
+    assert_eq!(
+        models[0].cursor,
+        Some(FloatingCursor { line: 1, column: 3 })
+    );
+}
+
+#[test]
+fn panel_manager_projects_terminal_inline_styles_to_floating_screen_model() {
+    let mut manager = PanelManager::default();
+
+    manager.open(PanelOpenRequest {
+        id: "terminal-demo".to_string(),
+        position: PanelPosition::Right,
+        size: PanelSize::Percent(35),
+        content: PanelContent::Terminal {
+            terminal_id: 42,
+            close_behavior: PanelCloseBehavior::Kill,
+        },
+        focus: true,
+    });
+    assert!(manager.replace_terminal_lines("terminal-demo", vec!["styled".to_string()]));
+    let styles = vec![FloatingInlineStyle {
+        kind: FloatingInlineStyleKind::TerminalCell(TerminalCellStyle {
+            foreground: Some(TerminalColor::Indexed(1)),
+            background: Some(TerminalColor::Indexed(4)),
+            bold: true,
+            underline: true,
+            inverse: false,
+        }),
+        line: 0,
+        column_start: 0,
+        column_end: 6,
+    }];
+    assert!(manager.replace_terminal_inline_styles("terminal-demo", styles.clone()));
+
+    let models = manager.resolve_floating_screen_models(120, 40);
+
+    assert_eq!(models[0].inline_styles, styles);
 }
 
 #[test]

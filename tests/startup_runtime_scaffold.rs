@@ -207,6 +207,9 @@ async fn init_ts_module_can_import_local_typescript_plugin() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn init_ts_module_can_import_repository_dired_plugin() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
     let config_path = current_dir.join("init.ts");
@@ -285,6 +288,9 @@ async fn init_ts_module_can_import_repository_dired_plugin() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn init_ts_module_can_import_repository_agent_plugin() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
     let config_path = current_dir.join("init.ts");
@@ -351,6 +357,9 @@ async fn init_ts_module_can_import_repository_agent_plugin() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn init_ts_module_can_import_repository_lsp_client_plugin() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
     let config_path = current_dir.join("init.ts");
@@ -894,6 +903,49 @@ fn init_ts_module_transpile_keeps_theme_object_literals_executable() {
                     .executable_source_text
                     .contains("heading: { fg: \"accent\", bold: true }"),
                 "object literal values must not be stripped as type annotations"
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_preserves_identifier_values_in_callback_object_literals() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.events.on("bufferOpen", async () => {
+                const panelPosition = "right";
+                const panelSize = "50%";
+                await saya.panel.open({
+                    id: "terminal-demo",
+                    position: panelPosition,
+                    size: panelSize,
+                    focus: true,
+                });
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("position: panelPosition"),
+                "identifier-valued object fields must not be stripped as type annotations: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module.executable_source_text.contains("size: panelSize"),
+                "identifier-valued object fields must not be stripped as type annotations: {}",
+                module.executable_source_text
             );
         }
         other => panic!("Success を返すこと, got: {:?}", other),

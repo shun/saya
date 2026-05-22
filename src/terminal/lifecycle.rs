@@ -17,6 +17,7 @@ pub struct TerminalSession<'a, B: TerminalBackend> {
     alternate_screen_enabled: bool,
     mouse_capture_enabled: bool,
     bracketed_paste_enabled: bool,
+    keyboard_enhancement_enabled: bool,
     current_cursor_style: Option<ScreenCursorStyle>,
     suspended: bool,
     restored: bool,
@@ -39,6 +40,10 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
 
     pub fn is_bracketed_paste_enabled(&self) -> bool {
         self.bracketed_paste_enabled
+    }
+
+    pub fn is_keyboard_enhancement_enabled(&self) -> bool {
+        self.keyboard_enhancement_enabled
     }
 
     pub fn latest_size(&self) -> Option<TerminalSize> {
@@ -160,6 +165,26 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
         self.bracketed_paste_enabled = true;
         log::debug!("[terminal] bracketed paste re-enabled after resume");
 
+        if let Err(error) = self.backend.enable_keyboard_enhancement() {
+            log::debug!(
+                "[terminal] resume keyboard enhancement failed, rolling back terminal claim: {}",
+                error
+            );
+            let _ = self.backend.disable_bracketed_paste();
+            let _ = self.backend.disable_mouse_capture();
+            let _ = self.backend.leave_alternate_screen();
+            let _ = self.backend.disable_raw_mode();
+            self.bracketed_paste_enabled = false;
+            self.mouse_capture_enabled = false;
+            self.alternate_screen_enabled = false;
+            self.raw_mode_enabled = false;
+            return Err(TerminalStartError::KeyboardEnhancementFailed {
+                message: error.to_string(),
+            });
+        }
+        self.keyboard_enhancement_enabled = true;
+        log::debug!("[terminal] keyboard enhancement re-enabled after resume");
+
         if let Some(style) = self.current_cursor_style {
             self.backend.set_cursor_style(style).map_err(|error| {
                 TerminalStartError::CursorStyleFailed {
@@ -198,6 +223,19 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
                 log::debug!("[terminal] reset cursor style failed: {}", error);
                 error.to_string()
             })
+        } else {
+            None
+        };
+
+        let disable_keyboard_enhancement_error = if self.keyboard_enhancement_enabled {
+            log::debug!("[terminal] disabling keyboard enhancement");
+            self.backend
+                .disable_keyboard_enhancement()
+                .err()
+                .map(|error| {
+                    log::debug!("[terminal] disable keyboard enhancement failed: {}", error);
+                    error.to_string()
+                })
         } else {
             None
         };
@@ -243,31 +281,35 @@ impl<'a, B: TerminalBackend> TerminalSession<'a, B> {
         };
 
         self.bracketed_paste_enabled = false;
+        self.keyboard_enhancement_enabled = false;
         self.mouse_capture_enabled = false;
         self.alternate_screen_enabled = false;
         self.raw_mode_enabled = false;
 
         match (
             disable_bracketed_paste_error,
+            disable_keyboard_enhancement_error,
             disable_mouse_capture_error,
             leave_alternate_screen_error,
             disable_raw_mode_error,
             reset_cursor_style_error,
         ) {
-            (None, None, None, None, None) => Ok(()),
+            (None, None, None, None, None, None) => Ok(()),
             (
                 disable_bracketed_paste,
+                disable_keyboard_enhancement,
                 disable_mouse_capture,
                 leave_alternate_screen,
                 disable_raw_mode,
                 reset_cursor_style,
             ) => {
                 log::debug!(
-                    "[terminal] terminal restore failed: reset_cursor_style={reset_cursor_style:?}, disable_bracketed_paste={disable_bracketed_paste:?}, disable_mouse_capture={disable_mouse_capture:?}, leave_alternate_screen={leave_alternate_screen:?}, disable_raw_mode={disable_raw_mode:?}"
+                    "[terminal] terminal restore failed: reset_cursor_style={reset_cursor_style:?}, disable_keyboard_enhancement={disable_keyboard_enhancement:?}, disable_bracketed_paste={disable_bracketed_paste:?}, disable_mouse_capture={disable_mouse_capture:?}, leave_alternate_screen={leave_alternate_screen:?}, disable_raw_mode={disable_raw_mode:?}"
                 );
                 Err(TerminalRestoreError {
                     reset_cursor_style,
                     disable_bracketed_paste,
+                    disable_keyboard_enhancement,
                     disable_mouse_capture,
                     leave_alternate_screen,
                     disable_raw_mode,
@@ -291,6 +333,7 @@ pub enum TerminalStartError {
     AlternateScreenFailed { message: String },
     MouseCaptureFailed { message: String },
     BracketedPasteFailed { message: String },
+    KeyboardEnhancementFailed { message: String },
     CursorStyleFailed { message: String },
 }
 
@@ -298,6 +341,7 @@ pub enum TerminalStartError {
 pub struct TerminalRestoreError {
     pub reset_cursor_style: Option<String>,
     pub disable_bracketed_paste: Option<String>,
+    pub disable_keyboard_enhancement: Option<String>,
     pub disable_mouse_capture: Option<String>,
     pub leave_alternate_screen: Option<String>,
     pub disable_raw_mode: Option<String>,
@@ -308,6 +352,9 @@ pub trait TerminalBackend {
     fn enter_alternate_screen(&mut self) -> io::Result<()>;
     fn enable_mouse_capture(&mut self) -> io::Result<()>;
     fn enable_bracketed_paste(&mut self) -> io::Result<()>;
+    fn enable_keyboard_enhancement(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     fn set_cursor_style(&mut self, _style: ScreenCursorStyle) -> io::Result<()> {
         Ok(())
     }
@@ -315,6 +362,9 @@ pub trait TerminalBackend {
         Ok(())
     }
     fn disable_bracketed_paste(&mut self) -> io::Result<()>;
+    fn disable_keyboard_enhancement(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     fn disable_mouse_capture(&mut self) -> io::Result<()>;
     fn leave_alternate_screen(&mut self) -> io::Result<()>;
     fn disable_raw_mode(&mut self) -> io::Result<()>;
@@ -399,12 +449,49 @@ impl TerminalLifecycle {
 
         log::debug!("[terminal] bracketed paste enabled");
 
+        if let Err(error) = backend.enable_keyboard_enhancement() {
+            log::debug!(
+                "[terminal] keyboard enhancement failed, rolling back bracketed paste, mouse capture, alternate screen, and raw mode: {}",
+                error
+            );
+            if let Err(rollback_error) = backend.disable_bracketed_paste() {
+                log::debug!(
+                    "[terminal] rollback disable bracketed paste failed after keyboard enhancement failure: {}",
+                    rollback_error
+                );
+            }
+            if let Err(rollback_error) = backend.disable_mouse_capture() {
+                log::debug!(
+                    "[terminal] rollback disable mouse capture failed after keyboard enhancement failure: {}",
+                    rollback_error
+                );
+            }
+            if let Err(rollback_error) = backend.leave_alternate_screen() {
+                log::debug!(
+                    "[terminal] rollback leave alternate screen failed after keyboard enhancement failure: {}",
+                    rollback_error
+                );
+            }
+            if let Err(rollback_error) = backend.disable_raw_mode() {
+                log::debug!(
+                    "[terminal] rollback disable raw mode failed after keyboard enhancement failure: {}",
+                    rollback_error
+                );
+            }
+            return Err(TerminalStartError::KeyboardEnhancementFailed {
+                message: error.to_string(),
+            });
+        }
+
+        log::debug!("[terminal] keyboard enhancement enabled");
+
         Ok(TerminalSession {
             backend,
             raw_mode_enabled: true,
             alternate_screen_enabled: true,
             mouse_capture_enabled: true,
             bracketed_paste_enabled: true,
+            keyboard_enhancement_enabled: true,
             current_cursor_style: None,
             suspended: false,
             restored: false,
@@ -425,6 +512,8 @@ mod tests {
         fail_on_enter_alternate_screen: bool,
         fail_on_enable_mouse_capture: bool,
         fail_on_enable_bracketed_paste: bool,
+        fail_on_enable_keyboard_enhancement: bool,
+        fail_on_disable_keyboard_enhancement: bool,
         fail_on_disable_bracketed_paste: bool,
         fail_on_disable_mouse_capture: bool,
         fail_on_leave_alternate_screen: bool,
@@ -465,6 +554,15 @@ mod tests {
             }
         }
 
+        fn enable_keyboard_enhancement(&mut self) -> io::Result<()> {
+            self.calls.push("enable_keyboard_enhancement");
+            if self.fail_on_enable_keyboard_enhancement {
+                Err(io::Error::other("keyboard enhancement failed"))
+            } else {
+                Ok(())
+            }
+        }
+
         fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> io::Result<()> {
             self.calls.push(match style {
                 ScreenCursorStyle::Block => "set_cursor_style_block",
@@ -487,6 +585,15 @@ mod tests {
             self.calls.push("disable_bracketed_paste");
             if self.fail_on_disable_bracketed_paste {
                 Err(io::Error::other("disable bracketed paste failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn disable_keyboard_enhancement(&mut self) -> io::Result<()> {
+            self.calls.push("disable_keyboard_enhancement");
+            if self.fail_on_disable_keyboard_enhancement {
+                Err(io::Error::other("disable keyboard enhancement failed"))
             } else {
                 Ok(())
             }
@@ -537,6 +644,8 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -638,6 +747,8 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -664,8 +775,10 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
                 "set_cursor_style_steady_bar",
                 "reset_cursor_style",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -703,6 +816,8 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -711,6 +826,8 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -745,8 +862,10 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
                 "set_cursor_style_steady_bar",
                 "reset_cursor_style",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -755,8 +874,10 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
                 "set_cursor_style_steady_bar",
                 "reset_cursor_style",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -840,6 +961,8 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -863,6 +986,7 @@ mod tests {
             TerminalRestoreError {
                 reset_cursor_style: None,
                 disable_bracketed_paste: None,
+                disable_keyboard_enhancement: None,
                 disable_mouse_capture: None,
                 leave_alternate_screen: Some("leave alternate screen failed".to_string()),
                 disable_raw_mode: None,
@@ -875,6 +999,8 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",
@@ -887,6 +1013,7 @@ mod tests {
     fn restore_attempts_all_cleanup_steps_when_extended_input_disable_fails() {
         let mut backend = RecordingBackend {
             fail_on_disable_bracketed_paste: true,
+            fail_on_disable_keyboard_enhancement: true,
             fail_on_disable_mouse_capture: true,
             fail_on_leave_alternate_screen: true,
             fail_on_disable_raw_mode: true,
@@ -901,6 +1028,9 @@ mod tests {
             TerminalRestoreError {
                 reset_cursor_style: None,
                 disable_bracketed_paste: Some("disable bracketed paste failed".to_string()),
+                disable_keyboard_enhancement: Some(
+                    "disable keyboard enhancement failed".to_string()
+                ),
                 disable_mouse_capture: Some("disable mouse capture failed".to_string()),
                 leave_alternate_screen: Some("leave alternate screen failed".to_string()),
                 disable_raw_mode: Some("disable raw mode failed".to_string()),
@@ -913,6 +1043,8 @@ mod tests {
                 "enter_alternate_screen",
                 "enable_mouse_capture",
                 "enable_bracketed_paste",
+                "enable_keyboard_enhancement",
+                "disable_keyboard_enhancement",
                 "disable_bracketed_paste",
                 "disable_mouse_capture",
                 "leave_alternate_screen",

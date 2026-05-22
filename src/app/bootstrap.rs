@@ -1138,6 +1138,7 @@ fn map_session_guard_error(error: SessionGuardError) -> BootstrapError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1153,6 +1154,7 @@ mod tests {
         AppliedKeyMapping, ConfigApplyState, ConfigKeyMode, SayaKeyMode, SayaKeymapAction,
         StartupRegistry, StartupRegistryEntry,
     };
+    use crate::runtime::plugin::{LazyIndex, LazyTarget, PluginHost};
     use crate::support::session_guard::{SessionGuard, test_lock as session_test_lock};
 
     fn unique_path(name: &str) -> PathBuf {
@@ -1194,6 +1196,32 @@ mod tests {
                 std::env::remove_var(key);
             },
         }
+        result
+    }
+
+    fn with_isolated_plugin_cache<T>(name: &str, f: impl FnOnce() -> T) -> T {
+        let cache_root = unique_path(name);
+        let host = PluginHost::new(crate::runtime::plugin::PluginCacheRoot::new(
+            cache_root.clone(),
+        ));
+        let mut commands = BTreeMap::new();
+        commands.insert(
+            "__test.noop".to_string(),
+            LazyTarget {
+                plugin: "__test".to_string(),
+                module: "__test.ts".to_string(),
+                export_name: "setup".to_string(),
+            },
+        );
+        host.write_lazy_index(&LazyIndex {
+            version: LazyIndex::CURRENT_VERSION,
+            commands,
+            events: BTreeMap::new(),
+        })
+        .expect("isolated lazy plugin cache should be writable");
+
+        let result = with_env_var_set("SAYA_CACHE_DIR", &cache_root, f);
+        let _ = std::fs::remove_dir_all(cache_root);
         result
     }
 
@@ -1362,12 +1390,14 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let missing_config = unique_path("missing-config");
 
-        let outcome = prepare_launch(LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::File(missing_config.clone()),
-            ..default_request()
-        })
-        .expect("config failures should not abort startup");
+        let outcome = with_isolated_plugin_cache("missing-config-plugin-cache", || {
+            prepare_launch(LaunchRequest {
+                input_source: InputSource::Empty,
+                config_source: ConfigSource::File(missing_config.clone()),
+                ..default_request()
+            })
+            .expect("config failures should not abort startup")
+        });
 
         assert_eq!(outcome.loaded_config, LoadedConfig::Default);
         assert_eq!(
@@ -1433,12 +1463,14 @@ mod tests {
         let config_path = unique_path("config-ok");
         std::fs::write(&config_path, "export default {};\n").expect("config file");
 
-        let outcome = prepare_launch(LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::File(config_path.clone()),
-            ..default_request()
-        })
-        .expect("existing config should load");
+        let outcome = with_isolated_plugin_cache("config-ok-plugin-cache", || {
+            prepare_launch(LaunchRequest {
+                input_source: InputSource::Empty,
+                config_source: ConfigSource::File(config_path.clone()),
+                ..default_request()
+            })
+            .expect("existing config should load")
+        });
 
         assert_eq!(
             outcome.loaded_config,
@@ -1464,14 +1496,16 @@ mod tests {
         std::fs::create_dir_all(&config_dir).expect("xdg config directory");
         std::fs::write(&config_path, "saya.options.tabstop = 4;\n").expect("config file");
 
-        let outcome = with_env_var_set("XDG_CONFIG_HOME", &xdg_config_home, || {
-            with_env_var_removed("HOME", || {
-                prepare_launch(LaunchRequest {
-                    input_source: InputSource::Empty,
-                    config_source: ConfigSource::Default,
-                    ..default_request()
+        let outcome = with_isolated_plugin_cache("xdg-config-plugin-cache", || {
+            with_env_var_set("XDG_CONFIG_HOME", &xdg_config_home, || {
+                with_env_var_removed("HOME", || {
+                    prepare_launch(LaunchRequest {
+                        input_source: InputSource::Empty,
+                        config_source: ConfigSource::Default,
+                        ..default_request()
+                    })
+                    .expect("default launch should load XDG config")
                 })
-                .expect("default launch should load XDG config")
             })
         });
 
@@ -1500,14 +1534,16 @@ mod tests {
         std::fs::create_dir_all(&config_dir).expect("home config directory");
         std::fs::write(&config_path, "saya.options.number = true;\n").expect("config file");
 
-        let outcome = with_env_var_removed("XDG_CONFIG_HOME", || {
-            with_env_var_set("HOME", &home_dir, || {
-                prepare_launch(LaunchRequest {
-                    input_source: InputSource::Empty,
-                    config_source: ConfigSource::Default,
-                    ..default_request()
+        let outcome = with_isolated_plugin_cache("home-config-plugin-cache", || {
+            with_env_var_removed("XDG_CONFIG_HOME", || {
+                with_env_var_set("HOME", &home_dir, || {
+                    prepare_launch(LaunchRequest {
+                        input_source: InputSource::Empty,
+                        config_source: ConfigSource::Default,
+                        ..default_request()
+                    })
+                    .expect("default launch should load HOME fallback config")
                 })
-                .expect("default launch should load HOME fallback config")
             })
         });
 
@@ -1608,7 +1644,9 @@ mod tests {
 
     #[test]
     fn plugin_fallback_does_not_override_config_registered_lsp_command() {
-        let _guard = session_test_lock();
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cache_root = unique_path("plugin-fallback-no-override-cache");
         let mut registry = StartupRegistry::default();
         registry.push(StartupRegistryEntry::Command {
@@ -1694,12 +1732,14 @@ mod tests {
         let config_path = unique_path("config-tab-size");
         std::fs::write(&config_path, "saya.options.tabstop = 4;\n").expect("config file");
 
-        let outcome = prepare_launch(LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::File(config_path.clone()),
-            ..default_request()
-        })
-        .expect("existing config should load");
+        let outcome = with_isolated_plugin_cache("config-tab-size-plugin-cache", || {
+            prepare_launch(LaunchRequest {
+                input_source: InputSource::Empty,
+                config_source: ConfigSource::File(config_path.clone()),
+                ..default_request()
+            })
+            .expect("existing config should load")
+        });
 
         assert_eq!(outcome.initial_tab_size, 4);
         assert!(outcome.warnings.is_empty());
@@ -1713,12 +1753,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let outcome = prepare_launch(LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::Default,
-            ..default_request()
-        })
-        .expect("launching without target path should succeed");
+        let outcome = with_isolated_plugin_cache("empty-buffer-plugin-cache", || {
+            prepare_launch(LaunchRequest {
+                input_source: InputSource::Empty,
+                config_source: ConfigSource::Default,
+                ..default_request()
+            })
+            .expect("launching without target path should succeed")
+        });
 
         assert_eq!(outcome.target_path, None);
         assert_eq!(outcome.initial_snapshot.text, "\n");

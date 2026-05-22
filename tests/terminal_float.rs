@@ -1,7 +1,11 @@
+use saya::app::event_loop::{EventLoopCoordinator, LoopAction};
 use saya::input::router::KeyInput;
 use saya::presentation::floating_window::{
-    FloatingBorder, FloatingChrome, FloatingContentRef, FloatingPlacement, FloatingSize,
-    FloatingWindowManager, FloatingZIndex,
+    FloatingBorder, FloatingChrome, FloatingContentRef, FloatingInlineStyleKind, FloatingPlacement,
+    FloatingSize, FloatingWindowManager, FloatingZIndex,
+};
+use saya::terminal::emulator::{
+    TerminalCellStyle, TerminalColor, TerminalEmulator, Vt100TerminalEmulator,
 };
 use saya::terminal::float::{
     TerminalFloatCloseBehavior, TerminalFloatManager, TerminalFloatSpawnRequest,
@@ -17,6 +21,133 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(predicate(), "condition did not become true before timeout");
+}
+
+#[test]
+fn vt100_terminal_emulator_projects_cell_styles_and_cursor() {
+    let mut emulator = Vt100TerminalEmulator::new(12, 3, 16);
+
+    emulator.feed(b"\x1b[31;44;1;4mA\x1b[7mB\x1b[0m\nplain\x1b[2;6H");
+
+    let snapshot = emulator.screen();
+    assert_eq!(snapshot.cursor_row, 1);
+    assert_eq!(snapshot.cursor_col, 5);
+    assert!(snapshot.cursor_visible);
+    assert_eq!(snapshot.rows[0][0].text, "A");
+    assert_eq!(
+        snapshot.rows[0][0].style,
+        TerminalCellStyle {
+            foreground: Some(TerminalColor::Indexed(1)),
+            background: Some(TerminalColor::Indexed(4)),
+            bold: true,
+            underline: true,
+            inverse: false,
+        }
+    );
+    assert_eq!(snapshot.rows[0][1].text, "B");
+    assert!(snapshot.rows[0][1].style.inverse);
+}
+
+#[test]
+fn terminal_snapshot_projects_lines_and_terminal_inline_styles() {
+    let mut emulator = Vt100TerminalEmulator::new(8, 2, 16);
+
+    emulator.feed(b"\x1b[32mOK\x1b[0m \x1b[7m!\x1b[0m");
+
+    let snapshot = emulator.screen();
+
+    assert_eq!(snapshot.rendered_lines(), vec!["OK !    ", "        "]);
+    assert_eq!(snapshot.inline_styles().len(), 2);
+    assert!(snapshot.inline_styles().iter().any(|style| {
+        matches!(
+            style.kind,
+            FloatingInlineStyleKind::TerminalCell(TerminalCellStyle {
+                foreground: Some(TerminalColor::Indexed(2)),
+                background: None,
+                bold: false,
+                underline: false,
+                inverse: false,
+            })
+        ) && style.line == 0
+            && style.column_start == 0
+            && style.column_end == 2
+    }));
+    assert!(snapshot.inline_styles().iter().any(|style| {
+        matches!(
+            style.kind,
+            FloatingInlineStyleKind::TerminalCell(TerminalCellStyle {
+                foreground: None,
+                background: None,
+                bold: false,
+                underline: false,
+                inverse: true,
+            })
+        ) && style.line == 0
+            && style.column_start == 3
+            && style.column_end == 4
+    }));
+}
+
+#[test]
+fn vt100_terminal_emulator_does_not_render_wide_continuation_cells_as_spaces() {
+    let mut emulator = Vt100TerminalEmulator::new(12, 2, 16);
+
+    emulator.feed("このリポ".as_bytes());
+
+    let snapshot = emulator.screen();
+    assert_eq!(snapshot.cursor_row, 0);
+    assert_eq!(snapshot.cursor_col, 8);
+    assert!(
+        snapshot.rendered_lines()[0].starts_with("このリポ"),
+        "wide-character continuation cells must not insert extra spaces: {:?}",
+        snapshot.rendered_lines()[0]
+    );
+    assert!(
+        !snapshot.rendered_lines()[0].starts_with("こ の リ ポ "),
+        "wide-character continuation cells were rendered as visible spaces: {:?}",
+        snapshot.rendered_lines()[0]
+    );
+}
+
+#[test]
+fn vt100_terminal_emulator_resize_updates_snapshot_dimensions() {
+    let mut emulator = Vt100TerminalEmulator::new(4, 2, 16);
+
+    emulator.resize(6, 3);
+
+    let snapshot = emulator.screen();
+    assert_eq!(snapshot.rows.len(), 3);
+    assert_eq!(snapshot.rows[0].len(), 6);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_output_requests_redraw_event() {
+    let (mut coordinator, redraw_sender) = EventLoopCoordinator::with_capacity(8);
+    let mut terminals = TerminalFloatManager::default();
+    terminals.set_redraw_sender(redraw_sender);
+
+    let terminal_id = terminals
+        .spawn(TerminalFloatSpawnRequest {
+            command: "sh".to_string(),
+            args: vec!["-lc".to_string(), "printf 'redraw-from-pty\\n'".to_string()],
+            width: 24,
+            height: 4,
+            close_behavior: TerminalFloatCloseBehavior::KillOnClose,
+        })
+        .expect("terminal session should spawn");
+
+    let action = tokio::time::timeout(Duration::from_secs(5), coordinator.next_action())
+        .await
+        .expect("terminal output should wake the UI loop with redraw");
+
+    assert_eq!(action, LoopAction::NeedRedraw);
+    wait_until(|| {
+        terminals.drain();
+        terminals
+            .rendered_lines(terminal_id)
+            .iter()
+            .any(|line| line.contains("redraw-from-pty"))
+    });
 }
 
 #[test]
@@ -80,6 +211,63 @@ fn pty_terminal_float_renders_command_output_inside_floating_window() {
             .iter()
             .any(|line| line.contains("phase7-terminal"))
     );
+}
+
+#[test]
+fn pty_terminal_float_projects_cell_styles_and_resize() {
+    let mut terminals = TerminalFloatManager::default();
+
+    let terminal_id = terminals
+        .spawn(TerminalFloatSpawnRequest {
+            command: "sh".to_string(),
+            args: vec![
+                "-lc".to_string(),
+                "printf '\\033[31;44;1;4mstyled\\033[0m\\n'; sleep 30".to_string(),
+            ],
+            width: 16,
+            height: 4,
+            close_behavior: TerminalFloatCloseBehavior::KillOnClose,
+        })
+        .expect("terminal session should spawn");
+
+    wait_until(|| {
+        terminals.drain();
+        terminals
+            .screen_snapshot(terminal_id)
+            .is_some_and(|snapshot| snapshot.rendered_lines()[0].contains("styled"))
+    });
+
+    let snapshot = terminals
+        .screen_snapshot(terminal_id)
+        .expect("terminal snapshot should be available");
+    let styled = snapshot
+        .inline_styles()
+        .into_iter()
+        .find(|style| style.line == 0 && style.column_start == 0 && style.column_end >= 6)
+        .expect("styled terminal cells should project to inline styles");
+    assert!(matches!(
+        styled.kind,
+        FloatingInlineStyleKind::TerminalCell(TerminalCellStyle {
+            foreground: Some(TerminalColor::Indexed(1)),
+            background: Some(TerminalColor::Indexed(4)),
+            bold: true,
+            underline: true,
+            inverse: false,
+        })
+    ));
+
+    terminals
+        .resize(terminal_id, 20, 6)
+        .expect("terminal resize should propagate to PTY and emulator");
+    let resized = terminals
+        .screen_snapshot(terminal_id)
+        .expect("resized terminal snapshot should be available");
+    assert_eq!(resized.rows.len(), 6);
+    assert_eq!(resized.rows[0].len(), 20);
+
+    terminals
+        .kill(terminal_id)
+        .expect("test cleanup should kill resized terminal");
 }
 
 #[test]

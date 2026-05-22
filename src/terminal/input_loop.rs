@@ -176,7 +176,9 @@ fn map_key_input(key_event: KeyEvent) -> Option<KeyInput> {
         KeyCode::Delete => Some(KeyInput::Delete),
         KeyCode::Insert => Some(KeyInput::Insert),
         KeyCode::Esc => Some(KeyInput::Escape),
-        KeyCode::Enter => Some(KeyInput::Enter),
+        KeyCode::Enter if modifiers == KeyModifiers::SHIFT => Some(KeyInput::ShiftEnter),
+        KeyCode::Enter if modifiers == KeyModifiers::NONE => Some(KeyInput::Enter),
+        KeyCode::Enter => None,
         KeyCode::Backspace => Some(KeyInput::Backspace),
         _ => None,
     }
@@ -366,6 +368,16 @@ mod tests {
             let mapped = map_key_input(key_event_with_modifiers(code, modifiers));
             assert_eq!(mapped, Some(expected));
         }
+    }
+
+    #[test]
+    fn map_key_input_preserves_shift_enter_as_modified_enter() {
+        let mapped = map_key_input(key_event_with_modifiers(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        ));
+
+        assert_eq!(mapped, Some(KeyInput::ShiftEnter));
     }
 
     #[test]

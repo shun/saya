@@ -105,6 +105,8 @@ pub enum PanelContentRef {
         terminal_id: u64,
         close_behavior: PanelCloseBehavior,
         lines: Vec<String>,
+        inline_styles: Vec<FloatingInlineStyle>,
+        cursor: Option<FloatingCursor>,
     },
 }
 
@@ -167,6 +169,7 @@ pub struct PanelScreenModel {
 pub struct PanelTerminalViewRequest {
     pub id: String,
     pub terminal_id: u64,
+    pub content_width: u16,
     pub content_height: u16,
 }
 
@@ -211,6 +214,8 @@ impl PanelManager {
                 terminal_id,
                 close_behavior,
                 lines: Vec::new(),
+                inline_styles: Vec::new(),
+                cursor: None,
             },
         };
         if existing.is_none() {
@@ -324,16 +329,22 @@ impl PanelManager {
         Ok(terminal_id)
     }
 
-    pub fn terminal_view_requests(&self) -> Vec<PanelTerminalViewRequest> {
+    pub fn terminal_view_requests(
+        &self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Vec<PanelTerminalViewRequest> {
         self.order
             .iter()
             .filter_map(|id| self.panels.get(id))
             .filter_map(|panel| {
                 let terminal_id = panel.content.terminal_id()?;
+                let rect = panel_rect(panel.position, panel.size, terminal_width, terminal_height);
                 Some(PanelTerminalViewRequest {
                     id: panel.id.clone(),
                     terminal_id,
-                    content_height: 1,
+                    content_width: panel_visible_content_width(rect),
+                    content_height: panel_visible_content_height(rect),
                 })
             })
             .collect()
@@ -346,8 +357,10 @@ impl PanelManager {
         let PanelContentRef::Terminal {
             terminal_id,
             close_behavior,
+            inline_styles,
+            cursor,
             ..
-        } = panel.content
+        } = panel.content.clone()
         else {
             return false;
         };
@@ -355,11 +368,78 @@ impl PanelManager {
             terminal_id,
             close_behavior,
             lines,
+            inline_styles,
+            cursor,
         };
         log::trace!(
             "[panel] terminal lines refreshed: id={}, terminal_id={}",
             id,
             terminal_id
+        );
+        true
+    }
+
+    pub fn replace_terminal_cursor(&mut self, id: &str, cursor: Option<FloatingCursor>) -> bool {
+        let Some(panel) = self.panels.get_mut(id) else {
+            return false;
+        };
+        let PanelContentRef::Terminal {
+            terminal_id,
+            close_behavior,
+            inline_styles,
+            lines,
+            ..
+        } = panel.content.clone()
+        else {
+            return false;
+        };
+        panel.content = PanelContentRef::Terminal {
+            terminal_id,
+            close_behavior,
+            lines,
+            inline_styles,
+            cursor,
+        };
+        log::trace!(
+            "[panel] terminal cursor refreshed: id={}, terminal_id={}, cursor={:?}",
+            id,
+            terminal_id,
+            cursor
+        );
+        true
+    }
+
+    pub fn replace_terminal_inline_styles(
+        &mut self,
+        id: &str,
+        inline_styles: Vec<FloatingInlineStyle>,
+    ) -> bool {
+        let Some(panel) = self.panels.get_mut(id) else {
+            return false;
+        };
+        let PanelContentRef::Terminal {
+            terminal_id,
+            close_behavior,
+            lines,
+            cursor,
+            ..
+        } = panel.content.clone()
+        else {
+            return false;
+        };
+        let style_count = inline_styles.len();
+        panel.content = PanelContentRef::Terminal {
+            terminal_id,
+            close_behavior,
+            lines,
+            inline_styles,
+            cursor,
+        };
+        log::trace!(
+            "[panel] terminal inline styles refreshed: id={}, terminal_id={}, styles={}",
+            id,
+            terminal_id,
+            style_count
         );
         true
     }
@@ -409,10 +489,20 @@ impl PanelManager {
                 },
                 rect: panel.rect,
                 lines: panel.lines,
-                inline_styles: Vec::<FloatingInlineStyle>::new(),
-                cursor: panel
-                    .focused
-                    .then_some(FloatingCursor { line: 0, column: 0 }),
+                inline_styles: match &panel.content {
+                    PanelContentRef::Terminal { inline_styles, .. } => inline_styles.clone(),
+                    PanelContentRef::Lines { .. } | PanelContentRef::View { .. } => {
+                        Vec::<FloatingInlineStyle>::new()
+                    }
+                },
+                cursor: panel.focused.then_some(match panel.content {
+                    PanelContentRef::Terminal { cursor, .. } => {
+                        cursor.unwrap_or(FloatingCursor { line: 0, column: 0 })
+                    }
+                    PanelContentRef::Lines { .. } | PanelContentRef::View { .. } => {
+                        FloatingCursor { line: 0, column: 0 }
+                    }
+                }),
                 focusable: true,
                 mouse: true,
                 chrome: FloatingChrome {
@@ -433,6 +523,14 @@ impl PanelManager {
         self.next_creation_order = self.next_creation_order.saturating_add(1);
         self.next_creation_order
     }
+}
+
+fn panel_visible_content_height(rect: PaneRect) -> u16 {
+    rect.height.saturating_sub(2).max(1)
+}
+
+fn panel_visible_content_width(rect: PaneRect) -> u16 {
+    rect.width.saturating_sub(2).max(1)
 }
 
 fn panel_rect(

@@ -249,6 +249,7 @@ impl<'a, B: TerminalBackend> TerminalIoBroker<'a, B> {
             TerminalIoBrokerError::TerminalRestore(TerminalRestoreError {
                 reset_cursor_style: Some(error.to_string()),
                 disable_bracketed_paste: None,
+                disable_keyboard_enhancement: None,
                 disable_mouse_capture: None,
                 leave_alternate_screen: None,
                 disable_raw_mode: None,
@@ -308,6 +309,7 @@ fn terminal_transport_error(error: std::io::Error) -> TerminalIoBrokerError {
     TerminalIoBrokerError::TerminalRestore(TerminalRestoreError {
         reset_cursor_style: None,
         disable_bracketed_paste: None,
+        disable_keyboard_enhancement: None,
         disable_mouse_capture: None,
         leave_alternate_screen: None,
         disable_raw_mode: Some(error.to_string()),

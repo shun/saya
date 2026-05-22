@@ -1,4 +1,5 @@
 use crate::presentation::screen_model::PaneRect;
+use crate::terminal::emulator::TerminalCellStyle;
 
 use crate::input::router::KeyInput;
 
@@ -86,6 +87,8 @@ pub enum FloatingInlineStyleKind {
     LinkText,
     /// リンクの URL 部分
     LinkUrl,
+    /// terminal emulator のセル属性を renderer へ渡すための host-owned style。
+    TerminalCell(TerminalCellStyle),
 }
 
 /// float の特定行内に適用するインラインスタイル範囲。
@@ -426,6 +429,7 @@ pub struct CoreWindowFloatViewRequest {
 pub struct TerminalFloatViewRequest {
     pub float_id: FloatingWindowId,
     pub terminal_id: u64,
+    pub content_width: u16,
     pub content_height: u16,
 }
 
@@ -876,6 +880,7 @@ impl FloatingWindowManager {
                 FloatingContentRef::Terminal { terminal_id } => Some(TerminalFloatViewRequest {
                     float_id: window.id,
                     terminal_id,
+                    content_width: visible_content_width_for(window.size, window.chrome),
                     content_height: visible_content_height_for(window.size, window.chrome),
                 }),
                 _ => None,
@@ -1417,6 +1422,13 @@ fn visible_content_height_for(size: FloatingSize, chrome: FloatingChrome) -> u16
     match chrome.border {
         FloatingBorder::None => size.height.max(1),
         FloatingBorder::Single => size.height.saturating_sub(2).max(1),
+    }
+}
+
+fn visible_content_width_for(size: FloatingSize, chrome: FloatingChrome) -> u16 {
+    match chrome.border {
+        FloatingBorder::None => size.width.max(1),
+        FloatingBorder::Single => size.width.saturating_sub(2).max(1),
     }
 }
 

@@ -51,6 +51,8 @@ pub enum KeyInput {
     Escape,
     /// Enter キー
     Enter,
+    /// Shift+Enter キー
+    ShiftEnter,
     /// Backspace キー
     Backspace,
     /// F1-F12 ファンクションキー
@@ -120,6 +122,7 @@ fn key_input_to_vim_key(key: &KeyInput) -> String {
         KeyInput::Insert => "\x1b[2~".to_string(),
         KeyInput::Escape => "\x1b".to_string(),
         KeyInput::Enter => "\r".to_string(),
+        KeyInput::ShiftEnter => "\x1b[13;2u".to_string(),
         KeyInput::Backspace => "\x08".to_string(),
         KeyInput::F(number) => function_key_sequence(*number).to_string(),
         KeyInput::Alt(ch) => format!("\x1b{ch}"),
@@ -213,6 +216,17 @@ mod tests {
             intent,
             EditorIntent::EditKey("\r".to_string()),
             "Enter は CR として EditKey に変換されること"
+        );
+    }
+
+    #[test]
+    fn shift_enter_resolves_to_modified_enter_sequence() {
+        let intent = resolve_intent(&KeyInput::ShiftEnter);
+
+        assert_eq!(
+            intent,
+            EditorIntent::EditKey("\x1b[13;2u".to_string()),
+            "Shift+Enter は modified Enter として EditKey に変換されること"
         );
     }
 

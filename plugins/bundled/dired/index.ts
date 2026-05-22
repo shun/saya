@@ -68,29 +68,31 @@ function quoteRuntimeString(value: string): string {
 }
 
 export function setupSayaDired(options: SayaDiredOptions = {}): void {
-  const commandName = options.commands?.open ?? options.commandName ?? "dired.open";
+  const commands = options.commands ?? {};
+  const keymap = options.keymap ?? {};
+  const commandName = commands.open ?? options.commandName ?? "dired.open";
   const enterCommandName =
-    options.commands?.enter ?? options.enterCommandName ?? "dired.enter";
-  const upCommandName = options.commands?.up ?? options.upCommandName ?? "dired.up";
+    commands.enter ?? options.enterCommandName ?? "dired.enter";
+  const upCommandName = commands.up ?? options.upCommandName ?? "dired.up";
   const refreshCommandName =
-    options.commands?.refresh ?? options.refreshCommandName ?? "dired.refresh";
-  const markCommandName = options.commands?.mark ?? options.markCommandName ?? "dired.mark";
+    commands.refresh ?? options.refreshCommandName ?? "dired.refresh";
+  const markCommandName = commands.mark ?? options.markCommandName ?? "dired.mark";
   const unmarkCommandName =
-    options.commands?.unmark ?? options.unmarkCommandName ?? "dired.unmark";
+    commands.unmark ?? options.unmarkCommandName ?? "dired.unmark";
   const clearMarksCommandName =
-    options.commands?.clearMarks ?? options.clearMarksCommandName ?? "dired.clearMarks";
+    commands.clearMarks ?? options.clearMarksCommandName ?? "dired.clearMarks";
   const bulkDeletePreviewCommandName =
-    options.commands?.bulkDeletePreview ??
+    commands.bulkDeletePreview ??
     options.bulkDeletePreviewCommandName ??
     "dired.bulkDeletePreview";
-  const key = options.keymap?.up ?? options.key ?? "-";
-  const enterKey = options.keymap?.enter ?? options.enterKey ?? "<Enter>";
-  const refreshKey = options.keymap?.refresh ?? options.refreshKey ?? "gr";
-  const markKey = options.keymap?.mark ?? options.markKey ?? "m";
-  const unmarkKey = options.keymap?.unmark ?? options.unmarkKey ?? "M";
-  const clearMarksKey = options.keymap?.clearMarks ?? options.clearMarksKey ?? "gM";
+  const key = keymap.up ?? options.key ?? "-";
+  const enterKey = keymap.enter ?? options.enterKey ?? "<Enter>";
+  const refreshKey = keymap.refresh ?? options.refreshKey ?? "gr";
+  const markKey = keymap.mark ?? options.markKey ?? "m";
+  const unmarkKey = keymap.unmark ?? options.unmarkKey ?? "M";
+  const clearMarksKey = keymap.clearMarks ?? options.clearMarksKey ?? "gM";
   const bulkDeletePreviewKey =
-    options.keymap?.bulkDeletePreview ?? options.bulkDeletePreviewKey ?? "D";
+    keymap.bulkDeletePreview ?? options.bulkDeletePreviewKey ?? "D";
   const root = options.root ?? "";
   const hiddenFilePolicy = options.hiddenFilePolicy ?? "show";
   const sortPolicy = options.sortPolicy ?? "kind";

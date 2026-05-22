@@ -545,18 +545,20 @@ function lineAt(documentText, line) {
 }
 
 export function lspRangeFromSayaRange(documentText, range, positionEncoding = "utf-16") {
-  const startLine = Math.max(0, Number(range?.start?.line) || 0);
-  const endLine = Math.max(0, Number(range?.end?.line) || 0);
+  const startRange = range && range.start ? range.start : {};
+  const endRange = range && range.end ? range.end : {};
+  const startLine = Math.max(0, Number(startRange.line) || 0);
+  const endLine = Math.max(0, Number(endRange.line) || 0);
   const start = lspPositionFromSayaCursor(
     lineAt(documentText, startLine),
     startLine,
-    range?.start?.character ?? 0,
+    startRange.character ?? 0,
     positionEncoding,
   );
   const end = lspPositionFromSayaCursor(
     lineAt(documentText, endLine),
     endLine,
-    range?.end?.character ?? 0,
+    endRange.character ?? 0,
     positionEncoding,
   );
   return {
@@ -981,10 +983,14 @@ function createRuntimeBridgeCallbackSource(
       "    const byLanguage = servers.find((server) => (server.languages ?? []).includes(languageId));\n" +
       "    return byLanguage ?? servers[0];\n" +
       "  };\n" +
-      "  const negotiatedPositionEncoding = (server) => serverState()[server.name]?.positionEncoding ?? server.positionEncoding;\n" +
+      "  const negotiatedPositionEncoding = (server) => {\n" +
+      "    const state = serverState()[server.name] || {};\n" +
+      "    return state.positionEncoding ?? server.positionEncoding;\n" +
+      "  };\n" +
       "  const rememberServerCapabilities = (server, response) => {\n" +
       "    if (method !== 'initialize') return;\n" +
-      "    const capabilities = response?.result?.capabilities ?? response?.capabilities ?? null;\n" +
+      "    const result = response && response.result ? response.result : null;\n" +
+      "    const capabilities = result && result.capabilities ? result.capabilities : ((response && response.capabilities) ? response.capabilities : null);\n" +
       "    if (!capabilities) return;\n" +
       "    const next = { ...(serverState()[server.name] ?? {}), capabilities };\n" +
       "    if (capabilities.positionEncoding === 'utf-8' || capabilities.positionEncoding === 'utf-16' || capabilities.positionEncoding === 'utf-32') {\n" +
@@ -1085,18 +1091,19 @@ function createRuntimeBridgeCallbackSource(
       "    } else if (responseMethod === 'textDocument/documentSymbol') {\n" +
       "      await executeUiCommand('lsp.floatSymbols', { response, ui: normalizedPopupUi.symbols });\n" +
       "    } else if (responseMethod === 'textDocument/completion') {\n" +
-      "      const result = response?.result ?? response;\n" +
-      "      const items = Array.isArray(result) ? result : (Array.isArray(result?.items) ? result.items : []);\n" +
+      "      const result = response && response.result !== undefined ? response.result : response;\n" +
+      "      const items = Array.isArray(result) ? result : (result && Array.isArray(result.items) ? result.items : []);\n" +
       "      await executeUiCommand('completion.floatMenu', { candidates: items, selectedIndex: 0 });\n" +
       "    } else if (responseMethod === 'completionItem/resolve') {\n" +
-      "      await executeUiCommand('completion.floatMenu', { candidates: [response?.result ?? response], selectedIndex: 0 });\n" +
+      "      await executeUiCommand('completion.floatMenu', { candidates: [response && response.result !== undefined ? response.result : response], selectedIndex: 0 });\n" +
       "    } else if (responseMethod === 'textDocument/signatureHelp') {\n" +
-      "      const result = response?.result ?? response;\n" +
-      "      const signatures = Array.isArray(result?.signatures) ? result.signatures : [];\n" +
-      "      const active = Math.max(0, Math.min(Number(result?.activeSignature) || 0, Math.max(0, signatures.length - 1)));\n" +
+      "      const result = response && response.result !== undefined ? response.result : response;\n" +
+      "      const signatures = result && Array.isArray(result.signatures) ? result.signatures : [];\n" +
+      "      const active = Math.max(0, Math.min(Number(result && result.activeSignature) || 0, Math.max(0, signatures.length - 1)));\n" +
       "      const signature = signatures[active];\n" +
-      "      const label = signature?.label ?? '';\n" +
-      "      const doc = typeof signature?.documentation === 'string' ? signature.documentation : (signature?.documentation?.value ?? '');\n" +
+      "      const label = signature && signature.label !== undefined ? signature.label : '';\n" +
+      "      const documentation = signature ? signature.documentation : null;\n" +
+      "      const doc = typeof documentation === 'string' ? documentation : (documentation && documentation.value !== undefined ? documentation.value : '');\n" +
       "      await executeUiCommand('lsp.floatHover', { kind: 'signatureHelp', response: { result: { contents: [label, doc].filter(Boolean).join('\\n') } }, ui: normalizedPopupUi.signatureHelp });\n" +
       "    } else if (responseMethod === 'textDocument/formatting' || responseMethod === 'textDocument/rangeFormatting') {\n" +
       "      await executeUiCommand('lsp.previewWorkspaceEdit', { title: 'Formatting preview', response });\n" +
@@ -1156,12 +1163,12 @@ function createRuntimeBridgeCallbackSource(
       "    source,\n" +
       "    lspVersion,\n" +
       "    method,\n" +
-      "    clientName: selectedServer?.name ?? " +
+      "    clientName: selectedServer && selectedServer.name !== undefined ? selectedServer.name : " +
       quoteRuntimeValue(clientName) +
       ",\n" +
       "    rootUri: resolvedRootUri,\n" +
       "    languageId: effectiveLanguageId,\n" +
-      "    trace: selectedServer?.trace ?? " +
+      "    trace: selectedServer && selectedServer.trace !== undefined ? selectedServer.trace : " +
       quoteRuntimeValue(trace) +
       ",\n" +
       "    positionEncoding: effectivePositionEncoding,\n" +
@@ -1374,9 +1381,11 @@ export function setupSayaLspClient(options = {}) {
   ];
   const normalizedPopupUi = normalizeLspPopupUi(options);
   const enableBufferEvents = options.enableBufferEvents ?? true;
-  const lsifEnabled = options.lsif?.enabled ?? false;
-  const lsifBridgeCommand = options.lsif?.bridgeCommand ?? "lsif.request";
-  const lsifDumpPath = options.lsif?.dumpPath ?? "";
+  const lsifOptions = options.lsif ?? {};
+  const keymapOptions = options.keymap ?? {};
+  const lsifEnabled = lsifOptions.enabled ?? false;
+  const lsifBridgeCommand = lsifOptions.bridgeCommand ?? "lsif.request";
+  const lsifDumpPath = lsifOptions.dumpPath ?? "";
 
   for (const kind of [
     "initialize",
@@ -1512,60 +1521,60 @@ export function setupSayaLspClient(options = {}) {
     );
   }
 
-  saya.keymap.set("normal", options.keymap?.hover ?? "K", saya.commands.execute(commandNames.hover));
+  saya.keymap.set("normal", keymapOptions.hover ?? "K", saya.commands.execute(commandNames.hover));
   saya.keymap.set(
     "normal",
-    options.keymap?.definition ?? "gd",
+    keymapOptions.definition ?? "gd",
     saya.commands.execute(commandNames.definition),
   );
   saya.keymap.set(
     "normal",
-    options.keymap?.references ?? "gR",
+    keymapOptions.references ?? "gR",
     saya.commands.execute(commandNames.references),
   );
   saya.keymap.set(
     "normal",
-    options.keymap?.documentSymbol ?? "gO",
+    keymapOptions.documentSymbol ?? "gO",
     saya.commands.execute(commandNames.documentSymbol),
   );
   saya.keymap.set(
     "insert",
-    options.keymap?.completion ?? "<C-Space>",
+    keymapOptions.completion ?? "<C-Space>",
     saya.commands.execute(commandNames.completion),
   );
   saya.keymap.set(
     "insert",
-    options.keymap?.signatureHelp ?? "<C-k>",
+    keymapOptions.signatureHelp ?? "<C-k>",
     saya.commands.execute(commandNames.signatureHelp),
   );
   saya.keymap.set(
     "normal",
-    options.keymap?.formatting ?? "gq",
+    keymapOptions.formatting ?? "gq",
     saya.commands.execute(commandNames.formatting),
   );
   saya.keymap.set(
     "visual",
-    options.keymap?.rangeFormatting ?? "gq",
+    keymapOptions.rangeFormatting ?? "gq",
     saya.commands.execute(commandNames.rangeFormatting),
   );
   saya.keymap.set(
     "normal",
-    options.keymap?.rename ?? "grn",
+    keymapOptions.rename ?? "grn",
     saya.commands.execute(commandNames.rename),
   );
   saya.keymap.set(
     "normal",
-    options.keymap?.codeAction ?? "gra",
+    keymapOptions.codeAction ?? "gra",
     saya.commands.execute(commandNames.codeAction),
   );
   saya.keymap.set(
     "normal",
-    options.keymap?.nextDiagnostic ?? "]d",
+    keymapOptions.nextDiagnostic ?? "]d",
     saya.commands.execute(commandNames.nextDiagnostic),
   );
   saya.keymap.set(
     "normal",
-    options.keymap?.previousDiagnostic ?? "[d",
+    keymapOptions.previousDiagnostic ?? "[d",
     saya.commands.execute(commandNames.previousDiagnostic),
   );
 
@@ -1614,12 +1623,12 @@ export function setupSayaLspClient(options = {}) {
     );
     saya.keymap.set(
       "normal",
-      options.keymap?.lsifHover ?? "gK",
+      keymapOptions.lsifHover ?? "gK",
       saya.commands.execute(commandNames.lsifHover),
     );
     saya.keymap.set(
       "normal",
-      options.keymap?.lsifDefinition ?? "gD",
+      keymapOptions.lsifDefinition ?? "gD",
       saya.commands.execute(commandNames.lsifDefinition),
     );
   }

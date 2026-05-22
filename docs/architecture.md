@@ -84,7 +84,10 @@ The `src/` tree mirrors this ownership model so new code has an obvious home.
   TUI rendering.
 - `src/terminal/` owns terminal lifecycle, terminal capability detection,
   terminal input, signal handling, terminal I/O brokering, and terminal-backed
-  floating surfaces.
+  floating surfaces. `src/terminal/emulator.rs` owns the host-side terminal
+  emulator abstraction for PTY-backed panels and floats. See
+  [Terminal backend design](design/terminal-backend.md) for the snapshot,
+  resize, redraw, and compatibility boundaries.
 - `src/features/` owns feature-level orchestration that crosses lower-level
   primitives, such as selector, search, LSP, and completion workflows.
 

@@ -6,6 +6,7 @@
 //! application boot 後の host/application integration に限定する。詳細な
 //! editing semantics は ADR 0001 に従って `vim-core-rs` に委ねる。
 //!
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,6 +23,7 @@ use saya::runtime::live::{
     RuntimeFloatOpenRequest, RuntimeFloatSnapshot, RuntimeMode, RuntimePanelOpenRequest,
     RuntimePanelSnapshot, SayaLiveRuntime,
 };
+use saya::runtime::plugin::{LazyIndex, LazyTarget, PluginCacheRoot, PluginHost};
 use saya::terminal::lifecycle::TerminalBackend;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -31,6 +33,43 @@ fn unique_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-typescript-runtime-command-{name}-{nanos}"))
+}
+
+fn with_isolated_lazy_plugin_event<T>(name: &str, event_name: &str, f: impl FnOnce() -> T) -> T {
+    let cache_root = unique_path(name);
+    let host = PluginHost::new(PluginCacheRoot::new(cache_root.clone()));
+    let mut events = BTreeMap::new();
+    events.insert(
+        event_name.to_string(),
+        vec![LazyTarget {
+            plugin: "__test".to_string(),
+            module: "__test.ts".to_string(),
+            export_name: "setup".to_string(),
+        }],
+    );
+    host.write_lazy_index(&LazyIndex {
+        version: LazyIndex::CURRENT_VERSION,
+        commands: BTreeMap::new(),
+        events,
+    })
+    .expect("isolated lazy plugin cache should be writable");
+
+    let previous_cache_dir = std::env::var_os("SAYA_CACHE_DIR");
+    unsafe {
+        std::env::set_var("SAYA_CACHE_DIR", &cache_root);
+    }
+    let result = f();
+    if let Some(value) = previous_cache_dir {
+        unsafe {
+            std::env::set_var("SAYA_CACHE_DIR", value);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("SAYA_CACHE_DIR");
+        }
+    }
+    let _ = std::fs::remove_dir_all(cache_root);
+    result
 }
 
 fn typescript_runtime_suite_scope_statement() -> &'static str {
@@ -346,15 +385,18 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
     .expect("config file");
 
     let mut terminal_backend = DummyTerminalBackend::default();
-    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
-        LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::File(config_path.clone()),
-            ..LaunchRequest::default()
-        },
-        &mut terminal_backend,
-    )
-    .expect("startup config should prepare callback seed");
+    let (outcome, terminal_broker) =
+        with_isolated_lazy_plugin_event("runtime-event-plugin-cache", "bufferOpen", || {
+            prepare_launch_and_start_terminal(
+                LaunchRequest {
+                    input_source: InputSource::Empty,
+                    config_source: ConfigSource::File(config_path.clone()),
+                    ..LaunchRequest::default()
+                },
+                &mut terminal_backend,
+            )
+        })
+        .expect("startup config should prepare callback seed");
     assert!(terminal_broker.is_raw_mode_enabled());
     assert!(terminal_broker.is_alternate_screen_enabled());
     drop(terminal_broker);
@@ -438,15 +480,18 @@ async fn runtime_panel_api_forwards_open_focus_list_send_and_close_to_host() {
     .expect("config file");
 
     let mut terminal_backend = DummyTerminalBackend::default();
-    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
-        LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::File(config_path.clone()),
-            ..LaunchRequest::default()
-        },
-        &mut terminal_backend,
-    )
-    .expect("startup config should prepare callback seed");
+    let (outcome, terminal_broker) =
+        with_isolated_lazy_plugin_event("runtime-panel-plugin-cache", "bufferOpen", || {
+            prepare_launch_and_start_terminal(
+                LaunchRequest {
+                    input_source: InputSource::Empty,
+                    config_source: ConfigSource::File(config_path.clone()),
+                    ..LaunchRequest::default()
+                },
+                &mut terminal_backend,
+            )
+        })
+        .expect("startup config should prepare callback seed");
     drop(terminal_broker);
     let host_bridge = Arc::new(RecordingHostBridge::new());
     let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), outcome.callback_registry)
@@ -539,15 +584,18 @@ async fn runtime_panel_api_forwards_structured_view_content_to_host() {
     .expect("config file");
 
     let mut terminal_backend = DummyTerminalBackend::default();
-    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
-        LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::File(config_path.clone()),
-            ..LaunchRequest::default()
-        },
-        &mut terminal_backend,
-    )
-    .expect("startup config should prepare callback seed");
+    let (outcome, terminal_broker) =
+        with_isolated_lazy_plugin_event("runtime-panel-view-plugin-cache", "bufferOpen", || {
+            prepare_launch_and_start_terminal(
+                LaunchRequest {
+                    input_source: InputSource::Empty,
+                    config_source: ConfigSource::File(config_path.clone()),
+                    ..LaunchRequest::default()
+                },
+                &mut terminal_backend,
+            )
+        })
+        .expect("startup config should prepare callback seed");
     drop(terminal_broker);
     let host_bridge = Arc::new(RecordingHostBridge::new());
     let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), outcome.callback_registry)
@@ -631,15 +679,18 @@ async fn startup_and_runtime_capability_boundaries_survive_application_boot() {
     .expect("config file");
 
     let mut terminal_backend = DummyTerminalBackend::default();
-    let (outcome, terminal_broker) = prepare_launch_and_start_terminal(
-        LaunchRequest {
-            input_source: InputSource::Empty,
-            config_source: ConfigSource::File(config_path.clone()),
-            ..LaunchRequest::default()
-        },
-        &mut terminal_backend,
-    )
-    .expect("startup config should prepare callback seed");
+    let (outcome, terminal_broker) =
+        with_isolated_lazy_plugin_event("runtime-boundary-plugin-cache", "bufferOpen", || {
+            prepare_launch_and_start_terminal(
+                LaunchRequest {
+                    input_source: InputSource::Empty,
+                    config_source: ConfigSource::File(config_path.clone()),
+                    ..LaunchRequest::default()
+                },
+                &mut terminal_backend,
+            )
+        })
+        .expect("startup config should prepare callback seed");
 
     assert!(terminal_broker.is_raw_mode_enabled());
     assert!(terminal_broker.is_alternate_screen_enabled());

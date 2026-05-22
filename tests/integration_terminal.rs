@@ -1700,10 +1700,11 @@ async fn extended_keyboard_terminal_events_resolve_to_editor_intent_texts_end_to
         key_event_with_modifiers(KeyCode::Insert, KeyModifiers::NONE),
         key_event_with_modifiers(KeyCode::Esc, KeyModifiers::NONE),
         key_event_with_modifiers(KeyCode::Enter, KeyModifiers::NONE),
+        key_event_with_modifiers(KeyCode::Enter, KeyModifiers::SHIFT),
         key_event_with_modifiers(KeyCode::Backspace, KeyModifiers::NONE),
     ];
 
-    let forwarded = collect_terminal_events_through_user_path(events, 21).await;
+    let forwarded = collect_terminal_events_through_user_path(events, 22).await;
     let edit_texts = forwarded
         .into_iter()
         .filter_map(intent_text_from_input_event)
@@ -1732,6 +1733,7 @@ async fn extended_keyboard_terminal_events_resolve_to_editor_intent_texts_end_to
             "\x1b[2~",
             "\x1b",
             "\r",
+            "\x1b[13;2u",
             "\x08",
         ],
         "extended keys should resolve to vim-core-rs bridge strings and unsupported keys should be ignored"

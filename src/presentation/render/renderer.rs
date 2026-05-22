@@ -10,6 +10,7 @@ use crate::presentation::screen_model::{
 use crate::presentation::theme::{
     ResolvedTextStyle, ResolvedTheme, ResolvedThemeColor, SyntaxSemanticStyleKey, UiStyleKey,
 };
+use crate::terminal::emulator::{TerminalCellStyle, TerminalColor};
 use crate::terminal::lifecycle::TerminalBackend;
 use crossterm::{cursor, event, execute, queue, style, terminal};
 use ratatui::Terminal;
@@ -38,6 +39,16 @@ impl TerminalBackend for CrosstermBackendImpl {
         execute!(io::stdout(), event::EnableBracketedPaste)
     }
 
+    fn enable_keyboard_enhancement(&mut self) -> io::Result<()> {
+        execute!(
+            io::stdout(),
+            event::PushKeyboardEnhancementFlags(
+                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )
+    }
+
     fn set_cursor_style(&mut self, style: ScreenCursorStyle) -> io::Result<()> {
         let crossterm_style = match style {
             ScreenCursorStyle::Block => cursor::SetCursorStyle::SteadyBlock,
@@ -53,6 +64,10 @@ impl TerminalBackend for CrosstermBackendImpl {
 
     fn disable_bracketed_paste(&mut self) -> io::Result<()> {
         execute!(io::stdout(), event::DisableBracketedPaste)
+    }
+
+    fn disable_keyboard_enhancement(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), event::PopKeyboardEnhancementFlags)
     }
 
     fn disable_mouse_capture(&mut self) -> io::Result<()> {
@@ -513,6 +528,35 @@ fn inline_kind_modifier_style(kind: FloatingInlineStyleKind) -> Style {
         FloatingInlineStyleKind::LinkUrl => Style::default()
             .add_modifier(Modifier::UNDERLINED)
             .add_modifier(Modifier::DIM),
+        FloatingInlineStyleKind::TerminalCell(style) => terminal_cell_style(style),
+    }
+}
+
+fn terminal_cell_style(style: TerminalCellStyle) -> Style {
+    use ratatui::style::Modifier;
+    let mut tui_style = Style::default();
+    if let Some(foreground) = style.foreground {
+        tui_style = tui_style.fg(terminal_color(foreground));
+    }
+    if let Some(background) = style.background {
+        tui_style = tui_style.bg(terminal_color(background));
+    }
+    if style.bold {
+        tui_style = tui_style.add_modifier(Modifier::BOLD);
+    }
+    if style.underline {
+        tui_style = tui_style.add_modifier(Modifier::UNDERLINED);
+    }
+    if style.inverse {
+        tui_style = tui_style.add_modifier(Modifier::REVERSED);
+    }
+    tui_style
+}
+
+fn terminal_color(color: TerminalColor) -> ratatui::style::Color {
+    match color {
+        TerminalColor::Indexed(index) => ratatui::style::Color::Indexed(index),
+        TerminalColor::Rgb(red, green, blue) => ratatui::style::Color::Rgb(red, green, blue),
     }
 }
 
@@ -1529,7 +1573,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::app::bootstrap::prepare_launch;
@@ -1673,8 +1717,7 @@ mod tests {
     }
 
     fn color_env_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        session_test_lock()
     }
 
     struct NoColorGuard {
@@ -3706,6 +3749,59 @@ mod tests {
             "Cell outside the Code range must not be BOLD: got modifier={:?}",
             cell(4).modifier
         );
+    }
+
+    #[test]
+    fn workspace_render_applies_terminal_cell_styles_to_float_text() {
+        use ratatui::style::{Color, Modifier};
+        let mut terminal =
+            Terminal::new(TestBackend::new(20, 4)).expect("test terminal should initialize");
+        let mut model = workspace_with_typed_message(None);
+        model.floats = vec![FloatingScreenModel {
+            id: FloatingWindowId(1),
+            content: FloatingContentRef::Terminal { terminal_id: 7 },
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 12,
+                height: 1,
+            },
+            lines: vec!["styled".to_string()],
+            inline_styles: vec![FloatingInlineStyle {
+                kind: FloatingInlineStyleKind::TerminalCell(TerminalCellStyle {
+                    foreground: Some(TerminalColor::Indexed(1)),
+                    background: Some(TerminalColor::Rgb(1, 2, 3)),
+                    bold: true,
+                    underline: true,
+                    inverse: true,
+                }),
+                line: 0,
+                column_start: 0,
+                column_end: 6,
+            }],
+            cursor: Some(FloatingCursor { line: 0, column: 2 }),
+            focusable: true,
+            mouse: true,
+            chrome: FloatingChrome {
+                border: FloatingBorder::None,
+            },
+            zindex: 40,
+            creation_order: 1,
+        }];
+
+        draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+            .expect("workspace render should succeed");
+
+        let buffer = terminal.backend().buffer().clone();
+        let styled = buffer[(0u16, 0u16)].clone();
+        assert_eq!(styled.fg, Color::Indexed(1));
+        assert_eq!(styled.bg, Color::Rgb(1, 2, 3));
+        assert!(styled.modifier.contains(Modifier::BOLD));
+        assert!(styled.modifier.contains(Modifier::UNDERLINED));
+        assert!(styled.modifier.contains(Modifier::REVERSED));
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(2, 0));
     }
 
     #[test]

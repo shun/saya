@@ -6,6 +6,7 @@
 //! host/application projection に限定する。詳細な editing semantics は
 //! ADR 0001 に従って `vim-core-rs` に委ねる。
 //!
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +25,7 @@ use saya::runtime::live::{
     RuntimeEventPayload, RuntimeMode, SayaLiveRuntime,
 };
 use saya::runtime::message::runtime_callback_failure_message;
+use saya::runtime::plugin::{LazyIndex, LazyTarget, PluginCacheRoot, PluginHost};
 use saya::runtime::refresh::runtime_dispatch_requests_redraw;
 use tokio::sync::Mutex;
 
@@ -33,6 +35,43 @@ fn unique_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-ts-config-{name}-{nanos}"))
+}
+
+fn with_isolated_lazy_plugin_event<T>(name: &str, event_name: &str, f: impl FnOnce() -> T) -> T {
+    let cache_root = unique_path(name);
+    let host = PluginHost::new(PluginCacheRoot::new(cache_root.clone()));
+    let mut events = BTreeMap::new();
+    events.insert(
+        event_name.to_string(),
+        vec![LazyTarget {
+            plugin: "__test".to_string(),
+            module: "__test.ts".to_string(),
+            export_name: "setup".to_string(),
+        }],
+    );
+    host.write_lazy_index(&LazyIndex {
+        version: LazyIndex::CURRENT_VERSION,
+        commands: BTreeMap::new(),
+        events,
+    })
+    .expect("isolated lazy plugin cache should be writable");
+
+    let previous_cache_dir = std::env::var_os("SAYA_CACHE_DIR");
+    unsafe {
+        std::env::set_var("SAYA_CACHE_DIR", &cache_root);
+    }
+    let result = f();
+    if let Some(value) = previous_cache_dir {
+        unsafe {
+            std::env::set_var("SAYA_CACHE_DIR", value);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("SAYA_CACHE_DIR");
+        }
+    }
+    let _ = std::fs::remove_dir_all(cache_root);
+    result
 }
 
 fn typescript_runtime_suite_scope_statement() -> &'static str {
@@ -131,12 +170,15 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
     )
     .expect("config file");
 
-    let outcome = prepare_launch(LaunchRequest {
-        input_source: InputSource::File(target_path.clone()),
-        config_source: ConfigSource::File(config_path.clone()),
-        ..LaunchRequest::default()
-    })
-    .expect("startup with typescript config");
+    let outcome =
+        with_isolated_lazy_plugin_event("startup-options-plugin-cache", "bufferOpen", || {
+            prepare_launch(LaunchRequest {
+                input_source: InputSource::File(target_path.clone()),
+                config_source: ConfigSource::File(config_path.clone()),
+                ..LaunchRequest::default()
+            })
+        })
+        .expect("startup with typescript config");
 
     assert_eq!(outcome.initial_tab_size, 4);
     assert!(outcome.initial_line_numbers);
@@ -744,12 +786,15 @@ async fn runtime_callback_failure_projects_as_message_without_corrupting_session
     )
     .expect("config file");
 
-    let outcome = prepare_launch(LaunchRequest {
-        input_source: InputSource::File(target_path.clone()),
-        config_source: ConfigSource::File(config_path.clone()),
-        ..LaunchRequest::default()
-    })
-    .expect("startup should register failing runtime callback");
+    let outcome =
+        with_isolated_lazy_plugin_event("runtime-failure-plugin-cache", "bufferOpen", || {
+            prepare_launch(LaunchRequest {
+                input_source: InputSource::File(target_path.clone()),
+                config_source: ConfigSource::File(config_path.clone()),
+                ..LaunchRequest::default()
+            })
+        })
+        .expect("startup should register failing runtime callback");
 
     assert_eq!(outcome.callback_registry.events().len(), 1);
     let session_state = outcome.editor_session_state();
@@ -823,12 +868,15 @@ async fn runtime_callback_completion_requests_projection_refresh_after_host_save
     )
     .expect("config file");
 
-    let mut outcome = prepare_launch(LaunchRequest {
-        input_source: InputSource::File(target_path.clone()),
-        config_source: ConfigSource::File(config_path.clone()),
-        ..LaunchRequest::default()
-    })
-    .expect("startup should register runtime callback");
+    let mut outcome =
+        with_isolated_lazy_plugin_event("runtime-refresh-plugin-cache", "bufferOpen", || {
+            prepare_launch(LaunchRequest {
+                input_source: InputSource::File(target_path.clone()),
+                config_source: ConfigSource::File(config_path.clone()),
+                ..LaunchRequest::default()
+            })
+        })
+        .expect("startup should register runtime callback");
 
     assert_eq!(outcome.callback_registry.commands().len(), 1);
     assert_eq!(outcome.callback_registry.events().len(), 1);

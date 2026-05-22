@@ -55,14 +55,9 @@ fn home_dir_fallback() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::support::session_guard::test_lock;
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -102,7 +97,7 @@ mod tests {
 
     #[test]
     fn default_init_ts_path_prefers_xdg_config_home() {
-        let _lock = env_test_lock()
+        let _lock = test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _xdg_guard = EnvVarGuard::set("XDG_CONFIG_HOME", Path::new("/tmp/xdg-config"));
@@ -116,7 +111,7 @@ mod tests {
 
     #[test]
     fn default_init_ts_path_falls_back_to_home_dot_config() {
-        let _lock = env_test_lock()
+        let _lock = test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _xdg_guard = EnvVarGuard::remove("XDG_CONFIG_HOME");
@@ -130,7 +125,7 @@ mod tests {
 
     #[test]
     fn cache_dir_prefers_xdg_cache_home() {
-        let _lock = env_test_lock()
+        let _lock = test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _xdg_guard = EnvVarGuard::set("XDG_CACHE_HOME", Path::new("/tmp/xdg-cache"));
@@ -141,7 +136,7 @@ mod tests {
 
     #[test]
     fn cache_dir_falls_back_to_home_dot_cache() {
-        let _lock = env_test_lock()
+        let _lock = test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _xdg_guard = EnvVarGuard::remove("XDG_CACHE_HOME");
