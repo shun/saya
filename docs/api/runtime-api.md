@@ -1,11 +1,11 @@
 # Runtime API
 
 This page documents the public TypeScript runtime surface that `saya` exposes
-while executing runtime callbacks. This API is separate from the startup API
-and focuses on typed state reads plus explicit command execution.
+while executing runtime callbacks. This API is separate from the startup API and
+focuses on typed state reads plus explicit command execution.
 
-If you need startup-time registration APIs, read the startup API page instead
-of this one.
+If you need startup-time registration APIs, read the startup API page instead of
+this one.
 
 ## Availability
 
@@ -13,6 +13,9 @@ The runtime API is available only inside runtime callback execution. The
 repository currently validates this behavior primarily through headless tests.
 
 The runtime surface is narrower than the startup surface by design.
+
+For completion-specific setup and extension points, read the
+[Completion API](completion-api.md).
 
 ## Namespace
 
@@ -41,8 +44,8 @@ Use this method to execute a named command.
 await saya.commands.execute("write");
 ```
 
-Commands may resolve to a registered runtime callback or to a host-side
-command implementation, depending on the current registry and host bridge.
+Commands may resolve to a registered runtime callback or to a host-side command
+implementation, depending on the current registry and host bridge.
 
 ## Workspace
 
@@ -62,26 +65,25 @@ const root = await saya.workspace.findRoot(buffer.path, [
 ]);
 ```
 
-The method returns a path string when a marker matches and `null` when no
-marker is found. The LSP preview plugin uses this API to resolve per-server
-workspace roots from marker lists such as `go.mod`, `Cargo.toml`, and `.git`.
+The method returns a path string when a marker matches and `null` when no marker
+is found. The LSP preview plugin uses this API to resolve per-server workspace
+roots from marker lists such as `go.mod`, `Cargo.toml`, and `.git`.
 
 ## LSP
 
-The LSP surface exposes one typed host bridge for preview LSP and LSIF
-requests. It is intentionally narrower than a general process or filesystem
-API. Runtime code describes the request, and the Rust host owns process
-lifecycle, JSON-RPC framing, document synchronization, diagnostic logging, and
-LSIF index lookup.
+The LSP surface exposes one typed host bridge for preview LSP and LSIF requests.
+It is intentionally narrower than a general process or filesystem API. Runtime
+code describes the request, and the Rust host owns process lifecycle, JSON-RPC
+framing, document synchronization, diagnostic logging, and LSIF index lookup.
 
-> **Note:** This is a preview feature currently under active development.
-> See [LSP preview](lsp-preview.md) for setup examples, the feature support
-> matrix, LSIF limitations, and verification commands.
+> **Note:** This is a preview feature currently under active development. See
+> [LSP preview](lsp-preview.md) for setup examples, the feature support matrix,
+> LSIF limitations, and verification commands.
 
 ### `saya.lsp.request(payload)`
 
-Use this method to send a validated LSP or LSIF bridge request to the host.
-Most users call it indirectly through `setupSayaLspClient()` from
+Use this method to send a validated LSP or LSIF bridge request to the host. Most
+users call it indirectly through `setupSayaLspClient()` from
 `plugins/saya-lsp-client.ts`.
 
 ```ts
@@ -143,9 +145,9 @@ they need the filesystem entry associated with the cursor row.
 
 ## Window
 
-The window surface lets you read the current window snapshot and manage
-floating windows through typed host-mediated requests. Runtime code never
-receives raw renderer access.
+The window surface lets you read the current window snapshot and manage floating
+windows through typed host-mediated requests. Runtime code never receives raw
+renderer access.
 
 ### `saya.window.current()`
 
@@ -178,8 +180,8 @@ const float = await saya.window.openFloat({
 ```
 
 The method returns a read-only float snapshot with `id`, `kind`, `focused`,
-`focusable`, `width`, `height`, `row`, `col`, `border`, `zIndex`,
-`lifecycle`, and `replacementGroup`.
+`focusable`, `width`, `height`, `row`, `col`, `border`, `zIndex`, `lifecycle`,
+and `replacementGroup`.
 
 Supported content kinds are:
 
@@ -194,9 +196,9 @@ displays that buffer. The host rejects buffer IDs that are not backed by a
 current core window because hidden core-window creation is not part of the
 runtime API yet.
 
-For terminal floats, pass the command as an array. The host owns the PTY,
-parses terminal output, routes focused key input to the terminal session, and
-applies the close policy when the float closes.
+For terminal floats, pass the command as an array. The host owns the PTY, parses
+terminal output, routes focused key input to the terminal session, and applies
+the close policy when the float closes.
 
 ```ts
 const terminal = await saya.window.openFloat({
@@ -247,10 +249,10 @@ for (const float of floats) {
 
 ## Panels
 
-The panel surface lets runtime callbacks open persistent side panels. Panels
-are different from transient floating windows: they are intended for longer
-running tool surfaces such as terminal-backed assistants, status views, and
-plugin work areas.
+The panel surface lets runtime callbacks open persistent side panels. Panels are
+different from transient floating windows: they are intended for longer running
+tool surfaces such as terminal-backed assistants, status views, and plugin work
+areas.
 
 > **Note:** This is a preview feature currently under active development.
 
@@ -270,8 +272,8 @@ startup. Use these commands from normal Ex command-line input:
 focus. This lets you run another editor command immediately after opening the
 panel. `panel.focus` selects the panel as the active persistent display area.
 Only terminal-backed panels use that focus as terminal input mode. From a
-focused terminal panel, press `:` to enter the editor command line, press `/`
-to enter editor search, or press `Ctrl-w` to return focus to the editor while
+focused terminal panel, press `:` to enter the editor command line, press `/` to
+enter editor search, or press `Ctrl-w` to return focus to the editor while
 leaving the panel open. Runtime code can also call `panel.unfocus`. Use
 `panel.close` to close the panel from the editor command line.
 
@@ -308,8 +310,8 @@ Supported content kinds are:
 - `terminal`: A PTY-backed terminal panel with an explicit command array.
 - `view`: Structured plugin-controlled UI nodes rendered by the host TUI.
 
-For terminal panels, pass the command as an array. The host owns the PTY,
-parses terminal output, routes key input to the terminal only when the panel is
+For terminal panels, pass the command as an array. The host owns the PTY, parses
+terminal output, routes key input to the terminal only when the panel is
 focused, and applies the close policy when the panel closes.
 
 For view panels, pass a declarative `nodes` array. The host owns layout,
@@ -337,9 +339,9 @@ await saya.panel.open({
 });
 ```
 
-The initial view node subset is `text`, `heading`, `divider`, `image`,
-`badge`, `progress`, and `button`. Image nodes render as text fallback in the
-TUI until terminal image rendering is introduced.
+The initial view node subset is `text`, `heading`, `divider`, `image`, `badge`,
+`progress`, and `button`. Image nodes render as text fallback in the TUI until
+terminal image rendering is introduced.
 
 ### `saya.panel.focus(id)`
 
@@ -350,8 +352,8 @@ const focused = await saya.panel.focus(panel.id);
 ```
 
 The method returns `true` when the host focused the panel. A focused terminal
-panel receives typed keys. A focused `lines` or `view` panel is selected, but
-it doesn't enter terminal input mode. The `:` and `/` keys are reserved for
+panel receives typed keys. A focused `lines` or `view` panel is selected, but it
+doesn't enter terminal input mode. The `:` and `/` keys are reserved for
 returning from a focused terminal panel to the editor command line and editor
 search.
 
@@ -430,26 +432,26 @@ arbitrary filesystem access out of the runtime surface.
 
 > **Note:** Dired and filer operations are preview APIs. They are covered by
 > public surface guards, but command names, option shapes, and operation reports
-> can still change before the dired API is stabilized.
-> See [Dired API v1](dired-api-v1.md) for the versioned local dired contract,
+> can still change before the dired API is stabilized. See
+> [Dired API v1](dired-api-v1.md) for the versioned local dired contract,
 > migration notes, and plugin author anti-patterns.
 
 Directory listings are not saved as regular files. Writable directory buffers
 use a save-time preview flow instead: plain `:write` prepares an operation
 preview and opens a confirmation prompt. Press `y` or Enter to apply only the
-latest matching preview through host-mediated filer operations. Press `n` or
-Esc to cancel without changing the filesystem. The preview message includes
-the preview ID and the high-risk operation count. `:write!` remains a legacy
-explicit confirmation path; missing, stale, or invalid previews don't mutate
-the filesystem.
+latest matching preview through host-mediated filer operations. Press `n` or Esc
+to cancel without changing the filesystem. The preview message includes the
+preview ID and the high-risk operation count. `:write!` remains a legacy
+explicit confirmation path; missing, stale, or invalid previews don't mutate the
+filesystem.
 
 Confirmed writable-buffer operations run as host-side transactions. The host
-checks for path conflicts before execution, uses temporary paths to avoid
-rename collisions, runs deletes after create and rename operations, and
-refreshes directory metadata from the filesystem after success or failure. If a
+checks for path conflicts before execution, uses temporary paths to avoid rename
+collisions, runs deletes after create and rename operations, and refreshes
+directory metadata from the filesystem after success or failure. If a
 transaction partially succeeds, the diagnostic message includes structured
-counts for successful steps, failed steps, rollback results, and manual
-recovery requirements.
+counts for successful steps, failed steps, rollback results, and manual recovery
+requirements.
 
 ### `saya.filer.list(path, options)`
 
@@ -471,8 +473,8 @@ The optional `options` object supports:
 - `showHidden`, as `true` to include dotfiles and `false` to hide them. The
   default is `true` for compatibility with earlier `saya.filer.list(path)`
   behavior.
-- `sortBy`, as `"name"`, `"kind"`, `"modifiedTime"`, or `"size"`. The default
-  is `"kind"` for compatibility with earlier listings.
+- `sortBy`, as `"name"`, `"kind"`, `"modifiedTime"`, or `"size"`. The default is
+  `"kind"` for compatibility with earlier listings.
 - `filter`, as a case-insensitive substring matched against `name` and
   `displayText`. Empty strings and omitted values keep the listing unfiltered.
 
@@ -547,8 +549,8 @@ await saya.commands.execute(`edit ${entry.rootPath}`);
 ### `saya.filer.move(from, to)`
 
 Use this method to move one file or directory through the host application. The
-operation uses the host rename path and fails when the source path doesn't
-exist or the destination path collides.
+operation uses the host rename path and fails when the source path doesn't exist
+or the destination path collides.
 
 ```ts
 await saya.filer.move(entry.path, `${entry.rootPath}/moved.md`);
@@ -571,8 +573,8 @@ await saya.commands.execute(`edit ${entry.rootPath}`);
 Use this method to delete one file or one empty directory through the host
 application. You must pass `{ confirm: true }`; the operation fails without an
 explicit confirmation flag. Recursive deletion is disabled, and
-`{ trash: true }` fails with an unsupported-backend error until a platform
-trash policy is configured.
+`{ trash: true }` fails with an unsupported-backend error until a platform trash
+policy is configured.
 
 ```ts
 await saya.filer.delete(entry.path, { confirm: true });
@@ -646,14 +648,14 @@ Each successful operation returns a report with:
 - `entries`, for mark and bulk operations
 - `previewId`, for bulk delete preview and confirmed bulk delete
 
-Filer operation failures surface a structured error payload in the runtime
-error message. The payload includes the operation, path, optional target path,
-error kind, and host error message. Error kinds include `"alreadyExists"`,
+Filer operation failures surface a structured error payload in the runtime error
+message. The payload includes the operation, path, optional target path, error
+kind, and host error message. Error kinds include `"alreadyExists"`,
 `"confirmationRequired"`, `"notFound"`, and `"permissionDenied"`.
 
 Save-time directory transaction failures also include structured counts in the
-host error message so UI code and logs can distinguish successful steps,
-failed steps, rollback results, and manual recovery requirements.
+host error message so UI code and logs can distinguish successful steps, failed
+steps, rollback results, and manual recovery requirements.
 
 ## What the runtime API does not expose
 

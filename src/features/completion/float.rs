@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
-use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
+use crate::features::completion::session::{
+    CompletionRange, CompletionSessionManager, CompletionShowRequest,
+};
 use crate::input::router::KeyInput;
 use crate::presentation::floating_window::{
     FloatingAnchor, FloatingBorder, FloatingChrome, FloatingContentRef, FloatingFit,
@@ -19,9 +21,21 @@ const MAX_MENU_HEIGHT: u16 = 12;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionCandidate {
     pub label: String,
+    pub insert_text: Option<String>,
     pub detail: Option<String>,
     pub kind: Option<String>,
     pub documentation: Vec<String>,
+    pub source: Option<String>,
+    pub replace_range: Option<CompletionRange>,
+}
+
+impl CompletionCandidate {
+    pub fn insert_text(&self) -> &str {
+        self.insert_text
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .unwrap_or(&self.label)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +65,7 @@ pub enum CompletionFloatInputOutcome {
     },
     Accepted {
         menu_id: FloatingWindowId,
-        label: String,
+        candidate: CompletionCandidate,
     },
     Closed {
         menu_id: FloatingWindowId,
@@ -63,6 +77,7 @@ pub struct CompletionFloatManager {
     menus: HashMap<FloatingWindowId, CompletionMenuState>,
     active_menu_id: Option<FloatingWindowId>,
     active_documentation_id: Option<FloatingWindowId>,
+    session_manager: CompletionSessionManager,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +180,33 @@ impl CompletionFloatManager {
         })
     }
 
+    pub fn show_typed(
+        &mut self,
+        floats: &mut FloatingWindowManager,
+        window_id: i32,
+        cursor_row: usize,
+        cursor_col: usize,
+        request: CompletionShowRequest,
+    ) -> bool {
+        let accepted = match self.session_manager.accept_show_request(request) {
+            Ok(accepted) => accepted,
+            Err(stale) => {
+                log::debug!(
+                    "[completion_float] stale typed completion show ignored: session_id={}, request_id={}, current_request_id={}",
+                    stale.session_id,
+                    stale.request_id,
+                    stale.current_request_id
+                );
+                return false;
+            }
+        };
+        self.open_menu(
+            floats,
+            accepted.to_float_request(window_id, cursor_row, cursor_col),
+        )
+        .is_some()
+    }
+
     pub fn handle_key(
         &mut self,
         floats: &mut FloatingWindowManager,
@@ -204,19 +246,29 @@ impl CompletionFloatManager {
                 CompletionFloatInputOutcome::Closed { menu_id }
             }
             KeyInput::Enter | KeyInput::Tab | KeyInput::Ctrl('y') | KeyInput::Ctrl('Y') => {
-                let label = self
+                let candidate = self
                     .menus
                     .get(&menu_id)
                     .and_then(|state| state.candidates.get(state.selected_index))
-                    .map(|candidate| candidate.label.clone())
-                    .unwrap_or_default();
+                    .cloned()
+                    .unwrap_or_else(|| CompletionCandidate {
+                        label: String::new(),
+                        insert_text: None,
+                        detail: None,
+                        kind: None,
+                        documentation: Vec::new(),
+                        source: None,
+                        replace_range: None,
+                    });
                 self.close_menu(floats, menu_id, restore_window_id);
                 log::debug!(
-                    "[completion_float] accepted completion candidate: menu_id={}, label={:?}",
+                    "[completion_float] accepted completion candidate: menu_id={}, label={:?}, insert_text_len={}, source={:?}",
                     menu_id.0,
-                    label
+                    candidate.label,
+                    candidate.insert_text().len(),
+                    candidate.source
                 );
-                CompletionFloatInputOutcome::Accepted { menu_id, label }
+                CompletionFloatInputOutcome::Accepted { menu_id, candidate }
             }
             KeyInput::Up | KeyInput::Ctrl('p') | KeyInput::Ctrl('P') => {
                 self.move_selection(floats, menu_id, -1)
@@ -388,131 +440,6 @@ impl CompletionFloatManager {
             restore_window_id
         );
     }
-}
-
-pub fn completion_menu_request_from_json(
-    window_id: i32,
-    cursor_row: usize,
-    cursor_col: usize,
-    value: &Value,
-) -> Result<CompletionMenuFloatRequest, String> {
-    let candidates_value = value
-        .get("candidates")
-        .or_else(|| value.get("items"))
-        .ok_or_else(|| "missing candidates".to_string())?;
-    let candidates = candidates_value
-        .as_array()
-        .ok_or_else(|| "candidates must be an array".to_string())?
-        .iter()
-        .filter_map(candidate_from_json)
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Err("completion menu has no usable candidates".to_string());
-    }
-    Ok(CompletionMenuFloatRequest {
-        window_id,
-        cursor_row,
-        cursor_col,
-        candidates,
-        selected_index: value
-            .get("selectedIndex")
-            .or_else(|| value.get("selected_index"))
-            .and_then(Value::as_u64)
-            .map(|index| index as usize)
-            .unwrap_or(0),
-        max_visible_items: value
-            .get("maxVisibleItems")
-            .or_else(|| value.get("max_visible_items"))
-            .and_then(Value::as_u64)
-            .map(|items| items as usize)
-            .unwrap_or(8),
-        documentation_max_width: value
-            .get("documentationMaxWidth")
-            .or_else(|| value.get("documentation_max_width"))
-            .and_then(Value::as_u64)
-            .and_then(|width| u16::try_from(width).ok())
-            .unwrap_or(72),
-        documentation_max_height: value
-            .get("documentationMaxHeight")
-            .or_else(|| value.get("documentation_max_height"))
-            .and_then(Value::as_u64)
-            .and_then(|height| u16::try_from(height).ok())
-            .unwrap_or(12),
-    })
-}
-
-fn candidate_from_json(value: &Value) -> Option<CompletionCandidate> {
-    match value {
-        Value::String(label) => {
-            let label = label.trim();
-            (!label.is_empty()).then(|| CompletionCandidate {
-                label: label.to_string(),
-                detail: None,
-                kind: None,
-                documentation: Vec::new(),
-            })
-        }
-        Value::Object(object) => {
-            let label = object
-                .get("label")
-                .or_else(|| object.get("word"))
-                .or_else(|| object.get("insertText"))
-                .and_then(Value::as_str)?
-                .trim()
-                .to_string();
-            if label.is_empty() {
-                return None;
-            }
-            Some(CompletionCandidate {
-                label,
-                detail: object
-                    .get("detail")
-                    .or_else(|| object.get("menu"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|detail| !detail.is_empty())
-                    .map(ToString::to_string),
-                kind: object
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|kind| !kind.is_empty())
-                    .map(ToString::to_string),
-                documentation: object
-                    .get("documentation")
-                    .or_else(|| object.get("docs"))
-                    .or_else(|| object.get("info"))
-                    .map(documentation_lines_from_json)
-                    .unwrap_or_default(),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn documentation_lines_from_json(value: &Value) -> Vec<String> {
-    match value {
-        Value::String(text) => normalize_documentation_lines(text),
-        Value::Array(items) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .flat_map(normalize_documentation_lines)
-            .collect(),
-        Value::Object(object) => object
-            .get("value")
-            .and_then(Value::as_str)
-            .map(normalize_documentation_lines)
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
-}
-
-fn normalize_documentation_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .map(ToString::to_string)
-        .collect()
 }
 
 fn refresh_menu_lines(

@@ -17,21 +17,30 @@ fn request() -> CompletionMenuFloatRequest {
         candidates: vec![
             CompletionCandidate {
                 label: "println!".to_string(),
+                insert_text: None,
                 detail: Some("macro".to_string()),
                 kind: Some("Function".to_string()),
                 documentation: vec!["Prints to stdout.".to_string()],
+                source: None,
+                replace_range: None,
             },
             CompletionCandidate {
                 label: "print!".to_string(),
+                insert_text: None,
                 detail: Some("macro".to_string()),
                 kind: Some("Function".to_string()),
                 documentation: vec!["Prints without a newline.".to_string()],
+                source: None,
+                replace_range: None,
             },
             CompletionCandidate {
                 label: "process".to_string(),
+                insert_text: None,
                 detail: Some("module".to_string()),
                 kind: Some("Module".to_string()),
                 documentation: vec!["Process control APIs.".to_string()],
+                source: None,
+                replace_range: None,
             },
         ],
         selected_index: 1,
@@ -172,7 +181,7 @@ fn completion_enter_accepts_candidate_and_escape_closes_menu_and_docs() {
         completion.handle_key(&mut floats, &KeyInput::Enter, Some(7)),
         CompletionFloatInputOutcome::Accepted {
             menu_id: opened.menu_id,
-            label: "print!".to_string()
+            candidate: request().candidates[1].clone()
         }
     );
     assert_eq!(floats.focus(), Some(WorkspaceFocus::Pane { window_id: 7 }));

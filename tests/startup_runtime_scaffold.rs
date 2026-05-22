@@ -642,6 +642,13 @@ fn lsp_client_manager_routes_server_notifications_to_ui_commands() {
         ),
         "diagnostic navigation commands should carry diagnostics popup UI configuration"
     );
+    assert!(
+        source.contains("responseMethod === 'textDocument/completion' || responseMethod === 'completionItem/resolve'")
+            && source.contains("return response;")
+            && !source.contains("executeUiCommand('completion.floatMenu'")
+            && !source.contains("await saya.completion.show"),
+        "LSP completion responses should return raw results for the bundled completion source pipeline"
+    );
 }
 
 #[test]

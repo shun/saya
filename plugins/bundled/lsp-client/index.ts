@@ -1090,12 +1090,8 @@ function createRuntimeBridgeCallbackSource(
       "      await executeUiCommand('lsp.floatLocations', { title: 'References', response, ui: normalizedPopupUi.locations });\n" +
       "    } else if (responseMethod === 'textDocument/documentSymbol') {\n" +
       "      await executeUiCommand('lsp.floatSymbols', { response, ui: normalizedPopupUi.symbols });\n" +
-      "    } else if (responseMethod === 'textDocument/completion') {\n" +
-      "      const result = response && response.result !== undefined ? response.result : response;\n" +
-      "      const items = Array.isArray(result) ? result : (result && Array.isArray(result.items) ? result.items : []);\n" +
-      "      await executeUiCommand('completion.floatMenu', { candidates: items, selectedIndex: 0 });\n" +
-      "    } else if (responseMethod === 'completionItem/resolve') {\n" +
-      "      await executeUiCommand('completion.floatMenu', { candidates: [response && response.result !== undefined ? response.result : response], selectedIndex: 0 });\n" +
+      "    } else if (responseMethod === 'textDocument/completion' || responseMethod === 'completionItem/resolve') {\n" +
+      "      return;\n" +
       "    } else if (responseMethod === 'textDocument/signatureHelp') {\n" +
       "      const result = response && response.result !== undefined ? response.result : response;\n" +
       "      const signatures = result && Array.isArray(result.signatures) ? result.signatures : [];\n" +
@@ -1536,11 +1532,6 @@ export function setupSayaLspClient(options = {}) {
     "normal",
     keymapOptions.documentSymbol ?? "gO",
     saya.commands.execute(commandNames.documentSymbol),
-  );
-  saya.keymap.set(
-    "insert",
-    keymapOptions.completion ?? "<C-Space>",
-    saya.commands.execute(commandNames.completion),
   );
   saya.keymap.set(
     "insert",

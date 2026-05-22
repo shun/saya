@@ -22,9 +22,8 @@ use saya::core::outcome::{
     NormalizedOutcomeBatch, StructuralEffectSet, fold_normalized_outcomes,
 };
 use saya::core::prompt::PromptResponseCommand;
-use saya::features::completion::float::{
-    CompletionFloatInputOutcome, CompletionFloatManager, completion_menu_request_from_json,
-};
+use saya::features::completion::float::{CompletionFloatInputOutcome, CompletionFloatManager};
+use saya::features::completion::session::CompletionShowRequest;
 use saya::features::lsp::float::{
     LspDiagnosticFloatRequest, LspDiagnosticStore, LspHoverFloatRequest, LspLocationListRequest,
     LspSymbolOutlineRequest, PopupSizeBasis, PopupSizeSpec, PopupSizeValue, ResolvedPopupSizeLimit,
@@ -3562,7 +3561,6 @@ enum MainHostCommand {
     BufferWindowFloat(String),
     TerminalFloat(String),
     TerminalCloseFloat(String),
-    CompletionMenuFloat(String),
     LspHoverFloat(String),
     LspDiagnosticFloat(String),
     LspLocationListFloat(String),
@@ -3581,9 +3579,6 @@ fn parse_main_host_command(command: &str) -> Option<MainHostCommand> {
         return Some(command);
     }
     if let Some(command) = parse_terminal_float_host_command(command) {
-        return Some(command);
-    }
-    if let Some(command) = parse_completion_float_host_command(command) {
         return Some(command);
     }
     if let Some(command) = parse_lsp_float_host_command(command) {
@@ -3627,18 +3622,6 @@ fn parse_terminal_float_host_command(command: &str) -> Option<MainHostCommand> {
     payload
         .filter(|payload| !payload.is_empty())
         .map(|payload| MainHostCommand::TerminalCloseFloat(payload.to_string()))
-}
-
-fn parse_completion_float_host_command(command: &str) -> Option<MainHostCommand> {
-    let trimmed = command.trim();
-    let trimmed = trimmed.strip_prefix(':').unwrap_or(trimmed).trim();
-    let payload = trimmed
-        .strip_prefix("completion.floatMenu ")
-        .or_else(|| trimmed.strip_prefix("completion.menuFloat "))
-        .map(str::trim);
-    payload
-        .filter(|payload| !payload.is_empty())
-        .map(|payload| MainHostCommand::CompletionMenuFloat(payload.to_string()))
 }
 
 fn parse_lsp_float_host_command(command: &str) -> Option<MainHostCommand> {
@@ -3988,7 +3971,7 @@ fn execute_runtime_host_command_with_floats(
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     session_state: &mut saya::app::session::EditorSessionState,
     floating_window_manager: Option<&mut FloatingWindowManager>,
-    completion_float_manager: Option<&mut CompletionFloatManager>,
+    _completion_float_manager: Option<&mut CompletionFloatManager>,
     lsp_diagnostic_store: Option<&mut LspDiagnosticStore>,
     terminal_float_manager: Option<&mut TerminalFloatManager>,
 ) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
@@ -4045,14 +4028,6 @@ fn execute_runtime_host_command_with_floats(
             }
             outcome.target_path = Some(path);
             Ok(effect)
-        }
-        Some(MainHostCommand::CompletionMenuFloat(payload)) => {
-            execute_completion_menu_float_host_command(
-                &payload,
-                outcome,
-                floating_window_manager,
-                completion_float_manager,
-            )
         }
         Some(MainHostCommand::BufferWindowFloat(payload)) => {
             execute_buffer_window_float_host_command(&payload, outcome, floating_window_manager)
@@ -4477,61 +4452,6 @@ fn execute_terminal_close_float_host_command(
         terminal_id
     );
     Ok(RuntimeCommandEffect::default())
-}
-
-fn execute_completion_menu_float_host_command(
-    payload: &str,
-    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
-    floating_window_manager: Option<&mut FloatingWindowManager>,
-    completion_float_manager: Option<&mut CompletionFloatManager>,
-) -> Result<RuntimeCommandEffect, RuntimeCommandError> {
-    let floating_manager =
-        floating_window_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
-            name: "completion.floatMenu".to_string(),
-            message: "floating window manager is not available".to_string(),
-        })?;
-    let completion_manager =
-        completion_float_manager.ok_or_else(|| RuntimeCommandError::CommandFailed {
-            name: "completion.floatMenu".to_string(),
-            message: "completion float manager is not available".to_string(),
-        })?;
-    let value: serde_json::Value =
-        serde_json::from_str(payload).map_err(|error| RuntimeCommandError::CommandFailed {
-            name: "completion.floatMenu".to_string(),
-            message: format!("invalid completion float payload: {error}"),
-        })?;
-    let snapshot = outcome.core_bridge.light_snapshot();
-    let window_id = snapshot.active_window_id().unwrap_or(1);
-    let request = completion_menu_request_from_json(
-        window_id,
-        snapshot.cursor_row,
-        snapshot.cursor_col,
-        &value,
-    )
-    .map_err(|message| RuntimeCommandError::CommandFailed {
-        name: "completion.floatMenu".to_string(),
-        message,
-    })?;
-    let opened = completion_manager.open_menu(floating_manager, request);
-    if let Some(opened) = opened {
-        floating_manager.focus_float(opened.menu_id);
-    }
-    log::debug!(
-        "[main][completion_float] completion menu host command applied: opened={:?}, documentation={:?}, window_id={}, cursor=({}, {})",
-        opened.map(|opened| opened.menu_id.0),
-        opened.and_then(|opened| opened.documentation_id.map(|id| id.0)),
-        window_id,
-        snapshot.cursor_row,
-        snapshot.cursor_col
-    );
-    Ok(RuntimeCommandEffect {
-        transient_message: opened
-            .is_none()
-            .then(|| "No completion candidates".to_string()),
-        follow_up_events: Vec::new(),
-        shutdown_intent: None,
-        presentation_intents: Vec::new(),
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7015,6 +6935,43 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             })
             .and_then(|mut cache| cache.execute_request(request, &bridge.diagnostic_events))
     }
+
+    fn show_completion(
+        &mut self,
+        request: CompletionShowRequest,
+    ) -> Result<bool, RuntimeCommandError> {
+        let floating_window_manager =
+            self.floating_window_manager.as_deref_mut().ok_or_else(|| {
+                RuntimeCommandError::CommandFailed {
+                    name: "completion.show".to_string(),
+                    message: "floating window manager is not available".to_string(),
+                }
+            })?;
+        let completion_manager = self
+            .completion_float_manager
+            .as_deref_mut()
+            .ok_or_else(|| RuntimeCommandError::CommandFailed {
+                name: "completion.show".to_string(),
+                message: "completion manager is not available".to_string(),
+            })?;
+        let snapshot = self.outcome.core_bridge.light_snapshot();
+        let window_id = snapshot.active_window_id().unwrap_or(1);
+        let shown = completion_manager.show_typed(
+            floating_window_manager,
+            window_id,
+            snapshot.cursor_row,
+            snapshot.cursor_col,
+            request,
+        );
+        log::debug!(
+            "[main][completion] typed completion show applied: window_id={}, cursor=({},{}), shown={}",
+            window_id,
+            snapshot.cursor_row,
+            snapshot.cursor_col,
+            shown
+        );
+        Ok(shown)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -8107,13 +8064,20 @@ fn handle_completion_float_key(
             );
             Some(FloatingWindowKeyHandling::Consumed)
         }
-        CompletionFloatInputOutcome::Accepted { menu_id, label } => {
-            if !label.is_empty() {
-                if let Err(error) = core_bridge.dispatch_key(&label) {
+        CompletionFloatInputOutcome::Accepted { menu_id, candidate } => {
+            let insert_text = candidate.insert_text();
+            if !insert_text.is_empty() {
+                let result = if let Some(replace_range) = candidate.replace_range.as_ref() {
+                    core_bridge.apply_completion_replace_range(replace_range, insert_text)
+                } else {
+                    core_bridge.dispatch_key(insert_text).map(|_| ())
+                };
+                if let Err(error) = result {
                     log::debug!(
-                        "[main] completion candidate insertion failed: menu_id={}, label={:?}, error={:?}",
+                        "[main] completion candidate insertion failed: menu_id={}, label={:?}, insert_text_len={}, error={:?}",
                         menu_id.0,
-                        label,
+                        candidate.label,
+                        insert_text.len(),
                         error
                     );
                 }
@@ -8121,7 +8085,7 @@ fn handle_completion_float_key(
             log::debug!(
                 "[main] completion candidate accepted from focused input: menu_id={}, label={:?}",
                 menu_id.0,
-                label
+                candidate.label
             );
             Some(FloatingWindowKeyHandling::Closed { id: menu_id })
         }
@@ -10983,12 +10947,6 @@ mod tests {
             ))
         );
         assert_eq!(
-            parse_main_host_command(r#"completion.floatMenu {"candidates":["alpha"]}"#),
-            Some(MainHostCommand::CompletionMenuFloat(
-                r#"{"candidates":["alpha"]}"#.to_string()
-            ))
-        );
-        assert_eq!(
             parse_main_host_command(r#"buffer.floatWindow {"width":20}"#),
             Some(MainHostCommand::BufferWindowFloat(
                 r#"{"width":20}"#.to_string()
@@ -11005,6 +10963,10 @@ mod tests {
             Some(MainHostCommand::TerminalCloseFloat(
                 r#"{"terminalId":1}"#.to_string()
             ))
+        );
+        assert_eq!(
+            parse_main_host_command(r#"completion.floatMenu {"candidates":["alpha"]}"#),
+            None
         );
         assert_eq!(parse_main_host_command("set number"), None);
     }
@@ -11441,60 +11403,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_completion_float_host_command_opens_focusable_menu_and_routes_selection() {
-        let _lock = saya::app::bootstrap::launch_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
-            input_source: saya::app::cli::InputSource::Empty,
-            config_source: saya::app::cli::ConfigSource::Default,
-            ..saya::app::cli::LaunchRequest::default()
-        })
-        .expect("launch should succeed");
-        let mut session_state = outcome.editor_session_state();
-        let mut floating_window_manager = FloatingWindowManager::default();
-        let mut completion_float_manager = CompletionFloatManager::default();
-
-        execute_runtime_host_command_with_floats(
-            r#"completion.floatMenu {"selectedIndex":0,"maxVisibleItems":2,"candidates":[{"label":"alpha","kind":"Text","documentation":"Alpha docs"},{"label":"beta","detail":"detail","kind":"Text","documentation":"Beta docs"}]}"#,
-            &mut outcome,
-            &mut session_state,
-            Some(&mut floating_window_manager),
-            Some(&mut completion_float_manager),
-            None,
-            None,
-        )
-        .expect("completion menu should open");
-
-        let active_window_id = outcome
-            .core_bridge
-            .light_snapshot()
-            .active_window_id()
-            .unwrap_or(1);
-        let menu_id = floating_window_manager
-            .focused_float_id()
-            .expect("completion menu should take focus");
-        assert_eq!(
-            handle_completion_float_key(
-                &mut completion_float_manager,
-                &mut floating_window_manager,
-                &mut outcome.core_bridge,
-                &KeyInput::Down,
-                active_window_id,
-            ),
-            Some(FloatingWindowKeyHandling::Consumed)
-        );
-        assert_eq!(
-            floating_window_manager
-                .debug_window(menu_id)
-                .expect("menu should stay open after selection")
-                .lines,
-            vec!["  [Text] alpha", "> [Text] beta - detail"]
-        );
-    }
-
-    #[test]
-    fn runtime_completion_float_accept_inserts_selected_candidate() {
+    fn runtime_typed_completion_accept_applies_replace_range_insert_text() {
         let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -11506,28 +11415,63 @@ mod tests {
         .expect("launch should succeed");
         outcome
             .core_bridge
-            .dispatch_key("i")
-            .expect("enter insert mode before accepting completion");
-        let mut session_state = outcome.editor_session_state();
+            .replace_buffer_text("pri\n")
+            .expect("seed buffer text");
         let mut floating_window_manager = FloatingWindowManager::default();
         let mut completion_float_manager = CompletionFloatManager::default();
 
-        execute_runtime_host_command_with_floats(
-            r#"completion.floatMenu {"selectedIndex":0,"candidates":[{"label":"alpha","kind":"Text"}]}"#,
-            &mut outcome,
-            &mut session_state,
-            Some(&mut floating_window_manager),
-            Some(&mut completion_float_manager),
-            None,
-            None,
-        )
-        .expect("completion menu should open");
-
+        assert!(completion_float_manager.show_typed(
+            &mut floating_window_manager,
+            1,
+            0,
+            0,
+            CompletionShowRequest {
+                session_id: "test-session".to_string(),
+                request_id: 1,
+                replace_range: saya::features::completion::session::CompletionRange {
+                    start: saya::features::completion::session::CompletionPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: saya::features::completion::session::CompletionPosition {
+                        line: 0,
+                        character: 3,
+                    },
+                },
+                candidates: vec![
+                    saya::features::completion::session::HostCompletionCandidate {
+                        label: "println!".to_string(),
+                        insert_text: Some("println!($0);".to_string()),
+                        kind: Some("Function".to_string()),
+                        detail: Some("macro".to_string()),
+                        documentation: Vec::new(),
+                        source: Some("rust-analyzer".to_string()),
+                    },
+                ],
+                selected_index: 0,
+                max_visible_items: 8,
+                documentation_max_width: 72,
+                documentation_max_height: 12,
+            },
+        ));
         let active_window_id = outcome
             .core_bridge
             .light_snapshot()
             .active_window_id()
             .unwrap_or(1);
+        let menu_id = floating_window_manager
+            .windows()
+            .iter()
+            .find(|window| {
+                matches!(
+                    window.content,
+                    saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+                )
+            })
+            .map(|window| window.id)
+            .expect("completion menu should exist");
+        assert!(floating_window_manager.focus_float(menu_id));
+
         assert!(matches!(
             handle_completion_float_key(
                 &mut completion_float_manager,
@@ -11538,7 +11482,7 @@ mod tests {
             ),
             Some(FloatingWindowKeyHandling::Closed { .. })
         ));
-        assert_eq!(outcome.core_bridge.buffer_text(), "alpha\n");
+        assert_eq!(outcome.core_bridge.buffer_text(), "println!($0);\n");
     }
 
     #[test]

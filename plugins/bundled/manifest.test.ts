@@ -5,6 +5,7 @@ Deno.test("bundled manifests generate lazy command placeholders", async () => {
   const manifests = await Promise.all(
     [
       new URL("./dired/manifest.json", import.meta.url),
+      new URL("./completion/manifest.json", import.meta.url),
       new URL("./lsp-client/manifest.json", import.meta.url),
     ].map(async (url) =>
       JSON.parse(await Deno.readTextFile(url)) as SayaBundledPluginManifest
@@ -19,6 +20,9 @@ Deno.test("bundled manifests generate lazy command placeholders", async () => {
   }
   if (!artifacts.lazyIndex.commands["lsp.start"]) {
     throw new Error("lsp command placeholder missing");
+  }
+  if (!artifacts.lazyIndex.commands["completion.trigger"]) {
+    throw new Error("completion command placeholder missing");
   }
   if (artifacts.lockfile.plugins.length !== 0) {
     throw new Error("bundled manifests must not create lockfile entries");

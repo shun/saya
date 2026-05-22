@@ -14,6 +14,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::features::completion::session::CompletionShowRequest;
 use crate::features::lsp::runtime_bridge::{LspRuntimeBridgeRequest, LspRuntimeBridgeResponse};
 use crate::features::selector::runtime::{
     RuntimeSelectorControlRequest, RuntimeSelectorError, RuntimeSelectorOpenRequest,
@@ -70,6 +71,7 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.selector.control",
     "saya.selector.cancel",
     "saya.selector.dispose",
+    "saya.completion.show",
     "saya.process.spawn",
     "saya.plugins.loadLazy",
 ];
@@ -323,6 +325,22 @@ globalThis.saya = {
             return Deno.core.ops.op_runtime_selector_dispose(String(id));
         },
     },
+    completion: {
+        show(request) {
+            const normalized = {
+                sessionId: String(request?.sessionId ?? ""),
+                requestId: Number.isFinite(Number(request?.requestId)) ? Number(request.requestId) : 0,
+                replaceRange: request?.replaceRange ?? null,
+                candidates: Array.isArray(request?.candidates) ? request.candidates : [],
+                selectedIndex: Number.isFinite(Number(request?.selectedIndex)) ? Number(request.selectedIndex) : 0,
+                maxVisibleItems: Number.isFinite(Number(request?.maxVisibleItems)) ? Number(request.maxVisibleItems) : 8,
+                documentationMaxWidth: Number.isFinite(Number(request?.documentationMaxWidth)) ? Number(request.documentationMaxWidth) : 72,
+                documentationMaxHeight: Number.isFinite(Number(request?.documentationMaxHeight)) ? Number(request.documentationMaxHeight) : 12,
+            };
+            console.info(`[saya.completion] show session=${normalized.sessionId} request=${normalized.requestId} candidates=${normalized.candidates.length}`);
+            return Deno.core.ops.op_runtime_completion_show(JSON.stringify(normalized));
+        },
+    },
     // Phase A.2: 汎用プロセス I/O。Rust 側の op_process_* を Object.freeze
     // で凍結したラッパ越しに公開する。LSP / DAP / linter / formatter 等
     // のプラグインから利用される基盤。
@@ -404,6 +422,7 @@ Object.freeze(globalThis.saya.filer);
 Object.freeze(globalThis.saya.lsif);
 Object.freeze(globalThis.saya.input);
 Object.freeze(globalThis.saya.selector);
+Object.freeze(globalThis.saya.completion);
 Object.freeze(globalThis.saya.process);
 Object.freeze(globalThis.saya.plugins);
 Object.freeze(globalThis.saya);
@@ -457,8 +476,18 @@ Object.freeze(globalThis.saya);
 "#;
 
 const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &[
-    "commands", "buffer", "window", "panel", "editor", "filer", "lsif", "input", "selector",
-    "process", "plugins",
+    "commands",
+    "buffer",
+    "window",
+    "panel",
+    "editor",
+    "filer",
+    "lsif",
+    "input",
+    "selector",
+    "completion",
+    "process",
+    "plugins",
 ];
 const RUNTIME_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
@@ -799,6 +828,40 @@ declare global {
         dispose(id: number): Promise<boolean>;
     }
 
+    interface SayaCompletionPosition {
+        line: number;
+        character: number;
+    }
+
+    interface SayaCompletionRange {
+        start: SayaCompletionPosition;
+        end: SayaCompletionPosition;
+    }
+
+    interface SayaCompletionCandidate {
+        label: string;
+        insertText?: string | null;
+        kind?: string | null;
+        detail?: string | null;
+        documentation?: string[];
+        source?: string | null;
+    }
+
+    interface SayaCompletionShowRequest {
+        sessionId: string;
+        requestId: number;
+        replaceRange: SayaCompletionRange;
+        candidates: SayaCompletionCandidate[];
+        selectedIndex?: number;
+        maxVisibleItems?: number;
+        documentationMaxWidth?: number;
+        documentationMaxHeight?: number;
+    }
+
+    interface SayaRuntimeCompletionSurface {
+        show(request: SayaCompletionShowRequest): Promise<boolean>;
+    }
+
     type SayaProcessStdioMode = "inherit" | "null" | "piped";
 
     interface SayaProcessSpec {
@@ -1015,6 +1078,7 @@ declare global {
         lsif: SayaRuntimeLsifSurface;
         input: SayaRuntimeInputSurface;
         selector: SayaRuntimeSelectorSurface;
+        completion: SayaRuntimeCompletionSurface;
         process: SayaRuntimeProcessSurface;
         plugins: SayaRuntimePluginsSurface;
     }
@@ -1474,6 +1538,22 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
             );
             Err(RuntimeCommandError::UnknownCommand {
                 name: "lsif.request".to_string(),
+            })
+        })
+    }
+    fn show_completion(
+        &self,
+        request: CompletionShowRequest,
+    ) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!(
+                "[saya_live_runtime][completion] typed show unavailable: session_id={}, request_id={}, candidates={}",
+                request.session_id,
+                request.request_id,
+                request.candidates.len()
+            );
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "completion.show".to_string(),
             })
         })
     }
@@ -1942,6 +2022,28 @@ async fn op_runtime_lsif_request(
             Err(runtime_command_error_to_js_error(error))
         }
     }
+}
+
+#[op2(async(deferred), fast)]
+async fn op_runtime_completion_show(
+    state: Rc<RefCell<OpState>>,
+    #[string] request_json: String,
+) -> Result<bool, JsErrorBox> {
+    let request =
+        serde_json::from_str::<CompletionShowRequest>(&request_json).map_err(|error| {
+            JsErrorBox::generic(format!("invalid completion show request: {error}"))
+        })?;
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!(
+        "[saya_live_runtime][completion] runtime op show: session_id={}, request_id={}, candidates={}",
+        request.session_id,
+        request.request_id,
+        request.candidates.len()
+    );
+    bridge
+        .show_completion(request)
+        .await
+        .map_err(runtime_command_error_to_js_error)
 }
 
 #[op2(async(deferred), fast)]
@@ -2967,6 +3069,7 @@ deno_core::extension!(
         op_runtime_execute_host_command,
         op_runtime_plugin_load_lazy,
         op_runtime_lsif_request,
+        op_runtime_completion_show,
         op_runtime_input_prompt,
         op_runtime_selector_open,
         op_runtime_selector_update,

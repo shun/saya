@@ -17,6 +17,7 @@ use crate::core::outcome::{
     normalize_core_event, normalize_host_action,
 };
 use crate::core::prompt::{PromptResponseCommand, PromptResponseError, PromptResponseRejection};
+use crate::features::completion::session::{CompletionRange, apply_replace_range};
 use crate::features::search::capability::SearchCapabilityContract;
 use crate::features::search::query::{
     SearchMatch, SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery,
@@ -517,6 +518,47 @@ impl CoreBridge {
     }
 
     pub fn replace_buffer_text(&mut self, text: &str) -> Result<(), CoreSessionError> {
+        self.replace_buffer_text_inner(text, true)
+    }
+
+    pub fn apply_completion_replace_range(
+        &mut self,
+        range: &CompletionRange,
+        replacement_text: &str,
+    ) -> Result<(), CoreSessionError> {
+        let before = self.buffer_text();
+        let Some(after) = apply_replace_range(&before, range, replacement_text) else {
+            log::debug!(
+                "[core_bridge] completion replace range rejected: start=({}:{}), end=({}:{}), replacement_len={}, text_len={}",
+                range.start.line,
+                range.start.character,
+                range.end.line,
+                range.end.character,
+                replacement_text.len(),
+                before.len()
+            );
+            return Err(CoreSessionError::CommandFailed(
+                vim_core_rs::CoreCommandError::OperationFailed { reason_code: 1 },
+            ));
+        };
+        log::debug!(
+            "[core_bridge] applying completion replace range: start=({}:{}), end=({}:{}), replacement_len={}, before_len={}, after_len={}",
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character,
+            replacement_text.len(),
+            before.len(),
+            after.len()
+        );
+        self.replace_buffer_text_inner(&after, false)
+    }
+
+    fn replace_buffer_text_inner(
+        &mut self,
+        text: &str,
+        clear_modified: bool,
+    ) -> Result<(), CoreSessionError> {
         let lines = text
             .strip_suffix('\n')
             .unwrap_or(text)
@@ -557,11 +599,13 @@ impl CoreBridge {
                 .map_err(CoreSessionError::CommandFailed)?;
             self.queue_transaction_artifacts(&delete);
         }
-        let nomodified = self
-            .session
-            .execute_ex_command("set nomodified")
-            .map_err(CoreSessionError::CommandFailed)?;
-        self.queue_transaction_artifacts(&nomodified);
+        if clear_modified {
+            let nomodified = self
+                .session
+                .execute_ex_command("set nomodified")
+                .map_err(CoreSessionError::CommandFailed)?;
+            self.queue_transaction_artifacts(&nomodified);
+        }
         Ok(())
     }
 

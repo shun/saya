@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "name": "completion",
+  "module": "plugins/bundled/completion/index.ts",
+  "setup": "setupSayaCompletion",
+  "lazy": {
+    "commands": [
+      "completion.trigger"
+    ],
+    "events": [
+      "bufferChanged"
+    ]
+  }
+}
