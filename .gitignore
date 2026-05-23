@@ -8,5 +8,4 @@ target/
 !.codex/hooks/
 !.codex/hooks/**
 .agents/
-scripts/
 tmp/

@@ -14,7 +14,10 @@ not grant extra runtime authority by itself.
 
 Bundled plugins ship with `saya` and are versioned with the editor. They are
 implemented in TypeScript, but they are not installed through the plugin
-manager.
+manager. Complete installs distribute them under
+`SAYA_HOME/runtime/plugins/bundled`; see
+[Install layout design](install-layout.md) for the archive and local install
+layout.
 
 Use a bundled plugin when all of these conditions are true:
 
@@ -142,9 +145,10 @@ The host uses these startup modes:
 | Explicit sync | User runs `sy plugin sync` or the equivalent command | Resolve external plugins and regenerate artifacts | Outside startup path |
 
 Cache files are disposable. If the cache is deleted, bundled plugins are
-recovered from the distribution manifests. External plugins are not restored
-during startup because repository resolution, dependency solving, and network
-or process work would make startup unpredictable.
+recovered from manifests in `SAYA_HOME/runtime/plugins/bundled`. External
+plugins are not restored during startup because repository resolution,
+dependency solving, and network or process work would make startup
+unpredictable.
 
 The cache layout is intentionally disposable and contains only generated state
 or external checkouts.

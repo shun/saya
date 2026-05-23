@@ -10,13 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::runtime::config::{
     StartupPluginDeclaration, StartupPluginSource, StartupRegistry, StartupRegistryEntry,
 };
+use crate::support::paths::bundled_plugin_dir;
 
 const CACHE_SUBDIR: &str = "plugins";
 const LOCKFILE_NAME: &str = "plugin-lock.json";
 const STARTUP_PLAN_NAME: &str = "startup-plan.json";
 const LAZY_INDEX_NAME: &str = "lazy-index.json";
 const OPERATIONS_LOG_NAME: &str = "operations.log";
-const BUNDLED_PLUGIN_MANIFEST_DIR: &str = "plugins/bundled";
 const BUNDLED_PLUGIN_MANIFEST_NAME: &str = "manifest.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,7 +347,14 @@ impl PluginHost {
     }
 
     pub fn read_bundled_manifests(&self) -> Result<Vec<BundledPluginManifest>, PluginHostError> {
-        self.read_bundled_manifests_from(bundled_manifest_dir())
+        let manifest_dir = bundled_manifest_dir();
+        if env::var_os("SAYA_HOME").is_some() && !manifest_dir.is_dir() {
+            return Err(PluginHostError::Io {
+                path: manifest_dir,
+                message: "bundled plugin runtime directory is missing".to_string(),
+            });
+        }
+        self.read_bundled_manifests_from(manifest_dir)
     }
 
     pub fn read_bundled_manifests_from(
@@ -805,7 +812,7 @@ impl PluginHost {
 }
 
 fn bundled_manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(BUNDLED_PLUGIN_MANIFEST_DIR)
+    bundled_plugin_dir()
 }
 
 fn registry_from_bundled_manifests(

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/distribution-common.sh
+source "$SCRIPT_DIR/distribution-common.sh"
+
+prefix="${PREFIX:-$HOME/.local}"
+linked_home="$REPO_ROOT/target/saya-home"
+bin_link="$prefix/bin/sy"
+home_link="$prefix/share/saya"
+
+saya_build_release_binary
+saya_copy_home "$linked_home"
+
+install -d "$prefix/bin" "$prefix/share"
+
+if [[ -e "$bin_link" && ! -L "$bin_link" && "${FORCE:-0}" != "1" ]]; then
+  printf 'refusing to replace non-symlink binary: %s\n' "$bin_link" >&2
+  printf 'set FORCE=1 to replace it.\n' >&2
+  exit 1
+fi
+
+if [[ -e "$home_link" && ! -L "$home_link" && "${FORCE:-0}" != "1" ]]; then
+  printf 'refusing to replace non-symlink SAYA_HOME: %s\n' "$home_link" >&2
+  printf 'set FORCE=1 to replace it.\n' >&2
+  exit 1
+fi
+
+rm -f "$bin_link"
+rm -rf "$home_link"
+ln -s "$(saya_binary_path)" "$bin_link"
+ln -s "$linked_home" "$home_link"
+
+printf 'linked sy: %s -> %s\n' "$bin_link" "$(saya_binary_path)"
+printf 'linked SAYA_HOME: %s -> %s\n' "$home_link" "$linked_home"

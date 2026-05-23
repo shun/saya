@@ -27,6 +27,7 @@ pages.
 - [Project overview](docs/overview.md)
 - [Requirements](docs/requirements.md)
 - [Architecture](docs/architecture.md)
+- [Install layout design](docs/design/install-layout.md)
 - [Boot flow design](docs/design/boot-flow.md)
 - [Editing flow design](docs/design/editing-flow.md)
 - [Floating windows design](docs/design/floating-windows.md)
@@ -58,6 +59,22 @@ cargo build
 ```
 
 The binary name is `sy`.
+
+To stage the release layout with `bin/sy` and `share/saya`, run this command.
+
+```bash
+scripts/build-dist
+```
+
+For local installs, the default prefix is `$HOME/.local`.
+
+```bash
+scripts/install-local
+scripts/link-local
+```
+
+See [Install layout design](docs/design/install-layout.md) for the release
+archive, `SAYA_HOME`, and package-manager layout.
 
 ## Run
 
@@ -214,7 +231,8 @@ this order.
 1. Read [Project overview](docs/overview.md).
 2. Read [Requirements](docs/requirements.md).
 3. Read [Architecture](docs/architecture.md).
-4. Read the design pages under
+4. Read [Install layout design](docs/design/install-layout.md).
+5. Read the design pages under
    [docs/design](docs/design).
-5. Read the API reference under
+6. Read the API reference under
    [docs/api](docs/api).

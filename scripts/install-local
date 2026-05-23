@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/distribution-common.sh
+source "$SCRIPT_DIR/distribution-common.sh"
+
+prefix="${PREFIX:-$HOME/.local}"
+
+saya_build_release_binary
+
+install -d "$prefix/bin" "$prefix/share"
+install -m 0755 "$(saya_binary_path)" "$prefix/bin/sy"
+saya_copy_home "$prefix/share/saya"
+
+printf 'installed sy: %s\n' "$prefix/bin/sy"
+printf 'installed SAYA_HOME: %s\n' "$prefix/share/saya"

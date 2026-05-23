@@ -177,6 +177,9 @@ await syncPlugins(plugins, {
 
 Bundled manifests can contribute startup and lazy artifacts, but they are not
 written to `plugin-lock.json`. The lockfile tracks external plugins only.
+Complete installs distribute bundled manifests and plugin sources under
+`SAYA_HOME/runtime/plugins/bundled`; see
+[Install layout design](../design/install-layout.md).
 
 ## CLI commands
 

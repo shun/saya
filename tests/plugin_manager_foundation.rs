@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use saya::app::bootstrap::launch_test_lock;
 use saya::runtime::config::{
     StartupPluginDeclaration, StartupPluginSource, StartupRegistry, StartupRegistryEntry,
 };
@@ -17,6 +19,34 @@ fn unique_cache_root(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-plugin-manager-{name}-{nanos}"))
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.as_ref() {
+            Some(value) => unsafe {
+                std::env::set_var(self.key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(self.key);
+            },
+        }
+    }
 }
 
 #[test]
@@ -174,6 +204,28 @@ fn plugin_host_generates_lazy_placeholders_from_bundled_manifests() {
         entry,
         StartupRegistryEntry::Command { name, .. } if name == "lsp.start"
     )));
+}
+
+#[test]
+fn plugin_host_errors_when_explicit_saya_home_has_no_bundled_runtime() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let missing_home = unique_cache_root("missing-saya-home");
+    let _saya_home = EnvVarGuard::set("SAYA_HOME", &missing_home);
+    let root = PluginCacheRoot::new(unique_cache_root("missing-bundled-runtime"));
+    let host = PluginHost::new(root);
+
+    let error = host
+        .read_bundled_manifests()
+        .expect_err("explicit missing SAYA_HOME runtime must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("bundled plugin runtime directory is missing"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

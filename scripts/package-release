@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/distribution-common.sh
+source "$SCRIPT_DIR/distribution-common.sh"
+
+saya_build_release_binary
+stage_dir="$(saya_stage_release_tree)"
+dist_root="$(saya_dist_root)"
+release_name="$(saya_release_name)"
+archive_path="$dist_root/$release_name.tar.gz"
+
+mkdir -p "$dist_root"
+rm -f "$archive_path"
+tar -C "$dist_root" -czf "$archive_path" "$release_name"
+
+printf 'created release archive: %s\n' "$archive_path"

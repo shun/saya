@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/distribution-common.sh
+source "$SCRIPT_DIR/distribution-common.sh"
+
+saya_build_release_binary
+stage_dir="$(saya_stage_release_tree)"
+
+printf 'staged release tree: %s\n' "$stage_dir"

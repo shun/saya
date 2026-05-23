@@ -183,6 +183,9 @@ verification commands.
 Use [Plugin model](design/plugin-model.md) for the distinction between bundled
 TypeScript plugins that ship with `saya` and external plugins installed through
 the plugin manager.
+Use [Install layout design](design/install-layout.md) for the distribution
+archive shape, `SAYA_HOME` resolution, local install scripts, and the runtime
+file layout that carries bundled plugins.
 
 The plugin manager foundation follows the same boundary. Rust provides only the
 host primitives for cache files under `~/.cache/saya`, cached startup plan
@@ -204,4 +207,5 @@ these pages.
 3. Read [Floating windows design](design/floating-windows.md).
 4. Read [TypeScript runtime design](design/typescript-runtime.md).
 5. Read [Selector design](design/selector.md).
-6. Read [LSP preview](api/lsp-preview.md).
+6. Read [Install layout design](design/install-layout.md).
+7. Read [LSP preview](api/lsp-preview.md).

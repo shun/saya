@@ -28,6 +28,7 @@ TUI を構築し、設定と拡張の公開面を Vim script ではなく TypeSc
 - [Project overview](docs/overview.md)
 - [Requirements](docs/requirements.md)
 - [Architecture](docs/architecture.md)
+- [Install layout design](docs/design/install-layout.md)
 - [Boot flow design](docs/design/boot-flow.md)
 - [Editing flow design](docs/design/editing-flow.md)
 - [Floating windows design](docs/design/floating-windows.md)
@@ -60,6 +61,24 @@ cargo build
 ```
 
 バイナリ名は `sy` です。
+
+`bin/sy` と `share/saya` を含む release layout を staging するには、次を
+実行します。
+
+```bash
+scripts/build-dist
+```
+
+ローカルインストールでは、デフォルトの prefix は `$HOME/.local` です。
+
+```bash
+scripts/install-local
+scripts/link-local
+```
+
+release archive、`SAYA_HOME`、package manager 向け layout の詳細は
+[Install layout design](docs/design/install-layout.md)
+を参照してください。
 
 ## 起動
 
@@ -169,7 +188,9 @@ sources を Vim License のまま再配布します。`saya` のバイナリを�
    を読む
 3. [Architecture](docs/architecture.md)
    を読む
-4. [docs/design](docs/design)
+4. [Install layout design](docs/design/install-layout.md)
+   を読む
+5. [docs/design](docs/design)
    以下の設計書を読む
-5. [docs/api](docs/api)
+6. [docs/api](docs/api)
    以下の API ドキュメントを読む
