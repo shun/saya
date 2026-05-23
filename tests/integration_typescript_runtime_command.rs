@@ -104,6 +104,9 @@ fn typescript_runtime_suite_scope_statement_stays_pinned_to_host_layer_integrati
 
 struct RecordingHostBridge {
     executed_commands: Arc<TokioMutex<Vec<String>>>,
+    read_buffers: Arc<TokioMutex<Vec<ReadonlyBufferSnapshot>>>,
+    read_windows: Arc<TokioMutex<Vec<ReadonlyWindowSnapshot>>>,
+    read_editors: Arc<TokioMutex<Vec<ReadonlyEditorSnapshot>>>,
     opened_floats: Arc<TokioMutex<Vec<RuntimeFloatOpenRequest>>>,
     focused_floats: Arc<TokioMutex<Vec<u64>>>,
     closed_floats: Arc<TokioMutex<Vec<u64>>>,
@@ -118,6 +121,9 @@ impl RecordingHostBridge {
     fn new() -> Self {
         Self {
             executed_commands: Arc::new(TokioMutex::new(Vec::new())),
+            read_buffers: Arc::new(TokioMutex::new(Vec::new())),
+            read_windows: Arc::new(TokioMutex::new(Vec::new())),
+            read_editors: Arc::new(TokioMutex::new(Vec::new())),
             opened_floats: Arc::new(TokioMutex::new(Vec::new())),
             focused_floats: Arc::new(TokioMutex::new(Vec::new())),
             closed_floats: Arc::new(TokioMutex::new(Vec::new())),
@@ -188,8 +194,9 @@ impl HostCapabilityBridge for RecordingHostBridge {
     }
 
     fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot> {
+        let read_buffers = self.read_buffers.clone();
         Box::pin(async move {
-            ReadonlyBufferSnapshot {
+            let snapshot = ReadonlyBufferSnapshot {
                 id: 404,
                 path: Some(PathBuf::from("wave6-runtime.md")),
                 line_count: 9,
@@ -197,19 +204,29 @@ impl HostCapabilityBridge for RecordingHostBridge {
                 cursor_col: 0,
                 current_line: String::new(),
                 text: String::new(),
-            }
+            };
+            read_buffers.lock().await.push(snapshot.clone());
+            snapshot
         })
     }
 
     fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot> {
-        Box::pin(async move { ReadonlyWindowSnapshot { id: 12 } })
+        let read_windows = self.read_windows.clone();
+        Box::pin(async move {
+            let snapshot = ReadonlyWindowSnapshot { id: 12 };
+            read_windows.lock().await.push(snapshot.clone());
+            snapshot
+        })
     }
 
     fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot> {
+        let read_editors = self.read_editors.clone();
         Box::pin(async move {
-            ReadonlyEditorSnapshot {
+            let snapshot = ReadonlyEditorSnapshot {
                 mode: RuntimeMode::Normal,
-            }
+            };
+            read_editors.lock().await.push(snapshot.clone());
+            snapshot
         })
     }
 
@@ -378,6 +395,24 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
                     throw new Error("startup keymap api leaked into runtime namespace");
                 }
                 await saya.commands.execute("writeCurrent");
+                const currentBuffer = await saya.buffer.current();
+                const currentWindow = await saya.window.current();
+                const currentEditor = await saya.editor.current();
+                if (
+                    currentBuffer.id !== 404 ||
+                    currentBuffer.path !== "wave6-runtime.md" ||
+                    currentBuffer.lineCount !== 9 ||
+                    currentWindow.id !== 12 ||
+                    currentEditor.mode !== "Normal"
+                ) {
+                    throw new Error(
+                        `unexpected runtime state read-back: ${JSON.stringify({
+                            currentBuffer,
+                            currentWindow,
+                            currentEditor,
+                        })}`
+                    );
+                }
                 await saya.commands.execute(`opened:${payload.buffer.id}:${payload.buffer.lineCount}`);
             });
         "#,
@@ -442,6 +477,28 @@ async fn startup_registered_command_executes_from_runtime_event_after_applicatio
     assert_eq!(
         host_bridge.executed_commands.lock().await.clone(),
         vec!["write".to_string(), "opened:17:4".to_string()]
+    );
+    assert_eq!(
+        host_bridge.read_buffers.lock().await.clone(),
+        vec![ReadonlyBufferSnapshot {
+            id: 404,
+            path: Some(PathBuf::from("wave6-runtime.md")),
+            line_count: 9,
+            cursor_row: 0,
+            cursor_col: 0,
+            current_line: String::new(),
+            text: String::new(),
+        }]
+    );
+    assert_eq!(
+        host_bridge.read_windows.lock().await.clone(),
+        vec![ReadonlyWindowSnapshot { id: 12 }]
+    );
+    assert_eq!(
+        host_bridge.read_editors.lock().await.clone(),
+        vec![ReadonlyEditorSnapshot {
+            mode: RuntimeMode::Normal,
+        }]
     );
 
     std::fs::remove_file(&config_path).expect("remove config");

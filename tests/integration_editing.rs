@@ -865,6 +865,10 @@ fn text_input_reflected_in_screen_model_lines() {
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
+    assert_eq!(
+        snapshot.text, "Hi\n",
+        "core snapshot should contain the inserted text"
+    );
     assert!(
         model.lines.iter().any(|line| line.contains("Hi")),
         "入力した 'Hi' が行データに含まれること: {:?}",
@@ -893,6 +897,10 @@ fn insert_mode_uppercase_sequence_does_not_duplicate_previous_character() {
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
+    assert_eq!(
+        snapshot.text, "AGENTS\n",
+        "core snapshot should contain one inserted character per key event"
+    );
     assert!(
         model.lines.iter().any(|line| line == "AGENTS"),
         "one terminal key event per uppercase character should insert exactly once: {:?}",
@@ -921,6 +929,10 @@ fn insert_mode_backspace_and_ctrl_h_delete_previous_character() {
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
 
+    assert_eq!(
+        snapshot.text, "AGENT\n",
+        "core snapshot should reflect insert-mode backspace changes"
+    );
     assert!(
         model.lines.iter().any(|line| line == "AGENT"),
         "Backspace and Ctrl-H-compatible BS should delete the previous inserted character: {:?}",
@@ -973,6 +985,10 @@ fn dirty_state_follows_editing_in_screen_model() {
 
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+    assert!(
+        snapshot.dirty,
+        "core snapshot should report dirty after text input"
+    );
     assert!(model.dirty, "編集後は dirty=true");
 }
 
@@ -991,6 +1007,10 @@ fn dirty_state_set_after_delete_operation() {
     outcome.core_bridge.dispatch_key("x").expect("x dispatch");
     let snapshot = outcome.core_bridge.snapshot();
     let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+    assert!(
+        snapshot.dirty,
+        "core snapshot should report dirty after delete operation"
+    );
     assert!(model.dirty, "削除操作後は dirty=true");
 }
 
@@ -1033,6 +1053,10 @@ fn full_editing_flow_mode_move_insert_delete() {
         &session_state,
         None,
     ));
+    assert!(
+        edited_snapshot.dirty,
+        "core snapshot should be dirty after insert step"
+    );
     assert!(edited_model.dirty);
     assert!(
         edited_model.lines != initial_model.lines,
@@ -1045,6 +1069,10 @@ fn full_editing_flow_mode_move_insert_delete() {
     outcome.core_bridge.dispatch_key("dd").expect("dd dispatch");
     let final_snapshot = outcome.core_bridge.snapshot();
     let final_model = project(&ProjectionInput::new(&final_snapshot, &session_state, None));
+    assert!(
+        final_snapshot.dirty,
+        "core snapshot should remain dirty after delete step"
+    );
     assert!(final_model.dirty);
     assert!(
         final_model.lines != edited_model.lines,
@@ -1052,10 +1080,13 @@ fn full_editing_flow_mode_move_insert_delete() {
         edited_model.lines,
         final_model.lines
     );
-
-    // 削除後の行データの検証
-    eprintln!(
-        "[integ-test] host smoke projection changed across edit flow: initial={:?} edited={:?} final={:?}",
-        initial_model.lines, edited_model.lines, final_model.lines
+    assert_eq!(
+        final_model.lines,
+        final_snapshot
+            .text
+            .lines()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "final projection should read back the current core snapshot text"
     );
 }

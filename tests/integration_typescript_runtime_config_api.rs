@@ -593,12 +593,14 @@ fn startup_config_failure_keeps_default_session_and_presentation_state() {
 
 struct RecordingHostBridge {
     executed_commands: Arc<Mutex<Vec<String>>>,
+    read_buffers: Arc<Mutex<Vec<ReadonlyBufferSnapshot>>>,
 }
 
 impl RecordingHostBridge {
     fn new() -> Self {
         Self {
             executed_commands: Arc::new(Mutex::new(Vec::new())),
+            read_buffers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -614,8 +616,9 @@ impl HostCapabilityBridge for RecordingHostBridge {
     }
 
     fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot> {
+        let read_buffers = self.read_buffers.clone();
         Box::pin(async move {
-            ReadonlyBufferSnapshot {
+            let snapshot = ReadonlyBufferSnapshot {
                 id: 99,
                 path: Some(PathBuf::from("runtime.md")),
                 line_count: 2,
@@ -623,7 +626,9 @@ impl HostCapabilityBridge for RecordingHostBridge {
                 cursor_col: 0,
                 current_line: String::new(),
                 text: String::new(),
-            }
+            };
+            read_buffers.lock().await.push(snapshot.clone());
+            snapshot
         })
     }
 
@@ -638,6 +643,12 @@ impl HostCapabilityBridge for RecordingHostBridge {
             }
         })
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeObservation {
+    EventBufferOpened { buffer_id: u64 },
+    CommandReadBuffer { path: Option<PathBuf> },
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -655,7 +666,7 @@ async fn runtime_event_dispatch_executes_registered_command_headlessly() {
                 observed_in_command
                     .lock()
                     .await
-                    .push(format!("command:{:?}", buffer.path));
+                    .push(RuntimeObservation::CommandReadBuffer { path: buffer.path });
                 ctx.commands().execute("write").await
             })
         })
@@ -665,7 +676,9 @@ async fn runtime_event_dispatch_executes_registered_command_headlessly() {
                 observed_in_event
                     .lock()
                     .await
-                    .push(format!("event:{}", payload.buffer.id));
+                    .push(RuntimeObservation::EventBufferOpened {
+                        buffer_id: payload.buffer.id,
+                    });
                 ctx.commands().execute("writeCurrent").await?;
                 Ok(())
             })
@@ -694,9 +707,23 @@ async fn runtime_event_dispatch_executes_registered_command_headlessly() {
     assert_eq!(
         observed.lock().await.clone(),
         vec![
-            "event:7".to_string(),
-            "command:Some(\"runtime.md\")".to_string(),
+            RuntimeObservation::EventBufferOpened { buffer_id: 7 },
+            RuntimeObservation::CommandReadBuffer {
+                path: Some(PathBuf::from("runtime.md")),
+            },
         ]
+    );
+    assert_eq!(
+        host_bridge.read_buffers.lock().await.clone(),
+        vec![ReadonlyBufferSnapshot {
+            id: 99,
+            path: Some(PathBuf::from("runtime.md")),
+            line_count: 2,
+            cursor_row: 0,
+            cursor_col: 0,
+            current_line: String::new(),
+            text: String::new(),
+        }]
     );
     assert_eq!(
         host_bridge.executed_commands.lock().await.clone(),

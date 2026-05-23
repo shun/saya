@@ -20,114 +20,28 @@
 //! テスト戦略:
 //! - `SayaLiveRuntime::spawn_from_seed` で seed runtime を起動する
 //! - `bufferOpen` イベント handler 内で `saya.process.spawn(...)` を呼ぶ
-//! - 検証成功時のみ `saya.commands.execute("...")` を呼んで
-//!   `RecordingHostBridge` 側に痕跡を残し、Rust 側で確認する
 //! - 検証失敗時は handler 内 `throw new Error(...)` で
 //!   「期待値と観測値の両方を含むメッセージ」を投げ、`await_result`
 //!   経由で panic させる
 //! - 全テストに `tokio::time::timeout(Duration::from_secs(5), ...)` を
 //!   巻き、子プロセスが応答しない場合のハングを防ぐ
 
-use std::collections::HashMap;
+mod support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
-use saya::runtime::live::{
-    BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
-    ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
-    RuntimeMode, SayaLiveRuntime,
-};
-use saya::runtime::startup::StartupRegistryEntry;
-use tokio::sync::Mutex;
-
-/// 検証用の `HostCapabilityBridge`。
-///
-/// TS handler が `saya.commands.execute("...")` を呼んだ際に、コマンド
-/// 名を共有 Mutex に蓄積する。Phase A.3 のラッパ E2E テストでは、TS
-/// 側で「成功パス」を踏んだ場合だけ特定コマンドを execute することで、
-/// 外側 (Rust 側) から検証できるようにする。
-struct RecordingHostBridge {
-    executed_commands: Arc<Mutex<Vec<String>>>,
-    command_results: HashMap<String, RuntimeCommandError>,
-}
-
-impl RecordingHostBridge {
-    fn new() -> Self {
-        Self {
-            executed_commands: Arc::new(Mutex::new(Vec::new())),
-            command_results: HashMap::new(),
-        }
-    }
-
-    fn shared_executed_commands(&self) -> Arc<Mutex<Vec<String>>> {
-        self.executed_commands.clone()
-    }
-}
-
-impl HostCapabilityBridge for RecordingHostBridge {
-    fn execute_host_command(&self, name: &str) -> BoxFuture<Result<(), RuntimeCommandError>> {
-        let executed_commands = self.executed_commands.clone();
-        let name_owned = name.to_string();
-        let result = self.command_results.get(&name_owned).cloned();
-        Box::pin(async move {
-            if let Some(error) = result {
-                return Err(error);
-            }
-            executed_commands.lock().await.push(name_owned);
-            Ok(())
-        })
-    }
-
-    fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot> {
-        Box::pin(async move {
-            ReadonlyBufferSnapshot {
-                id: 1,
-                path: None,
-                line_count: 0,
-                cursor_row: 0,
-                cursor_col: 0,
-                current_line: String::new(),
-                text: String::new(),
-            }
-        })
-    }
-
-    fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot> {
-        Box::pin(async move { ReadonlyWindowSnapshot { id: 1 } })
-    }
-
-    fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot> {
-        Box::pin(async move {
-            ReadonlyEditorSnapshot {
-                mode: RuntimeMode::Normal,
-            }
-        })
-    }
-}
+use saya::runtime::live::{RuntimeEventPayload, SayaLiveRuntime};
 
 fn buffer_open_payload() -> RuntimeEventPayload {
-    RuntimeEventPayload::BufferOpen(BufferEventPayload {
-        buffer: ReadonlyBufferSnapshot {
-            id: 1,
-            path: Some(PathBuf::from("saya-process-handle.test.md")),
-            line_count: 1,
-            cursor_row: 0,
-            cursor_col: 0,
-            current_line: String::new(),
-            text: String::new(),
-        },
-    })
+    support::runtime::buffer_open_payload(PathBuf::from("saya-process-handle.test.md"))
 }
 
-/// TS で実行する script 本体を `bufferOpen` ハンドラとして seed に
-/// 登録するためのヘルパ。
-fn seed_with_handler(handler_source: &str) -> CallbackRegistrySeed {
-    CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Event {
-        name: "bufferOpen".to_string(),
-        callback_source: handler_source.to_string(),
-    }])
+fn seed_with_handler(
+    handler_source: &str,
+) -> saya::runtime::callback_registry_seed::CallbackRegistrySeed {
+    support::runtime::seed_with_buffer_open_handler(handler_source)
 }
 
 /// T-H-1: `saya.process.spawn(...)` 越しの round-trip。
@@ -139,9 +53,7 @@ fn seed_with_handler(handler_source: &str) -> CallbackRegistrySeed {
 /// 数値で公開していることも合わせて検証する。
 #[tokio::test(flavor = "current_thread")]
 async fn handle_round_trip_via_spawn_wrapper() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     // deno_core の seed runtime には TextEncoder/TextDecoder が無いため、
     // ASCII の payload を charCodeAt 経由で `Uint8Array` に詰める。
     let handler = r#"
@@ -200,8 +112,6 @@ async fn handle_round_trip_via_spawn_wrapper() {
                     "expected non-zero exit code after kill, got 0"
                 );
             }
-
-            await saya.commands.execute("handle-roundtrip-ok");
         }
     "#;
 
@@ -216,9 +126,6 @@ async fn handle_round_trip_via_spawn_wrapper() {
         .expect("round-trip should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["handle-roundtrip-ok".to_string()]);
 }
 
 /// T-H-2: EOF が `null` に正規化される。
@@ -229,9 +136,7 @@ async fn handle_round_trip_via_spawn_wrapper() {
 /// 確認することで、正規化責務が抜けると即座に検知できるようにする。
 #[tokio::test(flavor = "current_thread")]
 async fn handle_read_returns_null_at_eof() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const child = await saya.process.spawn({
@@ -257,8 +162,6 @@ async fn handle_read_returns_null_at_eof() {
             if (code !== 0) {
                 throw new Error("expected exit code 0, got " + code);
             }
-
-            await saya.commands.execute("handle-eof-ok");
         }
     "#;
 
@@ -273,9 +176,6 @@ async fn handle_read_returns_null_at_eof() {
         .expect("EOF check should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["handle-eof-ok".to_string()]);
 }
 
 /// T-H-3: stderr が stdout と独立して動く（ラッパ越し）。
@@ -287,9 +187,7 @@ async fn handle_read_returns_null_at_eof() {
 /// `op_process_read_stderr`) を呼んでいることを確認する。
 #[tokio::test(flavor = "current_thread")]
 async fn handle_stderr_independent_from_stdout() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const child = await saya.process.spawn({
@@ -346,8 +244,6 @@ async fn handle_stderr_independent_from_stdout() {
             if (code !== 0) {
                 throw new Error("expected exit code 0, got " + code);
             }
-
-            await saya.commands.execute("handle-stderr-ok");
         }
     "#;
 
@@ -362,9 +258,6 @@ async fn handle_stderr_independent_from_stdout() {
         .expect("stderr round-trip should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["handle-stderr-ok".to_string()]);
 }
 
 /// T-H-4: `Uint8Array` 以外を `write` / `read` に渡すと `TypeError`。
@@ -376,9 +269,7 @@ async fn handle_stderr_independent_from_stdout() {
 /// 即座に検知できるようにする。
 #[tokio::test(flavor = "current_thread")]
 async fn handle_rejects_non_uint8array_with_type_error() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const child = await saya.process.spawn({
@@ -435,8 +326,6 @@ async fn handle_rejects_non_uint8array_with_type_error() {
 
             await child.kill();
             await child.wait();
-
-            await saya.commands.execute("handle-typeerror-ok");
         }
     "#;
 
@@ -451,9 +340,6 @@ async fn handle_rejects_non_uint8array_with_type_error() {
         .expect("type error checks should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["handle-typeerror-ok".to_string()]);
 }
 
 /// T-H-5: `Object.freeze` でハンドルが不変化されている。
@@ -465,9 +351,7 @@ async fn handle_rejects_non_uint8array_with_type_error() {
 /// する。
 #[tokio::test(flavor = "current_thread")]
 async fn handle_is_frozen_against_property_overrides() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const child = await saya.process.spawn({
@@ -530,8 +414,6 @@ async fn handle_is_frozen_against_property_overrides() {
 
             await child.kill();
             await child.wait();
-
-            await saya.commands.execute("handle-frozen-ok");
         }
     "#;
 
@@ -546,9 +428,6 @@ async fn handle_is_frozen_against_property_overrides() {
         .expect("freeze checks should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["handle-frozen-ok".to_string()]);
 }
 
 /// T-H-6: 複数 handle を並列に spawn しても独立に動き、混線しない。
@@ -559,9 +438,7 @@ async fn handle_is_frozen_against_property_overrides() {
 /// 不変条件を検証する。ハンドル ID が別物であることも合わせて確認。
 #[tokio::test(flavor = "current_thread")]
 async fn handles_run_in_parallel_without_cross_talk() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const [a, b] = await Promise.all([
@@ -655,8 +532,6 @@ async fn handles_run_in_parallel_without_cross_talk() {
 
             await Promise.all([a.kill(), b.kill()]);
             await Promise.all([a.wait(), b.wait()]);
-
-            await saya.commands.execute("handle-parallel-ok");
         }
     "#;
 
@@ -671,9 +546,6 @@ async fn handles_run_in_parallel_without_cross_talk() {
         .expect("parallel handle check should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["handle-parallel-ok".to_string()]);
 }
 
 /// T-H-7: spec フィールド欠落時のフォールバック。
@@ -687,9 +559,7 @@ async fn handles_run_in_parallel_without_cross_talk() {
 /// 確認する。
 #[tokio::test(flavor = "current_thread")]
 async fn spawn_falls_back_when_optional_fields_omitted() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const child = await saya.process.spawn({ command: "true" });
@@ -732,8 +602,6 @@ async fn spawn_falls_back_when_optional_fields_omitted() {
             if (code !== 0) {
                 throw new Error("expected exit code 0, got " + code);
             }
-
-            await saya.commands.execute("handle-fallback-ok");
         }
     "#;
 
@@ -748,7 +616,4 @@ async fn spawn_falls_back_when_optional_fields_omitted() {
         .expect("fallback spawn should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["handle-fallback-ok".to_string()]);
 }

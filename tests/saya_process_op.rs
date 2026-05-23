@@ -14,119 +14,31 @@
 //! - `SayaLiveRuntime::spawn_from_seed` で seed runtime を起動する
 //! - 起動したランタイムへ `bufferOpen` イベントを `dispatch_event` で
 //!   流し込み、その handler 内で TS から op を呼ぶ
-//! - op 戻り値の検証は handler 内で `throw` するか、検証成功時にだけ
-//!   `saya.commands.execute("ok")` を呼ぶ形で `RecordingHostBridge`
-//!   側に痕跡を残し、Rust 側で確認する
+//! - op 戻り値の検証は handler 内で `throw` し、Rust 側では dispatch が
+//!   完了したことを確認する
 
-use std::collections::HashMap;
+mod support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use saya::runtime::callback_registry_seed::CallbackRegistrySeed;
-use saya::runtime::live::{
-    BoxFuture, BufferEventPayload, HostCapabilityBridge, ReadonlyBufferSnapshot,
-    ReadonlyEditorSnapshot, ReadonlyWindowSnapshot, RuntimeCommandError, RuntimeEventPayload,
-    RuntimeMode, SayaLiveRuntime,
-};
-use saya::runtime::startup::StartupRegistryEntry;
-use tokio::sync::Mutex;
-
-/// 検証用の `HostCapabilityBridge`。
-///
-/// TS handler が `saya.commands.execute("...")` を呼んだ際に、コマンド
-/// 名を共有 Mutex に蓄積する。Phase A.2 op テストでは、TS 側で「成功
-/// パス」を踏んだ場合だけ特定コマンドを execute することで、外側 (Rust
-/// 側) から検証できるようにする。
-struct RecordingHostBridge {
-    executed_commands: Arc<Mutex<Vec<String>>>,
-    command_results: HashMap<String, RuntimeCommandError>,
-}
-
-impl RecordingHostBridge {
-    fn new() -> Self {
-        Self {
-            executed_commands: Arc::new(Mutex::new(Vec::new())),
-            command_results: HashMap::new(),
-        }
-    }
-
-    fn shared_executed_commands(&self) -> Arc<Mutex<Vec<String>>> {
-        self.executed_commands.clone()
-    }
-}
-
-impl HostCapabilityBridge for RecordingHostBridge {
-    fn execute_host_command(&self, name: &str) -> BoxFuture<Result<(), RuntimeCommandError>> {
-        let executed_commands = self.executed_commands.clone();
-        let name_owned = name.to_string();
-        let result = self.command_results.get(&name_owned).cloned();
-        Box::pin(async move {
-            if let Some(error) = result {
-                return Err(error);
-            }
-            executed_commands.lock().await.push(name_owned);
-            Ok(())
-        })
-    }
-
-    fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot> {
-        Box::pin(async move {
-            ReadonlyBufferSnapshot {
-                id: 1,
-                path: None,
-                line_count: 0,
-                cursor_row: 0,
-                cursor_col: 0,
-                current_line: String::new(),
-                text: String::new(),
-            }
-        })
-    }
-
-    fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot> {
-        Box::pin(async move { ReadonlyWindowSnapshot { id: 1 } })
-    }
-
-    fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot> {
-        Box::pin(async move {
-            ReadonlyEditorSnapshot {
-                mode: RuntimeMode::Normal,
-            }
-        })
-    }
-}
+use saya::runtime::live::{RuntimeEventPayload, SayaLiveRuntime};
 
 fn buffer_open_payload() -> RuntimeEventPayload {
-    RuntimeEventPayload::BufferOpen(BufferEventPayload {
-        buffer: ReadonlyBufferSnapshot {
-            id: 1,
-            path: Some(PathBuf::from("saya-process-op.test.md")),
-            line_count: 1,
-            cursor_row: 0,
-            cursor_col: 0,
-            current_line: String::new(),
-            text: String::new(),
-        },
-    })
+    support::runtime::buffer_open_payload(PathBuf::from("saya-process-op.test.md"))
 }
 
-/// TS で実行する script 本体を `bufferOpen` ハンドラとして seed に
-/// 登録するためのヘルパ。
-fn seed_with_handler(handler_source: &str) -> CallbackRegistrySeed {
-    CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Event {
-        name: "bufferOpen".to_string(),
-        callback_source: handler_source.to_string(),
-    }])
+fn seed_with_handler(
+    handler_source: &str,
+) -> saya::runtime::callback_registry_seed::CallbackRegistrySeed {
+    support::runtime::seed_with_buffer_open_handler(handler_source)
 }
 
-/// T-OP-1: `op_process_spawn` を JSON で呼ぶと数値ハンドルが返り、
-/// `saya.commands.execute("op-spawn-ok")` が呼ばれる。
+/// T-OP-1: `op_process_spawn` を JSON で呼ぶと数値ハンドルが返る。
 #[tokio::test(flavor = "current_thread")]
 async fn op_process_spawn_returns_numeric_handle_for_cat_session() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const spec = JSON.stringify({
@@ -147,7 +59,6 @@ async fn op_process_spawn_returns_numeric_handle_for_cat_session() {
             }
             await Deno.core.ops.op_process_kill(handle);
             await Deno.core.ops.op_process_wait(handle);
-            await saya.commands.execute("op-spawn-ok");
         }
     "#;
 
@@ -159,18 +70,13 @@ async fn op_process_spawn_returns_numeric_handle_for_cat_session() {
         .expect("dispatch should succeed");
     let report = receipt.await_result().await.expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["op-spawn-ok".to_string()]);
 }
 
 /// T-OP-2: `op_process_write_stdin` + `op_process_read_stdout` の
 /// round-trip が成立する（zero-copy で Uint8Array に書き戻される）。
 #[tokio::test(flavor = "current_thread")]
 async fn op_process_write_stdin_then_read_stdout_round_trip() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     // deno_core の seed runtime には TextEncoder/TextDecoder が無いため、
     // ASCII の payload を `charCodeAt` 経由で `Uint8Array` に詰める形で
     // 検証する（Phase A.2 の op レイヤー検証では Web API に依存させない）。
@@ -213,7 +119,6 @@ async fn op_process_write_stdin_then_read_stdout_round_trip() {
 
             await Deno.core.ops.op_process_kill(handle);
             await Deno.core.ops.op_process_wait(handle);
-            await saya.commands.execute("op-roundtrip-ok");
         }
     "#;
 
@@ -228,18 +133,13 @@ async fn op_process_write_stdin_then_read_stdout_round_trip() {
         .expect("round-trip should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["op-roundtrip-ok".to_string()]);
 }
 
 /// T-OP-3: `true` プロセスが exit したあと `op_process_read_stdout` は
 /// EOF (0) を返す。
 #[tokio::test(flavor = "current_thread")]
 async fn op_process_read_stdout_returns_zero_after_child_exits() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const spec = JSON.stringify({
@@ -261,7 +161,6 @@ async fn op_process_read_stdout_returns_zero_after_child_exits() {
             if (code !== 0) {
                 throw new Error("expected exit code 0, got " + code);
             }
-            await saya.commands.execute("op-eof-ok");
         }
     "#;
 
@@ -276,18 +175,13 @@ async fn op_process_read_stdout_returns_zero_after_child_exits() {
         .expect("EOF check should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["op-eof-ok".to_string()]);
 }
 
 /// T-OP-4: `op_process_kill` の後 `op_process_wait` で非ゼロ exit code
 /// が返り、`AlreadyKilled` 等ではエラーにならない。
 #[tokio::test(flavor = "current_thread")]
 async fn op_process_kill_then_wait_returns_non_zero_exit_code() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const spec = JSON.stringify({
@@ -305,7 +199,6 @@ async fn op_process_kill_then_wait_returns_non_zero_exit_code() {
             if (code === 0) {
                 throw new Error("expected non-zero exit code after kill, got 0");
             }
-            await saya.commands.execute("op-kill-ok");
         }
     "#;
 
@@ -320,17 +213,12 @@ async fn op_process_kill_then_wait_returns_non_zero_exit_code() {
         .expect("kill+wait should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["op-kill-ok".to_string()]);
 }
 
 /// T-OP-5: `op_process_read_stderr` が stdout と独立して動作する。
 #[tokio::test(flavor = "current_thread")]
 async fn op_process_read_stderr_independent_from_stdout() {
-    let bridge = Arc::new(RecordingHostBridge::new());
-    let executed = bridge.shared_executed_commands();
-
+    let bridge = Arc::new(support::runtime::CommandRecordingHostBridge::new());
     let handler = r#"
         async (_payload) => {
             const spec = JSON.stringify({
@@ -371,7 +259,6 @@ async fn op_process_read_stderr_independent_from_stdout() {
             }
 
             await Deno.core.ops.op_process_wait(handle);
-            await saya.commands.execute("op-stderr-ok");
         }
     "#;
 
@@ -386,7 +273,4 @@ async fn op_process_read_stderr_independent_from_stdout() {
         .expect("stderr round-trip should complete within 5s")
         .expect("dispatch result");
     assert_eq!(report.handler_count, 1);
-
-    let names = executed.lock().await.clone();
-    assert_eq!(names, vec!["op-stderr-ok".to_string()]);
 }

@@ -3,10 +3,11 @@
 //! 実行ファイルを直接起動し、ファイルを開いて 1 回編集し、
 //! clean に保存して終了できることを確認する。
 
+mod support;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 fn swapfile_path_for_target(target_path: &std::path::Path) -> PathBuf {
     let file_name = target_path
@@ -22,11 +23,7 @@ fn swapfile_path_for_target(target_path: &std::path::Path) -> PathBuf {
 }
 
 fn unique_path(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    std::env::temp_dir().join(format!("saya-binary-smoke-{name}-{nanos}"))
+    support::temp::unique_temp_path("binary-smoke", name)
 }
 
 fn sy_binary_path() -> PathBuf {
@@ -105,6 +102,18 @@ fn run_sy_headless_smoke_with_stdin(args: &[&str], stdin_text: &[u8]) -> Output 
         .expect("headless smoke should finish")
 }
 
+fn smoke_state(stderr: &[u8], label: &str) -> serde_json::Value {
+    let stderr = String::from_utf8_lossy(stderr);
+    let prefix = format!("[main][smoke][state] {label} ");
+    let line = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("smoke state {label:?} should be present: stderr={stderr}"));
+    serde_json::from_str(line).unwrap_or_else(|error| {
+        panic!("smoke state {label:?} should be valid JSON: {error}: line={line}")
+    })
+}
+
 #[test]
 fn opening_editing_once_and_quitting_cleanly_works_through_the_sy_binary() {
     let target_path = unique_path("open-edit-quit.txt");
@@ -164,16 +173,13 @@ fn opening_with_u_init_ts_projects_startup_configuration_into_the_ui() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("projected startup ui"),
-        "smoke output should include the projected startup UI: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Some(\"   1 alpha\")"),
-        "startup config should affect projected line numbers: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let startup_state = smoke_state(&output.stderr, "startup");
+    assert_eq!(startup_state["firstLine"], "   1 alpha");
+    assert_eq!(startup_state["fileName"], target_path_arg);
+    assert_eq!(startup_state["mode"], "NORMAL");
+    assert_eq!(startup_state["dirty"], false);
+    assert_eq!(startup_state["lineNumbers"], true);
+    assert_eq!(startup_state["numberWidth"], 4);
 
     std::fs::remove_file(&target_path).expect("cleanup target");
     std::fs::remove_file(&config_path).expect("cleanup config");
@@ -290,11 +296,12 @@ fn starting_from_stdin_surfaces_save_path_restriction_in_the_smoke_output() {
         "stdin smoke should surface the save-path restriction: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let startup_state = smoke_state(&output.stderr, "startup");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("first_line=Some(\"")
-            && String::from_utf8_lossy(&output.stderr).contains("alpha"),
-        "stdin smoke should project stdin contents into the startup UI: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
+        startup_state["firstLine"]
+            .as_str()
+            .is_some_and(|line| line.contains("alpha")),
+        "stdin startup should read back projected stdin contents: {startup_state}"
     );
 }
 
@@ -337,16 +344,12 @@ fn bundled_completion_keymap_accepts_candidate_through_the_sy_binary() {
         std::fs::read_to_string(&target_path).expect("target should be readable"),
         "type\ntype\n"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("[main][smoke][completion] completed"),
-        "completion smoke should report completion: stderr={}",
-        stderr
-    );
-    assert!(
-        stderr.contains("[main][smoke][completion] after confirm: cursor=(0,4), mode=Insert"),
-        "completion smoke should confirm cursor state after insertion: stderr={stderr}"
-    );
+    let completed = smoke_state(&output.stderr, "completion-completed");
+    assert_eq!(completed["transient"], "Saved successfully");
+    let after_confirm = smoke_state(&output.stderr, "completion-after-confirm");
+    assert_eq!(after_confirm["cursorRow"], 0);
+    assert_eq!(after_confirm["cursorCol"], 4);
+    assert_eq!(after_confirm["mode"], "Insert");
 
     std::fs::remove_file(&target_path).expect("cleanup target");
     std::fs::remove_file(&config_path).expect("cleanup config");
@@ -395,21 +398,33 @@ fn bundled_completion_binary_smoke_can_select_second_candidate() {
         std::fs::read_to_string(&target_path).expect("target should be readable"),
         "typed\ntype\ntyped\n"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let opened = smoke_state(&output.stderr, "completion-menu-opened");
+    let opened_lines = opened["lines"]
+        .as_array()
+        .expect("opened completion lines should be an array");
+    assert!(opened_lines.iter().any(|line| {
+        line.as_str()
+            .is_some_and(|line| line.contains("[Text] type"))
+    }));
+    assert!(opened_lines.iter().any(|line| {
+        line.as_str()
+            .is_some_and(|line| line.contains("[Text] typed"))
+    }));
+    let after_down = smoke_state(&output.stderr, "completion-menu-after-down");
+    let after_down_lines = after_down["lines"]
+        .as_array()
+        .expect("selected completion lines should be an array");
     assert!(
-        stderr.contains("menu opened: lines=")
-            && stderr.contains("type")
-            && stderr.contains("typed"),
-        "completion smoke should log multiple menu candidates: stderr={stderr}"
+        after_down_lines.iter().any(|line| {
+            line.as_str()
+                .is_some_and(|line| line.starts_with("> ") && line.contains("typed"))
+        }),
+        "second completion candidate should be selected after Down: {after_down_lines:?}"
     );
-    assert!(
-        stderr.contains("menu after Down: lines=") && stderr.contains("> [Text] typed"),
-        "completion smoke should log selected second candidate after Down: stderr={stderr}"
-    );
-    assert!(
-        stderr.contains("[main][smoke][completion] after confirm: cursor=(0,5), mode=Insert"),
-        "completion smoke should confirm cursor state after selected insertion: stderr={stderr}"
-    );
+    let after_confirm = smoke_state(&output.stderr, "completion-after-confirm");
+    assert_eq!(after_confirm["cursorRow"], 0);
+    assert_eq!(after_confirm["cursorCol"], 5);
+    assert_eq!(after_confirm["mode"], "Insert");
 
     std::fs::remove_file(&target_path).expect("cleanup target");
     std::fs::remove_file(&config_path).expect("cleanup config");
@@ -460,15 +475,19 @@ fn bundled_path_completion_does_not_replace_buffer_with_directory_listing() {
         "./a_dir/\n",
         "path completion must update only the typed path prefix, not project a directory listing into the edited buffer"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let opened = smoke_state(&output.stderr, "completion-menu-opened");
+    let opened_lines = opened["lines"]
+        .as_array()
+        .expect("path completion lines should be an array");
     assert!(
-        stderr.contains("menu opened: lines=") && stderr.contains("./a_dir/"),
-        "path completion smoke should log path candidates: stderr={stderr}"
+        opened_lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|line| line.contains("./a_dir/")))
     );
-    assert!(
-        stderr.contains("[main][smoke][completion] after confirm: cursor=(0,8), mode=Insert"),
-        "path completion smoke should confirm cursor state after path insertion: stderr={stderr}"
-    );
+    let after_confirm = smoke_state(&output.stderr, "completion-after-confirm");
+    assert_eq!(after_confirm["cursorRow"], 0);
+    assert_eq!(after_confirm["cursorCol"], 8);
+    assert_eq!(after_confirm["mode"], "Insert");
 
     std::fs::remove_file(&target_path).expect("cleanup target");
     std::fs::remove_file(&file_path).expect("cleanup file");

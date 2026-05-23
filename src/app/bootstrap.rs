@@ -758,6 +758,9 @@ fn evaluate_bootstrap_capability(loaded_config: &LoadedConfig) -> CapabilityLoad
                 path: path.clone(),
                 source: source.clone(),
             };
+            if source.trim_start().starts_with(['{', '[']) {
+                return evaluate_capability_source(&source_result);
+            }
             evaluate_bootstrap_capability_from_path(path)
                 .unwrap_or_else(|| evaluate_capability_source(&source_result))
         }
@@ -765,6 +768,12 @@ fn evaluate_bootstrap_capability(loaded_config: &LoadedConfig) -> CapabilityLoad
 }
 
 fn evaluate_bootstrap_capability_from_path(path: &Path) -> Option<CapabilityLoadResult> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
+        return None;
+    }
     let (resolved_path, current_dir) = resolve_formal_startup_runtime_path(path)?;
     log::debug!(
         "[bootstrap] evaluating formal startup runtime path: config_path={}, current_dir={}",

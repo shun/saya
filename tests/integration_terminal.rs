@@ -641,12 +641,10 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
         )
         .expect("initial headless render should succeed");
     assert_eq!(initial_render.rendered_workspace.panes, initial.panes);
-    assert!(
-        initial_render
-            .rendered_workspace
-            .visible_message_text()
-            .is_some_and(|message| message.contains("initial draw")),
-        "headless smoke should expose the initial draw marker"
+    assert_eq!(
+        active_pane(&initial_render.rendered_workspace).lines,
+        vec!["alpha".to_string()],
+        "initial headless render should expose the active pane content"
     );
 
     let split = headless_split_workspace();
@@ -658,14 +656,22 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
             None,
         )
         .expect("split headless render should succeed");
-    assert_eq!(split_render.rendered_workspace.panes.len(), 2);
+    assert_eq!(split_render.rendered_workspace.panes, split.panes);
     assert_eq!(split_render.rendered_workspace.active_window_id, 2);
-    assert!(
+    assert_eq!(
+        active_pane(&split_render.rendered_workspace).lines,
+        vec!["beta".to_string()],
+        "split headless render should expose the active pane content"
+    );
+    assert_eq!(
         split_render
             .rendered_workspace
-            .visible_message_text()
-            .is_some_and(|message| message.contains("split draw")),
-        "headless smoke should expose the split draw marker"
+            .panes
+            .iter()
+            .filter(|pane| pane.is_active)
+            .count(),
+        1,
+        "split headless render should keep exactly one active pane"
     );
 
     let rollback_render = coordinator
@@ -678,12 +684,10 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
         .expect("projection failure should render the retained workspace without PTY");
     assert_eq!(rollback_render.rendered_workspace.panes, split.panes);
     assert_eq!(rollback_render.rendered_workspace.active_window_id, 2);
-    assert!(
-        rollback_render
-            .rendered_workspace
-            .visible_message_text()
-            .is_some_and(|message| message.contains("split draw")),
-        "rollback should preserve the last successful workspace message"
+    assert_eq!(
+        active_pane(&rollback_render.rendered_workspace).lines,
+        vec!["beta".to_string()],
+        "rollback should preserve the last successful active pane"
     );
     assert!(
         rollback_render
@@ -695,14 +699,21 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
 
     let resized = headless_workspace(2, 11, "resized", "resize draw");
     let resize_render = coordinator
-        .render_workspace_result::<WorkspaceProjectionError>(Ok(resized), &capabilities, &[], None)
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(resized.clone()),
+            &capabilities,
+            &[],
+            None,
+        )
         .expect("valid refresh after rollback should succeed");
+    assert_eq!(resize_render.rendered_workspace.panes, resized.panes);
+    assert_eq!(resize_render.rendered_workspace.active_window_id, 2);
     assert!(
         resize_render
             .rendered_workspace
-            .visible_message_text()
-            .is_some_and(|message| message.contains("resize draw")),
-        "next valid headless render should replace the retained rollback screen"
+            .suppressed_message_sources()
+            .is_empty(),
+        "next valid headless render should clear rollback diagnostics"
     );
 }
 
@@ -908,6 +919,14 @@ fn headless_split_workspace() -> WorkspaceScreenModel {
         height: 4,
     };
     workspace
+}
+
+fn active_pane(workspace: &WorkspaceScreenModel) -> &ScreenModel {
+    workspace
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == workspace.active_window_id && pane.is_active)
+        .expect("workspace should have one visible active pane")
 }
 
 fn plain_terminal_capabilities() -> saya::terminal::capability::TerminalCapabilityProfile {

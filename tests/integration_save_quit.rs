@@ -18,7 +18,6 @@ use saya::app::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::app::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::app::session::{EditorSessionState, QuitDecision};
-use saya::presentation::screen_model::{ProjectionInput, project};
 use saya::support::swapfile::swapfile_path_for_target;
 use vim_core_rs::CoreHostAction;
 
@@ -107,6 +106,12 @@ fn save_success_clears_dirty_state_and_allows_quit() {
     // ホストへの保存処理
     let result = write_to_path(&request);
     assert_eq!(result, SaveResult::Saved);
+    assert_eq!(
+        std::fs::read_to_string(outcome.target_path.as_ref().expect("target path"))
+            .expect("saved file should be readable"),
+        snapshot.text,
+        "保存後のファイル内容は core snapshot の本文と一致すること"
+    );
 
     // 成功をセッションに反映
     session_state.record_save_success();
@@ -117,7 +122,7 @@ fn save_success_clears_dirty_state_and_allows_quit() {
 }
 
 #[test]
-fn write_host_action_updates_transient_message_on_success() {
+fn write_host_action_saves_buffer_contents_on_success() {
     let _lock = test_lock();
     let mut outcome = launch_with_content("initial\n");
     let mut session_state = EditorSessionState::new(outcome.target_path.clone());
@@ -148,19 +153,14 @@ fn write_host_action_updates_transient_message_on_success() {
         .expect("host 側が保存要求を組み立てられること");
     let result = write_to_path(&request);
     assert_eq!(result, SaveResult::Saved);
+    assert_eq!(
+        std::fs::read_to_string(outcome.target_path.as_ref().expect("target path"))
+            .expect("saved file should be readable"),
+        snapshot.text,
+        ":w 成功後のファイル内容は保存時 snapshot の本文と一致すること"
+    );
 
     session_state.record_save_success();
-    let model = project(&ProjectionInput::new(
-        &snapshot,
-        &session_state,
-        Some("Saved successfully"),
-    ));
-
-    assert_eq!(
-        model.message_line,
-        Some("Saved successfully".to_string()),
-        "write 成功時の transient message が画面へ反映されること"
-    );
     assert!(!session_state.is_dirty());
     assert_eq!(session_state.last_save_error(), None);
 }
@@ -200,6 +200,16 @@ fn save_failure_keeps_dirty_state_and_warns_on_quit() {
     // dirty 状態は維持される
     assert!(session_state.is_dirty());
     assert!(session_state.last_save_error().is_some());
+    assert!(
+        !bad_path.exists(),
+        "保存失敗時は存在しない保存先ファイルを作成しないこと"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outcome.target_path.as_ref().expect("original target path"))
+            .expect("original file should remain readable"),
+        "initial\n",
+        "保存失敗時は元のファイル内容を変更しないこと"
+    );
 
     // 通常終了は警告になる
     assert_eq!(
@@ -383,6 +393,12 @@ fn wq_host_coordination_saves_before_allowing_quit() {
         .expect("host 側が保存要求を組み立てられること");
     let result = write_to_path(&request);
     assert_eq!(result, SaveResult::Saved, ":wq の保存が成功すること");
+    assert_eq!(
+        std::fs::read_to_string(outcome.target_path.as_ref().expect("target path"))
+            .expect("saved file should be readable"),
+        snapshot.text,
+        ":wq の保存後ファイル内容は snapshot と一致すること"
+    );
 
     session_state.record_save_success();
     assert_eq!(
@@ -413,6 +429,13 @@ fn x_xit_exit_queue_quit_only_on_clean_buffer() {
             "{command} は clean buffer では Quit のみをキューすること: {:?}",
             actions
         );
+        assert!(!outcome.core_bridge.snapshot().dirty);
+        assert_eq!(
+            std::fs::read_to_string(outcome.target_path.as_ref().expect("target path"))
+                .expect("target file should remain readable"),
+            "initial\n",
+            "{command} は clean buffer の終了でファイル内容を変更しないこと"
+        );
     }
 }
 
@@ -422,6 +445,7 @@ fn x_xit_exit_queue_write_then_quit_on_dirty_buffer() {
 
     for command in [":x", ":xit", ":exit"] {
         let mut outcome = launch_with_content("initial\n");
+        let mut session_state = EditorSessionState::new(outcome.target_path.clone());
 
         outcome.core_bridge.dispatch_key("i").expect("i dispatch");
         outcome.core_bridge.dispatch_key("D").expect("D input");
@@ -429,6 +453,11 @@ fn x_xit_exit_queue_write_then_quit_on_dirty_buffer() {
             .core_bridge
             .dispatch_key("\x1b")
             .expect("Esc dispatch");
+        session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
+        assert!(
+            session_state.is_dirty(),
+            "{command} の保存前は dirty であること"
+        );
 
         outcome
             .core_bridge
@@ -447,6 +476,20 @@ fn x_xit_exit_queue_write_then_quit_on_dirty_buffer() {
             "{command} は dirty buffer では Write -> Quit をキューすること: {:?}",
             actions
         );
+
+        let snapshot = outcome.core_bridge.snapshot();
+        let request = session_state
+            .build_save_request(&snapshot.text)
+            .expect("host 側が保存要求を組み立てられること");
+        assert_eq!(write_to_path(&request), SaveResult::Saved);
+        assert_eq!(
+            std::fs::read_to_string(outcome.target_path.as_ref().expect("target path"))
+                .expect("saved file should be readable"),
+            snapshot.text,
+            "{command} の保存後ファイル内容は snapshot と一致すること"
+        );
+        session_state.record_save_success();
+        assert_eq!(session_state.evaluate_quit(false), QuitDecision::Allow);
     }
 }
 
@@ -560,6 +603,11 @@ fn compound_update_file_then_quit_on_dirty_buffer_queues_write_before_quit() {
         QuitDecision::Allow,
         "dirty buffer の alternate save 成功後に quit を許可すること"
     );
+    assert_eq!(
+        std::fs::read_to_string(&alternate_path).expect("alternate path should exist"),
+        snapshot.text,
+        "dirty buffer の :update file は explicit path に snapshot 本文を保存すること"
+    );
 }
 
 #[test]
@@ -610,6 +658,11 @@ fn compound_update_file_then_quit_on_clean_buffer_still_preserves_write_before_q
         session_state.evaluate_quit(false),
         QuitDecision::Allow,
         "clean buffer の alternate save 後も quit を許可すること"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&alternate_path).expect("alternate path should exist"),
+        snapshot.text,
+        "clean buffer の :update file は explicit path に snapshot 本文を保存すること"
     );
 }
 
@@ -665,5 +718,10 @@ fn non_slash_delimiter_compound_update_then_quit_keeps_forwarding_intact() {
         session_state.evaluate_quit(false),
         QuitDecision::Allow,
         "non-slash delimiter compound save 成功後に quit を許可すること"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&alternate_path).expect("alternate path should exist"),
+        snapshot.text,
+        "non-slash delimiter compound command は変換後 snapshot 本文を保存すること"
     );
 }

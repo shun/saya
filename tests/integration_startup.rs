@@ -506,7 +506,8 @@ fn startup_with_vim_style_u_option_loads_config_without_warning() {
     );
     assert!(
         outcome.warnings.is_empty(),
-        "有効な設定ファイルでは warning なし"
+        "有効な設定ファイルでは warning なし: {:?}",
+        outcome.warnings
     );
 
     std::fs::remove_file(&config_path).expect("設定ファイルの削除");
