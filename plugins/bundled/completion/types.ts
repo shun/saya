@@ -31,28 +31,40 @@ export interface SayaCompletionCandidate {
   source?: string | null;
 }
 
-export interface SayaCompletionContext {
+export interface SayaCompletionTriggerContext {
   buffer: SayaReadonlyBufferSnapshot;
   editor: SayaReadonlyEditorSnapshot;
+}
+
+export interface SayaCompletionQuery extends SayaCompletionTriggerContext {
+  sourceId: string;
   prefix: string;
   replaceRange: SayaCompletionRange;
 }
 
+export interface SayaCompletionSourceResult {
+  sourceId: string;
+  prefix: string;
+  replaceRange: SayaCompletionRange;
+  candidates: SayaCompletionCandidate[];
+}
+
 export interface SayaCompletionSource {
-  name: string;
+  id: string;
+  trigger(context: SayaCompletionTriggerContext): SayaCompletionQuery | null;
   complete(
-    context: SayaCompletionContext,
-  ): Promise<SayaCompletionCandidate[]> | SayaCompletionCandidate[];
+    query: SayaCompletionQuery,
+  ): Promise<SayaCompletionSourceResult> | SayaCompletionSourceResult;
 }
 
 export type SayaCompletionFilter = (
-  candidates: SayaCompletionCandidate[],
-  context: SayaCompletionContext,
-) => SayaCompletionCandidate[];
+  result: SayaCompletionSourceResult,
+  query: SayaCompletionQuery,
+) => SayaCompletionSourceResult;
 
 export type SayaCompletionSorter = (
   candidates: SayaCompletionCandidate[],
-  context: SayaCompletionContext,
+  result: SayaCompletionSourceResult,
 ) => SayaCompletionCandidate[];
 
 export interface SayaCompletionOptions {
@@ -70,4 +82,11 @@ export interface SayaLspCompletionSourceOptions {
   commandName?: string;
   sourceName?: string;
   optional?: boolean;
+}
+
+export interface SayaPathCompletionSourceOptions {
+  sourceName?: string;
+  optional?: boolean;
+  maxItems?: number;
+  showHidden?: boolean;
 }

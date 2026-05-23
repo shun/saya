@@ -54,6 +54,7 @@ pub enum LoadedConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapWarning {
     ConfigLoadFailed { path: PathBuf, message: String },
+    ConfigEvalFailed { path: PathBuf, message: String },
     ConfigWarning { path: PathBuf, message: String },
 }
 
@@ -62,6 +63,18 @@ pub fn bootstrap_warning_message(warnings: &[BootstrapWarning]) -> Option<String
         BootstrapWarning::ConfigLoadFailed { path, message } => {
             let rendered = format!(
                 "Failed to read startup config ({}): {}",
+                path.display(),
+                message
+            );
+            log::debug!(
+                "[bootstrap] projecting startup warning into host message line: {}",
+                rendered
+            );
+            Some(rendered)
+        }
+        BootstrapWarning::ConfigEvalFailed { path, message } => {
+            let rendered = format!(
+                "Failed to evaluate startup config ({}): {}",
                 path.display(),
                 message
             );
@@ -488,6 +501,7 @@ fn load_config_with_fallback(
 
 fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState {
     let mut state = ConfigApplyState::default_state();
+    let mut fallback_warnings = Vec::new();
     match evaluate_bootstrap_capability(loaded_config) {
         CapabilityLoadResult::Success {
             path,
@@ -549,6 +563,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
                 path.display(),
                 message
             );
+            fallback_warnings.push(BootstrapWarning::ConfigLoadFailed { path, message });
         }
         CapabilityLoadResult::EvalFailed { path, message } => {
             log::debug!(
@@ -556,6 +571,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
                 path.display(),
                 message
             );
+            fallback_warnings.push(BootstrapWarning::ConfigEvalFailed { path, message });
         }
         CapabilityLoadResult::UnsupportedCapability {
             path,
@@ -568,6 +584,10 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
                 capability,
                 message
             );
+            fallback_warnings.push(BootstrapWarning::ConfigEvalFailed {
+                path,
+                message: format!("unsupported {capability}: {message}"),
+            });
         }
     }
 
@@ -587,7 +607,7 @@ fn resolve_bootstrap_state(loaded_config: &LoadedConfig) -> ResolvedStartupState
         startup_registry,
         callback_registry,
         resolved_theme,
-        warnings: Vec::new(),
+        warnings: fallback_warnings,
     }
 }
 
@@ -1421,6 +1441,16 @@ mod tests {
         assert!(
             load_failure.starts_with("Failed to read startup config"),
             "config load failure should say that the config file could not be read: {load_failure}"
+        );
+
+        let eval_failure = bootstrap_warning_message(&[BootstrapWarning::ConfigEvalFailed {
+            path: config_path.clone(),
+            message: "Uncaught SyntaxError: Unexpected token ')'".to_string(),
+        }])
+        .expect("eval failure warning should render");
+        assert!(
+            eval_failure.starts_with("Failed to evaluate startup config"),
+            "config eval failure should say that startup evaluation failed: {eval_failure}"
         );
 
         let partial_warning = bootstrap_warning_message(&[BootstrapWarning::ConfigWarning {

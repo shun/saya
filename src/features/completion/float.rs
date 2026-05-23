@@ -213,12 +213,33 @@ impl CompletionFloatManager {
         key: &KeyInput,
         restore_window_id: Option<i32>,
     ) -> CompletionFloatInputOutcome {
-        let Some(menu_id) = floats.focused_float_id() else {
-            log::debug!(
-                "[completion_float] key ignored because focused target is not a float: key={:?}",
-                key
-            );
-            return CompletionFloatInputOutcome::Ignored;
+        let menu_id = match floats.focused_float_id() {
+            Some(menu_id)
+                if matches!(
+                    floats.window_content(menu_id),
+                    Some(FloatingContentRef::CompletionMenu { .. })
+                ) =>
+            {
+                menu_id
+            }
+            Some(menu_id) => {
+                log::debug!(
+                    "[completion_float] key ignored because focused float is not a completion menu: key={:?}, menu_id={}",
+                    key,
+                    menu_id.0
+                );
+                return CompletionFloatInputOutcome::Ignored;
+            }
+            None => {
+                let Some(menu_id) = self.active_menu_id else {
+                    log::debug!(
+                        "[completion_float] key ignored because no completion menu is active: key={:?}",
+                        key
+                    );
+                    return CompletionFloatInputOutcome::Ignored;
+                };
+                menu_id
+            }
         };
         if !matches!(
             floats.window_content(menu_id),

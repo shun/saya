@@ -59,6 +59,26 @@ fn run_sy_headless_smoke_with_env(args: &[&str], envs: &[(&str, &str)]) -> Outpu
         .expect("headless smoke should spawn sy")
 }
 
+fn run_sy_completion_smoke_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let binary = sy_binary_path();
+    assert!(binary.exists(), "sy binary should exist at {:?}", binary);
+
+    let mut command = Command::new(binary);
+    command
+        .env("SAYA_BINARY_SMOKE", "1")
+        .env("SAYA_COMPLETION_SMOKE", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("completion smoke should spawn sy")
+}
+
 fn run_sy_headless_smoke_with_stdin(args: &[&str], stdin_text: &[u8]) -> Output {
     let binary = sy_binary_path();
     assert!(binary.exists(), "sy binary should exist at {:?}", binary);
@@ -276,4 +296,183 @@ fn starting_from_stdin_surfaces_save_path_restriction_in_the_smoke_output() {
         "stdin smoke should project stdin contents into the startup UI: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn bundled_completion_keymap_accepts_candidate_through_the_sy_binary() {
+    let target_path = unique_path("completion-target.txt");
+    let config_path = unique_path("completion-init.ts");
+    let completion_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+    std::fs::write(&target_path, "ty\ntype\n").expect("target file should be created");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaCompletion }} from "{}";
+                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+            "#,
+            completion_path.to_string_lossy()
+        ),
+    )
+    .expect("startup config should be created");
+
+    let output = run_sy_completion_smoke_with_env(
+        &[
+            "-u",
+            config_path.to_str().expect("config path should be UTF-8"),
+            target_path.to_str().expect("target path should be UTF-8"),
+        ],
+        &[("SAYA_LOG", "0")],
+    );
+
+    assert!(
+        output.status.success(),
+        "completion smoke should exit cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target_path).expect("target should be readable"),
+        "type\ntype\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[main][smoke][completion] completed"),
+        "completion smoke should report completion: stderr={}",
+        stderr
+    );
+    assert!(
+        stderr.contains("[main][smoke][completion] after confirm: cursor=(0,4), mode=Insert"),
+        "completion smoke should confirm cursor state after insertion: stderr={stderr}"
+    );
+
+    std::fs::remove_file(&target_path).expect("cleanup target");
+    std::fs::remove_file(&config_path).expect("cleanup config");
+}
+
+#[test]
+fn bundled_completion_binary_smoke_can_select_second_candidate() {
+    let target_path = unique_path("completion-select-target.txt");
+    let config_path = unique_path("completion-select-init.ts");
+    let completion_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+    std::fs::write(&target_path, "ty\ntype\ntyped\n").expect("target file should be created");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaCompletion }} from "{}";
+                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+            "#,
+            completion_path.to_string_lossy()
+        ),
+    )
+    .expect("startup config should be created");
+
+    let output = run_sy_completion_smoke_with_env(
+        &[
+            "-u",
+            config_path.to_str().expect("config path should be UTF-8"),
+            target_path.to_str().expect("target path should be UTF-8"),
+        ],
+        &[
+            ("SAYA_LOG", "0"),
+            ("SAYA_COMPLETION_SMOKE_EXPECT_MULTIPLE", "1"),
+            ("SAYA_COMPLETION_SMOKE_SELECT_NEXT", "1"),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "completion select smoke should exit cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target_path).expect("target should be readable"),
+        "typed\ntype\ntyped\n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("menu opened: lines=")
+            && stderr.contains("type")
+            && stderr.contains("typed"),
+        "completion smoke should log multiple menu candidates: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("menu after Down: lines=") && stderr.contains("> [Text] typed"),
+        "completion smoke should log selected second candidate after Down: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("[main][smoke][completion] after confirm: cursor=(0,5), mode=Insert"),
+        "completion smoke should confirm cursor state after selected insertion: stderr={stderr}"
+    );
+
+    std::fs::remove_file(&target_path).expect("cleanup target");
+    std::fs::remove_file(&config_path).expect("cleanup config");
+}
+
+#[test]
+fn bundled_path_completion_does_not_replace_buffer_with_directory_listing() {
+    let root_path = unique_path("completion-path-root");
+    let target_path = root_path.join("main.go");
+    let dir_path = root_path.join("a_dir");
+    let file_path = root_path.join("z.txt");
+    let config_path = unique_path("completion-path-init.ts");
+    let completion_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+    std::fs::create_dir_all(&dir_path).expect("directory candidate should be created");
+    std::fs::write(&file_path, "z\n").expect("file candidate should be created");
+    std::fs::write(&target_path, "./\n").expect("target file should be created");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaCompletion }} from "{}";
+                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+            "#,
+            completion_path.to_string_lossy()
+        ),
+    )
+    .expect("startup config should be created");
+
+    let output = run_sy_completion_smoke_with_env(
+        &[
+            "-u",
+            config_path.to_str().expect("config path should be UTF-8"),
+            target_path.to_str().expect("target path should be UTF-8"),
+        ],
+        &[("SAYA_LOG", "0")],
+    );
+
+    assert!(
+        output.status.success(),
+        "path completion smoke should exit cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target_path).expect("target should be readable"),
+        "./a_dir/\n",
+        "path completion must update only the typed path prefix, not project a directory listing into the edited buffer"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("menu opened: lines=") && stderr.contains("./a_dir/"),
+        "path completion smoke should log path candidates: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("[main][smoke][completion] after confirm: cursor=(0,8), mode=Insert"),
+        "path completion smoke should confirm cursor state after path insertion: stderr={stderr}"
+    );
+
+    std::fs::remove_file(&target_path).expect("cleanup target");
+    std::fs::remove_file(&file_path).expect("cleanup file");
+    std::fs::remove_dir(&dir_path).expect("cleanup dir");
+    std::fs::remove_dir(&root_path).expect("cleanup root");
+    std::fs::remove_file(&config_path).expect("cleanup config");
 }

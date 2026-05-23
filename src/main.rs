@@ -53,10 +53,10 @@ use saya::input::command_line_history::{
 use saya::input::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_command};
 use saya::input::router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
 use saya::presentation::floating_window::{
-    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingCursor, FloatingFit,
-    FloatingInputOutcome, FloatingLifecycle, FloatingLifecycleEvent, FloatingMouseOutcome,
-    FloatingPlacement, FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager,
-    FloatingZIndex,
+    FloatingAnchor, FloatingBorder, FloatingChrome, FloatingContentRef, FloatingCursor,
+    FloatingFit, FloatingInputOutcome, FloatingLifecycle, FloatingLifecycleEvent,
+    FloatingMouseOutcome, FloatingPlacement, FloatingRelativeTo, FloatingSize, FloatingWindowId,
+    FloatingWindowManager, FloatingZIndex,
 };
 use saya::presentation::markdown::structure::{
     MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey,
@@ -194,7 +194,7 @@ async fn main() {
     }
 
     if std::env::var_os("SAYA_BINARY_SMOKE").is_some() {
-        if let Err(error) = run_binary_smoke(launch_request) {
+        if let Err(error) = run_binary_smoke(launch_request).await {
             eprintln!("[main][smoke] {error}");
             std::process::exit(1);
         }
@@ -1854,7 +1854,10 @@ fn viewport_sync_mode_for_input(key: &KeyInput) -> ViewportSyncMode {
     }
 }
 
-fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Result<(), String> {
+async fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Result<(), String> {
+    if std::env::var_os("SAYA_COMPLETION_SMOKE").is_some() {
+        return run_binary_completion_smoke(launch_request).await;
+    }
     eprintln!("[main][smoke] preparing headless launch");
     let mut outcome =
         saya::app::bootstrap::prepare_launch(launch_request).map_err(format_bootstrap_error)?;
@@ -1951,6 +1954,157 @@ fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Result<(),
     }
 
     eprintln!("[main][smoke] completed with shutdown reason: {:?}", reason);
+    Ok(())
+}
+
+async fn run_binary_completion_smoke(
+    launch_request: saya::app::cli::LaunchRequest,
+) -> Result<(), String> {
+    eprintln!("[main][smoke][completion] preparing headless launch");
+    let mut outcome =
+        saya::app::bootstrap::prepare_launch(launch_request).map_err(format_bootstrap_error)?;
+    configure_diagnostic_log_from_startup(
+        outcome.startup_registry.log.log_file.as_deref(),
+        outcome.startup_registry.log.log_level,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut session_state = outcome.editor_session_state();
+    let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+        .map_err(|error| format!("runtime session initialization failed: {error:?}"))?;
+    let mut floating_window_manager = FloatingWindowManager::default();
+    let mut completion_float_manager = CompletionFloatManager::default();
+    let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+    let mut terminal_float_manager = TerminalFloatManager::default();
+    let mut panel_manager = PanelManager::default();
+    let mut transient_msg = None;
+    let mut need_redraw = false;
+    let mut runtime_presentation_intents = Vec::new();
+
+    outcome
+        .core_bridge
+        .dispatch_key("A")
+        .map_err(|error| format!("completion smoke insert mode failed: {error:?}"))?;
+    let action = startup_keymap_action_for_snapshot_input(
+        &outcome.startup_registry.keymaps,
+        &outcome.core_bridge.light_snapshot(),
+        &KeyInput::Ctrl('x'),
+    )
+    .ok_or_else(|| {
+        format!(
+            "completion smoke keymap did not resolve: mode={:?}, keymaps={:?}, warnings={:?}",
+            outcome.core_bridge.mode(),
+            outcome.startup_registry.keymaps,
+            outcome.warnings
+        )
+    })?;
+    let StartupKeymapAction::RegisteredCommand(command_name) = action else {
+        return Err(format!(
+            "completion smoke keymap resolved to non-command action: {action:?}"
+        ));
+    };
+    execute_startup_keymap_registered_command(
+        Some(&mut runtime_session),
+        &command_name,
+        &mut outcome,
+        &mut session_state,
+        &mut floating_window_manager,
+        &mut completion_float_manager,
+        &mut lsp_diagnostic_store,
+        &mut terminal_float_manager,
+        &mut panel_manager,
+        None,
+        &mut transient_msg,
+        &mut need_redraw,
+        &mut runtime_presentation_intents,
+        None,
+    )
+    .await;
+    if let Some(message) = transient_msg {
+        return Err(format!("completion smoke command failed: {message}"));
+    }
+    let menu_window = floating_window_manager
+        .windows()
+        .iter()
+        .find(|window| matches!(window.content, FloatingContentRef::CompletionMenu { .. }));
+    let Some(menu_window) = menu_window else {
+        return Err("completion smoke did not open a completion menu".to_string());
+    };
+    eprintln!(
+        "[main][smoke][completion] menu opened: lines={:?}",
+        menu_window.lines
+    );
+    if std::env::var_os("SAYA_COMPLETION_SMOKE_EXPECT_MULTIPLE").is_some()
+        && menu_window.lines.len() < 2
+    {
+        return Err(format!(
+            "completion smoke expected multiple candidates, got lines={:?}",
+            menu_window.lines
+        ));
+    }
+
+    let active_window_id = outcome
+        .core_bridge
+        .light_snapshot()
+        .active_window_id()
+        .unwrap_or(1);
+    if std::env::var_os("SAYA_COMPLETION_SMOKE_SELECT_NEXT").is_some() {
+        match handle_completion_float_key(
+            &mut completion_float_manager,
+            &mut floating_window_manager,
+            &mut outcome.core_bridge,
+            &KeyInput::Down,
+            active_window_id,
+        ) {
+            Some(FloatingWindowKeyHandling::Consumed) => {}
+            other => {
+                return Err(format!(
+                    "completion smoke Down did not move the active menu selection: {other:?}"
+                ));
+            }
+        }
+        let selected_lines = floating_window_manager
+            .windows()
+            .iter()
+            .find(|window| matches!(window.content, FloatingContentRef::CompletionMenu { .. }))
+            .map(|window| window.lines.clone())
+            .unwrap_or_default();
+        eprintln!(
+            "[main][smoke][completion] menu after Down: lines={:?}",
+            selected_lines
+        );
+    }
+    match handle_completion_float_key(
+        &mut completion_float_manager,
+        &mut floating_window_manager,
+        &mut outcome.core_bridge,
+        &KeyInput::Enter,
+        active_window_id,
+    ) {
+        Some(FloatingWindowKeyHandling::Closed { .. }) => {}
+        other => {
+            return Err(format!(
+                "completion smoke Enter did not accept the active menu: {other:?}"
+            ));
+        }
+    }
+
+    let snapshot = outcome.core_bridge.snapshot();
+    eprintln!(
+        "[main][smoke][completion] after confirm: cursor=({},{}), mode={:?}",
+        snapshot.cursor_row, snapshot.cursor_col, snapshot.mode
+    );
+    let save = save_snapshot_result(&snapshot.text, &mut session_state);
+    if !save.wrote {
+        return Err(format!(
+            "completion smoke save failed: {:?}",
+            save.transient_message
+        ));
+    }
+    eprintln!(
+        "[main][smoke][completion] completed: text_len={}, transient={:?}",
+        snapshot.text.len(),
+        save.transient_message
+    );
     Ok(())
 }
 
@@ -11417,6 +11571,10 @@ mod tests {
             .core_bridge
             .replace_buffer_text("pri\n")
             .expect("seed buffer text");
+        outcome
+            .core_bridge
+            .dispatch_key("A")
+            .expect("enter insert mode at line end");
         let mut floating_window_manager = FloatingWindowManager::default();
         let mut completion_float_manager = CompletionFloatManager::default();
 
@@ -11459,7 +11617,7 @@ mod tests {
             .light_snapshot()
             .active_window_id()
             .unwrap_or(1);
-        let menu_id = floating_window_manager
+        let _menu_id = floating_window_manager
             .windows()
             .iter()
             .find(|window| {
@@ -11470,7 +11628,7 @@ mod tests {
             })
             .map(|window| window.id)
             .expect("completion menu should exist");
-        assert!(floating_window_manager.focus_float(menu_id));
+        assert_eq!(floating_window_manager.focused_float_id(), None);
 
         assert!(matches!(
             handle_completion_float_key(
@@ -11483,6 +11641,130 @@ mod tests {
             Some(FloatingWindowKeyHandling::Closed { .. })
         ));
         assert_eq!(outcome.core_bridge.buffer_text(), "println!($0);\n");
+        let snapshot = outcome.core_bridge.light_snapshot();
+        assert_eq!(snapshot.mode, vim_core_rs::CoreMode::Insert);
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(
+            snapshot.cursor_col,
+            "println!($0);".len(),
+            "typed completion confirmation should move the insert cursor to the replacement end"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_completion_keymap_opens_pum_and_enter_confirms_candidate() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("completion-keymap-target").with_extension("txt");
+        let config_path = unique_path("completion-keymap-init").with_extension("ts");
+        let completion_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+        std::fs::write(&target_path, "ty\ntype\n").expect("target file");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+                    import {{ setupSayaCompletion }} from "{}";
+                    setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+                "#,
+                completion_path.to_string_lossy()
+            ),
+        )
+        .expect("config file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+
+        outcome.core_bridge.dispatch_key("A").expect("enter insert");
+        let action = startup_keymap_action_for_snapshot_input(
+            &outcome.startup_registry.keymaps,
+            &outcome.core_bridge.light_snapshot(),
+            &KeyInput::Ctrl('x'),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "insert completion keymap should resolve; keymaps={:?}, mode={:?}, warnings={:?}",
+                outcome.startup_registry.keymaps,
+                outcome.core_bridge.mode(),
+                outcome.warnings
+            )
+        });
+        let StartupKeymapAction::RegisteredCommand(command_name) = action else {
+            panic!("completion keymap should point at a registered command");
+        };
+        assert_eq!(command_name, "completion.trigger");
+
+        let shutdown = execute_startup_keymap_registered_command(
+            Some(&mut runtime_session),
+            &command_name,
+            &mut outcome,
+            &mut session_state,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
+            None,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            None,
+        )
+        .await;
+        assert_eq!(shutdown, None);
+        assert_eq!(transient_msg, None);
+        assert!(
+            floating_window_manager.windows().iter().any(|window| {
+                matches!(
+                    window.content,
+                    saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+                )
+            }),
+            "completion trigger should open a completion menu"
+        );
+        assert_eq!(floating_window_manager.focused_float_id(), None);
+
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        assert!(matches!(
+            handle_completion_float_key(
+                &mut completion_float_manager,
+                &mut floating_window_manager,
+                &mut outcome.core_bridge,
+                &KeyInput::Enter,
+                active_window_id,
+            ),
+            Some(FloatingWindowKeyHandling::Closed { .. })
+        ));
+        assert_eq!(outcome.core_bridge.buffer_text(), "type\ntype\n");
+        let snapshot = outcome.core_bridge.light_snapshot();
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(
+            snapshot.cursor_col, 4,
+            "startup completion keymap confirmation should move the insert cursor after the candidate"
+        );
+
+        std::fs::remove_file(target_path).expect("cleanup target");
+        std::fs::remove_file(config_path).expect("cleanup config");
     }
 
     #[test]

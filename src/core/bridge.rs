@@ -551,7 +551,23 @@ impl CoreBridge {
             before.len(),
             after.len()
         );
-        self.replace_buffer_text_inner(&after, false)
+        self.replace_buffer_text_inner(&after, false)?;
+        let (cursor_row, cursor_col) = completion_replacement_end(range, replacement_text);
+        let cursor = self
+            .session
+            .execute_ex_command(&format!(
+                "call cursor({}, {})",
+                cursor_row + 1,
+                cursor_col + 1
+            ))
+            .map_err(CoreSessionError::CommandFailed)?;
+        self.queue_transaction_artifacts(&cursor);
+        log::debug!(
+            "[core_bridge] moved completion cursor to replacement end: row={}, col={}",
+            cursor_row,
+            cursor_col
+        );
+        Ok(())
     }
 
     fn replace_buffer_text_inner(
@@ -1412,6 +1428,18 @@ fn escape_path_for_file_command(target_path: &Path) -> String {
     escaped
 }
 
+fn completion_replacement_end(range: &CompletionRange, replacement_text: &str) -> (usize, usize) {
+    let mut lines = replacement_text.split('\n');
+    let first = lines.next().unwrap_or("");
+    let mut row = range.start.line;
+    let mut col = range.start.character + first.len();
+    for line in lines {
+        row += 1;
+        col = line.len();
+    }
+    (row, col)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1422,7 +1450,7 @@ mod tests {
         CoreMessageEvent, CoreMessageSeverity, CoreMode, CorePendingInput,
     };
 
-    use super::CoreBridge;
+    use super::{CoreBridge, completion_replacement_end};
     use crate::core::outcome::{
         ApplicationOutcomeState, NormalizedCoreOutcome, NormalizedHostDirective,
         NormalizedNotification, NormalizedOutcomeBatch, NormalizedPrompt,
@@ -1430,6 +1458,7 @@ mod tests {
         PromptResponseDisposition, fold_normalized_outcomes,
     };
     use crate::core::prompt::{PromptResponseCommand, PromptResponseError};
+    use crate::features::completion::session::{CompletionPosition, CompletionRange};
 
     use crate::support::session_guard::test_lock as session_test_lock;
 
@@ -2714,6 +2743,57 @@ mod tests {
             "編集後の buffer_text に入力文字が含まれること: {:?}",
             text_after
         );
+    }
+
+    #[test]
+    fn completion_replace_range_moves_insert_cursor_to_replacement_end() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut bridge = CoreBridge::new("ty\n").expect("core bridge should initialize");
+        bridge.dispatch_key("A").expect("insert mode at line end");
+        bridge
+            .apply_completion_replace_range(
+                &CompletionRange {
+                    start: CompletionPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: CompletionPosition {
+                        line: 0,
+                        character: 2,
+                    },
+                },
+                "type",
+            )
+            .expect("completion replacement should apply");
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(snapshot.text, "type\n");
+        assert_eq!(snapshot.mode, CoreMode::Insert);
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(
+            snapshot.cursor_col, 4,
+            "accepted completion should leave the insert cursor after the inserted text"
+        );
+    }
+
+    #[test]
+    fn completion_replacement_end_tracks_multiline_insert_text() {
+        let range = CompletionRange {
+            start: CompletionPosition {
+                line: 2,
+                character: 3,
+            },
+            end: CompletionPosition {
+                line: 2,
+                character: 5,
+            },
+        };
+
+        assert_eq!(completion_replacement_end(&range, "abc"), (2, 6));
+        assert_eq!(completion_replacement_end(&range, "ab\ncd"), (3, 2));
     }
 
     // ---- タスク 5.4: 終了要求（:q, :q!）でホストアクション Quit が発行されるテスト ----

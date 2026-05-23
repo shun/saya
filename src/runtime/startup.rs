@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1337,13 +1338,20 @@ fn transpile_typescript_module(module: &StartupModuleSource) -> Result<String, S
 
 fn expand_local_startup_imports(module: &StartupModuleSource) -> Result<String, String> {
     let mut stack = Vec::new();
-    expand_local_startup_imports_from_path(&module.path, &module.source_text, &mut stack)
+    let mut expanded_imports = HashSet::new();
+    expand_local_startup_imports_from_path(
+        &module.path,
+        &module.source_text,
+        &mut stack,
+        &mut expanded_imports,
+    )
 }
 
 fn expand_local_startup_imports_from_path(
     path: &Path,
     source_text: &str,
     stack: &mut Vec<PathBuf>,
+    expanded_imports: &mut HashSet<PathBuf>,
 ) -> Result<String, String> {
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if stack.contains(&canonical_path) {
@@ -1355,16 +1363,35 @@ fn expand_local_startup_imports_from_path(
     stack.push(canonical_path);
 
     let mut output = String::with_capacity(source_text.len());
-    for line in source_text.lines() {
-        let Some(specifier) =
-            parse_static_import_specifier(line).or_else(|| parse_static_re_export_specifier(line))
+    let lines: Vec<&str> = source_text.lines().collect();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        let (statement, consumed_lines) = collect_static_import_statement(&lines, index);
+        let Some(specifier) = parse_static_import_specifier(&statement)
+            .or_else(|| parse_static_re_export_specifier(&statement))
         else {
             output.push_str(line);
             output.push('\n');
+            index += 1;
             continue;
         };
 
         let imported_path = resolve_local_startup_import(path, specifier)?;
+        let canonical_imported_path = imported_path
+            .canonicalize()
+            .unwrap_or_else(|_| imported_path.clone());
+        if expanded_imports.contains(&canonical_imported_path) {
+            log::debug!(
+                "[startup_runtime] skip duplicate local startup import: importer={}, specifier={}, resolved={}",
+                path.display(),
+                specifier,
+                imported_path.display()
+            );
+            index += consumed_lines;
+            continue;
+        }
+        expanded_imports.insert(canonical_imported_path);
         log::debug!(
             "[startup_runtime] inline local startup import: importer={}, specifier={}, resolved={}",
             path.display(),
@@ -1379,14 +1406,36 @@ fn expand_local_startup_imports_from_path(
                 error
             )
         })?;
-        let expanded_import =
-            expand_local_startup_imports_from_path(&imported_path, &imported_source, stack)?;
+        let expanded_import = expand_local_startup_imports_from_path(
+            &imported_path,
+            &imported_source,
+            stack,
+            expanded_imports,
+        )?;
         output.push_str(&expanded_import);
         output.push('\n');
+        index += consumed_lines;
     }
 
     stack.pop();
     Ok(output)
+}
+
+fn collect_static_import_statement(lines: &[&str], start_index: usize) -> (String, usize) {
+    let first_line = lines[start_index];
+    let trimmed = first_line.trim_start();
+    if !trimmed.starts_with("import ") && !trimmed.starts_with("export {") {
+        return (first_line.to_string(), 1);
+    }
+
+    let mut statement = first_line.to_string();
+    let mut consumed_lines = 1usize;
+    while !statement.trim_end().ends_with(';') && start_index + consumed_lines < lines.len() {
+        statement.push('\n');
+        statement.push_str(lines[start_index + consumed_lines]);
+        consumed_lines += 1;
+    }
+    (statement, consumed_lines)
 }
 
 fn parse_static_import_specifier(line: &str) -> Option<&str> {
@@ -1443,13 +1492,26 @@ fn resolve_local_startup_import(importer: &Path, specifier: &str) -> Result<Path
 fn strip_type_declarations(source_text: &str) -> String {
     let mut output = String::with_capacity(source_text.len());
     let mut skipping_type_block = false;
+    let mut skipping_type_alias = false;
     let mut brace_depth = 0isize;
 
     for line in source_text.lines() {
         let trimmed = line.trim_start();
+        if skipping_type_alias {
+            if line.contains(';') {
+                skipping_type_alias = false;
+            }
+            continue;
+        }
+        if !skipping_type_block && trimmed.starts_with("declare ") {
+            continue;
+        }
         if !skipping_type_block
             && (trimmed.starts_with("type ") || trimmed.starts_with("export type "))
         {
+            if !line.contains(';') {
+                skipping_type_alias = true;
+            }
             continue;
         }
         if !skipping_type_block
@@ -1550,26 +1612,66 @@ fn strip_type_annotations(source_text: &str) -> String {
                     index += 1;
                     continue;
                 }
+                if previous_non_whitespace(&chars, index) == Some(')') {
+                    let mut lookahead = index + 1;
+                    while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                        lookahead += 1;
+                    }
+                    if chars.get(lookahead) == Some(&'{') {
+                        let mut brace_depth = 0isize;
+                        while lookahead < chars.len() {
+                            match chars[lookahead] {
+                                '{' => brace_depth += 1,
+                                '}' if brace_depth > 0 => {
+                                    brace_depth -= 1;
+                                    lookahead += 1;
+                                    if brace_depth == 0 {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                            lookahead += 1;
+                        }
+                        while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                            lookahead += 1;
+                        }
+                        index = lookahead;
+                        continue;
+                    }
+                }
                 let mut lookahead = index + 1;
                 while lookahead < chars.len() && chars[lookahead].is_whitespace() {
                     lookahead += 1;
                 }
-                if looks_like_object_literal_value(&chars, lookahead)
-                    || (looks_like_simple_identifier_object_value(&chars, lookahead)
-                        && colon_is_inside_brace_context(&chars, index))
+                if colon_looks_like_object_property(&chars, index)
+                    || looks_like_object_literal_value(&chars, lookahead)
                 {
                     output.push(ch);
                     index += 1;
                     continue;
                 }
+                let mut angle_depth = 0isize;
                 while lookahead < chars.len() {
                     let next = chars[lookahead];
-                    if next == '='
-                        || next == ','
-                        || next == ')'
-                        || next == ';'
-                        || next == '{'
-                        || next == '\n'
+                    if next == '<' {
+                        angle_depth += 1;
+                        lookahead += 1;
+                        continue;
+                    }
+                    if next == '>' && angle_depth > 0 {
+                        angle_depth -= 1;
+                        lookahead += 1;
+                        continue;
+                    }
+                    if angle_depth == 0
+                        && (next == '='
+                            || next == ','
+                            || next == ')'
+                            || next == ';'
+                            || next == '{'
+                            || next == '\n')
                     {
                         break;
                     }
@@ -1678,33 +1780,43 @@ fn looks_like_object_literal_value(chars: &[char], index: usize) -> bool {
         || tail.starts_with("undefined")
 }
 
-fn looks_like_simple_identifier_object_value(chars: &[char], index: usize) -> bool {
-    let mut cursor = index;
-    if !matches!(chars.get(cursor), Some('_' | '$' | 'a'..='z' | 'A'..='Z')) {
+fn colon_looks_like_object_property(chars: &[char], colon_index: usize) -> bool {
+    if !colon_is_inside_brace_context(chars, colon_index) {
         return false;
     }
 
-    while cursor < chars.len() {
-        match chars[cursor] {
-            '_' | '$' | 'a'..='z' | 'A'..='Z' | '0'..='9' => cursor += 1,
-            '.' => {
-                cursor += 1;
-                if !matches!(chars.get(cursor), Some('_' | '$' | 'a'..='z' | 'A'..='Z')) {
-                    return false;
-                }
-            }
-            ch if ch.is_whitespace() => {
-                cursor += 1;
+    let mut cursor = colon_index;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    if cursor == 0 {
+        return false;
+    }
+
+    if matches!(chars[cursor - 1], '"' | '\'' | '`') {
+        let quote = chars[cursor - 1];
+        cursor -= 1;
+        while cursor > 0 {
+            cursor -= 1;
+            if chars[cursor] == quote {
                 break;
             }
-            _ => break,
+        }
+    } else {
+        while cursor > 0 {
+            let ch = chars[cursor - 1];
+            if matches!(ch, '_' | '$' | 'a'..='z' | 'A'..='Z' | '0'..='9') {
+                cursor -= 1;
+            } else {
+                break;
+            }
         }
     }
 
-    while cursor < chars.len() && chars[cursor].is_whitespace() {
-        cursor += 1;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
     }
-    matches!(chars.get(cursor), Some(',' | '}'))
+    matches!(chars.get(cursor.wrapping_sub(1)), Some('{' | ','))
 }
 
 fn colon_is_inside_brace_context(chars: &[char], colon_index: usize) -> bool {
@@ -1834,7 +1946,13 @@ fn normalize_assignment_spacing(source_text: &str) -> String {
                     || output.ends_with('!')
                     || output.ends_with('<')
                     || output.ends_with('>')
-                    || output.ends_with('-');
+                    || output.ends_with('+')
+                    || output.ends_with('-')
+                    || output.ends_with('*')
+                    || output.ends_with('/')
+                    || output.ends_with('%')
+                    || output.ends_with('&')
+                    || output.ends_with('|');
                 let next = chars.get(index + 1).copied();
                 let next_is_operator = matches!(next, Some('=') | Some('>'));
 

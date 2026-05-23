@@ -644,6 +644,37 @@ fn startup_warning_projects_into_initial_message_line() {
 }
 
 #[test]
+fn startup_eval_failure_projects_into_initial_message_line() {
+    let _lock = test_lock();
+    let config_path = unique_path("config-eval-failure.ts");
+    std::fs::write(&config_path, "throw new Error('startup exploded');")
+        .expect("設定ファイルの作成");
+
+    let request = parse_launch_request(["--config", config_path.to_str().unwrap()])
+        .expect("CLI 引数のパースが成功すること");
+    let outcome = prepare_launch(request).expect("評価失敗でも既定値で起動すること");
+    let session_state = outcome.editor_session_state();
+    let warning_message = bootstrap_warning_message(&outcome.warnings)
+        .expect("起動評価エラーが host message として可視化されること");
+
+    assert!(outcome.warnings.iter().any(|warning| matches!(
+        warning,
+        BootstrapWarning::ConfigEvalFailed { path, message }
+            if path == &config_path && message.contains("startup exploded")
+    )));
+
+    let model = project(&ProjectionInput::new(
+        &outcome.initial_snapshot,
+        &session_state,
+        Some(warning_message.as_str()),
+    ));
+
+    assert_eq!(model.message_line, Some(warning_message));
+
+    std::fs::remove_file(config_path).expect("設定ファイルの削除");
+}
+
+#[test]
 fn startup_from_stdin_populates_initial_snapshot() {
     let _lock = test_lock();
     let request = parse_launch_request(["-"]).expect("CLI 引数のパースが成功すること");

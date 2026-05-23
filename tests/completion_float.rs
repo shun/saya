@@ -208,6 +208,33 @@ fn completion_enter_accepts_candidate_and_escape_closes_menu_and_docs() {
 }
 
 #[test]
+fn completion_keys_drive_active_menu_without_float_focus() {
+    let mut floats = FloatingWindowManager::default();
+    let mut completion = CompletionFloatManager::default();
+    let opened = completion
+        .open_menu(&mut floats, request())
+        .expect("completion candidates should open a menu");
+
+    assert_eq!(floats.focus(), None);
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Down, Some(7)),
+        CompletionFloatInputOutcome::Selected {
+            menu_id: opened.menu_id,
+            selected_index: 2
+        }
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Enter, Some(7)),
+        CompletionFloatInputOutcome::Accepted {
+            menu_id: opened.menu_id,
+            candidate: request().candidates[2].clone()
+        }
+    );
+    assert_eq!(floats.focus(), Some(WorkspaceFocus::Pane { window_id: 7 }));
+    assert!(floats.debug_window(opened.menu_id).is_none());
+}
+
+#[test]
 fn generic_static_line_key_handler_ignores_completion_menu_content() {
     let mut floats = FloatingWindowManager::default();
     let mut completion = CompletionFloatManager::default();

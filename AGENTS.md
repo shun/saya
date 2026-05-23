@@ -58,6 +58,34 @@ TypeScript で記述できることを重要な方向性とします。高負荷
 - 新しい依存追加は、CLI エディタとして妥当かを確認してから行う
 - 振る舞いを変える変更では、設計意図が伝わるテストかドキュメントを
   併せて更新する
+- 実装後の検証は、ログや UI イベントが出たことだけで完了にしない。
+  変更がバッファ編集、ファイル保存、runtime state、UI の開閉や選択状態、
+  設定反映などの最終状態を変えるなら、テストまたは smoke でその状態を
+  読み戻して期待値と一致することを assert する。ログは「どの経路を通った
+  か」を説明する補助であり、状態変化の assert の代替にしない。
+- TypeScript startup で `saya.commands.register` または `saya.events.on`
+  を使う変更では、startup runtime での登録成功だけを検証完了にしない。
+  callback は `Function.prototype.toString()` で live runtime に渡される
+  ため、closure 変数や startup-only API に依存していると、起動後に
+  ユーザーが実行した瞬間に壊れる。登録された callback source を
+  closure なし環境で実行するテスト、または
+  `CallbackRegistrySeed` から live runtime を起動して実際に command/event
+  を実行する Layer 2 テストを必ず追加する。
+- 補完 UX (`saya.completion.show`、bundled completion source、PUM、
+  input routing、floating window key handling) を変更した場合は、
+  「候補が出た」だけで検証完了にしない。少なくとも複数候補が表示される
+  こと、選択移動で selected row が変わること、Enter で選択候補が確定
+  されること、確定後のメモリ上バッファまたは保存後ファイル内容が期待値
+  と一致することをテストで確認する。ログは診断補助であり、buffer/file
+  contents assertion の代替にしない。可能なら
+  `tests/integration_binary_smoke.rs` の binary smoke で実行ファイル境界も
+  通す。
+- 補完 source や query helper が filesystem、workspace、editor state を
+  読むだけなら、必ず readonly な host API を使う。dired/filer のように
+  active buffer を投影・更新する API を補完 source から呼ばない。fake host
+  では副作用 API を無害な mock にせず、呼ばれたら失敗するようにして責務境界
+  をテストする。path completion では `saya.fs.readDir()` を使い、
+  `saya.filer.list()` を使わない。
 
 ## ドキュメントとレビュー
 

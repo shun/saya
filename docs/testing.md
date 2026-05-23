@@ -78,6 +78,139 @@ tests. The Markdown document map is host-side presentation metadata used by
 projection. These tests belong here only while they verify the CLI presentation
 path and preserve the raw buffer owned by `vim-core-rs`.
 
+## State-based acceptance
+
+Behavioral tests must assert the final state that the user or caller depends
+on. A log line, command dispatch, callback invocation, or UI event is useful
+evidence that a path was exercised, but it is not enough when the behavior is
+supposed to change application state.
+
+Use read-back assertions as the default acceptance shape:
+
+- If an operation edits a buffer, assert `buffer_text()` or the equivalent
+  readonly buffer snapshot after the operation.
+- If an operation saves or writes a file, read the file back and assert its
+  contents or metadata.
+- If an operation changes runtime-visible state, query the public runtime or
+  host surface again and assert the returned state.
+- If an operation opens, closes, selects, or reorders UI, assert the projected
+  model, floating window state, selected row, or visible item list. If the UI
+  action also changes buffer/file state, assert that state too.
+- If an operation is expected to emit diagnostics or logs, assert the relevant
+  log line only as a path or observability check. Do not use logs as the only
+  success criterion for a state-changing behavior.
+
+When adding a smoke test, make it fail for the common false positive: the
+command ran and logged something, but the buffer, file, or runtime state stayed
+unchanged.
+
+## Runtime API side effects
+
+Tests that exercise TypeScript runtime APIs must prove whether the API is
+readonly or mutating. A fake host that turns every API into a harmless stub can
+hide the exact failure that users see in the editor.
+
+Use explicit side-effect boundaries in tests:
+
+- If a source, filter, sorter, or query helper only reads editor, filesystem, or
+  workspace state, call a readonly API and make the fake host fail when a
+  mutating API is used.
+- If an API opens, edits, projects, or refreshes a buffer, name that behavior in
+  the API or test and assert the changed buffer/window/session state.
+- If a readonly feature lists the filesystem, assert that the active buffer text
+  or saved file contents remain the expected user buffer after the operation.
+- Do not mock a mutating API as a readonly API in unit tests. Either expose a
+  readonly surface for the feature, or add a Layer 2 or binary smoke that proves
+  the mutating behavior does not occur.
+
+For bundled completion, path completion must use `saya.fs.readDir()` rather
+than `saya.filer.list()`. `saya.filer.list()` projects a directory listing into
+the active buffer as part of the dired/filer workflow, so using it from a
+completion source corrupts the edited buffer.
+
+## TypeScript startup callback boundary
+
+Startup-registered commands and events cross a source serialization boundary.
+The startup runtime records callbacks with `Function.prototype.toString()` and
+the live runtime evaluates that callback source later. A startup smoke test
+that only proves config evaluation and keymap registration is not enough for
+commands that users invoke after boot.
+
+When you change bundled plugins or startup APIs that register commands or
+events, add a test that proves the callback works after this boundary. The test
+must run the registered callback source without the original startup closure.
+Use the narrowest layer that proves the behavior:
+
+- For bundled TypeScript plugin logic, add a Deno test that registers the
+  command, rebuilds the callback with `new Function("return (" +
+  callback.toString() + ");")()`, and executes it with only the public
+  `saya.*` runtime surface.
+- For host integration behavior, add a Layer 2 Rust test that starts from
+  startup config, builds the live runtime from `CallbackRegistrySeed`, invokes
+  the registered command or event, and observes the host side effect or message
+  line.
+- For real executable coverage, use Layer 3 only when the process or terminal
+  boundary matters.
+
+These tests must fail if the callback depends on closed-over startup variables,
+module-local helper values that are not included in the callback source, or APIs
+that exist only in the startup runtime. This is the guard against silent
+"registered successfully, fails when pressed" regressions.
+
+## Completion UX acceptance
+
+Completion tests must prove the user-visible editing workflow, not only the
+source or request shape. For changes under bundled completion, typed completion
+host handling, input routing, PUM/floating windows, or completion confirm
+application, a sufficient verification path must include these observations.
+
+- More than one candidate is available when the behavior depends on ordering or
+  selection.
+- The rendered menu identifies the selected row, and a navigation key such as
+  Down changes that selected row.
+- Enter confirms the selected candidate, not just the first candidate.
+- The resulting buffer text or saved file contents are asserted after confirm.
+  Logs may be used to prove the intermediate menu state, but logs are not a
+  substitute for a buffer/file contents assertion.
+- When a startup keymap or bundled plugin is involved, include a binary smoke or
+  Layer 2 live-runtime test that crosses the startup registry boundary.
+
+The canonical regression shape is a file containing:
+
+```text
+ty
+type
+typed
+```
+
+The completion smoke should open completion at `ty`, verify both `type` and
+`typed` are present, move selection to `typed`, confirm, and assert the final
+contents:
+
+```text
+typed
+type
+typed
+```
+
+Use the focused test when touching this path:
+
+```bash
+gtimeout 120 cargo test --test integration_binary_smoke bundled_completion_binary_smoke_can_select_second_candidate
+```
+
+Path completion has an additional guard because it reads filesystem state. The
+smoke must prove that `./` completion keeps the original file buffer and only
+replaces the typed path prefix:
+
+```bash
+gtimeout 120 cargo test --test integration_binary_smoke bundled_path_completion_does_not_replace_buffer_with_directory_listing
+```
+
+For release verification, rebuild and run the same smoke through
+`target/release/sy` or another explicit release binary path. Do not assume a
+debug binary proves the release binary the user is running.
+
 ## Useful commands
 
 Use these commands from the repository root.

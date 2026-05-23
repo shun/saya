@@ -1,288 +1,44 @@
+import { compareCandidates, uniqueByLabel } from "./candidates.ts";
+import { createBufferWordSource } from "./sources/buffer.ts";
+import { createLspCompletionSource } from "./sources/lsp.ts";
+import { createPathCompletionSource } from "./sources/path.ts";
 import type {
   SayaCompletionCandidate,
-  SayaCompletionContext,
   SayaCompletionOptions,
-  SayaCompletionRange,
+  SayaCompletionQuery,
   SayaCompletionSource,
-  SayaLspCompletionSourceOptions,
-  SayaReadonlyBufferSnapshot,
+  SayaCompletionSourceResult,
+  SayaCompletionTriggerContext,
 } from "./types.ts";
 
 declare const saya: any;
 
 let nextCompletionRequestId = 1;
 
-interface CandidateRank {
-  distance: number;
-}
-
-const candidateRanks = new WeakMap<SayaCompletionCandidate, CandidateRank>();
-
-function setCandidateRank(
-  candidate: SayaCompletionCandidate,
-  rank: CandidateRank,
-): SayaCompletionCandidate {
-  candidateRanks.set(candidate, rank);
-  return candidate;
-}
-
-function wordPrefix(
-  buffer: SayaReadonlyBufferSnapshot,
-): { prefix: string; range: SayaCompletionRange } {
-  const line = String(buffer.currentLine ?? "");
-  const cursor = Math.max(
-    0,
-    Math.min(Number(buffer.cursorCol) || 0, line.length),
-  );
-  const before = line.slice(0, cursor);
-  const match = before.match(/[A-Za-z0-9_]+$/);
-  const prefix = match ? match[0] : "";
-  return {
-    prefix,
-    range: {
-      start: {
-        line: Number(buffer.cursorRow) || 0,
-        character: cursor - prefix.length,
-      },
-      end: { line: Number(buffer.cursorRow) || 0, character: cursor },
-    },
-  };
-}
-
-function offsetFromPosition(
-  text: string,
-  row: number,
-  col: number,
-): number {
-  const targetRow = Math.max(0, Number(row) || 0);
-  const targetCol = Math.max(0, Number(col) || 0);
-  let offset = 0;
-  let currentRow = 0;
-
-  while (currentRow < targetRow && offset < text.length) {
-    const nextLine = text.indexOf("\n", offset);
-    if (nextLine === -1) return text.length;
-    offset = nextLine + 1;
-    currentRow += 1;
-  }
-
-  const lineEnd = text.indexOf("\n", offset);
-  const maxCol = (lineEnd === -1 ? text.length : lineEnd) - offset;
-  return offset + Math.min(targetCol, Math.max(0, maxCol));
-}
-
-function distanceToCursor(start: number, end: number, cursor: number): number {
-  if (cursor < start) return start - cursor;
-  if (cursor > end) return cursor - end;
-  return 0;
-}
-
-function compareCandidates(
-  left: SayaCompletionCandidate,
-  right: SayaCompletionCandidate,
-): number {
-  const leftRank = candidateRanks.get(left);
-  const rightRank = candidateRanks.get(right);
-  if (!leftRank && !rightRank) return left.label.localeCompare(right.label);
-  const leftDistance = leftRank?.distance ?? Number.POSITIVE_INFINITY;
-  const rightDistance = rightRank?.distance ?? Number.POSITIVE_INFINITY;
-  if (leftDistance !== rightDistance) return leftDistance - rightDistance;
-  if (left.label.length !== right.label.length) {
-    return left.label.length - right.label.length;
-  }
-  return left.label.localeCompare(right.label);
-}
-
-function uniqueByLabel(
-  candidates: SayaCompletionCandidate[],
-): SayaCompletionCandidate[] {
-  const seen = new Set<string>();
-  const result: SayaCompletionCandidate[] = [];
-  for (const candidate of candidates) {
-    const label = String(candidate.label ?? "").trim();
-    if (!label || seen.has(label)) continue;
-    seen.add(label);
-    const normalized = { ...candidate, label };
-    const rank = candidateRanks.get(candidate);
-    if (rank) candidateRanks.set(normalized, rank);
-    result.push(normalized);
-  }
-  return result;
-}
-
-export function createBufferWordSource(): SayaCompletionSource {
-  return {
-    name: "buffer",
-    complete(context: SayaCompletionContext): SayaCompletionCandidate[] {
-      const text = String(context.buffer.text ?? "");
-      const cursor = offsetFromPosition(
-        text,
-        context.buffer.cursorRow,
-        context.buffer.cursorCol,
-      );
-      const candidates: SayaCompletionCandidate[] = [];
-      const words = text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g);
-      for (const word of words) {
-        const label = word[0];
-        if (label.toLowerCase() === context.prefix.toLowerCase()) continue;
-        const start = word.index ?? 0;
-        const end = start + label.length;
-        candidates.push(setCandidateRank({
-          label,
-          insertText: label,
-          kind: "Text",
-          source: "buffer",
-        }, { distance: distanceToCursor(start, end, cursor) }));
-      }
-      return uniqueByLabel(candidates.sort(compareCandidates));
-    },
-  };
-}
-
-function normalizeDocumentation(documentation: unknown): string[] {
-  if (typeof documentation === "string") {
-    return documentation.split(/\r\n|\r|\n/).filter((line) =>
-      line.trim().length > 0
-    );
-  }
-  if (
-    documentation && typeof documentation === "object" &&
-    "value" in documentation
-  ) {
-    return normalizeDocumentation((documentation as { value?: unknown }).value);
-  }
-  return [];
-}
-
-function normalizeCompletionItem(
-  item: unknown,
-  sourceName: string,
-): SayaCompletionCandidate | null {
-  if (!item || typeof item !== "object") return null;
-  const record = item as Record<string, unknown>;
-  const label = String(record.label ?? "").trim();
-  if (!label) return null;
-  const textEdit = record.textEdit && typeof record.textEdit === "object"
-    ? record.textEdit as Record<string, unknown>
-    : null;
-  const insertText = record.insertText ?? textEdit?.newText ?? label;
-  return {
-    label,
-    insertText: typeof insertText === "string" ? insertText : label,
-    kind: record.kind == null ? null : String(record.kind),
-    detail: typeof record.detail === "string" ? record.detail : null,
-    documentation: normalizeDocumentation(record.documentation),
-    source: sourceName,
-  };
-}
-
-function completionItemsFromResponse(response: unknown): unknown[] {
-  const result =
-    response && typeof response === "object" && "result" in response
-      ? (response as { result?: unknown }).result
-      : response;
-  if (Array.isArray(result)) return result;
-  if (
-    result && typeof result === "object" &&
-    Array.isArray((result as { items?: unknown }).items)
-  ) {
-    return (result as { items: unknown[] }).items;
-  }
-  return [];
-}
-
-function lspRangeFromItem(item: unknown): SayaCompletionRange | null {
-  if (!item || typeof item !== "object") return null;
-  const textEdit = (item as { textEdit?: unknown }).textEdit;
-  if (!textEdit || typeof textEdit !== "object") return null;
-  const range = (textEdit as { range?: unknown }).range;
-  if (!range || typeof range !== "object") return null;
-  const start = (range as { start?: unknown }).start;
-  const end = (range as { end?: unknown }).end;
-  if (!start || !end || typeof start !== "object" || typeof end !== "object") {
-    return null;
-  }
-  const startRecord = start as Record<string, unknown>;
-  const endRecord = end as Record<string, unknown>;
-  const startLine = Number(startRecord.line);
-  const startCharacter = Number(startRecord.character);
-  const endLine = Number(endRecord.line);
-  const endCharacter = Number(endRecord.character);
-  if (
-    !Number.isFinite(startLine) || !Number.isFinite(startCharacter) ||
-    !Number.isFinite(endLine) || !Number.isFinite(endCharacter)
-  ) {
-    return null;
-  }
-  return {
-    start: {
-      line: Math.max(0, startLine),
-      character: Math.max(0, startCharacter),
-    },
-    end: { line: Math.max(0, endLine), character: Math.max(0, endCharacter) },
-  };
-}
-
-function chooseLspReplaceRange(
-  items: unknown[],
-  fallback: SayaCompletionRange,
-): SayaCompletionRange {
-  const first = items.map(lspRangeFromItem).find((
-    range,
-  ): range is SayaCompletionRange => range != null);
-  return first ?? fallback;
-}
-
-export function createLspCompletionSource(
-  options: SayaLspCompletionSourceOptions = {},
-): SayaCompletionSource {
-  const commandName = options.commandName ?? "lsp.completion";
-  const sourceName = options.sourceName ?? "lsp";
-  const optional = options.optional ?? true;
-  return {
-    name: sourceName,
-    async complete(
-      context: SayaCompletionContext,
-    ): Promise<SayaCompletionCandidate[]> {
-      try {
-        const response = await saya.commands.execute(commandName);
-        const items = completionItemsFromResponse(response);
-        context.replaceRange = chooseLspReplaceRange(
-          items,
-          context.replaceRange,
-        );
-        return uniqueByLabel(
-          items
-            .map((item) => normalizeCompletionItem(item, sourceName))
-            .filter((candidate): candidate is SayaCompletionCandidate =>
-              candidate != null
-            ),
-        );
-      } catch (error) {
-        if (!optional) throw error;
-        console.debug(
-          `[saya-completion] optional LSP source skipped: ${String(error)}`,
-        );
-        return [];
-      }
-    },
-  };
+interface BundledCompletionRuntimeOptions {
+  minPrefixLength: number;
+  maxItems: number;
+  sourceTimeoutMs: number;
 }
 
 export function prefixFilter(
-  candidates: SayaCompletionCandidate[],
-  context: SayaCompletionContext,
-): SayaCompletionCandidate[] {
-  const prefix = context.prefix.toLowerCase();
-  if (!prefix) return candidates;
-  return candidates.filter((candidate) =>
-    candidate.label.toLowerCase() !== prefix &&
-    candidate.label.toLowerCase().startsWith(prefix)
-  );
+  result: SayaCompletionSourceResult,
+  query: SayaCompletionQuery,
+): SayaCompletionSourceResult {
+  const prefix = query.prefix.toLowerCase();
+  if (!prefix) return result;
+  return {
+    ...result,
+    candidates: result.candidates.filter((candidate) =>
+      candidate.label.toLowerCase() !== prefix &&
+      candidate.label.toLowerCase().startsWith(prefix)
+    ),
+  };
 }
 
 export function labelSorter(
   candidates: SayaCompletionCandidate[],
+  _result: SayaCompletionSourceResult,
 ): SayaCompletionCandidate[] {
   return [...candidates].sort(compareCandidates);
 }
@@ -293,35 +49,78 @@ export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {
   const minPrefixLength = options.minPrefixLength ?? 1;
   const maxItems = options.maxItems ?? 50;
   const sourceTimeoutMs = options.sourceTimeoutMs ?? 1000;
+  const usesCustomPipeline = options.sources != null ||
+    options.filters != null || options.sorters != null;
+  if (!usesCustomPipeline) {
+    const run = createBundledCompletionRuntimeCommand({
+      minPrefixLength,
+      maxItems,
+      sourceTimeoutMs,
+    });
+    saya.commands.register(commandName, run);
+    saya.keymap.set("insert", key, saya.commands.execute(commandName));
+    return { commandName, key };
+  }
+
   const sources = options.sources ??
-    [createLspCompletionSource(), createBufferWordSource()];
+    [
+      createLspCompletionSource(),
+      createPathCompletionSource({ maxItems }),
+      createBufferWordSource(),
+    ];
   const filters = options.filters ?? [prefixFilter];
   const sorters = options.sorters ?? [labelSorter];
 
   const run = async () => {
     const buffer = await saya.buffer.current();
     const editor = await saya.editor.current();
-    const prefixInfo = wordPrefix(buffer);
-    if (prefixInfo.prefix.length < minPrefixLength) return false;
-    const context: SayaCompletionContext = {
+    const triggerContext: SayaCompletionTriggerContext = {
       buffer,
       editor,
-      prefix: prefixInfo.prefix,
-      replaceRange: prefixInfo.range,
     };
-    let candidates = (await Promise.all(
-      sources.map((source) =>
-        completeWithTimeout(source, context, sourceTimeoutMs)
+    const queries = sources.flatMap((source) => {
+      const query = source.trigger(triggerContext);
+      return query != null && query.prefix.length >= minPrefixLength
+        ? [{ source, query }]
+        : [];
+    });
+    if (queries.length === 0) return false;
+
+    let results = (await Promise.all(
+      queries.map(({ source, query }) =>
+        completeWithTimeout(
+          source,
+          query,
+          sourceTimeoutMs,
+        )
       ),
-    )).flat();
-    for (const filter of filters) candidates = filter(candidates, context);
-    for (const sorter of sorters) candidates = sorter(candidates, context);
+    )).filter((result) => result.candidates.length > 0);
+    if (results.length === 0) return false;
+
+    results = results.map((result) => {
+      const sourceQuery = queries.find(({ query }) =>
+        query.sourceId === result.sourceId
+      );
+      if (!sourceQuery) return result;
+      let filtered = result;
+      for (const filter of filters) {
+        filtered = filter(filtered, sourceQuery.query);
+      }
+      return filtered;
+    }).filter((result) => result.candidates.length > 0);
+    if (results.length === 0) return false;
+
+    const selected = selectResultGroup(results, sources);
+    let candidates = selected.results.flatMap((result) => result.candidates);
+    for (const sorter of sorters) {
+      candidates = sorter(candidates, selected.results[0]);
+    }
     candidates = uniqueByLabel(candidates).slice(0, maxItems);
     if (candidates.length === 0) return false;
     return await saya.completion.show({
       sessionId: `buffer:${buffer.id}:${buffer.cursorRow}:${buffer.cursorCol}`,
       requestId: nextCompletionRequestId++,
-      replaceRange: context.replaceRange,
+      replaceRange: selected.replaceRange,
       candidates,
       selectedIndex: 0,
     });
@@ -332,24 +131,410 @@ export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {
   return { commandName, key };
 }
 
+function createBundledCompletionRuntimeCommand(
+  options: BundledCompletionRuntimeOptions,
+) {
+  const minPrefixLength = JSON.stringify(options.minPrefixLength);
+  const maxItems = JSON.stringify(options.maxItems);
+  const sourceTimeoutMs = JSON.stringify(options.sourceTimeoutMs);
+  const source = `
+    return async function sayaCompletionTrigger() {
+      const minPrefixLength = ${minPrefixLength};
+      const maxItems = ${maxItems};
+      const sourceTimeoutMs = ${sourceTimeoutMs};
+      const requestIdKey = "__sayaCompletionNextRequestId";
+      globalThis[requestIdKey] = Number.isFinite(Number(globalThis[requestIdKey]))
+        ? Number(globalThis[requestIdKey])
+        : 1;
+
+      const setRank = (candidate, rank) => {
+        Object.defineProperty(candidate, "__rank", {
+          value: rank,
+          enumerable: false,
+          configurable: true,
+        });
+        return candidate;
+      };
+      const compareCandidates = (left, right) => {
+        const leftRank = left.__rank ?? {};
+        const rightRank = right.__rank ?? {};
+        const leftDistance = leftRank.distance ?? Number.POSITIVE_INFINITY;
+        const rightDistance = rightRank.distance ?? Number.POSITIVE_INFINITY;
+        if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+        const leftKindRank = leftRank.kindRank ?? 0;
+        const rightKindRank = rightRank.kindRank ?? 0;
+        if (leftKindRank !== rightKindRank) return leftKindRank - rightKindRank;
+        if (left.label.length !== right.label.length) {
+          return left.label.length - right.label.length;
+        }
+        return left.label.localeCompare(right.label);
+      };
+      const uniqueByLabel = (candidates) => {
+        const seen = new Set();
+        const result = [];
+        for (const candidate of candidates) {
+          const label = String(candidate.label ?? "").trim();
+          if (!label || seen.has(label)) continue;
+          seen.add(label);
+          const normalized = { ...candidate, label };
+          const rank = candidate.__rank;
+          if (rank != null) {
+            Object.defineProperty(normalized, "__rank", {
+              value: rank,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+          result.push(normalized);
+        }
+        return result;
+      };
+      const wordPrefix = (buffer) => {
+        const line = String(buffer.currentLine ?? "");
+        const cursor = Math.max(0, Math.min(Number(buffer.cursorCol) || 0, line.length));
+        const before = line.slice(0, cursor);
+        const match = before.match(/[A-Za-z0-9_]+$/);
+        const prefix = match ? match[0] : "";
+        return {
+          prefix,
+          range: {
+            start: { line: Number(buffer.cursorRow) || 0, character: cursor - prefix.length },
+            end: { line: Number(buffer.cursorRow) || 0, character: cursor },
+          },
+        };
+      };
+      const pathBoundaryChars = new Set([
+        '"',
+        "'",
+        String.fromCharCode(96),
+        "<",
+        ">",
+        "(",
+        ")",
+        "[",
+        "]",
+        "{",
+        "}",
+      ]);
+      const isPathPrefixBoundary = (ch) =>
+        String(ch).trim() === "" || pathBoundaryChars.has(String(ch));
+      const isPathLikePrefix = (prefix) =>
+        !!prefix && (
+          prefix.startsWith("/") ||
+          prefix.startsWith("./") ||
+          prefix.startsWith("../") ||
+          prefix.includes("/")
+        );
+      const dirname = (path) => {
+        const value = String(path ?? "");
+        if (!value) return ".";
+        const trimmed = value.replace(/\\/+$/, "");
+        const slash = trimmed.lastIndexOf("/");
+        if (slash <= 0) return slash === 0 ? "/" : ".";
+        return trimmed.slice(0, slash);
+      };
+      const normalizePath = (path) => {
+        const value = String(path || ".");
+        const absolute = value.startsWith("/");
+        const parts = [];
+        for (const part of value.split("/")) {
+          if (!part || part === ".") continue;
+          if (part === "..") {
+            if (parts.length > 0 && parts[parts.length - 1] !== "..") {
+              parts.pop();
+            } else if (!absolute) {
+              parts.push("..");
+            }
+          } else {
+            parts.push(part);
+          }
+        }
+        const joined = parts.join("/");
+        if (absolute) return "/" + joined;
+        return joined || ".";
+      };
+      const joinPath = (base, child) => {
+        if (!child || child === ".") return normalizePath(base || ".");
+        if (child.startsWith("/")) return normalizePath(child);
+        if (!base || base === ".") return normalizePath(child);
+        if (base === "/") return normalizePath("/" + child);
+        return normalizePath(String(base).replace(/\\/+$/, "") + "/" + child);
+      };
+      const pathPrefix = (buffer) => {
+        const line = String(buffer.currentLine ?? "");
+        const cursor = Math.max(0, Math.min(Number(buffer.cursorCol) || 0, line.length));
+        const before = line.slice(0, cursor);
+        let start = before.length;
+        while (start > 0 && !isPathPrefixBoundary(before[start - 1])) start -= 1;
+        const prefix = before.slice(start);
+        if (!isPathLikePrefix(prefix)) return null;
+        const slash = prefix.lastIndexOf("/");
+        return {
+          prefix,
+          range: {
+            start: { line: Number(buffer.cursorRow) || 0, character: start },
+            end: { line: Number(buffer.cursorRow) || 0, character: cursor },
+          },
+          directoryPrefix: slash >= 0 ? prefix.slice(0, slash + 1) : "",
+          entryPrefix: slash >= 0 ? prefix.slice(slash + 1) : prefix,
+        };
+      };
+      const pathDirectory = (buffer, prefixInfo) => {
+        if (prefixInfo.directoryPrefix.startsWith("/")) return normalizePath(prefixInfo.directoryPrefix);
+        return joinPath(dirname(buffer.path), prefixInfo.directoryPrefix || ".");
+      };
+      const pathLabel = (directoryPrefix, name, isDirectory) =>
+        directoryPrefix + name + (isDirectory ? "/" : "");
+      const pathKindRank = (kind) => kind === "directory" ? 0 : (kind === "file" ? 1 : 2);
+      const comparePathCandidates = (left, right) => {
+        const leftRank = pathKindRank(String(left.detail ?? "").toLowerCase());
+        const rightRank = pathKindRank(String(right.detail ?? "").toLowerCase());
+        if (leftRank !== rightRank) return leftRank - rightRank;
+        if (left.label.length !== right.label.length) return left.label.length - right.label.length;
+        return left.label.localeCompare(right.label);
+      };
+      const field = (value, key) =>
+        value && typeof value === "object" ? Reflect.get(value, key) : null;
+      const documentation = (value) => {
+        if (typeof value === "string") return value.split(/\\r\\n|\\r|\\n/).filter((line) => line.trim().length > 0);
+        if (value && typeof value === "object") return documentation(field(value, "value"));
+        return [];
+      };
+      const normalizeLspItem = (item) => {
+        if (!item || typeof item !== "object") return null;
+        const label = String(field(item, "label") ?? "").trim();
+        if (!label) return null;
+        const textEdit = field(item, "textEdit");
+        const insertText = field(item, "insertText") ?? field(textEdit, "newText") ?? label;
+        return {
+          label,
+          insertText: typeof insertText === "string" ? insertText : label,
+          kind: field(item, "kind") == null ? null : String(field(item, "kind")),
+          detail: typeof field(item, "detail") === "string" ? String(field(item, "detail")) : null,
+          documentation: documentation(field(item, "documentation")),
+          source: "lsp",
+        };
+      };
+      const lspItems = (response) => {
+        const result = response && typeof response === "object" ? field(response, "result") : response;
+        if (Array.isArray(result)) return result;
+        const items = field(result, "items");
+        return Array.isArray(items) ? items : [];
+      };
+      const lspRange = (item) => {
+        const textEdit = field(item, "textEdit");
+        const range = field(textEdit, "range");
+        const start = field(range, "start");
+        const end = field(range, "end");
+        if (!start || !end) return null;
+        const startLine = Number(field(start, "line"));
+        const startCharacter = Number(field(start, "character"));
+        const endLine = Number(field(end, "line"));
+        const endCharacter = Number(field(end, "character"));
+        if (
+          !Number.isFinite(startLine) || !Number.isFinite(startCharacter) ||
+          !Number.isFinite(endLine) || !Number.isFinite(endCharacter)
+        ) return null;
+        return {
+          start: { line: Math.max(0, startLine), character: Math.max(0, startCharacter) },
+          end: { line: Math.max(0, endLine), character: Math.max(0, endCharacter) },
+        };
+      };
+      const withTimeout = async (sourceId, prefix, replaceRange, producer) => {
+        if (
+          !Number.isFinite(sourceTimeoutMs) ||
+          sourceTimeoutMs <= 0 ||
+          typeof setTimeout !== "function" ||
+          typeof clearTimeout !== "function"
+        ) return await producer();
+        let timeoutId;
+        const timeout = new Promise((resolve) => {
+          timeoutId = setTimeout(() => {
+            console.debug("[saya-completion] source timed out: " + sourceId);
+            resolve({ sourceId, prefix, replaceRange, candidates: [] });
+          }, sourceTimeoutMs);
+        });
+        try {
+          return await Promise.race([Promise.resolve(producer()), timeout]);
+        } finally {
+          if (timeoutId !== undefined) clearTimeout(timeoutId);
+        }
+      };
+
+      const buffer = await saya.buffer.current();
+      const editor = await saya.editor.current();
+      void editor;
+      const bufferPrefix = wordPrefix(buffer);
+      const pathInfo = pathPrefix(buffer);
+      const queries = [];
+      const lspQuery = { sourceId: "lsp", prefix: bufferPrefix.prefix, replaceRange: bufferPrefix.range };
+      if (lspQuery.prefix.length >= minPrefixLength) queries.push(lspQuery);
+      if (pathInfo && pathInfo.prefix.length >= minPrefixLength) {
+        queries.push({ sourceId: "path", prefix: pathInfo.prefix, replaceRange: pathInfo.range, pathInfo });
+      }
+      if (bufferPrefix.prefix.length >= minPrefixLength) {
+        queries.push({ sourceId: "buffer", prefix: bufferPrefix.prefix, replaceRange: bufferPrefix.range });
+      }
+      if (queries.length === 0) return false;
+
+      const results = [];
+      for (const query of queries) {
+        if (query.sourceId === "lsp") {
+          const result = await withTimeout("lsp", query.prefix, query.replaceRange, async () => {
+            try {
+              const response = await saya.commands.execute("lsp.completion");
+              const items = lspItems(response);
+              let replaceRange = query.replaceRange;
+              for (const item of items) {
+                const range = lspRange(item);
+                if (range) {
+                  replaceRange = range;
+                  break;
+                }
+              }
+              return {
+                sourceId: "lsp",
+                prefix: query.prefix,
+                replaceRange,
+                candidates: uniqueByLabel(items.map(normalizeLspItem).filter(Boolean)),
+              };
+            } catch (error) {
+              console.debug("[saya-completion] optional LSP source skipped: " + String(error));
+              return { sourceId: "lsp", prefix: query.prefix, replaceRange: query.replaceRange, candidates: [] };
+            }
+          });
+          if (result.candidates.length > 0) results.push(result);
+        } else if (query.sourceId === "path") {
+          const result = await withTimeout("path", query.prefix, query.replaceRange, async () => {
+            try {
+              const entries = await saya.fs.readDir(pathDirectory(buffer, query.pathInfo), {
+                showHidden: true,
+                sortBy: "kind",
+              });
+              const entryPrefix = query.pathInfo.entryPrefix.toLowerCase();
+              const candidates = [];
+              for (const entry of Array.isArray(entries) ? entries : []) {
+                if (!entry || typeof entry !== "object") continue;
+                const name = String(field(entry, "name") ?? "");
+                const kind = String(field(entry, "kind") ?? "file").toLowerCase();
+                if (!name || !name.toLowerCase().startsWith(entryPrefix)) continue;
+                const isDirectory = kind === "directory";
+                const label = pathLabel(query.pathInfo.directoryPrefix, name, isDirectory);
+                if (label.toLowerCase() === query.pathInfo.prefix.toLowerCase()) continue;
+                candidates.push(setRank({
+                  label,
+                  insertText: label,
+                  kind: isDirectory ? "Folder" : "File",
+                  detail: isDirectory ? "directory" : kind,
+                  source: "path",
+                }, { distance: 0, kindRank: pathKindRank(kind) }));
+              }
+              return {
+                sourceId: "path",
+                prefix: query.prefix,
+                replaceRange: query.replaceRange,
+                candidates: uniqueByLabel(candidates.sort(comparePathCandidates)).slice(0, maxItems),
+              };
+            } catch (error) {
+              console.debug("[saya-completion] optional path source skipped: " + String(error));
+              return { sourceId: "path", prefix: query.prefix, replaceRange: query.replaceRange, candidates: [] };
+            }
+          });
+          if (result.candidates.length > 0) results.push(result);
+        } else {
+          const result = await withTimeout("buffer", query.prefix, query.replaceRange, async () => {
+            const text = String(buffer.text ?? "");
+            const cursorOffset = text
+              .split("\\n")
+              .slice(0, Number(buffer.cursorRow) || 0)
+              .reduce((sum, line) => sum + line.length + 1, 0) +
+              (Number(buffer.cursorCol) || 0);
+            const candidates = [];
+            const seen = new Set();
+            for (const match of text.matchAll(/[A-Za-z0-9_]+/g)) {
+              const word = match[0];
+              const start = match.index ?? 0;
+              if (
+                word.toLowerCase() === query.prefix.toLowerCase() ||
+                !word.toLowerCase().startsWith(query.prefix.toLowerCase()) ||
+                seen.has(word)
+              ) continue;
+              seen.add(word);
+              const end = start + word.length;
+              const distance = cursorOffset < start
+                ? start - cursorOffset
+                : (cursorOffset > end ? cursorOffset - end : 0);
+              candidates.push(setRank({
+                label: word,
+                insertText: word,
+                kind: "Text",
+                detail: "buffer word",
+                source: "buffer",
+              }, { distance, kindRank: 2 }));
+            }
+            return {
+              sourceId: "buffer",
+              prefix: query.prefix,
+              replaceRange: query.replaceRange,
+              candidates: uniqueByLabel(candidates.sort(compareCandidates)),
+            };
+          });
+          if (result.candidates.length > 0) results.push(result);
+        }
+      }
+      if (results.length === 0) return false;
+
+      const groups = new Map();
+      for (const result of results) {
+        const key = JSON.stringify(result.replaceRange);
+        groups.set(key, [...(groups.get(key) ?? []), result]);
+      }
+      const order = new Map([["lsp", 0], ["path", 1], ["buffer", 2]]);
+      const selected = [...groups.values()].map((group) => ({
+        replaceRange: group[0].replaceRange,
+        results: group,
+        order: Math.min(...group.map((result) => order.get(result.sourceId) ?? Number.POSITIVE_INFINITY)),
+      })).sort((left, right) => left.order - right.order)[0];
+      let candidates = selected.results.flatMap((result) => result.candidates);
+      candidates = uniqueByLabel(candidates.sort(compareCandidates)).slice(0, maxItems);
+      if (candidates.length === 0) return false;
+      return await saya.completion.show({
+        sessionId: "buffer:" + buffer.id + ":" + buffer.cursorRow + ":" + buffer.cursorCol,
+        requestId: globalThis[requestIdKey]++,
+        replaceRange: selected.replaceRange,
+        candidates,
+        selectedIndex: 0,
+      });
+    };
+  `;
+  return new Function(source)();
+}
+
 async function completeWithTimeout(
   source: SayaCompletionSource,
-  context: SayaCompletionContext,
+  query: SayaCompletionQuery,
   timeoutMs: number,
-): Promise<SayaCompletionCandidate[]> {
+): Promise<SayaCompletionSourceResult> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return await source.complete(context);
+    return await source.complete(query);
   }
-  let timeoutId: number | undefined;
-  const timeout = new Promise<SayaCompletionCandidate[]>((resolve) => {
-    timeoutId = setTimeout(() => {
-      console.debug(`[saya-completion] source timed out: ${source.name}`);
-      resolve([]);
-    }, timeoutMs);
-  });
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout: Promise<SayaCompletionSourceResult> = new Promise(
+    (resolve) => {
+      timeoutId = setTimeout(() => {
+        console.debug(`[saya-completion] source timed out: ${source.id}`);
+        resolve({
+          sourceId: query.sourceId,
+          prefix: query.prefix,
+          replaceRange: query.replaceRange,
+          candidates: [],
+        });
+      }, timeoutMs);
+    },
+  );
   try {
     return await Promise.race([
-      Promise.resolve(source.complete(context)),
+      Promise.resolve(source.complete(query)),
       timeout,
     ]);
   } finally {
@@ -357,11 +542,51 @@ async function completeWithTimeout(
   }
 }
 
+function selectResultGroup(
+  results: SayaCompletionSourceResult[],
+  sources: SayaCompletionSource[],
+): {
+  replaceRange: SayaCompletionSourceResult["replaceRange"];
+  results: SayaCompletionSourceResult[];
+} {
+  const groups: Map<string, SayaCompletionSourceResult[]> = new Map();
+  for (const result of results) {
+    const key = JSON.stringify(result.replaceRange);
+    groups.set(key, [...(groups.get(key) ?? []), result]);
+  }
+  const sourceOrder = new Map(
+    sources.map((source, index) => [source.id, index]),
+  );
+  return [...groups.values()]
+    .map((group) => ({
+      replaceRange: group[0].replaceRange,
+      results: group,
+      order: Math.min(
+        ...group.map((result) =>
+          sourceOrder.get(result.sourceId) ?? Number.POSITIVE_INFINITY
+        ),
+      ),
+    }))
+    .sort((left, right) => left.order - right.order)[0];
+}
+
+export {
+  createPathCompletionSource,
+  detectPathCompletionPrefix,
+  resolvePathCompletionDirectory,
+} from "./sources/path.ts";
+export { createBufferWordSource } from "./sources/buffer.ts";
+export { createLspCompletionSource } from "./sources/lsp.ts";
+
 export type {
   SayaCompletionCandidate,
-  SayaCompletionContext,
   SayaCompletionOptions,
+  SayaCompletionQuery,
   SayaCompletionRange,
   SayaCompletionSource,
+  SayaCompletionSourceResult,
+  SayaCompletionTriggerContext,
   SayaLspCompletionSourceOptions,
+  SayaPathCompletionSourceOptions,
 } from "./types.ts";
+export type { SayaPathCompletionPrefix } from "./sources/path.ts";

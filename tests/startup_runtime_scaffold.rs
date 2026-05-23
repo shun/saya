@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use saya::features::completion::session::CompletionShowRequest;
 use saya::presentation::theme::{
     MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
 };
@@ -17,11 +20,14 @@ use saya::runtime::startup::{
 };
 
 fn unique_path(name: &str) -> PathBuf {
+    static NEXT_UNIQUE_PATH_ID: AtomicU64 = AtomicU64::new(1);
+
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time went backwards")
         .as_nanos();
-    std::env::temp_dir().join(format!("saya-startup-runtime-{name}-{nanos}"))
+    let id = NEXT_UNIQUE_PATH_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("saya-startup-runtime-{name}-{nanos}-{id}"))
 }
 
 struct NoopHostBridge;
@@ -960,6 +966,75 @@ fn init_ts_module_transpile_preserves_identifier_values_in_callback_object_liter
 }
 
 #[test]
+fn init_ts_module_transpile_preserves_expression_values_in_object_literals() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            const buffer = { cursorRow: 3, cursorCol: 5 };
+            const range = {
+              start: {
+                line: Number(buffer.cursorRow) || 0,
+                character: Math.max(Number(buffer.cursorCol) || 0, 1),
+              },
+              end: { line: Number(buffer.cursorRow) || 0, character: 5 },
+            };
+            saya.options.tabstop = range.start.character;
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("line: Number(buffer.cursorRow) || 0"),
+                "expression-valued object fields must remain executable: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("character: Math.max(Number(buffer.cursorCol) || 0, 1)")
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_preserves_compound_assignment_operators() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            let offset = 1;
+            offset += 1;
+            offset -= 1;
+            saya.options.tabstop = offset;
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(module.executable_source_text.contains("offset += 1;"));
+            assert!(module.executable_source_text.contains("offset -= 1;"));
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
 fn init_ts_module_transpile_preserves_multiline_ternary_expressions() {
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
@@ -999,6 +1074,288 @@ fn init_ts_module_transpile_preserves_multiline_ternary_expressions() {
 }
 
 #[test]
+fn init_ts_module_transpile_strips_multiline_type_aliases_from_imports() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let types_path = current_dir.join("types.ts");
+    std::fs::write(
+        &types_path,
+        r#"
+            export type SourceFilter = (
+                result: unknown,
+                query: unknown,
+            ) => unknown;
+
+            export function setupImported() {
+                saya.options.number = true;
+            }
+        "#,
+    )
+    .expect("types file");
+    std::fs::write(
+        &config_path,
+        r#"
+            import { setupImported } from "./types.ts";
+            setupImported();
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                !module.executable_source_text.contains(") => unknown"),
+                "multiline type alias remnants must not reach executable JS: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("function setupImported()"),
+                "runtime declarations from the same import should remain"
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_strips_declare_statements_from_imports() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let imported_path = current_dir.join("imported.ts");
+    std::fs::write(
+        &imported_path,
+        r#"
+            declare const saya: any;
+
+            export function setupImported() {
+                saya.options.number = true;
+            }
+        "#,
+    )
+    .expect("imported file");
+    std::fs::write(
+        &config_path,
+        r#"
+            import { setupImported } from "./imported.ts";
+            setupImported();
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                !module.executable_source_text.contains("declare const"),
+                "declare statements must not reach executable JS: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("function setupImported()"),
+                "runtime declarations from the same import should remain"
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_strips_type_annotations_with_generic_commas() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            const ranks: WeakMap<object, { distance: number }> = new WeakMap();
+            const groups: Map<string, unknown[]> = new Map();
+            saya.keymap.set("normal", "-", saya.commands.execute("dired.open"));
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("const ranks = new WeakMap();"),
+                "generic type annotations with commas should be stripped cleanly: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("const groups = new Map();"),
+                "generic type annotations with array values should be stripped cleanly: {}",
+                module.executable_source_text
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_strips_object_return_type_annotations() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            function currentState(): {
+              enabled: boolean;
+              label: string;
+            } {
+              return { enabled: true, label: "ready" };
+            }
+            saya.options.number = currentState().enabled;
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("function currentState(){"),
+                "object return type annotations should be stripped: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("return { enabled: true, label: \"ready\" };")
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_inlines_shared_imports_once() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(current_dir.join("sources")).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        current_dir.join("shared.ts"),
+        r#"
+            export function sharedHelper() {
+              return "shared";
+            }
+        "#,
+    )
+    .expect("shared file");
+    std::fs::write(
+        current_dir.join("sources").join("a.ts"),
+        r#"
+            import { sharedHelper } from "../shared.ts";
+            export function setupA() {
+              saya.options.tabstop = sharedHelper().length;
+            }
+        "#,
+    )
+    .expect("source a file");
+    std::fs::write(
+        current_dir.join("sources").join("b.ts"),
+        r#"
+            import { sharedHelper } from "../shared.ts";
+            export function setupB() {
+              saya.options.shiftwidth = sharedHelper().length;
+            }
+        "#,
+    )
+    .expect("source b file");
+    std::fs::write(
+        &config_path,
+        r#"
+            import { setupA } from "./sources/a.ts";
+            import { setupB } from "./sources/b.ts";
+            setupA();
+            setupB();
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert_eq!(
+                module
+                    .executable_source_text
+                    .matches("function sharedHelper")
+                    .count(),
+                1,
+                "shared local imports should only be inlined once: {}",
+                module.executable_source_text
+            );
+            assert!(module.executable_source_text.contains("function setupA()"));
+            assert!(module.executable_source_text.contains("function setupB()"));
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_inlines_multiline_static_imports() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        current_dir.join("shared.ts"),
+        r#"
+            export function setupImported() {
+              saya.options.number = true;
+            }
+        "#,
+    )
+    .expect("shared file");
+    std::fs::write(
+        &config_path,
+        r#"
+            import {
+              setupImported,
+            } from "./shared.ts";
+            setupImported();
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::Success(module) => {
+            assert!(
+                !module.executable_source_text.contains("import {"),
+                "multiline imports must not reach executable JS: {}",
+                module.executable_source_text
+            );
+            assert!(
+                module
+                    .executable_source_text
+                    .contains("function setupImported()")
+            );
+        }
+        other => panic!("Success を返すこと, got: {:?}", other),
+    }
+}
+
+#[test]
 fn init_ts_module_transpile_failure_is_reported_structurally() {
     let current_dir = unique_path("cwd");
     std::fs::create_dir_all(&current_dir).expect("current dir");
@@ -1017,6 +1374,111 @@ fn init_ts_module_transpile_failure_is_reported_structurally() {
         result,
         StartupModulePrepareResult::TranspileFailed { ref path, .. } if path == &config_path
     ));
+}
+
+struct CompletionRuntimeHostBridge {
+    shown: Arc<Mutex<Vec<CompletionShowRequest>>>,
+}
+
+impl HostCapabilityBridge for CompletionRuntimeHostBridge {
+    fn execute_host_command(&self, name: &str) -> BoxFuture<Result<(), RuntimeCommandError>> {
+        let name = name.to_string();
+        Box::pin(async move { Err(RuntimeCommandError::UnknownCommand { name }) })
+    }
+
+    fn show_completion(
+        &self,
+        request: CompletionShowRequest,
+    ) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let shown = self.shown.clone();
+        Box::pin(async move {
+            shown
+                .lock()
+                .expect("completion requests lock")
+                .push(request);
+            Ok(true)
+        })
+    }
+
+    fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot> {
+        Box::pin(async move {
+            ReadonlyBufferSnapshot {
+                id: 42,
+                path: Some(PathBuf::from("/workspace/main.go")),
+                line_count: 3,
+                cursor_row: 0,
+                cursor_col: 3,
+                current_line: "pri".to_string(),
+                text: "pri\nprintln\nprivate\n".to_string(),
+            }
+        })
+    }
+
+    fn current_window(&self) -> BoxFuture<ReadonlyWindowSnapshot> {
+        Box::pin(async move { ReadonlyWindowSnapshot { id: 1 } })
+    }
+
+    fn current_editor(&self) -> BoxFuture<ReadonlyEditorSnapshot> {
+        Box::pin(async move {
+            ReadonlyEditorSnapshot {
+                mode: RuntimeMode::Insert,
+            }
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bundled_completion_command_runs_after_startup_to_live_runtime_boundary() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let completion_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+    let completion_specifier = completion_path.to_string_lossy();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaCompletion }} from "{completion_specifier}";
+                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 1000 }});
+            "#
+        ),
+    )
+    .expect("config file");
+
+    let prepared = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!("startup module should prepare: {prepared:?}");
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("startup registry should collect");
+    let seed = CallbackRegistrySeed::from_startup_registry(&registry);
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    let runtime = SayaLiveRuntime::spawn_from_seed(
+        Arc::new(CompletionRuntimeHostBridge {
+            shown: shown.clone(),
+        }),
+        seed,
+    )
+    .expect("live runtime should spawn from startup callback seed");
+
+    let receipt = runtime
+        .execute_command("completion.trigger")
+        .expect("completion trigger should queue");
+    receipt
+        .await_result()
+        .await
+        .expect("completion trigger should run in live runtime");
+
+    let shown = shown.lock().expect("completion requests lock");
+    assert_eq!(shown.len(), 1);
+    let labels = shown[0]
+        .candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(labels, vec!["println", "private"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

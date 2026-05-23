@@ -233,6 +233,11 @@ globalThis.saya = {
             );
         },
     },
+    fs: {
+        readDir(path = ".", options = {}) {
+            return Deno.core.ops.op_runtime_fs_read_dir(String(path), JSON.stringify(options ?? {}));
+        },
+    },
     filer: {
         list(path = ".", options = {}) {
             return Deno.core.ops.op_runtime_filer_list(String(path), JSON.stringify(options ?? {}));
@@ -1067,6 +1072,10 @@ declare global {
         manualRecoveryRequired: boolean;
     }
 
+    interface SayaRuntimeFsSurface {
+        readDir(path?: string, options?: SayaFilerListOptions): Promise<SayaFilerEntry[]>;
+    }
+
     interface SayaRuntimeSurface {
         commands: SayaRuntimeCommandsSurface;
         buffer: SayaRuntimeBufferSurface;
@@ -1074,6 +1083,7 @@ declare global {
         panel: SayaRuntimePanelSurface;
         editor: SayaRuntimeEditorSurface;
         workspace: SayaRuntimeWorkspaceSurface;
+        fs: SayaRuntimeFsSurface;
         filer: SayaRuntimeFilerSurface;
         lsif: SayaRuntimeLsifSurface;
         input: SayaRuntimeInputSurface;
@@ -2576,6 +2586,25 @@ async fn op_runtime_filer_list(
 
 #[op2(async(deferred), fast)]
 #[serde]
+async fn op_runtime_fs_read_dir(
+    #[string] path: String,
+    #[string] options_json: String,
+) -> Result<Vec<RuntimeFilerEntry>, JsErrorBox> {
+    let path = PathBuf::from(path);
+    let options = serde_json::from_str::<RuntimeFilerListOptions>(&options_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid fs readDir options: {error}")))?;
+    log::debug!(
+        "[saya_live_runtime] runtime op fs readDir: path={}, show_hidden={}, sort_by={:?}, filter={:?}",
+        path.display(),
+        options.show_hidden,
+        options.sort_by,
+        options.filter
+    );
+    list_local_filer_entries(path, options).map_err(runtime_filer_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
 async fn op_runtime_filer_current_entry(
     state: Rc<RefCell<OpState>>,
 ) -> Result<Option<RuntimeFilerCurrentEntry>, JsErrorBox> {
@@ -3078,6 +3107,7 @@ deno_core::extension!(
         op_runtime_selector_cancel,
         op_runtime_selector_dispose,
         op_runtime_workspace_find_root,
+        op_runtime_fs_read_dir,
         op_runtime_current_buffer,
         op_runtime_current_selection,
         op_runtime_current_window,

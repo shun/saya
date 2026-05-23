@@ -106,6 +106,35 @@ function isCodeOrConfigPath(path: string): boolean {
 function verificationCommandsFor(paths: string[]): string[] {
   const commands = new Set<string>();
 
+  const touchesStartupCallbackBoundary = paths.some((path) =>
+    path.startsWith("plugins/bundled/") ||
+    path.includes("runtime/startup") ||
+    path.includes("runtime/live") ||
+    path.includes("callback_registry_seed") ||
+    path.includes("integration_typescript_runtime")
+  );
+  const touchesCompletionUx = paths.some((path) =>
+    path.includes("completion") ||
+    path.includes("input_loop") ||
+    path.includes("input/router") ||
+    path.includes("floating_window") ||
+    path === "src/main.rs" ||
+    path === "tests/integration_binary_smoke.rs"
+  );
+  const touchesCompletionSourceOrRuntimeApi = paths.some((path) =>
+    path.includes("plugins/bundled/completion") ||
+    path.includes("runtime/live") ||
+    path.includes("runtime/integration") ||
+    path.includes("src/main.rs")
+  );
+
+  commands.add(
+    "For behavior changes, prove the intended effect by observing the final state, not only logs or UI events. If the change should edit a buffer, save a file, update runtime state, open/close UI, or change config-visible behavior, assert the resulting buffer/file/state by reading it back in a test or smoke.",
+  );
+  commands.add(
+    "If logs are added or used for diagnosis, verify the expected log line appears on the exercised path, but do not use logs as the only success criterion when state should change.",
+  );
+
   if (paths.some((path) => path.endsWith(".rs") || path === "Cargo.toml")) {
     commands.add("gtimeout 120s cargo test");
   }
@@ -130,6 +159,30 @@ function verificationCommandsFor(paths: string[]): string[] {
   ) {
     commands.add(
       "Run the affected runtime path, not only startup smoke. For selector changes, execute ',' -> prompt input -> selector open and confirm /tmp/saya.log.",
+    );
+  }
+
+  if (touchesStartupCallbackBoundary) {
+    commands.add(
+      "For startup-registered commands/events, verify the Function.toString boundary: run a test that rebuilds the registered callback from callback.toString() without startup closure state, or run a Layer 2 CallbackRegistrySeed/live-runtime command/event test.",
+    );
+  }
+
+  if (touchesCompletionUx) {
+    commands.add(
+      "For completion UX changes, run a binary or release smoke that proves multiple candidates render, selection moves (for example Down changes the selected row), Enter confirms the selected candidate, and the resulting buffer/save contents are asserted. Logs alone are not enough.",
+    );
+    commands.add(
+      "Suggested completion checks: gtimeout 120 cargo test --test integration_binary_smoke bundled_completion_binary_smoke_can_select_second_candidate && gtimeout 120 cargo test --test completion_float",
+    );
+  }
+
+  if (touchesCompletionSourceOrRuntimeApi) {
+    commands.add(
+      "For completion sources that inspect filesystem/workspace/editor state, prove they use readonly host APIs and do not mutate the active buffer/window/session. Add or run a fake-host test that fails on side-effectful APIs, plus a binary smoke that reads the final buffer/file back.",
+    );
+    commands.add(
+      "Suggested path completion guard: gtimeout 120 cargo test --test integration_binary_smoke bundled_path_completion_does_not_replace_buffer_with_directory_listing",
     );
   }
 
