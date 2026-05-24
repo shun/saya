@@ -1,5 +1,6 @@
 use saya::presentation::theme::{
-    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
+    FilerSemanticStyleKey, MarkdownSemanticStyleKey, SyntaxSemanticStyleKey,
+    ThemeTextStyleDeclaration, UiStyleKey,
 };
 use saya::runtime::startup::{
     SayaKeyMode, SayaKeymapAction, StartupOptionName, StartupOptionValue, StartupPluginSource,
@@ -293,6 +294,47 @@ async fn startup_theme_ui_and_syntax_styles_are_collected() {
                 key: SyntaxSemanticStyleKey::Statement,
                 style,
             } if style.fg.as_deref() == Some("keyword") && style.bold == Some(true)
+        )
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_theme_language_syntax_and_filer_styles_are_collected() {
+    let registry = collect_startup_registry(
+        r##"
+            saya.theme.languages = {
+                go: {
+                    syntax: {
+                        function: { fg: "#7aa2f7", bold: true },
+                    },
+                },
+            };
+            saya.theme.filer = {
+                directory: { fg: "#7aa2f7", bold: true },
+                marked: { bg: "#33467c" },
+            };
+        "##,
+    )
+    .await
+    .expect("startup theme language syntax and filer config should evaluate");
+
+    assert!(registry.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            StartupRegistryEntry::ThemeLanguageSyntaxStyle {
+                language,
+                key: SyntaxSemanticStyleKey::Function,
+                style,
+            } if language == "go" && style.fg.as_deref() == Some("#7aa2f7") && style.bold == Some(true)
+        )
+    }));
+    assert!(registry.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            StartupRegistryEntry::ThemeFilerStyle {
+                key: FilerSemanticStyleKey::Marked,
+                style,
+            } if style.bg.as_deref() == Some("#33467c")
         )
     }));
 }

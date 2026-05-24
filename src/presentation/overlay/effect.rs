@@ -185,6 +185,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                filer_style_ranges: vec![],
                 resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,

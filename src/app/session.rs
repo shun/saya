@@ -637,6 +637,10 @@ impl EditorSessionState {
         entries
     }
 
+    pub fn is_directory_entry_marked(&self, entry: &DirectoryBufferEntry) -> bool {
+        self.directory_marked_paths.contains(&entry.path)
+    }
+
     pub fn build_directory_buffer_operation_plan(
         &self,
         edited_text: &str,

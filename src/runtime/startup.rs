@@ -8,7 +8,8 @@ use log::LevelFilter;
 use serde::Deserialize;
 
 use crate::presentation::theme::{
-    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
+    FilerSemanticStyleKey, MarkdownSemanticStyleKey, SyntaxSemanticStyleKey,
+    ThemeTextStyleDeclaration, UiStyleKey,
 };
 pub use crate::runtime::config::{
     SayaKeyMode, SayaKeymapAction, SayaOptionName, SayaOptionValue, StartupPluginDeclaration,
@@ -48,6 +49,8 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.theme.palette",
     "saya.theme.ui",
     "saya.theme.syntax",
+    "saya.theme.languages",
+    "saya.theme.filer",
     "saya.theme.markdown",
     "saya.log.file",
     "saya.log.level",
@@ -76,6 +79,8 @@ const {
     op_collect_startup_theme_palette,
     op_collect_startup_theme_ui,
     op_collect_startup_theme_syntax,
+    op_collect_startup_theme_languages,
+    op_collect_startup_theme_filer,
     op_collect_startup_theme_markdown,
     op_collect_startup_log_file,
     op_collect_startup_log_level,
@@ -267,6 +272,28 @@ Object.defineProperty(globalThis.saya.theme, "syntax", {
     },
     set(value) {
         op_collect_startup_theme_syntax(JSON.stringify(value ?? {}));
+    },
+});
+
+Object.defineProperty(globalThis.saya.theme, "languages", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return {};
+    },
+    set(value) {
+        op_collect_startup_theme_languages(JSON.stringify(value ?? {}));
+    },
+});
+
+Object.defineProperty(globalThis.saya.theme, "filer", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return {};
+    },
+    set(value) {
+        op_collect_startup_theme_filer(JSON.stringify(value ?? {}));
     },
 });
 
@@ -531,6 +558,22 @@ declare global {
         strikethrough?: boolean;
     }
 
+    type SayaSyntaxStyleKey =
+        | "comment"
+        | "string"
+        | "constant"
+        | "statement"
+        | "identifier"
+        | "type"
+        | "function"
+        | "punctuation"
+        | "markup"
+        | "default";
+
+    interface SayaLanguageTheme {
+        syntax?: Partial<Record<SayaSyntaxStyleKey, SayaTextStyle>>;
+    }
+
     interface SayaStartupThemeSurface {
         palette: Record<string, string>;
         ui: Partial<Record<
@@ -543,17 +586,14 @@ declare global {
             | "prompt",
             SayaTextStyle
         >>;
-        syntax: Partial<Record<
-            | "comment"
-            | "string"
-            | "constant"
-            | "statement"
-            | "identifier"
-            | "type"
-            | "function"
-            | "punctuation"
-            | "markup"
-            | "default",
+        syntax: Partial<Record<SayaSyntaxStyleKey, SayaTextStyle>>;
+        languages: Record<string, SayaLanguageTheme>;
+        filer: Partial<Record<
+            | "directory"
+            | "file"
+            | "symlink"
+            | "other"
+            | "marked",
             SayaTextStyle
         >>;
         markdown: Partial<Record<
@@ -914,6 +954,75 @@ fn op_collect_startup_theme_syntax(
 }
 
 #[op2(fast)]
+fn op_collect_startup_theme_languages(
+    state: &mut OpState,
+    #[string] languages_json: String,
+) -> Result<(), JsErrorBox> {
+    let languages =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&languages_json)
+            .map_err(|error| JsErrorBox::generic(format!("invalid languages theme: {error}")))?;
+    log::debug!(
+        "[startup_runtime] collect startup language theme: language_count={}",
+        languages.len()
+    );
+    let registry = state.borrow_mut::<StartupRegistry>();
+    for (language, value) in languages {
+        let serde_json::Value::Object(language_object) = value else {
+            return Err(JsErrorBox::generic(format!(
+                "language theme must be an object: {language}"
+            )));
+        };
+        let Some(syntax_value) = language_object.get("syntax") else {
+            continue;
+        };
+        let serde_json::Value::Object(syntax) = syntax_value else {
+            return Err(JsErrorBox::generic(format!(
+                "language syntax theme must be an object: {language}.syntax"
+            )));
+        };
+        for (name, value) in syntax {
+            let key = SyntaxSemanticStyleKey::parse(name).ok_or_else(|| {
+                JsErrorBox::generic(format!(
+                    "unsupported language syntax theme key: {language}.{name}"
+                ))
+            })?;
+            let style = parse_theme_text_style(
+                "language syntax theme style",
+                &format!("{language}.syntax.{name}"),
+                value.clone(),
+            )?;
+            registry.push(StartupRegistryEntry::ThemeLanguageSyntaxStyle {
+                language: language.clone(),
+                key,
+                style,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_theme_filer(
+    state: &mut OpState,
+    #[string] filer_json: String,
+) -> Result<(), JsErrorBox> {
+    let filer = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&filer_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid filer theme: {error}")))?;
+    log::debug!(
+        "[startup_runtime] collect startup filer theme: style_count={}",
+        filer.len()
+    );
+    let registry = state.borrow_mut::<StartupRegistry>();
+    for (name, value) in filer {
+        let key = FilerSemanticStyleKey::parse(&name)
+            .ok_or_else(|| JsErrorBox::generic(format!("unsupported filer theme key: {name}")))?;
+        let style = parse_theme_text_style("filer theme style", &name, value)?;
+        registry.push(StartupRegistryEntry::ThemeFilerStyle { key, style });
+    }
+    Ok(())
+}
+
+#[op2(fast)]
 fn op_collect_startup_log_file(
     state: &mut OpState,
     #[string] path: String,
@@ -1160,6 +1269,8 @@ deno_core::extension!(
         op_collect_startup_theme_palette,
         op_collect_startup_theme_ui,
         op_collect_startup_theme_syntax,
+        op_collect_startup_theme_languages,
+        op_collect_startup_theme_filer,
         op_collect_startup_theme_markdown,
         op_collect_startup_log_file,
         op_collect_startup_log_level,

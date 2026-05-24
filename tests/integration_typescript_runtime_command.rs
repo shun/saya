@@ -1029,6 +1029,7 @@ impl RuntimeHostSession for RecordingRuntimeHostSession {
             follow_up_events,
             shutdown_intent,
             presentation_intents: Vec::new(),
+            vfs_load_failed: false,
         })
     }
 }

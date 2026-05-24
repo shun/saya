@@ -73,6 +73,22 @@ declare global {
         strikethrough?: boolean;
     }
 
+    type SayaSyntaxStyleKey =
+        | "comment"
+        | "string"
+        | "constant"
+        | "statement"
+        | "identifier"
+        | "type"
+        | "function"
+        | "punctuation"
+        | "markup"
+        | "default";
+
+    interface SayaLanguageTheme {
+        syntax?: Partial<Record<SayaSyntaxStyleKey, SayaTextStyle>>;
+    }
+
     interface SayaStartupThemeSurface {
         palette: Record<string, string>;
         ui: Partial<Record<
@@ -85,17 +101,14 @@ declare global {
             | "prompt",
             SayaTextStyle
         >>;
-        syntax: Partial<Record<
-            | "comment"
-            | "string"
-            | "constant"
-            | "statement"
-            | "identifier"
-            | "type"
-            | "function"
-            | "punctuation"
-            | "markup"
-            | "default",
+        syntax: Partial<Record<SayaSyntaxStyleKey, SayaTextStyle>>;
+        languages: Record<string, SayaLanguageTheme>;
+        filer: Partial<Record<
+            | "directory"
+            | "file"
+            | "symlink"
+            | "other"
+            | "marked",
             SayaTextStyle
         >>;
         markdown: Partial<Record<

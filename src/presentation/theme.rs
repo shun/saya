@@ -70,6 +70,28 @@ pub enum SyntaxSemanticStyleKey {
     Default,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FilerSemanticStyleKey {
+    Directory,
+    File,
+    Symlink,
+    Other,
+    Marked,
+}
+
+impl FilerSemanticStyleKey {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "directory" => Some(Self::Directory),
+            "file" => Some(Self::File),
+            "symlink" => Some(Self::Symlink),
+            "other" => Some(Self::Other),
+            "marked" => Some(Self::Marked),
+            _ => None,
+        }
+    }
+}
+
 impl SyntaxSemanticStyleKey {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -162,6 +184,8 @@ impl ResolvedTextStyle {
 pub struct ResolvedTheme {
     ui: BTreeMap<UiStyleKey, ResolvedTextStyle>,
     syntax: BTreeMap<SyntaxSemanticStyleKey, ResolvedTextStyle>,
+    language_syntax: BTreeMap<String, BTreeMap<SyntaxSemanticStyleKey, ResolvedTextStyle>>,
+    filer: BTreeMap<FilerSemanticStyleKey, ResolvedTextStyle>,
     markdown: BTreeMap<MarkdownSemanticStyleKey, ResolvedTextStyle>,
 }
 
@@ -172,6 +196,24 @@ impl ResolvedTheme {
 
     pub fn syntax_style(&self, key: SyntaxSemanticStyleKey) -> Option<&ResolvedTextStyle> {
         self.syntax.get(&key)
+    }
+
+    pub fn syntax_style_for_language(
+        &self,
+        language: Option<&str>,
+        key: SyntaxSemanticStyleKey,
+    ) -> Option<ResolvedTextStyle> {
+        language
+            .and_then(normalize_language_id)
+            .and_then(|language| self.language_syntax.get(&language))
+            .and_then(|syntax| syntax.get(&key))
+            .cloned()
+            .or_else(|| self.syntax.get(&key).cloned())
+            .filter(|style| !style.is_empty())
+    }
+
+    pub fn filer_style(&self, key: FilerSemanticStyleKey) -> Option<&ResolvedTextStyle> {
+        self.filer.get(&key)
     }
 
     pub fn markdown_style(&self, key: MarkdownSemanticStyleKey) -> Option<&ResolvedTextStyle> {
@@ -192,6 +234,8 @@ pub struct ThemeRegistry {
     palette: BTreeMap<String, String>,
     ui: BTreeMap<UiStyleKey, ThemeTextStyleDeclaration>,
     syntax: BTreeMap<SyntaxSemanticStyleKey, ThemeTextStyleDeclaration>,
+    language_syntax: BTreeMap<String, BTreeMap<SyntaxSemanticStyleKey, ThemeTextStyleDeclaration>>,
+    filer: BTreeMap<FilerSemanticStyleKey, ThemeTextStyleDeclaration>,
     markdown: BTreeMap<MarkdownSemanticStyleKey, ThemeTextStyleDeclaration>,
 }
 
@@ -226,6 +270,33 @@ impl ThemeRegistry {
                     );
                     theme.syntax.insert(*key, style.clone());
                 }
+                StartupRegistryEntry::ThemeLanguageSyntaxStyle {
+                    language,
+                    key,
+                    style,
+                } => {
+                    let Some(language) = normalize_language_id(language) else {
+                        log::debug!(
+                            "[theme] ignored empty language syntax style from startup registry: key={key:?}"
+                        );
+                        continue;
+                    };
+                    log::debug!(
+                        "[theme] collect language syntax style from startup registry: language={}, key={key:?}, style={style:?}",
+                        language
+                    );
+                    theme
+                        .language_syntax
+                        .entry(language)
+                        .or_default()
+                        .insert(*key, style.clone());
+                }
+                StartupRegistryEntry::ThemeFilerStyle { key, style } => {
+                    log::debug!(
+                        "[theme] collect filer style from startup registry: key={key:?}, style={style:?}"
+                    );
+                    theme.filer.insert(*key, style.clone());
+                }
                 _ => {}
             }
         }
@@ -240,6 +311,30 @@ impl ThemeRegistry {
             .collect::<BTreeMap<_, _>>();
         let syntax = self
             .syntax
+            .iter()
+            .map(|(key, style)| (*key, self.resolve_text_style(style)))
+            .collect::<BTreeMap<_, _>>();
+        let language_syntax = self
+            .language_syntax
+            .iter()
+            .map(|(language, syntax_styles)| {
+                let resolved_styles = syntax_styles
+                    .iter()
+                    .map(|(key, style)| {
+                        let mut resolved = self
+                            .syntax
+                            .get(key)
+                            .map(|base| self.resolve_text_style(base))
+                            .unwrap_or_default();
+                        self.apply_text_style_override(&mut resolved, style);
+                        (*key, resolved)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                (language.clone(), resolved_styles)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let filer = self
+            .filer
             .iter()
             .map(|(key, style)| (*key, self.resolve_text_style(style)))
             .collect::<BTreeMap<_, _>>();
@@ -263,6 +358,8 @@ impl ThemeRegistry {
         ResolvedTheme {
             ui,
             syntax,
+            language_syntax,
+            filer,
             markdown,
         }
     }
@@ -279,7 +376,7 @@ impl ThemeRegistry {
             (None, Some(level)) => Some(self.resolve_text_style(level)),
             (Some(heading), Some(level)) => {
                 let mut inherited = self.resolve_text_style(heading);
-                self.apply_text_style_override(&mut inherited, key, level);
+                self.apply_text_style_override_with_log(&mut inherited, key, level);
                 Some(inherited)
             }
         }
@@ -302,7 +399,7 @@ impl ThemeRegistry {
         }
     }
 
-    fn apply_text_style_override(
+    fn apply_text_style_override_with_log(
         &self,
         inherited: &mut ResolvedTextStyle,
         key: MarkdownSemanticStyleKey,
@@ -340,6 +437,39 @@ impl ThemeRegistry {
         }
     }
 
+    fn apply_text_style_override(
+        &self,
+        inherited: &mut ResolvedTextStyle,
+        override_style: &ThemeTextStyleDeclaration,
+    ) {
+        if let Some(fg) = override_style
+            .fg
+            .as_deref()
+            .and_then(|value| self.resolve_color(value))
+        {
+            inherited.fg = Some(fg);
+        }
+        if let Some(bg) = override_style
+            .bg
+            .as_deref()
+            .and_then(|value| self.resolve_color(value))
+        {
+            inherited.bg = Some(bg);
+        }
+        if let Some(bold) = override_style.bold {
+            inherited.bold = bold;
+        }
+        if let Some(italic) = override_style.italic {
+            inherited.italic = italic;
+        }
+        if let Some(underline) = override_style.underline {
+            inherited.underline = underline;
+        }
+        if let Some(strikethrough) = override_style.strikethrough {
+            inherited.strikethrough = strikethrough;
+        }
+    }
+
     fn resolve_color(&self, value: &str) -> Option<ResolvedThemeColor> {
         if is_direct_hex_color(value) {
             return Some(ResolvedThemeColor(value.to_string()));
@@ -357,6 +487,20 @@ impl ThemeRegistry {
         }
         log::debug!("[theme] unknown palette token ignored during theme resolution: {value}");
         None
+    }
+}
+
+pub fn normalize_language_id(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "go" | "golang" => Some("go".to_string()),
+        "rs" | "rust" => Some("rust".to_string()),
+        "ts" | "typescript" => Some("typescript".to_string()),
+        "tsx" => Some("tsx".to_string()),
+        "md" | "markdown" => Some("markdown".to_string()),
+        "js" | "javascript" => Some("javascript".to_string()),
+        "jsx" => Some("jsx".to_string()),
+        other => Some(other.to_string()),
     }
 }
 
@@ -500,5 +644,84 @@ mod tests {
             "heading2 bold=false should override heading bold=true"
         );
         assert!(heading2.underline);
+    }
+
+    #[test]
+    fn language_specific_syntax_style_overrides_global_syntax_fallback() {
+        let registry = StartupRegistry::from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "purple".to_string(),
+                value: "#bb9af7".to_string(),
+            },
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Function,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("purple".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeLanguageSyntaxStyle {
+                language: "Go".to_string(),
+                key: SyntaxSemanticStyleKey::Function,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("#7aa2f7".to_string()),
+                    bold: Some(true),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let resolved = ThemeRegistry::from_startup_registry(&registry).resolve();
+        let go_function = resolved
+            .syntax_style_for_language(Some("golang"), SyntaxSemanticStyleKey::Function)
+            .expect("go function style should resolve");
+        let rust_function = resolved
+            .syntax_style_for_language(Some("rust"), SyntaxSemanticStyleKey::Function)
+            .expect("rust function style should fall back to global syntax");
+
+        assert_eq!(
+            go_function.fg,
+            Some(ResolvedThemeColor("#7aa2f7".to_string()))
+        );
+        assert!(go_function.bold);
+        assert_eq!(
+            rust_function.fg,
+            Some(ResolvedThemeColor("#bb9af7".to_string()))
+        );
+        assert!(!rust_function.bold);
+    }
+
+    #[test]
+    fn filer_styles_resolve_separately_from_syntax_styles() {
+        let registry = StartupRegistry::from_entries(vec![
+            StartupRegistryEntry::ThemePalette {
+                name: "accent".to_string(),
+                value: "#7aa2f7".to_string(),
+            },
+            StartupRegistryEntry::ThemeFilerStyle {
+                key: FilerSemanticStyleKey::Directory,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("accent".to_string()),
+                    bold: Some(true),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let resolved = ThemeRegistry::from_startup_registry(&registry).resolve();
+        let directory = resolved
+            .filer_style(FilerSemanticStyleKey::Directory)
+            .expect("directory style should resolve");
+
+        assert_eq!(
+            directory.fg,
+            Some(ResolvedThemeColor("#7aa2f7".to_string()))
+        );
+        assert!(directory.bold);
+        assert!(
+            resolved
+                .syntax_style(SyntaxSemanticStyleKey::Function)
+                .is_none()
+        );
     }
 }

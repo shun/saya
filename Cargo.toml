@@ -12,6 +12,7 @@ tree-sitter-syntax = [
     "vim-core-rs/tree-sitter-markdown",
     "vim-core-rs/tree-sitter-rust",
     "vim-core-rs/tree-sitter-typescript",
+    "vim-core-rs/tree-sitter-go",
 ]
 terminal-ghostty = []
 

@@ -29,17 +29,26 @@ pub struct CoreHostActionRuntime {
 
 pub type HostActionRuntime = CoreHostActionRuntime;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HostVfsRequestEffect {
+    pub load_failed: bool,
+}
+
 impl CoreHostActionRuntime {
     pub fn handle_vfs_request(
         &mut self,
         core_bridge: &mut CoreBridge,
         request: CoreVfsRequest,
-    ) -> Result<(), HostActionError> {
+    ) -> Result<HostVfsRequestEffect, HostActionError> {
+        let is_load_request = matches!(&request, CoreVfsRequest::Load { .. });
         let response = self.vfs.response_for(request);
+        let effect = HostVfsRequestEffect {
+            load_failed: is_load_request && matches!(&response, CoreVfsResponse::Failed { .. }),
+        };
         core_bridge
             .submit_vfs_response(response)
             .map_err(|error| HostActionError::VfsResponseRejected(format!("{error:?}")))?;
-        Ok(())
+        Ok(effect)
     }
 
     pub fn start_job(

@@ -4250,13 +4250,17 @@ fn execute_runtime_host_command_through_core(
                         }
                         continue;
                     }
-                    if let Err(error) =
-                        host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
+                    match host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
                     {
-                        log::debug!(
-                            "[main] runtime host command VFS directive failed: {:?}",
-                            error
-                        );
+                        Ok(vfs_effect) => {
+                            effect.vfs_load_failed |= vfs_effect.load_failed;
+                        }
+                        Err(error) => {
+                            log::debug!(
+                                "[main] runtime host command VFS directive failed: {:?}",
+                                error
+                            );
+                        }
                     }
                 }
                 NormalizedHostDirective::JobStart { request, trace } => {
@@ -4363,6 +4367,13 @@ fn execute_runtime_host_command_with_floats(
             );
             let effect =
                 execute_runtime_host_command_through_core(&ex_command, outcome, session_state)?;
+            if effect.vfs_load_failed {
+                log::debug!(
+                    "[main] runtime edit command left host target unchanged because core VFS load failed: path={}",
+                    path.display()
+                );
+                return Ok(effect);
+            }
             session_state.replace_target_path(path.clone());
             if let Some(directory_buffer) = session_state
                 .directory_buffer()
@@ -5088,9 +5099,7 @@ fn execute_lsp_hover_float_host_command(
         );
         return Ok(RuntimeCommandEffect {
             transient_message: outcome.is_none().then(|| "No LSP diagnostics".to_string()),
-            follow_up_events: Vec::new(),
-            shutdown_intent: None,
-            presentation_intents: Vec::new(),
+            ..RuntimeCommandEffect::default()
         });
     }
     let outcome = open_lsp_hover_float(
@@ -5114,9 +5123,7 @@ fn execute_lsp_hover_float_host_command(
         transient_message: outcome
             .is_none()
             .then(|| "No LSP hover content".to_string()),
-        follow_up_events: Vec::new(),
-        shutdown_intent: None,
-        presentation_intents: Vec::new(),
+        ..RuntimeCommandEffect::default()
     })
 }
 
@@ -5222,9 +5229,7 @@ fn execute_lsp_diagnostic_float_host_command(
     );
     Ok(RuntimeCommandEffect {
         transient_message: id.is_none().then(|| "No LSP diagnostics".to_string()),
-        follow_up_events: Vec::new(),
-        shutdown_intent: None,
-        presentation_intents: Vec::new(),
+        ..RuntimeCommandEffect::default()
     })
 }
 
@@ -5277,9 +5282,7 @@ fn execute_lsp_location_list_float_host_command(
     );
     Ok(RuntimeCommandEffect {
         transient_message: id.is_none().then(|| "No LSP locations".to_string()),
-        follow_up_events: Vec::new(),
-        shutdown_intent: None,
-        presentation_intents: Vec::new(),
+        ..RuntimeCommandEffect::default()
     })
 }
 
@@ -5326,9 +5329,7 @@ fn execute_lsp_symbol_outline_float_host_command(
     );
     Ok(RuntimeCommandEffect {
         transient_message: id.is_none().then(|| "No LSP symbols".to_string()),
-        follow_up_events: Vec::new(),
-        shutdown_intent: None,
-        presentation_intents: Vec::new(),
+        ..RuntimeCommandEffect::default()
     })
 }
 
@@ -5624,9 +5625,7 @@ fn execute_lsp_publish_diagnostics_host_command(
     }
     Ok(RuntimeCommandEffect {
         transient_message: None,
-        follow_up_events: Vec::new(),
-        shutdown_intent: None,
-        presentation_intents: Vec::new(),
+        ..RuntimeCommandEffect::default()
     })
 }
 
@@ -5650,9 +5649,7 @@ fn execute_lsp_cycle_diagnostic_host_command(
     let Some(diagnostic) = diagnostic else {
         return Ok(RuntimeCommandEffect {
             transient_message: Some("No LSP diagnostics".to_string()),
-            follow_up_events: Vec::new(),
-            shutdown_intent: None,
-            presentation_intents: Vec::new(),
+            ..RuntimeCommandEffect::default()
         });
     };
     let ui =
@@ -5800,9 +5797,7 @@ fn execute_lsp_status_host_command(
     log::info!("[main][lsp] status: {message}");
     Ok(RuntimeCommandEffect {
         transient_message: Some(message),
-        follow_up_events: Vec::new(),
-        shutdown_intent: None,
-        presentation_intents: Vec::new(),
+        ..RuntimeCommandEffect::default()
     })
 }
 
@@ -9806,6 +9801,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                filer_style_ranges: vec![],
                 resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
@@ -13768,6 +13764,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn dired_enter_keeps_directory_state_when_file_load_fails() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-enter-load-failure-root");
+        let binary_path = root_path.join("bad.bin");
+        let config_path = unique_path("dired-enter-load-failure-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&binary_path, [0xff, 0xfe, 0xfd]).expect("binary file");
+        std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.enter",
+        )
+        .await;
+
+        assert_eq!(
+            outcome.target_path,
+            Some(root_path.clone()),
+            "failed file loads must not retarget the host session away from the directory buffer"
+        );
+        assert_eq!(
+            session_state.target_path().map(PathBuf::as_path),
+            Some(root_path.as_path())
+        );
+        assert!(
+            session_state.directory_buffer().is_some(),
+            "dired metadata should remain active so filer styling and currentEntry keep working"
+        );
+        assert_eq!(outcome.core_bridge.snapshot().text, "bad.bin\n");
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn dired_up_opens_parent_directory() {
         let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
@@ -15106,6 +15156,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                filer_style_ranges: vec![],
                 resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,

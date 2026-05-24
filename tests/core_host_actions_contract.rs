@@ -49,16 +49,22 @@ fn drain_host_actions_once(bridge: &mut CoreBridge, runtime: &mut CoreHostAction
     for directive in folded.effects.host_directives {
         handled = true;
         match directive {
-            NormalizedHostDirective::VfsRequest { request, .. } => runtime
-                .handle_vfs_request(bridge, request)
-                .expect("VFS request should be handled"),
-            NormalizedHostDirective::JobStart { request, .. } => runtime
-                .start_job(bridge, request)
-                .expect("job start should be handled"),
+            NormalizedHostDirective::VfsRequest { request, .. } => {
+                runtime
+                    .handle_vfs_request(bridge, request)
+                    .expect("VFS request should be handled");
+            }
+            NormalizedHostDirective::JobStart { request, .. } => {
+                runtime
+                    .start_job(bridge, request)
+                    .expect("job start should be handled");
+            }
             NormalizedHostDirective::JobWrite { vfd, data, .. } => runtime.write_job(vfd, data),
-            NormalizedHostDirective::JobStop { job_id, .. } => runtime
-                .stop_job(bridge, job_id)
-                .expect("job stop should be handled"),
+            NormalizedHostDirective::JobStop { job_id, .. } => {
+                runtime
+                    .stop_job(bridge, job_id)
+                    .expect("job stop should be handled");
+            }
             NormalizedHostDirective::Write { .. }
             | NormalizedHostDirective::Quit { .. }
             | NormalizedHostDirective::Suspend { .. } => {}

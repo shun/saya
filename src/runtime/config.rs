@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use serde_json::Value as JsonValue;
 
 use crate::presentation::theme::{
-    MarkdownSemanticStyleKey, SyntaxSemanticStyleKey, ThemeTextStyleDeclaration, UiStyleKey,
+    FilerSemanticStyleKey, MarkdownSemanticStyleKey, SyntaxSemanticStyleKey,
+    ThemeTextStyleDeclaration, UiStyleKey,
 };
 pub use crate::runtime::options::{SayaOptionName, SayaOptionValue};
 
@@ -168,6 +169,15 @@ pub enum StartupRegistryEntry {
     },
     ThemeSyntaxStyle {
         key: SyntaxSemanticStyleKey,
+        style: ThemeTextStyleDeclaration,
+    },
+    ThemeLanguageSyntaxStyle {
+        language: String,
+        key: SyntaxSemanticStyleKey,
+        style: ThemeTextStyleDeclaration,
+    },
+    ThemeFilerStyle {
+        key: FilerSemanticStyleKey,
         style: ThemeTextStyleDeclaration,
     },
     LogFile {

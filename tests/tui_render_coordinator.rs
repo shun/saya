@@ -60,6 +60,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: saya::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -463,6 +464,7 @@ fn syntax_chunks_force_color_text_mode_even_when_terminal_profile_is_monochrome(
         end_col_exclusive: 3,
         syn_id: 1,
         name: Some("rustKeyword".to_string()),
+        language: None,
         tree_sitter: None,
     }];
 

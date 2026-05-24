@@ -950,6 +950,8 @@ fn config_commands_from_registry(
             | StartupRegistryEntry::ThemeMarkdownStyle { .. }
             | StartupRegistryEntry::ThemeUiStyle { .. }
             | StartupRegistryEntry::ThemeSyntaxStyle { .. }
+            | StartupRegistryEntry::ThemeLanguageSyntaxStyle { .. }
+            | StartupRegistryEntry::ThemeFilerStyle { .. }
             | StartupRegistryEntry::LogFile { .. }
             | StartupRegistryEntry::LogLevel { .. }
             | StartupRegistryEntry::PluginUse { .. }

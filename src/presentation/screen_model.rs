@@ -14,7 +14,7 @@ use vim_core_rs::{
     CoreBufferLineRange, CoreLightSnapshot, CoreMode, CoreSnapshot, CoreSyntaxChunk, CoreWindowInfo,
 };
 
-use crate::app::session::EditorSessionState;
+use crate::app::session::{DirectoryBufferEntryKind, EditorSessionState};
 use crate::core::bridge::VisualSelection;
 use crate::core::notification_prompt::{
     BellIndication, InputPromptView, MessageLineCandidate, MessageLineSource, PagerPromptView,
@@ -26,7 +26,10 @@ use crate::presentation::floating_window::FloatingScreenModel;
 use crate::presentation::markdown::structure::{
     MarkdownBlockKind, MarkdownCheckboxState, MarkdownDocumentMap, MarkdownInlineKind,
 };
-use crate::presentation::theme::{MarkdownSemanticStyleKey, ResolvedTextStyle, ResolvedTheme};
+use crate::presentation::theme::{
+    FilerSemanticStyleKey, MarkdownSemanticStyleKey, ResolvedTextStyle, ResolvedTheme,
+    normalize_language_id,
+};
 use crate::presentation::viewport::WindowViewportStore;
 use crate::presentation::visual_line_layout::{RawByteCol, VisualLineLayout};
 
@@ -63,6 +66,8 @@ pub struct ScreenModel {
     pub syntax_chunks: Vec<ScreenSyntaxChunk>,
     /// Markdown semantic presentation style ranges.
     pub markdown_style_ranges: Vec<ScreenMarkdownStyleRange>,
+    /// Filer/dired presentation style ranges projected from host metadata.
+    pub filer_style_ranges: Vec<ScreenFilerStyleRange>,
     /// Renderer-ready startup theme for base UI and syntax styling.
     pub resolved_theme: ResolvedTheme,
     /// メッセージ欄に表示する通知（エラーやガイダンス）
@@ -240,6 +245,7 @@ pub struct ScreenSyntaxChunk {
     pub end_col_exclusive: u16,
     pub syn_id: i32,
     pub name: Option<String>,
+    pub language: Option<String>,
     pub tree_sitter: Option<ScreenTreeSitterSyntax>,
 }
 
@@ -248,6 +254,15 @@ pub struct ScreenMarkdownStyleRange {
     pub row: u16,
     pub start_col: u16,
     pub end_col_exclusive: u16,
+    pub style: ResolvedTextStyle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenFilerStyleRange {
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col_exclusive: u16,
+    pub key: FilerSemanticStyleKey,
     pub style: ResolvedTextStyle,
 }
 
@@ -646,6 +661,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let visual_selection = resolve_visual_selection(input);
     let search_overlays = project_search_overlays(input, &line_projections);
     let markdown_style_ranges = project_markdown_style_ranges(input, &line_projections);
+    let filer_style_ranges = project_filer_style_ranges(input, &line_projections);
     let mut syntax_chunks = project_syntax_chunks(input, &line_projections);
     #[cfg(feature = "tree-sitter-syntax")]
     syntax_chunks.extend(project_tree_sitter_syntax_chunks(input, &line_projections));
@@ -697,6 +713,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         search_overlays,
         syntax_chunks,
         markdown_style_ranges,
+        filer_style_ranges,
         resolved_theme: input.session_state.resolved_theme().clone(),
         message_line,
         command_cursor_col: None,
@@ -1776,6 +1793,70 @@ fn append_block_style_ranges(
     }
 }
 
+fn project_filer_style_ranges(
+    input: &ProjectionInput<'_>,
+    line_projections: &[ScreenLineProjection],
+) -> Vec<ScreenFilerStyleRange> {
+    let Some(directory_buffer) = input.session_state.directory_buffer() else {
+        return Vec::new();
+    };
+    let theme = input.session_state.resolved_theme();
+    let viewport_bottom = input
+        .viewport_top
+        .saturating_add(input.body_height.max(1))
+        .saturating_sub(1);
+    let mut ranges = Vec::new();
+    for (entry_index, entry) in directory_buffer.entries.iter().enumerate() {
+        if entry_index < input.viewport_top || entry_index > viewport_bottom {
+            continue;
+        }
+        let Some(projection) = line_projections
+            .iter()
+            .find(|projection| projection.absolute_row == entry_index)
+        else {
+            continue;
+        };
+        let row = u16::try_from(entry_index.saturating_sub(input.viewport_top)).unwrap_or(u16::MAX);
+        let end_col_exclusive = projection.logical_to_display_col(projection.raw_text.len());
+        let key = filer_key_for_entry_kind(entry.kind);
+        ranges.push(ScreenFilerStyleRange {
+            row,
+            start_col: projection.line_start_col,
+            end_col_exclusive,
+            key,
+            style: theme.filer_style(key).cloned().unwrap_or_default(),
+        });
+        if input.session_state.is_directory_entry_marked(entry) {
+            ranges.push(ScreenFilerStyleRange {
+                row,
+                start_col: projection.line_start_col,
+                end_col_exclusive,
+                key: FilerSemanticStyleKey::Marked,
+                style: theme
+                    .filer_style(FilerSemanticStyleKey::Marked)
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    log::debug!(
+        "[screen_model][filer] projected filer style ranges: window_id={}, root_path={}, ranges={}",
+        input.window_id,
+        directory_buffer.root_path.display(),
+        ranges.len()
+    );
+    ranges
+}
+
+fn filer_key_for_entry_kind(kind: DirectoryBufferEntryKind) -> FilerSemanticStyleKey {
+    match kind {
+        DirectoryBufferEntryKind::Directory => FilerSemanticStyleKey::Directory,
+        DirectoryBufferEntryKind::File => FilerSemanticStyleKey::File,
+        DirectoryBufferEntryKind::Symlink => FilerSemanticStyleKey::Symlink,
+        DirectoryBufferEntryKind::Other => FilerSemanticStyleKey::Other,
+    }
+}
+
 fn project_markdown_range_display_bounds(
     line_projections: &[ScreenLineProjection],
     absolute_row: usize,
@@ -1810,6 +1891,7 @@ fn project_syntax_chunks(
         .saturating_add(input.body_height.max(1))
         .saturating_sub(1);
     let mut projected = Vec::new();
+    let buffer_language = buffer_language_id(input);
 
     for (absolute_row, chunks) in syntax_lines {
         if *absolute_row < input.viewport_top || *absolute_row > viewport_bottom {
@@ -1853,6 +1935,8 @@ fn project_syntax_chunks(
                 end_col_exclusive,
                 syn_id: chunk.syn_id,
                 name: chunk.name.clone(),
+                language: markdown_embedded_language_id(input.markdown_document_map, *absolute_row)
+                    .or_else(|| buffer_language.clone()),
                 tree_sitter: None,
             });
         }
@@ -1866,6 +1950,53 @@ fn project_syntax_chunks(
         projected.iter().map(|chunk| chunk.row).collect::<Vec<_>>()
     );
     projected
+}
+
+fn markdown_embedded_language_id(
+    markdown_document_map: Option<&MarkdownDocumentMap>,
+    absolute_row: usize,
+) -> Option<String> {
+    let map = markdown_document_map?;
+    map.blocks.iter().find_map(|block| {
+        let MarkdownBlockKind::FencedCodeBlock { info, .. } = &block.kind else {
+            return None;
+        };
+        if absolute_row <= block.range.start.line || absolute_row >= block.range.end.line {
+            return None;
+        }
+        let language = info
+            .as_deref()
+            .and_then(|info| info.split_whitespace().next())
+            .and_then(normalize_language_id);
+        if let Some(language) = &language {
+            log::debug!(
+                "[screen_model][syntax] markdown fenced code language resolved: row={}, language={}",
+                absolute_row,
+                language
+            );
+        }
+        language
+    })
+}
+
+fn buffer_language_id(input: &ProjectionInput<'_>) -> Option<String> {
+    input
+        .snapshot
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id == input.buffer_id)
+        .and_then(|buffer| language_id_from_path_hint(&buffer.name))
+}
+
+fn language_id_from_path_hint(path: &str) -> Option<String> {
+    let extension = path
+        .rsplit('.')
+        .next()
+        .filter(|extension| *extension != path)?;
+    match extension.trim().to_ascii_lowercase().as_str() {
+        "go" | "rs" | "ts" | "tsx" | "md" => normalize_language_id(extension),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "tree-sitter-syntax")]
@@ -1998,6 +2129,7 @@ fn project_tree_sitter_syntax_chunks(
                 end_col_exclusive,
                 syn_id: 0,
                 name: None,
+                language: tree_sitter_chunk_language_id(syntax, chunk),
                 tree_sitter: Some(ScreenTreeSitterSyntax {
                     category: map_tree_sitter_category(chunk.category),
                     modifiers: chunk
@@ -2019,6 +2151,39 @@ fn project_tree_sitter_syntax_chunks(
         projected.iter().map(|chunk| chunk.row).collect::<Vec<_>>()
     );
     projected
+}
+
+#[cfg(feature = "tree-sitter-syntax")]
+fn tree_sitter_chunk_language_id(
+    syntax: &vim_core_rs::CoreTreeSitterRangeSyntax,
+    chunk: &vim_core_rs::CoreTreeSitterChunk,
+) -> Option<String> {
+    syntax
+        .embedded_regions
+        .iter()
+        .find_map(|region| {
+            if !matches!(
+                region.normalized_kind,
+                vim_core_rs::CoreEmbeddedBlockKind::Syntax
+            ) || chunk.range.start < region.content_range.start
+                || chunk.range.end > region.content_range.end
+            {
+                return None;
+            }
+            let resolved = region.resolved_language.as_ref()?;
+            if !matches!(
+                resolved.status,
+                vim_core_rs::CoreLanguageResolutionStatus::Resolved
+            ) || !matches!(resolved.kind, vim_core_rs::CoreEmbeddedBlockKind::Syntax)
+            {
+                return None;
+            }
+            resolved
+                .language_id
+                .as_deref()
+                .and_then(normalize_language_id)
+        })
+        .or_else(|| normalize_language_id(&syntax.provenance.language_id))
 }
 
 #[cfg(feature = "tree-sitter-syntax")]
@@ -3296,6 +3461,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -3476,6 +3642,7 @@ mod tests {
                 end_col_exclusive: 13,
                 syn_id: 11,
                 name: Some("Identifier".to_string()),
+                language: None,
                 tree_sitter: None,
             }]
         );
@@ -3518,10 +3685,95 @@ mod tests {
                 end_col_exclusive: 5,
                 syn_id: 11,
                 name: Some("Title".to_string()),
+                language: None,
                 tree_sitter: None,
             }],
             "syntax chunks should be projected through Markdown rich display-space"
         );
+    }
+
+    #[test]
+    fn projects_markdown_fenced_code_syntax_with_embedded_language_metadata() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "```go\nfunc main() {}\n```\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut syntax_lines = BTreeMap::new();
+        syntax_lines.insert(
+            1,
+            vec![CoreSyntaxChunk {
+                start_col: 0,
+                end_col: 4,
+                syn_id: 11,
+                name: Some("Function".to_string()),
+            }],
+        );
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map))
+            .with_syntax_lines(Some(&syntax_lines));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert_eq!(model.line_projections[1].display_text, "func main() {}");
+        assert_eq!(
+            model.syntax_chunks[0].language.as_deref(),
+            Some("go"),
+            "syntax chunks inside ```go fenced code should carry embedded language metadata"
+        );
+    }
+
+    #[test]
+    fn projects_filer_entry_kind_and_marked_styles_from_directory_metadata() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let root = std::env::temp_dir().join(format!("saya-filer-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("mkdir");
+        std::fs::write(root.join("README.md"), "hello").expect("file");
+        let bridge = CoreBridge::new("README.md\nsrc/\n").expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let mut session_state = EditorSessionState::new(Some(root.clone()));
+        let directory = session_state
+            .directory_buffer()
+            .expect("directory buffer should initialize")
+            .clone();
+        let src = directory
+            .entries
+            .iter()
+            .find(|entry| entry.name == "src")
+            .expect("src entry")
+            .clone();
+        session_state.mark_directory_entry(&src);
+
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+        assert!(
+            model
+                .filer_style_ranges
+                .iter()
+                .any(|range| { range.row == 0 && range.key == FilerSemanticStyleKey::File })
+        );
+        assert!(
+            model
+                .filer_style_ranges
+                .iter()
+                .any(|range| { range.row == 1 && range.key == FilerSemanticStyleKey::Directory })
+        );
+        assert!(
+            model
+                .filer_style_ranges
+                .iter()
+                .any(|range| { range.row == 1 && range.key == FilerSemanticStyleKey::Marked })
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
@@ -3561,6 +3813,7 @@ mod tests {
                 end_col_exclusive: 7,
                 syn_id: 11,
                 name: Some("Title".to_string()),
+                language: None,
                 tree_sitter: None,
             }],
             "active Markdown rows should keep syntax chunks aligned with raw text"
@@ -3635,6 +3888,7 @@ mod tests {
                 end_col_exclusive: 2,
                 syn_id: 0,
                 name: None,
+                language: Some("rust".to_string()),
                 tree_sitter: Some(ScreenTreeSitterSyntax {
                     category: ScreenSyntaxCategory::Keyword,
                     modifiers: vec![ScreenSyntaxModifier::Definition],
@@ -3642,6 +3896,102 @@ mod tests {
                 }),
             }],
             "Tree-sitter render data must stay separate from Vim CoreSyntaxChunk"
+        );
+    }
+
+    #[cfg(feature = "tree-sitter-syntax")]
+    #[test]
+    fn projects_embedded_tree_sitter_chunks_with_fenced_language_metadata() {
+        use vim_core_rs::{
+            CoreEmbeddedBlockKind, CoreEmbeddedRegion, CoreEmbeddedRegionSource,
+            CoreLanguageResolutionSource, CoreLanguageResolutionStatus, CoreLanguageRole,
+            CoreResolutionConfidence, CoreResolvedLanguage, CoreSyntaxCategory, CoreSyntaxModifier,
+            CoreTextPosition, CoreTextRange, CoreTreeSitterBudgetStatus, CoreTreeSitterChunk,
+            CoreTreeSitterProvenance, CoreTreeSitterRangeSyntax, CoreTreeSitterStatus,
+        };
+
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "```typescript\nfunction add(a: number): number { return a; }\n```\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let active_buffer = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.is_active)
+            .expect("active buffer");
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let visible_range = CoreTextRange {
+            start: CoreTextPosition { row: 0, col: 0 },
+            end: CoreTextPosition { row: 3, col: 0 },
+        };
+        let content_range = CoreTextRange {
+            start: CoreTextPosition { row: 1, col: 0 },
+            end: CoreTextPosition { row: 2, col: 0 },
+        };
+        let syntax = CoreTreeSitterRangeSyntax {
+            buffer_id: active_buffer.id,
+            source_revision: active_buffer.source_revision,
+            provenance: CoreTreeSitterProvenance {
+                language_id: "markdown".to_string(),
+                package_id: "tree-sitter-markdown".to_string(),
+                package_version: "tree-sitter-md-0.5.3".to_string(),
+                parser_version: "tree-sitter-md-block-0.5.3".to_string(),
+                query_version: "saya-test".to_string(),
+            },
+            status: CoreTreeSitterStatus::Prepared,
+            has_error: false,
+            covered_ranges: vec![visible_range],
+            error_ranges: vec![],
+            budget_status: CoreTreeSitterBudgetStatus::WithinBudget,
+            chunks: vec![CoreTreeSitterChunk {
+                range: CoreTextRange {
+                    start: CoreTextPosition { row: 1, col: 0 },
+                    end: CoreTextPosition { row: 1, col: 8 },
+                },
+                capture_name: "keyword".to_string(),
+                category: CoreSyntaxCategory::Keyword,
+                modifiers: vec![CoreSyntaxModifier::Definition],
+            }],
+            embedded_regions: vec![CoreEmbeddedRegion {
+                range: visible_range,
+                content_range,
+                source: CoreEmbeddedRegionSource::MarkdownFence,
+                raw_info_string: Some("typescript".to_string()),
+                normalized_info_string: Some("typescript".to_string()),
+                normalized_kind: CoreEmbeddedBlockKind::Syntax,
+                resolved_language: Some(CoreResolvedLanguage {
+                    range: visible_range,
+                    role: CoreLanguageRole::EmbeddedRegion,
+                    status: CoreLanguageResolutionStatus::Resolved,
+                    language_id: Some("typescript".to_string()),
+                    package_id: Some("tree-sitter-typescript".to_string()),
+                    package_version: Some("0.23.2".to_string()),
+                    kind: CoreEmbeddedBlockKind::Syntax,
+                    confidence: CoreResolutionConfidence::Exact,
+                    source: CoreLanguageResolutionSource::MarkdownInfoString,
+                }),
+            }],
+        };
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_markdown_document_map(Some(&markdown_map))
+                .with_tree_sitter_syntax(Some(&syntax)),
+        );
+
+        let embedded_chunk = model
+            .syntax_chunks
+            .iter()
+            .find(|chunk| chunk.tree_sitter.is_some())
+            .expect("embedded Tree-sitter chunk should project");
+        assert_eq!(
+            embedded_chunk.language.as_deref(),
+            Some("typescript"),
+            "embedded fenced-code Tree-sitter chunks must use the fence language, not the Markdown root language"
         );
     }
 
@@ -5102,6 +5452,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -5984,6 +6335,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,

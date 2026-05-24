@@ -1044,15 +1044,17 @@ fn render_line(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RenderOverlayKind {
     Ui(UiStyleKey),
+    Filer(ResolvedTextStyle),
     Markdown(ResolvedTextStyle),
     Syntax(RenderSyntaxStyle),
     VisualSelection,
     Search(crate::features::search::query::SearchMatchKind),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderSyntaxStyle {
     vim_family: Option<&'static str>,
+    language: Option<String>,
     tree_sitter: Option<RenderTreeSitterSyntaxStyle>,
 }
 
@@ -1081,6 +1083,19 @@ fn collect_render_overlays(model: &ScreenModel, row: u16, line: &str) -> Vec<Ren
             kind: RenderOverlayKind::Ui(UiStyleKey::Gutter),
         });
     }
+
+    overlays.extend(
+        model
+            .filer_style_ranges
+            .iter()
+            .filter(|range| range.row == row)
+            .filter(|range| range.end_col_exclusive > range.start_col)
+            .map(|range| RenderOverlayRange {
+                start_col: usize::from(range.start_col),
+                end_col_exclusive: usize::from(range.end_col_exclusive),
+                kind: RenderOverlayKind::Filer(range.style.clone()),
+            }),
+    );
 
     overlays.extend(
         model
@@ -1178,14 +1193,24 @@ fn render_layered_line(
             continue;
         }
         let text = slice_line_by_display_columns(line, start_col, end_col_exclusive);
-        let style = overlays
+        let mut style = style_for_buffer_base_text(base_style.clone(), text_mode);
+        let mut matching = overlays
             .iter()
             .filter(|overlay| {
                 overlay.start_col < end_col_exclusive && overlay.end_col_exclusive > start_col
             })
-            .max_by_key(|overlay| overlay_kind_rank(&overlay.kind))
-            .map(|overlay| style_for_overlay_kind(overlay.kind.clone(), text_mode, theme))
-            .unwrap_or_else(|| style_for_buffer_base_text(base_style.clone(), text_mode));
+            .collect::<Vec<_>>();
+        matching.sort_by_key(|overlay| overlay_kind_rank(&overlay.kind));
+        for overlay in matching {
+            if overlay_replaces_lower_layers(&overlay.kind) {
+                style = Style::default();
+            }
+            style = style.patch(style_for_overlay_kind(
+                overlay.kind.clone(),
+                text_mode,
+                theme,
+            ));
+        }
         if style == Style::default() {
             spans.push(Span::raw(text));
         } else {
@@ -1196,18 +1221,39 @@ fn render_layered_line(
     pad_line_to_width(Line::from(spans), width)
 }
 
+fn overlay_replaces_lower_layers(kind: &RenderOverlayKind) -> bool {
+    matches!(
+        kind,
+        RenderOverlayKind::VisualSelection | RenderOverlayKind::Search(_)
+    )
+}
+
 fn overlay_kind_rank(kind: &RenderOverlayKind) -> usize {
     match kind {
         RenderOverlayKind::Ui(_) => 0,
-        RenderOverlayKind::Syntax(_) => 1,
+        RenderOverlayKind::Syntax(style) if syntax_is_base_markdown(style) => 1,
+        RenderOverlayKind::Syntax(style) if style.language.is_none() => 1,
+        RenderOverlayKind::Filer(_) => 2,
         RenderOverlayKind::Markdown(_) => 2,
-        RenderOverlayKind::Search(crate::features::search::query::SearchMatchKind::Regular) => 3,
+        RenderOverlayKind::Syntax(_) => 3,
+        RenderOverlayKind::Search(crate::features::search::query::SearchMatchKind::Regular) => 4,
         RenderOverlayKind::Search(crate::features::search::query::SearchMatchKind::Incremental) => {
-            4
+            5
         }
-        RenderOverlayKind::Search(crate::features::search::query::SearchMatchKind::Current) => 5,
-        RenderOverlayKind::VisualSelection => 6,
+        RenderOverlayKind::Search(crate::features::search::query::SearchMatchKind::Current) => 6,
+        RenderOverlayKind::VisualSelection => 7,
     }
+}
+
+fn syntax_is_base_markdown(style: &RenderSyntaxStyle) -> bool {
+    style
+        .language
+        .as_deref()
+        .map(|language| {
+            let normalized = language.trim().to_ascii_lowercase();
+            normalized == "markdown" || normalized == "md"
+        })
+        .unwrap_or(false)
 }
 
 fn style_for_overlay_kind(
@@ -1224,6 +1270,7 @@ fn style_for_overlay_kind(
             .cloned()
             .map(|style| style_for_text(style, text_mode))
             .unwrap_or_default(),
+        RenderOverlayKind::Filer(style) => style_for_text(style, text_mode),
         RenderOverlayKind::Markdown(style) => style_for_markdown(style, text_mode),
         RenderOverlayKind::Syntax(style) => style_for_syntax(style, text_mode, theme),
         RenderOverlayKind::VisualSelection => Style::default().add_modifier(Modifier::REVERSED),
@@ -1330,6 +1377,7 @@ fn color_for_resolved_theme_color(color: &ResolvedThemeColor) -> Color {
 fn syntax_style(chunk: &crate::presentation::screen_model::ScreenSyntaxChunk) -> RenderSyntaxStyle {
     RenderSyntaxStyle {
         vim_family: syntax_family(chunk.name.as_deref()),
+        language: chunk.language.clone(),
         tree_sitter: chunk.tree_sitter.as_ref().map(tree_sitter_syntax_style),
     }
 }
@@ -1351,13 +1399,24 @@ fn style_for_syntax(
     theme: &ResolvedTheme,
 ) -> Style {
     if let Some(tree_sitter) = style.tree_sitter {
-        return style_for_tree_sitter_syntax(tree_sitter, text_mode, theme);
+        return style_for_tree_sitter_syntax(
+            tree_sitter,
+            style.language.as_deref(),
+            text_mode,
+            theme,
+        );
     }
-    style_for_syntax_family(style.vim_family, text_mode, theme)
+    style_for_syntax_family(
+        style.vim_family,
+        style.language.as_deref(),
+        text_mode,
+        theme,
+    )
 }
 
 fn style_for_tree_sitter_syntax(
     syntax: RenderTreeSitterSyntaxStyle,
+    language: Option<&str>,
     text_mode: RenderTextMode,
     theme: &ResolvedTheme,
 ) -> Style {
@@ -1366,8 +1425,7 @@ fn style_for_tree_sitter_syntax(
     }
     let key = syntax_key_for_tree_sitter(syntax.category);
     let mut style = theme
-        .syntax_style(key)
-        .cloned()
+        .syntax_style_for_language(language, key)
         .map(|style| style_for_text(style, text_mode))
         .unwrap_or_else(|| fallback_style_for_tree_sitter_syntax(syntax.category, text_mode));
     if syntax.definition || syntax.documentation {
@@ -1497,6 +1555,7 @@ fn syntax_family(name: Option<&str>) -> Option<&'static str> {
 
 fn style_for_syntax_family(
     family: Option<&'static str>,
+    language: Option<&str>,
     text_mode: RenderTextMode,
     theme: &ResolvedTheme,
 ) -> Style {
@@ -1515,7 +1574,7 @@ fn style_for_syntax_family(
         Some("default") | None => SyntaxSemanticStyleKey::Default,
         Some(_) => SyntaxSemanticStyleKey::Default,
     };
-    if let Some(style) = theme.syntax_style(key).cloned() {
+    if let Some(style) = theme.syntax_style_for_language(language, key) {
         return style_for_text(style, text_mode);
     }
     match family {
@@ -1660,6 +1719,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: message_line.map(ToString::to_string),
             command_cursor_col: None,
@@ -1941,6 +2001,7 @@ mod tests {
             ],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -2240,6 +2301,7 @@ mod tests {
             end_col_exclusive: 10,
             syn_id: 1,
             name: Some("Comment".to_string()),
+            language: None,
             tree_sitter: None,
         }];
         model.resolved_theme = theme_from_entries(vec![
@@ -2270,6 +2332,111 @@ mod tests {
     }
 
     #[test]
+    fn render_buffer_text_applies_language_specific_syntax_over_markdown_fence_style() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["func main() {}".to_string()];
+        model.visual_selection = None;
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 14,
+            style: ResolvedTextStyle {
+                bg: Some(ResolvedThemeColor("#111827".to_string())),
+                ..ResolvedTextStyle::default()
+            },
+        }];
+        model.syntax_chunks = vec![ScreenSyntaxChunk {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 4,
+            syn_id: 1,
+            name: Some("Function".to_string()),
+            language: Some("go".to_string()),
+            tree_sitter: None,
+        }];
+        model.resolved_theme = theme_from_entries(vec![
+            StartupRegistryEntry::ThemeSyntaxStyle {
+                key: SyntaxSemanticStyleKey::Function,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("#bb9af7".to_string()),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+            StartupRegistryEntry::ThemeLanguageSyntaxStyle {
+                language: "go".to_string(),
+                key: SyntaxSemanticStyleKey::Function,
+                style: ThemeTextStyleDeclaration {
+                    fg: Some("#7aa2f7".to_string()),
+                    bold: Some(true),
+                    ..ThemeTextStyleDeclaration::default()
+                },
+            },
+        ]);
+
+        let text = render_buffer_text(&model, 16, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "func");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x7a, 0xa2, 0xf7))
+                .bg(Color::Rgb(0x11, 0x18, 0x27))
+                .add_modifier(Modifier::BOLD),
+            "language-specific syntax should win over the fenced code Markdown presentation"
+        );
+        assert_eq!(line.spans[1].content.as_ref(), " main() {}");
+        assert_eq!(
+            line.spans[1].style,
+            Style::default().bg(Color::Rgb(0x11, 0x18, 0x27)),
+            "non-token cells should keep the fenced code Markdown presentation"
+        );
+    }
+
+    #[test]
+    fn render_buffer_text_applies_filer_entry_kind_and_marked_styles() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["src/".to_string()];
+        model.visual_selection = None;
+        model.filer_style_ranges = vec![
+            crate::presentation::screen_model::ScreenFilerStyleRange {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 4,
+                key: crate::presentation::theme::FilerSemanticStyleKey::Directory,
+                style: ResolvedTextStyle {
+                    fg: Some(ResolvedThemeColor("#7aa2f7".to_string())),
+                    bold: true,
+                    ..ResolvedTextStyle::default()
+                },
+            },
+            crate::presentation::screen_model::ScreenFilerStyleRange {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 4,
+                key: crate::presentation::theme::FilerSemanticStyleKey::Marked,
+                style: ResolvedTextStyle {
+                    bg: Some(ResolvedThemeColor("#33467c".to_string())),
+                    ..ResolvedTextStyle::default()
+                },
+            },
+        ];
+
+        let text = render_buffer_text(&model, 8, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "src/");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x7a, 0xa2, 0xf7))
+                .bg(Color::Rgb(0x33, 0x46, 0x7c))
+                .add_modifier(Modifier::BOLD),
+            "marked overlay is a filer presentation layer and should not depend on syntax names"
+        );
+    }
+
+    #[test]
     fn render_buffer_text_maps_vim_syntax_groups_to_type_and_function_theme_styles() {
         let mut model = screen_model_with_message(None);
         model.lines = vec!["const std::PathBuf macro".to_string()];
@@ -2281,6 +2448,7 @@ mod tests {
                 end_col_exclusive: 5,
                 syn_id: 1,
                 name: Some("rustStorage".to_string()),
+                language: None,
                 tree_sitter: None,
             },
             ScreenSyntaxChunk {
@@ -2289,6 +2457,7 @@ mod tests {
                 end_col_exclusive: 9,
                 syn_id: 2,
                 name: Some("rustModPath".to_string()),
+                language: None,
                 tree_sitter: None,
             },
             ScreenSyntaxChunk {
@@ -2297,6 +2466,7 @@ mod tests {
                 end_col_exclusive: 11,
                 syn_id: 3,
                 name: Some("rustModPathSep".to_string()),
+                language: None,
                 tree_sitter: None,
             },
             ScreenSyntaxChunk {
@@ -2305,6 +2475,7 @@ mod tests {
                 end_col_exclusive: 18,
                 syn_id: 4,
                 name: Some("rustType".to_string()),
+                language: None,
                 tree_sitter: None,
             },
             ScreenSyntaxChunk {
@@ -2313,6 +2484,7 @@ mod tests {
                 end_col_exclusive: 24,
                 syn_id: 5,
                 name: Some("rustMacro".to_string()),
+                language: None,
                 tree_sitter: None,
             },
         ];
@@ -2414,6 +2586,7 @@ mod tests {
             end_col_exclusive: 7,
             syn_id: 9,
             name: Some("Title".to_string()),
+            language: None,
             tree_sitter: None,
         }];
         model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
@@ -2437,6 +2610,189 @@ mod tests {
                 .fg(Color::Rgb(0x9e, 0xce, 0x6a))
                 .add_modifier(Modifier::UNDERLINED),
             "Markdown semantic theme should win over core syntax style on projected Markdown cells"
+        );
+    }
+
+    #[test]
+    fn markdown_style_ranges_override_markdown_tree_sitter_syntax_on_same_cells() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec!["## Heading".to_string()];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![ScreenLineProjection {
+            absolute_row: 0,
+            raw_text: "## Heading".to_string(),
+            display_text: "Heading".to_string(),
+            spans: vec![],
+            cells: vec![],
+            line_start_col: 0,
+        }];
+        model.syntax_chunks = vec![ScreenSyntaxChunk {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 7,
+            syn_id: 9,
+            name: None,
+            language: Some("markdown".to_string()),
+            tree_sitter: Some(ScreenTreeSitterSyntax {
+                category: ScreenSyntaxCategory::Markup,
+                modifiers: Vec::new(),
+                capture_name: "markup.heading".to_string(),
+            }),
+        }];
+        model.markdown_style_ranges = vec![ScreenMarkdownStyleRange {
+            row: 0,
+            start_col: 0,
+            end_col_exclusive: 7,
+            style: ResolvedTextStyle {
+                fg: Some(ResolvedThemeColor("#9ece6a".to_string())),
+                underline: true,
+                ..ResolvedTextStyle::default()
+            },
+        }];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::StyledTrueColor);
+        let line = &text.lines[0];
+
+        assert_eq!(line.spans[0].content.as_ref(), "Heading");
+        assert_eq!(
+            line.spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x9e, 0xce, 0x6a))
+                .add_modifier(Modifier::UNDERLINED),
+            "Markdown semantic heading levels should win over Markdown parser syntax"
+        );
+    }
+
+    #[test]
+    fn markdown_semantic_ranges_override_base_markdown_tree_sitter_across_styles() {
+        let mut model = screen_model_with_message(None);
+        model.lines = vec![
+            "Heading".to_string(),
+            "code".to_string(),
+            "link".to_string(),
+        ];
+        model.is_active = false;
+        model.visual_selection = None;
+        model.line_projections = vec![
+            ScreenLineProjection {
+                absolute_row: 0,
+                raw_text: "# Heading".to_string(),
+                display_text: "Heading".to_string(),
+                spans: vec![],
+                cells: vec![],
+                line_start_col: 0,
+            },
+            ScreenLineProjection {
+                absolute_row: 1,
+                raw_text: "`code`".to_string(),
+                display_text: "code".to_string(),
+                spans: vec![],
+                cells: vec![],
+                line_start_col: 0,
+            },
+            ScreenLineProjection {
+                absolute_row: 2,
+                raw_text: "[link](target)".to_string(),
+                display_text: "link".to_string(),
+                spans: vec![],
+                cells: vec![],
+                line_start_col: 0,
+            },
+        ];
+        model.syntax_chunks = vec![
+            ScreenSyntaxChunk {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 7,
+                syn_id: 1,
+                name: None,
+                language: Some("markdown".to_string()),
+                tree_sitter: Some(ScreenTreeSitterSyntax {
+                    category: ScreenSyntaxCategory::Markup,
+                    modifiers: Vec::new(),
+                    capture_name: "markup.heading".to_string(),
+                }),
+            },
+            ScreenSyntaxChunk {
+                row: 1,
+                start_col: 0,
+                end_col_exclusive: 4,
+                syn_id: 2,
+                name: None,
+                language: Some("markdown".to_string()),
+                tree_sitter: Some(ScreenTreeSitterSyntax {
+                    category: ScreenSyntaxCategory::String,
+                    modifiers: Vec::new(),
+                    capture_name: "markup.raw.inline".to_string(),
+                }),
+            },
+            ScreenSyntaxChunk {
+                row: 2,
+                start_col: 0,
+                end_col_exclusive: 4,
+                syn_id: 3,
+                name: None,
+                language: Some("markdown".to_string()),
+                tree_sitter: Some(ScreenTreeSitterSyntax {
+                    category: ScreenSyntaxCategory::Tag,
+                    modifiers: Vec::new(),
+                    capture_name: "markup.link.label".to_string(),
+                }),
+            },
+        ];
+        model.markdown_style_ranges = vec![
+            ScreenMarkdownStyleRange {
+                row: 0,
+                start_col: 0,
+                end_col_exclusive: 7,
+                style: ResolvedTextStyle {
+                    fg: Some(ResolvedThemeColor("#bb9af7".to_string())),
+                    bold: true,
+                    ..ResolvedTextStyle::default()
+                },
+            },
+            ScreenMarkdownStyleRange {
+                row: 1,
+                start_col: 0,
+                end_col_exclusive: 4,
+                style: ResolvedTextStyle {
+                    fg: Some(ResolvedThemeColor("#ff9e64".to_string())),
+                    bg: Some(ResolvedThemeColor("#292e42".to_string())),
+                    ..ResolvedTextStyle::default()
+                },
+            },
+            ScreenMarkdownStyleRange {
+                row: 2,
+                start_col: 0,
+                end_col_exclusive: 4,
+                style: ResolvedTextStyle {
+                    fg: Some(ResolvedThemeColor("#2ac3de".to_string())),
+                    underline: true,
+                    ..ResolvedTextStyle::default()
+                },
+            },
+        ];
+
+        let text = render_buffer_text(&model, 10, RenderTextMode::StyledTrueColor);
+
+        assert_eq!(
+            text.lines[0].spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0xbb, 0x9a, 0xf7))
+                .add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(
+            text.lines[1].spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0xff, 0x9e, 0x64))
+                .bg(Color::Rgb(0x29, 0x2e, 0x42))
+        );
+        assert_eq!(
+            text.lines[2].spans[0].style,
+            Style::default()
+                .fg(Color::Rgb(0x2a, 0xc3, 0xde))
+                .add_modifier(Modifier::UNDERLINED)
         );
     }
 
@@ -2588,6 +2944,7 @@ mod tests {
             end_col_exclusive: 3,
             syn_id: 1,
             name: Some("rustKeyword".to_string()),
+            language: None,
             tree_sitter: None,
         }];
         model.resolved_theme = theme_from_entries(vec![
@@ -3046,6 +3403,7 @@ mod tests {
             end_col_exclusive: 12,
             syn_id: 7,
             name: Some("Keyword".to_string()),
+            language: None,
             tree_sitter: None,
         }];
         model.line_projections = vec![projection("# Heading", "Heading", 5)];
@@ -3119,9 +3477,11 @@ mod tests {
                 end_col_exclusive: 3,
                 syn_id: 7,
                 name: Some("Keyword".to_string()),
+                language: None,
                 tree_sitter: None,
             }],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -3175,6 +3535,7 @@ mod tests {
                 end_col_exclusive: 2,
                 syn_id: 0,
                 name: Some("ignored.capture".to_string()),
+                language: None,
                 tree_sitter: Some(ScreenTreeSitterSyntax {
                     category: ScreenSyntaxCategory::Keyword,
                     modifiers: vec![ScreenSyntaxModifier::Definition],
@@ -3182,6 +3543,7 @@ mod tests {
                 }),
             }],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -3236,6 +3598,7 @@ mod tests {
             }],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -3291,6 +3654,7 @@ mod tests {
             }],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -3343,6 +3707,7 @@ mod tests {
             search_overlays: vec![],
             syntax_chunks: vec![],
             markdown_style_ranges: vec![],
+            filer_style_ranges: vec![],
             resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
             message_line: None,
             command_cursor_col: None,
@@ -3503,6 +3868,7 @@ mod tests {
                     search_overlays: vec![],
                     syntax_chunks: vec![],
                     markdown_style_ranges: vec![],
+                    filer_style_ranges: vec![],
                     resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
                     message_line: None,
                     command_cursor_col: None,
@@ -3529,6 +3895,7 @@ mod tests {
                     search_overlays: vec![],
                     syntax_chunks: vec![],
                     markdown_style_ranges: vec![],
+                    filer_style_ranges: vec![],
                     resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
                     message_line: None,
                     command_cursor_col: None,
@@ -3830,6 +4197,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                filer_style_ranges: vec![],
                 resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,
@@ -3935,6 +4303,7 @@ mod tests {
                 search_overlays: vec![],
                 syntax_chunks: vec![],
                 markdown_style_ranges: vec![],
+                filer_style_ranges: vec![],
                 resolved_theme: crate::presentation::theme::ResolvedTheme::default(),
                 message_line: None,
                 command_cursor_col: None,

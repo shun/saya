@@ -39,6 +39,7 @@ pub struct RuntimeCommandEffect {
     pub follow_up_events: Vec<RuntimeEventPayload>,
     pub shutdown_intent: Option<RuntimeShutdownIntent>,
     pub presentation_intents: Vec<RuntimePresentationIntent>,
+    pub vfs_load_failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
