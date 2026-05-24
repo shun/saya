@@ -1,6 +1,6 @@
 use saya::features::completion::session::{
-    CompletionPosition, CompletionRange, CompletionSessionManager, CompletionShowRequest,
-    HostCompletionCandidate,
+    CompletionKeyBindingsRequest, CompletionPosition, CompletionRange, CompletionSessionManager,
+    CompletionShowRequest, HostCompletionCandidate,
 };
 
 fn range(start: usize, end: usize) -> CompletionRange {
@@ -39,6 +39,7 @@ fn completion_session_rejects_stale_results_by_request_generation() {
         max_visible_items: 8,
         documentation_max_width: 72,
         documentation_max_height: 12,
+        keys: None,
     };
     let second = CompletionShowRequest {
         request_id: 2,
@@ -69,6 +70,7 @@ fn completion_confirm_applies_insert_text_to_replace_range() {
             max_visible_items: 8,
             documentation_max_width: 72,
             documentation_max_height: 12,
+            keys: None,
         })
         .expect("request should be accepted");
 
@@ -78,4 +80,43 @@ fn completion_confirm_applies_insert_text_to_replace_range() {
 
     assert_eq!(edit.replacement_text, "println!($0);");
     assert_eq!(edit.updated_text, "let println!($0); = 1;\n");
+}
+
+#[test]
+fn completion_session_carries_request_scoped_keys_to_float_request() {
+    let mut manager = CompletionSessionManager::default();
+    let accepted = manager
+        .accept_show_request(CompletionShowRequest {
+            session_id: "session-1".to_string(),
+            request_id: 1,
+            replace_range: range(0, 3),
+            candidates: vec![candidate("println!", "println!($0);")],
+            selected_index: 0,
+            max_visible_items: 8,
+            documentation_max_width: 72,
+            documentation_max_height: 12,
+            keys: Some(CompletionKeyBindingsRequest {
+                confirm: Some(vec!["<Tab>".to_string()]),
+                close: Some(vec!["<Esc>".to_string()]),
+                next: Some(vec!["j".to_string()]),
+                previous: Some(vec!["k".to_string()]),
+                page_next: Some(vec!["<C-f>".to_string()]),
+                page_previous: Some(vec!["<C-b>".to_string()]),
+            }),
+        })
+        .expect("request should be accepted");
+
+    let float_request = accepted.to_float_request(7, 1, 2);
+
+    assert_eq!(
+        float_request.keys,
+        Some(CompletionKeyBindingsRequest {
+            confirm: Some(vec!["<Tab>".to_string()]),
+            close: Some(vec!["<Esc>".to_string()]),
+            next: Some(vec!["j".to_string()]),
+            previous: Some(vec!["k".to_string()]),
+            page_next: Some(vec!["<C-f>".to_string()]),
+            page_previous: Some(vec!["<C-b>".to_string()]),
+        })
+    );
 }

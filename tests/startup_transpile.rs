@@ -251,33 +251,71 @@ async fn init_ts_module_can_import_repository_dired_plugin() {
             "missing command {expected_command}"
         );
     }
-    for (expected_lhs, expected_command) in [
-        ("-", "dired.up"),
-        ("<Enter>", "dired.enter"),
-        ("gr", "dired.refresh"),
-        ("m", "dired.mark"),
-        ("M", "dired.unmark"),
-        ("gM", "dired.clearMarks"),
-        ("D", "dired.bulkDeletePreview"),
-    ] {
-        assert!(
-            registry.entries().iter().any(|entry| {
-                matches!(
-                    entry,
-                    StartupRegistryEntry::Keymap {
-                        mode: SayaKeyMode::Normal,
-                        lhs,
-                        action: SayaKeymapAction::RegisteredCommand(command),
-                    } if lhs == expected_lhs && command == expected_command
-                )
-            }),
-            "missing keymap {expected_lhs} -> {expected_command}"
-        );
-    }
+    assert!(
+        !registry
+            .entries()
+            .iter()
+            .any(|entry| { matches!(entry, StartupRegistryEntry::Keymap { .. }) }),
+        "setupSayaDired() must not install normal-mode mappings without explicit keymap"
+    );
 
     let seed = CallbackRegistrySeed::from_startup_registry(&registry);
     SayaLiveRuntime::spawn_from_seed(Arc::new(NoopHostBridge), seed)
         .expect("repository dired command callbacks should initialize in live runtime");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bundled_plugins_with_no_behavior_options_do_not_register_keymaps_or_events() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current_dir = unique_path("explicit-config-cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let dired_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-dired.ts");
+    let lsp_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/saya-lsp-client.ts");
+    let completion_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ setupSayaCompletion }} from "{completion}";
+                import {{ setupSayaDired }} from "{dired}";
+                import {{ setupSayaLspClient }} from "{lsp}";
+                setupSayaCompletion();
+                setupSayaDired();
+                setupSayaLspClient();
+            "#,
+            completion = completion_path.display(),
+            dired = dired_path.display(),
+            lsp = lsp_path.display(),
+        ),
+    )
+    .expect("config file");
+
+    let prepared = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!("bundled plugin setup should prepare, got: {prepared:?}");
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("bundled plugin setup should evaluate");
+
+    assert!(
+        !registry
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, StartupRegistryEntry::Keymap { .. })),
+        "bundled setup functions must not install keymaps without explicit options"
+    );
+    assert!(
+        !registry
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, StartupRegistryEntry::Event { .. })),
+        "bundled setup functions must not subscribe to events without explicit options"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

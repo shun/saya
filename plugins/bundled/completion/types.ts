@@ -34,7 +34,12 @@ export interface SayaCompletionCandidate {
 export interface SayaCompletionTriggerContext {
   buffer: SayaReadonlyBufferSnapshot;
   editor: SayaReadonlyEditorSnapshot;
+  reason: SayaCompletionTriggerReason;
 }
+
+export type SayaCompletionTriggerReason =
+  | { kind: "manual" }
+  | { kind: "auto"; character?: string };
 
 export interface SayaCompletionQuery extends SayaCompletionTriggerContext {
   sourceId: string;
@@ -51,6 +56,9 @@ export interface SayaCompletionSourceResult {
 
 export interface SayaCompletionSource {
   id: string;
+  minPrefixLength?: number;
+  triggerCharacters?: string[];
+  __sayaBundledSource?: Record<string, unknown>;
   trigger(context: SayaCompletionTriggerContext): SayaCompletionQuery | null;
   complete(
     query: SayaCompletionQuery,
@@ -67,12 +75,24 @@ export type SayaCompletionSorter = (
   result: SayaCompletionSourceResult,
 ) => SayaCompletionCandidate[];
 
+export interface SayaCompletionKeyBindings {
+  confirm?: string[];
+  close?: string[];
+  next?: string[];
+  previous?: string[];
+  pageNext?: string[];
+  pagePrevious?: string[];
+}
+
 export interface SayaCompletionOptions {
   commandName?: string;
   key?: string;
+  keys?: SayaCompletionKeyBindings;
   minPrefixLength?: number;
   maxItems?: number;
   sourceTimeoutMs?: number;
+  autoTrigger?: boolean;
+  autoTriggerDelayMs?: number;
   sources?: SayaCompletionSource[];
   filters?: SayaCompletionFilter[];
   sorters?: SayaCompletionSorter[];
@@ -82,6 +102,8 @@ export interface SayaLspCompletionSourceOptions {
   commandName?: string;
   sourceName?: string;
   optional?: boolean;
+  minPrefixLength?: number;
+  triggerCharacters?: string[];
 }
 
 export interface SayaPathCompletionSourceOptions {
@@ -89,4 +111,12 @@ export interface SayaPathCompletionSourceOptions {
   optional?: boolean;
   maxItems?: number;
   showHidden?: boolean;
+  minPrefixLength?: number;
+  triggerCharacters?: string[];
+}
+
+export interface SayaBufferWordSourceOptions {
+  sourceName?: string;
+  minPrefixLength?: number;
+  triggerCharacters?: string[];
 }

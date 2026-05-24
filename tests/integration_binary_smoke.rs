@@ -316,8 +316,14 @@ fn bundled_completion_keymap_accepts_candidate_through_the_sy_binary() {
         &config_path,
         format!(
             r#"
-                import {{ setupSayaCompletion }} from "{}";
-                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+                import {{ createBufferWordSource, setupSayaCompletion }} from "{}";
+                setupSayaCompletion({{
+                    key: "<C-x>",
+                    keys: {{ confirm: ["<Enter>"] }},
+                    minPrefixLength: 2,
+                    sourceTimeoutMs: 0,
+                    sources: [createBufferWordSource()],
+                }});
             "#,
             completion_path.to_string_lossy()
         ),
@@ -366,8 +372,14 @@ fn bundled_completion_binary_smoke_can_select_second_candidate() {
         &config_path,
         format!(
             r#"
-                import {{ setupSayaCompletion }} from "{}";
-                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+                import {{ createBufferWordSource, setupSayaCompletion }} from "{}";
+                setupSayaCompletion({{
+                    key: "<C-x>",
+                    keys: {{ confirm: ["<Enter>"], next: ["<Down>"] }},
+                    minPrefixLength: 2,
+                    sourceTimeoutMs: 0,
+                    sources: [createBufferWordSource()],
+                }});
             "#,
             completion_path.to_string_lossy()
         ),
@@ -446,8 +458,13 @@ fn bundled_path_completion_does_not_replace_buffer_with_directory_listing() {
         &config_path,
         format!(
             r#"
-                import {{ setupSayaCompletion }} from "{}";
-                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+                import {{ createPathCompletionSource, setupSayaCompletion }} from "{}";
+                setupSayaCompletion({{
+                    key: "<C-x>",
+                    keys: {{ confirm: ["<Enter>"] }},
+                    sourceTimeoutMs: 0,
+                    sources: [createPathCompletionSource()],
+                }});
             "#,
             completion_path.to_string_lossy()
         ),

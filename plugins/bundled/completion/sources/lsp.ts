@@ -112,6 +112,16 @@ export function createLspCompletionSource(
   const optional = options.optional ?? true;
   return {
     id: sourceName,
+    minPrefixLength: options.minPrefixLength,
+    triggerCharacters: options.triggerCharacters,
+    __sayaBundledSource: {
+      kind: "lsp",
+      id: sourceName,
+      commandName,
+      optional,
+      minPrefixLength: options.minPrefixLength,
+      triggerCharacters: options.triggerCharacters,
+    },
     trigger(context: SayaCompletionTriggerContext): SayaCompletionQuery | null {
       const prefixInfo = wordPrefix(context.buffer);
       return {

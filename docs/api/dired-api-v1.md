@@ -27,8 +27,9 @@ the declaration guard tests. Breaking changes include:
 
 ## Startup setup contract
 
-Use `setupSayaDired(options)` from `plugins/saya-dired.ts` to register the
-local dired commands and normal-mode keymaps at startup.
+Use `setupSayaDired(options)` from `plugins/saya-dired.ts` to register the local
+dired commands at startup. It doesn't register normal-mode keymaps unless you
+provide `keymap` or a legacy flat key option.
 
 ```ts
 import { setupSayaDired } from "./plugins/saya-dired.ts";
@@ -54,16 +55,30 @@ setupSayaDired({
 
 The public setup options are:
 
-- `commands`, with optional names for `open`, `enter`, `up`, `refresh`,
-  `mark`, `unmark`, `clearMarks`, and `bulkDeletePreview`.
+- `commands`, with optional names for `open`, `enter`, `up`, `refresh`, `mark`,
+  `unmark`, `clearMarks`, and `bulkDeletePreview`.
 - `keymap`, with optional bindings for `up`, `enter`, `refresh`, `mark`,
   `unmark`, `clearMarks`, and `bulkDeletePreview`.
 - `root`, as the startup root path used by the open and refresh commands.
 - `hiddenFilePolicy`, as `"show"` or `"hide"`.
 - `sortPolicy`, as `"name"`, `"kind"`, `"modifiedTime"`, or `"size"`.
 - `filter`, as the case-insensitive listing filter.
-- `confirmStrategy`, as `"preview"` or `"disabled"` for the bulk-delete
-  preview command.
+- `confirmStrategy`, as `"preview"` or `"disabled"` for the bulk-delete preview
+  command.
+
+`setupSayaDired()` always registers the dired command callbacks. Commands are
+named entry points, and they don't affect editor behavior until the user maps a
+key, runs a command, or a lazy plugin trigger calls them. The default command
+names are `dired.open`, `dired.enter`, `dired.up`, `dired.refresh`,
+`dired.mark`, `dired.unmark`, `dired.clearMarks`, and `dired.bulkDeletePreview`.
+
+When `keymap` is present, omitted key entries use the standard dired bindings:
+`-`, `<Enter>`, `gr`, `m`, `M`, `gM`, and `D`. When `keymap` is omitted, no
+normal-mode mappings are registered.
+
+`hiddenFilePolicy`, `sortPolicy`, and `confirmStrategy` keep behavior defaults
+because they only affect commands that the user explicitly invokes. The defaults
+are `show`, `kind`, and `preview`.
 
 Legacy flat option names such as `commandName`, `enterCommandName`, `key`,
 `enterKey`, and `bulkDeletePreviewKey` remain accepted for compatibility. New
@@ -71,8 +86,8 @@ plugins must prefer the grouped `commands` and `keymap` options.
 
 ## Runtime filer contract
 
-The runtime API exposes a narrow local filesystem surface under `saya.filer`.
-It does not expose broad filesystem, network, backend registry, or Neovim
+The runtime API exposes a narrow local filesystem surface under `saya.filer`. It
+does not expose broad filesystem, network, backend registry, or Neovim
 compatibility APIs.
 
 The v1 preview runtime methods are:
@@ -207,11 +222,10 @@ Avoid these plugin patterns:
 
 - Parsing rendered dired lines instead of using `saya.filer.currentEntry()`.
 - Calling delete without `{ confirm: true }`.
-- Calling `bulkDelete()` without a fresh `previewId` from
-  `bulkDeletePreview()`.
+- Calling `bulkDelete()` without a fresh `previewId` from `bulkDeletePreview()`.
 - Treating `:write!` as a generic force-save bypass for directory buffers.
-- Sending normal editing keys while a directory operation confirmation prompt
-  is active instead of answering OK or Cancel.
+- Sending normal editing keys while a directory operation confirmation prompt is
+  active instead of answering OK or Cancel.
 - Expecting recursive delete, trash, remote filesystems, archive browsing, or
   broad filesystem access from the v1 preview API.
 - Adding Neovim dired compatibility shims or Vim script setup requirements.
@@ -224,8 +238,8 @@ The current migration baseline is from the earlier unversioned preview API to
 - Prefer grouped `commands` and `keymap` options over legacy flat option names.
 - Treat `saya.filer.list(path, options)` defaults as `showHidden: true` and
   `sortBy: "kind"`.
-- Expect operation reports to use `operation`, `path`, `targetPath`,
-  `entries`, and `previewId`.
+- Expect operation reports to use `operation`, `path`, `targetPath`, `entries`,
+  and `previewId`.
 - Keep destructive operations behind explicit confirmation and preview flows.
 - Keep local dired plugin code on the narrow `saya.filer` surface.
 

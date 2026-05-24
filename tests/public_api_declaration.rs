@@ -95,6 +95,9 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("close(id: number)"));
     assert!(declaration.contains("focus(id: number)"));
     assert!(declaration.contains("floats()"));
+    assert!(declaration.contains("interface SayaCompletionKeyBindings"));
+    assert!(declaration.contains("keys?: SayaCompletionKeyBindings"));
+    assert!(declaration.contains("close(): Promise<boolean>"));
     assert!(declaration.contains("editor"));
     assert!(declaration.contains("filer"));
     assert!(declaration.contains("lsif"));

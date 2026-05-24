@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
 use crate::features::completion::session::{
-    CompletionRange, CompletionSessionManager, CompletionShowRequest,
+    CompletionKeyBindingsRequest, CompletionRange, CompletionSessionManager, CompletionShowRequest,
 };
-use crate::input::router::KeyInput;
+use crate::input::router::{KeyInput, NavigationKey};
 use crate::presentation::floating_window::{
     FloatingAnchor, FloatingBorder, FloatingChrome, FloatingContentRef, FloatingFit,
     FloatingInputOutcome, FloatingLifecycle, FloatingPlacement, FloatingRelativeTo, FloatingSize,
@@ -48,6 +48,7 @@ pub struct CompletionMenuFloatRequest {
     pub max_visible_items: usize,
     pub documentation_max_width: u16,
     pub documentation_max_height: u16,
+    pub keys: Option<CompletionKeyBindingsRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +91,89 @@ struct CompletionMenuState {
     documentation_max_width: u16,
     documentation_max_height: u16,
     menu_size: FloatingSize,
+    keys: CompletionMenuKeyBindings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionMenuKeyBindings {
+    confirm: Vec<KeyInput>,
+    close: Vec<KeyInput>,
+    next: Vec<KeyInput>,
+    previous: Vec<KeyInput>,
+    page_next: Vec<KeyInput>,
+    page_previous: Vec<KeyInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionMenuKeyAction {
+    Confirm,
+    Close,
+    Next,
+    Previous,
+    PageNext,
+    PagePrevious,
+}
+
+impl Default for CompletionMenuKeyBindings {
+    fn default() -> Self {
+        Self {
+            confirm: vec![KeyInput::Enter, KeyInput::Tab, KeyInput::Ctrl('y')],
+            close: vec![KeyInput::Escape, KeyInput::Ctrl('[')],
+            next: vec![KeyInput::Down, KeyInput::Ctrl('n')],
+            previous: vec![KeyInput::Up, KeyInput::Ctrl('p')],
+            page_next: vec![KeyInput::PageDown],
+            page_previous: vec![KeyInput::PageUp],
+        }
+    }
+}
+
+impl CompletionMenuKeyBindings {
+    fn from_request(request: Option<&CompletionKeyBindingsRequest>) -> Self {
+        let Some(request) = request else {
+            return Self {
+                confirm: Vec::new(),
+                close: Vec::new(),
+                next: Vec::new(),
+                previous: Vec::new(),
+                page_next: Vec::new(),
+                page_previous: Vec::new(),
+            };
+        };
+        let defaults = Self::default();
+        Self {
+            confirm: normalize_key_specs(request.confirm.as_ref(), defaults.confirm),
+            close: normalize_key_specs(request.close.as_ref(), defaults.close),
+            next: normalize_key_specs(request.next.as_ref(), defaults.next),
+            previous: normalize_key_specs(request.previous.as_ref(), defaults.previous),
+            page_next: normalize_key_specs(request.page_next.as_ref(), defaults.page_next),
+            page_previous: normalize_key_specs(
+                request.page_previous.as_ref(),
+                defaults.page_previous,
+            ),
+        }
+    }
+
+    fn action_for(&self, key: &KeyInput) -> Option<CompletionMenuKeyAction> {
+        if key_matches(&self.close, key) {
+            return Some(CompletionMenuKeyAction::Close);
+        }
+        if key_matches(&self.confirm, key) {
+            return Some(CompletionMenuKeyAction::Confirm);
+        }
+        if key_matches(&self.previous, key) {
+            return Some(CompletionMenuKeyAction::Previous);
+        }
+        if key_matches(&self.next, key) {
+            return Some(CompletionMenuKeyAction::Next);
+        }
+        if key_matches(&self.page_previous, key) {
+            return Some(CompletionMenuKeyAction::PagePrevious);
+        }
+        if key_matches(&self.page_next, key) {
+            return Some(CompletionMenuKeyAction::PageNext);
+        }
+        None
+    }
 }
 
 impl CompletionFloatManager {
@@ -160,6 +244,7 @@ impl CompletionFloatManager {
             documentation_max_width: request.documentation_max_width,
             documentation_max_height: request.documentation_max_height,
             menu_size,
+            keys: CompletionMenuKeyBindings::from_request(request.keys.as_ref()),
         };
         self.menus.insert(menu_id, state);
         self.active_menu_id = Some(menu_id);
@@ -205,6 +290,14 @@ impl CompletionFloatManager {
             accepted.to_float_request(window_id, cursor_row, cursor_col),
         )
         .is_some()
+    }
+
+    pub fn close(
+        &mut self,
+        floats: &mut FloatingWindowManager,
+        restore_window_id: Option<i32>,
+    ) -> bool {
+        self.close_active(floats, restore_window_id).is_some()
     }
 
     pub fn handle_key(
@@ -261,12 +354,17 @@ impl CompletionFloatManager {
             return CompletionFloatInputOutcome::Ignored;
         }
 
-        match key {
-            KeyInput::Escape | KeyInput::Ctrl('[') => {
+        let action = self
+            .menus
+            .get(&menu_id)
+            .and_then(|state| state.keys.action_for(key));
+
+        match action {
+            Some(CompletionMenuKeyAction::Close) => {
                 self.close_menu(floats, menu_id, restore_window_id);
                 CompletionFloatInputOutcome::Closed { menu_id }
             }
-            KeyInput::Enter | KeyInput::Tab | KeyInput::Ctrl('y') | KeyInput::Ctrl('Y') => {
+            Some(CompletionMenuKeyAction::Confirm) => {
                 let candidate = self
                     .menus
                     .get(&menu_id)
@@ -291,15 +389,15 @@ impl CompletionFloatManager {
                 );
                 CompletionFloatInputOutcome::Accepted { menu_id, candidate }
             }
-            KeyInput::Up | KeyInput::Ctrl('p') | KeyInput::Ctrl('P') => {
-                self.move_selection(floats, menu_id, -1)
+            Some(CompletionMenuKeyAction::Previous) => self.move_selection(floats, menu_id, -1),
+            Some(CompletionMenuKeyAction::Next) => self.move_selection(floats, menu_id, 1),
+            Some(CompletionMenuKeyAction::PagePrevious) => {
+                self.move_selection_by_page(floats, menu_id, -1)
             }
-            KeyInput::Down | KeyInput::Ctrl('n') | KeyInput::Ctrl('N') => {
-                self.move_selection(floats, menu_id, 1)
+            Some(CompletionMenuKeyAction::PageNext) => {
+                self.move_selection_by_page(floats, menu_id, 1)
             }
-            KeyInput::PageUp => self.move_selection_by_page(floats, menu_id, -1),
-            KeyInput::PageDown => self.move_selection_by_page(floats, menu_id, 1),
-            _ => {
+            None => {
                 log::debug!(
                     "[completion_float] key ignored by completion menu: key={:?}, menu_id={}",
                     key,
@@ -461,6 +559,104 @@ impl CompletionFloatManager {
             restore_window_id
         );
     }
+}
+
+fn normalize_key_specs(specs: Option<&Vec<String>>, default: Vec<KeyInput>) -> Vec<KeyInput> {
+    let Some(specs) = specs else {
+        return default;
+    };
+    specs
+        .iter()
+        .filter_map(|spec| parse_completion_key_spec(spec))
+        .fold(Vec::new(), |mut keys, key| {
+            if !keys.iter().any(|existing| key_inputs_equal(existing, &key)) {
+                keys.push(key);
+            }
+            keys
+        })
+}
+
+fn key_matches(bindings: &[KeyInput], key: &KeyInput) -> bool {
+    bindings
+        .iter()
+        .any(|binding| key_inputs_equal(binding, key))
+}
+
+fn key_inputs_equal(left: &KeyInput, right: &KeyInput) -> bool {
+    match (left, right) {
+        (KeyInput::Ctrl(left), KeyInput::Ctrl(right))
+            if left.is_ascii_alphabetic() && right.is_ascii_alphabetic() =>
+        {
+            left.eq_ignore_ascii_case(right)
+        }
+        _ => left == right,
+    }
+}
+
+fn parse_completion_key_spec(spec: &str) -> Option<KeyInput> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.starts_with('<') || !trimmed.ends_with('>') {
+        let mut chars = trimmed.chars();
+        let first = chars.next()?;
+        return chars.next().is_none().then_some(KeyInput::Char(first));
+    }
+
+    let inner = trimmed.strip_prefix('<')?.strip_suffix('>')?.trim();
+    let lower = inner.to_ascii_lowercase();
+    match lower.as_str() {
+        "tab" => Some(KeyInput::Tab),
+        "s-tab" | "shift-tab" | "backtab" => Some(KeyInput::BackTab),
+        "enter" | "return" | "cr" => Some(KeyInput::Enter),
+        "s-enter" | "shift-enter" => Some(KeyInput::ShiftEnter),
+        "esc" | "escape" => Some(KeyInput::Escape),
+        "space" => Some(KeyInput::Char(' ')),
+        "bs" | "backspace" => Some(KeyInput::Backspace),
+        "del" | "delete" => Some(KeyInput::Delete),
+        "insert" | "ins" => Some(KeyInput::Insert),
+        "up" => Some(KeyInput::Up),
+        "down" => Some(KeyInput::Down),
+        "left" => Some(KeyInput::Left),
+        "right" => Some(KeyInput::Right),
+        "home" => Some(KeyInput::Home),
+        "end" => Some(KeyInput::End),
+        "pageup" | "page-up" => Some(KeyInput::PageUp),
+        "pagedown" | "page-down" => Some(KeyInput::PageDown),
+        _ => parse_modified_completion_key(inner),
+    }
+}
+
+fn parse_modified_completion_key(inner: &str) -> Option<KeyInput> {
+    let (modifier, key) = inner.split_once('-')?;
+    let modifier = modifier.trim().to_ascii_lowercase();
+    let key = key.trim();
+    if modifier == "c" || modifier == "ctrl" {
+        return parse_ctrl_completion_key(key);
+    }
+    if modifier == "a" || modifier == "alt" || modifier == "m" || modifier == "meta" {
+        return parse_single_char_key(key).map(KeyInput::Alt);
+    }
+    None
+}
+
+fn parse_ctrl_completion_key(key: &str) -> Option<KeyInput> {
+    match key.to_ascii_lowercase().as_str() {
+        "space" => Some(KeyInput::Ctrl(' ')),
+        "up" => Some(KeyInput::CtrlNav(NavigationKey::Up)),
+        "down" => Some(KeyInput::CtrlNav(NavigationKey::Down)),
+        "left" => Some(KeyInput::CtrlNav(NavigationKey::Left)),
+        "right" => Some(KeyInput::CtrlNav(NavigationKey::Right)),
+        "[" | "esc" | "escape" => Some(KeyInput::Ctrl('[')),
+        _ => parse_single_char_key(key).map(|ch| KeyInput::Ctrl(ch.to_ascii_lowercase())),
+    }
+}
+
+fn parse_single_char_key(key: &str) -> Option<char> {
+    let mut chars = key.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
 }
 
 fn refresh_menu_lines(

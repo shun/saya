@@ -72,6 +72,7 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.selector.cancel",
     "saya.selector.dispose",
     "saya.completion.show",
+    "saya.completion.close",
     "saya.process.spawn",
     "saya.plugins.loadLazy",
 ];
@@ -331,21 +332,25 @@ globalThis.saya = {
         },
     },
     completion: {
-        show(request) {
-            const normalized = {
-                sessionId: String(request?.sessionId ?? ""),
-                requestId: Number.isFinite(Number(request?.requestId)) ? Number(request.requestId) : 0,
+            show(request) {
+                const normalized = {
+                    sessionId: String(request?.sessionId ?? ""),
+                    requestId: Number.isFinite(Number(request?.requestId)) ? Number(request.requestId) : 0,
                 replaceRange: request?.replaceRange ?? null,
                 candidates: Array.isArray(request?.candidates) ? request.candidates : [],
                 selectedIndex: Number.isFinite(Number(request?.selectedIndex)) ? Number(request.selectedIndex) : 0,
                 maxVisibleItems: Number.isFinite(Number(request?.maxVisibleItems)) ? Number(request.maxVisibleItems) : 8,
                 documentationMaxWidth: Number.isFinite(Number(request?.documentationMaxWidth)) ? Number(request.documentationMaxWidth) : 72,
                 documentationMaxHeight: Number.isFinite(Number(request?.documentationMaxHeight)) ? Number(request.documentationMaxHeight) : 12,
+                keys: request?.keys && typeof request.keys === "object" ? request.keys : undefined,
             };
-            console.info(`[saya.completion] show session=${normalized.sessionId} request=${normalized.requestId} candidates=${normalized.candidates.length}`);
-            return Deno.core.ops.op_runtime_completion_show(JSON.stringify(normalized));
+                console.info(`[saya.completion] show session=${normalized.sessionId} request=${normalized.requestId} candidates=${normalized.candidates.length}`);
+                return Deno.core.ops.op_runtime_completion_show(JSON.stringify(normalized));
+            },
+            close() {
+                return Deno.core.ops.op_runtime_completion_close();
+            },
         },
-    },
     // Phase A.2: 汎用プロセス I/O。Rust 側の op_process_* を Object.freeze
     // で凍結したラッパ越しに公開する。LSP / DAP / linter / formatter 等
     // のプラグインから利用される基盤。
@@ -852,6 +857,15 @@ declare global {
         source?: string | null;
     }
 
+    interface SayaCompletionKeyBindings {
+        confirm?: string[];
+        close?: string[];
+        next?: string[];
+        previous?: string[];
+        pageNext?: string[];
+        pagePrevious?: string[];
+    }
+
     interface SayaCompletionShowRequest {
         sessionId: string;
         requestId: number;
@@ -861,10 +875,12 @@ declare global {
         maxVisibleItems?: number;
         documentationMaxWidth?: number;
         documentationMaxHeight?: number;
+        keys?: SayaCompletionKeyBindings;
     }
 
     interface SayaRuntimeCompletionSurface {
         show(request: SayaCompletionShowRequest): Promise<boolean>;
+        close(): Promise<boolean>;
     }
 
     type SayaProcessStdioMode = "inherit" | "null" | "piped";
@@ -1567,6 +1583,14 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
             })
         })
     }
+    fn close_completion(&self) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        Box::pin(async move {
+            log::debug!("[saya_live_runtime][completion] typed close unavailable");
+            Err(RuntimeCommandError::UnknownCommand {
+                name: "completion.close".to_string(),
+            })
+        })
+    }
     fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot>;
     fn current_selection(&self) -> BoxFuture<Option<ReadonlySelectionSnapshot>> {
         Box::pin(async move { None })
@@ -2052,6 +2076,16 @@ async fn op_runtime_completion_show(
     );
     bridge
         .show_completion(request)
+        .await
+        .map_err(runtime_command_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+async fn op_runtime_completion_close(state: Rc<RefCell<OpState>>) -> Result<bool, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime][completion] runtime op close");
+    bridge
+        .close_completion()
         .await
         .map_err(runtime_command_error_to_js_error)
 }
@@ -3099,6 +3133,7 @@ deno_core::extension!(
         op_runtime_plugin_load_lazy,
         op_runtime_lsif_request,
         op_runtime_completion_show,
+        op_runtime_completion_close,
         op_runtime_input_prompt,
         op_runtime_selector_open,
         op_runtime_selector_update,

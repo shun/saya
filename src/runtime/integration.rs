@@ -210,6 +210,12 @@ pub trait RuntimeHostSession {
             name: "completion.show".to_string(),
         })
     }
+    fn close_completion(&mut self) -> Result<bool, RuntimeCommandError> {
+        log::debug!("[runtime_integration][completion] close unsupported by host session");
+        Err(RuntimeCommandError::UnknownCommand {
+            name: "completion.close".to_string(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -359,6 +365,10 @@ struct RuntimeCompletionShowRequest {
     reply: oneshot::Sender<Result<bool, RuntimeCommandError>>,
 }
 
+struct RuntimeCompletionCloseRequest {
+    reply: oneshot::Sender<Result<bool, RuntimeCommandError>>,
+}
+
 fn runtime_filer_operation_parts(
     operation: &RuntimeFilerOperation,
 ) -> (
@@ -424,6 +434,7 @@ struct ChannelBackedHostBridge {
     input_prompt_sender: mpsc::UnboundedSender<RuntimeInputPromptChannelRequest>,
     lsif_request_sender: mpsc::UnboundedSender<RuntimeLsifRequest>,
     completion_show_sender: mpsc::UnboundedSender<RuntimeCompletionShowRequest>,
+    completion_close_sender: mpsc::UnboundedSender<RuntimeCompletionCloseRequest>,
     filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
     filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
     float_open_sender: mpsc::UnboundedSender<RuntimeFloatOpenChannelRequest>,
@@ -532,6 +543,27 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
                 .map_err(|_| RuntimeCommandError::CommandFailed {
                     name: "completion.show".to_string(),
                     message: "host completion show reply channel closed".to_string(),
+                })?
+        })
+    }
+
+    fn close_completion(
+        &self,
+    ) -> crate::runtime::live::BoxFuture<Result<bool, RuntimeCommandError>> {
+        let completion_close_sender = self.completion_close_sender.clone();
+        Box::pin(async move {
+            let (reply, receiver) = oneshot::channel();
+            completion_close_sender
+                .send(RuntimeCompletionCloseRequest { reply })
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "completion.close".to_string(),
+                    message: "host completion close channel closed".to_string(),
+                })?;
+            receiver
+                .await
+                .map_err(|_| RuntimeCommandError::CommandFailed {
+                    name: "completion.close".to_string(),
+                    message: "host completion close reply channel closed".to_string(),
                 })?
         })
     }
@@ -905,6 +937,8 @@ pub struct RuntimeSessionOwner {
     lsif_request_receiver: mpsc::UnboundedReceiver<RuntimeLsifRequest>,
     _completion_show_sender: mpsc::UnboundedSender<RuntimeCompletionShowRequest>,
     completion_show_receiver: mpsc::UnboundedReceiver<RuntimeCompletionShowRequest>,
+    _completion_close_sender: mpsc::UnboundedSender<RuntimeCompletionCloseRequest>,
+    completion_close_receiver: mpsc::UnboundedReceiver<RuntimeCompletionCloseRequest>,
     _filer_operation_sender: mpsc::UnboundedSender<RuntimeFilerOperationRequest>,
     filer_operation_receiver: mpsc::UnboundedReceiver<RuntimeFilerOperationRequest>,
     _filer_list_sender: mpsc::UnboundedSender<RuntimeFilerListRequest>,
@@ -946,6 +980,7 @@ impl RuntimeSessionOwner {
         let (input_prompt_sender, input_prompt_receiver) = mpsc::unbounded_channel();
         let (lsif_request_sender, lsif_request_receiver) = mpsc::unbounded_channel();
         let (completion_show_sender, completion_show_receiver) = mpsc::unbounded_channel();
+        let (completion_close_sender, completion_close_receiver) = mpsc::unbounded_channel();
         let (filer_operation_sender, filer_operation_receiver) = mpsc::unbounded_channel();
         let (filer_list_sender, filer_list_receiver) = mpsc::unbounded_channel();
         let (float_open_sender, float_open_receiver) = mpsc::unbounded_channel();
@@ -964,6 +999,7 @@ impl RuntimeSessionOwner {
             input_prompt_sender: input_prompt_sender.clone(),
             lsif_request_sender: lsif_request_sender.clone(),
             completion_show_sender: completion_show_sender.clone(),
+            completion_close_sender: completion_close_sender.clone(),
             filer_operation_sender: filer_operation_sender.clone(),
             filer_list_sender: filer_list_sender.clone(),
             float_open_sender: float_open_sender.clone(),
@@ -991,6 +1027,8 @@ impl RuntimeSessionOwner {
             lsif_request_receiver,
             _completion_show_sender: completion_show_sender,
             completion_show_receiver,
+            _completion_close_sender: completion_close_sender,
+            completion_close_receiver,
             _filer_operation_sender: filer_operation_sender,
             filer_operation_receiver,
             _filer_list_sender: filer_list_sender,
@@ -1437,6 +1475,25 @@ impl RuntimeSessionOwner {
                         }
                     }
                 }
+                request = self.completion_close_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] completion close channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][completion] servicing runtime completion.close during event dispatch"
+                    );
+                    match host_session.close_completion() {
+                        Ok(closed) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= closed;
+                            let _ = request.reply.send(Ok(closed));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
                 request = self.filer_operation_receiver.recv() => {
                     let Some(request) = request else {
                         log::debug!("[runtime_integration] filer operation channel closed while dispatch was in flight");
@@ -1817,6 +1874,25 @@ impl RuntimeSessionOwner {
                             self.refresh_cached_snapshots(host_session);
                             projected.requires_redraw |= shown;
                             let _ = request.reply.send(Ok(shown));
+                        }
+                        Err(error) => {
+                            let _ = request.reply.send(Err(error));
+                        }
+                    }
+                }
+                request = self.completion_close_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] completion close channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::info!(
+                        "[runtime_integration][completion] servicing runtime completion.close during command execution"
+                    );
+                    match host_session.close_completion() {
+                        Ok(closed) => {
+                            self.refresh_cached_snapshots(host_session);
+                            projected.requires_redraw |= closed;
+                            let _ = request.reply.send(Ok(closed));
                         }
                         Err(error) => {
                             let _ = request.reply.send(Err(error));

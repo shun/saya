@@ -1,5 +1,7 @@
 // deno-fmt-ignore-file
 
+declare const saya: any;
+
 export interface SayaDiredCommandNames {
   open?: string;
   enter?: string;
@@ -67,9 +69,21 @@ function quoteRuntimeString(value: string): string {
   return JSON.stringify(value);
 }
 
+function hasExplicitDiredKeymap(options: SayaDiredOptions): boolean {
+  if (options.keymap !== undefined) return true;
+  return options.key !== undefined ||
+    options.enterKey !== undefined ||
+    options.refreshKey !== undefined ||
+    options.markKey !== undefined ||
+    options.unmarkKey !== undefined ||
+    options.clearMarksKey !== undefined ||
+    options.bulkDeletePreviewKey !== undefined;
+}
+
 export function setupSayaDired(options: SayaDiredOptions = {}): void {
   const commands = options.commands ?? {};
   const keymap = options.keymap ?? {};
+  const registerKeymap = hasExplicitDiredKeymap(options);
   const commandName = commands.open ?? options.commandName ?? "dired.open";
   const enterCommandName =
     commands.enter ?? options.enterCommandName ?? "dired.enter";
@@ -207,6 +221,7 @@ export function setupSayaDired(options: SayaDiredOptions = {}): void {
   saya.commands.register(unmarkCommandName, unmarkCallback);
   saya.commands.register(clearMarksCommandName, clearMarksCallback);
   saya.commands.register(bulkDeletePreviewCommandName, bulkDeletePreviewCallback);
+  if (!registerKeymap) return;
   saya.keymap.set("normal", key, saya.commands.execute(upCommandName));
   saya.keymap.set("normal", enterKey, saya.commands.execute(enterCommandName));
   saya.keymap.set("normal", refreshKey, saya.commands.execute(refreshCommandName));

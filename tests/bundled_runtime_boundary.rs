@@ -20,6 +20,7 @@ fn unique_path(name: &str) -> PathBuf {
 
 struct CompletionRuntimeHostBridge {
     shown: Arc<Mutex<Vec<CompletionShowRequest>>>,
+    closed: Arc<Mutex<usize>>,
 }
 
 impl HostCapabilityBridge for CompletionRuntimeHostBridge {
@@ -38,6 +39,14 @@ impl HostCapabilityBridge for CompletionRuntimeHostBridge {
                 .lock()
                 .expect("completion requests lock")
                 .push(request);
+            Ok(true)
+        })
+    }
+
+    fn close_completion(&self) -> BoxFuture<Result<bool, RuntimeCommandError>> {
+        let closed = self.closed.clone();
+        Box::pin(async move {
+            *closed.lock().expect("completion close count lock") += 1;
             Ok(true)
         })
     }
@@ -81,8 +90,13 @@ async fn bundled_completion_command_runs_after_startup_to_live_runtime_boundary(
         &config_path,
         format!(
             r#"
-                import {{ setupSayaCompletion }} from "{completion_specifier}";
-                setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 1000 }});
+                import {{ createBufferWordSource, setupSayaCompletion }} from "{completion_specifier}";
+                setupSayaCompletion({{
+                    key: "<C-x>",
+                    minPrefixLength: 2,
+                    sourceTimeoutMs: 1000,
+                    sources: [createBufferWordSource()],
+                }});
             "#
         ),
     )
@@ -97,9 +111,11 @@ async fn bundled_completion_command_runs_after_startup_to_live_runtime_boundary(
         .expect("startup registry should collect");
     let seed = CallbackRegistrySeed::from_startup_registry(&registry);
     let shown = Arc::new(Mutex::new(Vec::new()));
+    let closed = Arc::new(Mutex::new(0));
     let runtime = SayaLiveRuntime::spawn_from_seed(
         Arc::new(CompletionRuntimeHostBridge {
             shown: shown.clone(),
+            closed,
         }),
         seed,
     )
@@ -121,4 +137,48 @@ async fn bundled_completion_command_runs_after_startup_to_live_runtime_boundary(
         .map(|candidate| candidate.label.as_str())
         .collect::<Vec<_>>();
     assert_eq!(labels, vec!["println", "private"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_completion_close_reaches_live_runtime_boundary() {
+    let current_dir = unique_path("close-cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.commands.register("completion.closeForTest", async () => {
+                return await saya.completion.close();
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let prepared = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(module) = prepared else {
+        panic!("startup module should prepare: {prepared:?}");
+    };
+    let registry = collect_startup_registry(&module.executable_source_text)
+        .await
+        .expect("startup registry should collect");
+    let seed = CallbackRegistrySeed::from_startup_registry(&registry);
+    let closed = Arc::new(Mutex::new(0));
+    let runtime = SayaLiveRuntime::spawn_from_seed(
+        Arc::new(CompletionRuntimeHostBridge {
+            shown: Arc::new(Mutex::new(Vec::new())),
+            closed: closed.clone(),
+        }),
+        seed,
+    )
+    .expect("live runtime should spawn from startup callback seed");
+
+    let receipt = runtime
+        .execute_command("completion.closeForTest")
+        .expect("completion close command should queue");
+    receipt
+        .await_result()
+        .await
+        .expect("completion close command should run in live runtime");
+
+    assert_eq!(*closed.lock().expect("completion close count lock"), 1);
 }

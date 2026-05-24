@@ -177,6 +177,9 @@ fn plugin_host_generates_lazy_placeholders_that_log_trigger_bridge() {
 
 #[test]
 fn plugin_host_generates_lazy_placeholders_from_bundled_manifests() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PluginCacheRoot::new(unique_cache_root("bundled-fallback"));
     let host = PluginHost::new(root);
 
@@ -308,6 +311,9 @@ fn plugin_operations_report_cache_artifacts_and_append_operation_logs() {
 
 #[test]
 fn plugin_sync_regenerates_bundled_startup_and_lazy_artifacts_without_locking_bundled_plugins() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PluginCacheRoot::new(unique_cache_root("sync-bundled"));
     let host = PluginHost::new(root.clone());
 
@@ -346,6 +352,9 @@ fn plugin_sync_regenerates_bundled_startup_and_lazy_artifacts_without_locking_bu
 
 #[test]
 fn plugin_sync_writes_artifacts_from_startup_plugin_declarations() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PluginCacheRoot::new(unique_cache_root("sync-startup-declarations"));
     let host = PluginHost::new(root.clone());
     let registry = StartupRegistry::from_entries(vec![

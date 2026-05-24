@@ -37,6 +37,23 @@ pub struct HostCompletionCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompletionKeyBindingsRequest {
+    #[serde(default)]
+    pub confirm: Option<Vec<String>>,
+    #[serde(default)]
+    pub close: Option<Vec<String>>,
+    #[serde(default)]
+    pub next: Option<Vec<String>>,
+    #[serde(default)]
+    pub previous: Option<Vec<String>>,
+    #[serde(default)]
+    pub page_next: Option<Vec<String>>,
+    #[serde(default)]
+    pub page_previous: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompletionShowRequest {
     pub session_id: String,
     pub request_id: u64,
@@ -51,6 +68,8 @@ pub struct CompletionShowRequest {
     pub documentation_max_width: u16,
     #[serde(default = "default_documentation_max_height")]
     pub documentation_max_height: u16,
+    #[serde(default)]
+    pub keys: Option<CompletionKeyBindingsRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +82,7 @@ pub struct AcceptedCompletionRequest {
     pub max_visible_items: usize,
     pub documentation_max_width: u16,
     pub documentation_max_height: u16,
+    pub keys: Option<CompletionKeyBindingsRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +151,7 @@ impl CompletionSessionManager {
             max_visible_items: request.max_visible_items,
             documentation_max_width: request.documentation_max_width,
             documentation_max_height: request.documentation_max_height,
+            keys: request.keys,
         })
     }
 }
@@ -160,6 +181,7 @@ impl AcceptedCompletionRequest {
             max_visible_items: self.max_visible_items,
             documentation_max_width: self.documentation_max_width,
             documentation_max_height: self.documentation_max_height,
+            keys: self.keys.clone(),
         }
     }
 

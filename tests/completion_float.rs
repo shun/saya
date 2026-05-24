@@ -2,6 +2,7 @@ use saya::features::completion::float::{
     CompletionCandidate, CompletionFloatInputOutcome, CompletionFloatManager,
     CompletionMenuFloatRequest,
 };
+use saya::features::completion::session::CompletionKeyBindingsRequest;
 use saya::input::router::KeyInput;
 use saya::presentation::floating_window::{
     FloatingAnchor, FloatingContentRef, FloatingFit, FloatingInputOutcome, FloatingPlacement,
@@ -47,6 +48,22 @@ fn request() -> CompletionMenuFloatRequest {
         max_visible_items: 2,
         documentation_max_width: 40,
         documentation_max_height: 5,
+        keys: Some(default_completion_keys()),
+    }
+}
+
+fn default_completion_keys() -> CompletionKeyBindingsRequest {
+    CompletionKeyBindingsRequest {
+        confirm: Some(vec![
+            "<Enter>".to_string(),
+            "<Tab>".to_string(),
+            "<C-y>".to_string(),
+        ]),
+        close: Some(vec!["<Esc>".to_string(), "<C-[>".to_string()]),
+        next: Some(vec!["<Down>".to_string(), "<C-n>".to_string()]),
+        previous: Some(vec!["<Up>".to_string(), "<C-p>".to_string()]),
+        page_next: Some(vec!["<PageDown>".to_string()]),
+        page_previous: Some(vec!["<PageUp>".to_string()]),
     }
 }
 
@@ -114,6 +131,35 @@ fn completion_menu_opens_structured_candidate_owner_and_documentation_float() {
             "  [Function] println! - macro",
             "> [Function] print! - macro"
         ]
+    );
+}
+
+#[test]
+fn completion_menu_without_request_keys_has_no_operation_key_bindings() {
+    let mut floats = FloatingWindowManager::default();
+    let mut completion = CompletionFloatManager::default();
+    let mut request = request();
+    request.keys = None;
+    let opened = completion
+        .open_menu(&mut floats, request)
+        .expect("completion candidates should open a menu");
+    assert!(floats.focus_float(opened.menu_id));
+
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Down, Some(7)),
+        CompletionFloatInputOutcome::Ignored
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Enter, Some(7)),
+        CompletionFloatInputOutcome::Ignored
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Escape, Some(7)),
+        CompletionFloatInputOutcome::Ignored
+    );
+    assert!(
+        floats.debug_window(opened.menu_id).is_some(),
+        "menu should remain open without explicit close keys"
     );
 }
 
@@ -247,5 +293,122 @@ fn generic_static_line_key_handler_ignores_completion_menu_content() {
         floats.handle_focused_static_lines_key_with_restore(&KeyInput::Down, Some(7)),
         FloatingInputOutcome::Ignored,
         "completion-specific key semantics must stay outside the generic static-lines handler"
+    );
+}
+
+#[test]
+fn completion_menu_uses_request_scoped_key_bindings_for_confirm_and_close() {
+    let mut floats = FloatingWindowManager::default();
+    let mut completion = CompletionFloatManager::default();
+    let mut custom = request();
+    custom.keys = Some(CompletionKeyBindingsRequest {
+        confirm: Some(vec!["<Tab>".to_string()]),
+        close: Some(vec!["<Esc>".to_string()]),
+        next: None,
+        previous: None,
+        page_next: None,
+        page_previous: None,
+    });
+    let opened = completion
+        .open_menu(&mut floats, custom)
+        .expect("completion candidates should open a menu");
+    assert!(floats.focus_float(opened.menu_id));
+
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Enter, Some(7)),
+        CompletionFloatInputOutcome::Ignored,
+        "Enter must not confirm when the popup overrides confirm keys to Tab only"
+    );
+    assert!(floats.debug_window(opened.menu_id).is_some());
+
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Tab, Some(7)),
+        CompletionFloatInputOutcome::Accepted {
+            menu_id: opened.menu_id,
+            candidate: request().candidates[1].clone()
+        }
+    );
+    assert!(floats.debug_window(opened.menu_id).is_none());
+}
+
+#[test]
+fn completion_menu_allows_empty_key_groups_to_disable_operations() {
+    let mut floats = FloatingWindowManager::default();
+    let mut completion = CompletionFloatManager::default();
+    let mut custom = request();
+    custom.keys = Some(CompletionKeyBindingsRequest {
+        confirm: Some(Vec::new()),
+        close: Some(Vec::new()),
+        next: None,
+        previous: None,
+        page_next: None,
+        page_previous: None,
+    });
+    let opened = completion
+        .open_menu(&mut floats, custom)
+        .expect("completion candidates should open a menu");
+    assert!(floats.focus_float(opened.menu_id));
+
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Enter, Some(7)),
+        CompletionFloatInputOutcome::Ignored
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Escape, Some(7)),
+        CompletionFloatInputOutcome::Ignored
+    );
+    assert!(floats.debug_window(opened.menu_id).is_some());
+}
+
+#[test]
+fn completion_menu_uses_request_scoped_navigation_keys() {
+    let mut floats = FloatingWindowManager::default();
+    let mut completion = CompletionFloatManager::default();
+    let mut custom = request();
+    custom.keys = Some(CompletionKeyBindingsRequest {
+        confirm: None,
+        close: None,
+        next: Some(vec!["j".to_string()]),
+        previous: Some(vec!["k".to_string()]),
+        page_next: Some(vec!["<C-f>".to_string()]),
+        page_previous: Some(vec!["<C-b>".to_string()]),
+    });
+    let opened = completion
+        .open_menu(&mut floats, custom)
+        .expect("completion candidates should open a menu");
+    assert!(floats.focus_float(opened.menu_id));
+
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Down, Some(7)),
+        CompletionFloatInputOutcome::Ignored,
+        "Down must not navigate when the popup overrides next keys"
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Char('j'), Some(7)),
+        CompletionFloatInputOutcome::Selected {
+            menu_id: opened.menu_id,
+            selected_index: 2
+        }
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Char('k'), Some(7)),
+        CompletionFloatInputOutcome::Selected {
+            menu_id: opened.menu_id,
+            selected_index: 1
+        }
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Ctrl('f'), Some(7)),
+        CompletionFloatInputOutcome::Selected {
+            menu_id: opened.menu_id,
+            selected_index: 2
+        }
+    );
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Ctrl('B'), Some(7)),
+        CompletionFloatInputOutcome::Selected {
+            menu_id: opened.menu_id,
+            selected_index: 0
+        }
     );
 }

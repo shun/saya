@@ -20,8 +20,12 @@ function installSayaFake(
 ) {
   const executed: string[] = [];
   const registered = new Map<string, () => unknown>();
+  const events = new Map<string, (payload: unknown) => unknown>();
   const shown: unknown[] = [];
+  const closed: unknown[] = [];
   const listed: Array<{ path: string; options?: unknown }> = [];
+  const keymaps: Array<{ mode: string; lhs: string; action: unknown }> = [];
+  let floats: unknown[] = [];
   (globalThis as any).saya = {
     buffer: {
       current: () =>
@@ -57,6 +61,23 @@ function installSayaFake(
         shown.push(request);
         return Promise.resolve(true);
       },
+      close() {
+        closed.push("completion.close");
+        floats = floats.filter((float: any) =>
+          float?.kind !== "completionMenu" && float?.kind !== "completion-menu"
+        );
+        return Promise.resolve(true);
+      },
+    },
+    window: {
+      floats() {
+        return Promise.resolve(floats);
+      },
+      close(id: unknown) {
+        closed.push(id);
+        floats = floats.filter((float: any) => float?.id !== id);
+        return Promise.resolve(true);
+      },
     },
     fs: {
       async readDir(path: string, options?: unknown) {
@@ -68,15 +89,52 @@ function installSayaFake(
     filer: {
       async list(path: string, options?: unknown) {
         throw new Error(
-          `completion tests must not use side-effectful saya.filer.list: ${path} ${JSON.stringify(options)}`,
+          `completion tests must not use side-effectful saya.filer.list: ${path} ${
+            JSON.stringify(options)
+          }`,
         );
       },
     },
     keymap: {
-      set() {},
+      set(mode: string, lhs: string, action: unknown) {
+        keymaps.push({ mode, lhs, action });
+      },
+    },
+    events: {
+      on(name: string, callback: (payload: unknown) => unknown) {
+        events.set(name, callback);
+      },
     },
   };
-  return { executed, registered, shown, listed };
+  return {
+    executed,
+    registered,
+    events,
+    shown,
+    keymaps,
+    listed,
+    closed,
+    setFloats(value: unknown[]) {
+      floats = value;
+    },
+  };
+}
+
+function shownLength(fake: ReturnType<typeof installSayaFake>): number {
+  return fake.shown.length;
+}
+
+function executeRegisteredCommands(
+  fake: ReturnType<typeof installSayaFake>,
+  lspResponse: unknown = { result: [] },
+) {
+  (globalThis as any).saya.commands.execute = (name: string) => {
+    fake.executed.push(name);
+    if (name === "lsp.completion") return Promise.resolve(lspResponse);
+    const callback = fake.registered.get(name);
+    if (!callback) throw new Error(`missing command: ${name}`);
+    return callback();
+  };
 }
 
 Deno.test("buffer source collects filtered deduped words ordered near the cursor", async () => {
@@ -95,6 +153,7 @@ Deno.test("buffer source collects filtered deduped words ordered near the cursor
       ].join("\n"),
     },
     editor: { mode: "Insert" },
+    reason: { kind: "manual" },
   };
 
   const source = createBufferWordSource();
@@ -137,7 +196,7 @@ Deno.test("buffer completion request uses typed menu shape and max items", async
       `expected completion trigger to show menu, got ${String(result)}`,
     );
   }
-  if (fake.shown.length !== 1) {
+  if (shownLength(fake) !== 1) {
     throw new Error(
       `expected one typed completion show, got ${fake.shown.length}`,
     );
@@ -161,15 +220,123 @@ Deno.test("buffer completion request uses typed menu shape and max items", async
   if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
     throw new Error(`unexpected request candidates: ${JSON.stringify(labels)}`);
   }
+  if (request.keys !== undefined) {
+    throw new Error(
+      `menu keys must be explicit: ${JSON.stringify(request.keys)}`,
+    );
+  }
 });
 
-Deno.test("bundled completion command source runs without startup closure state", async () => {
+Deno.test("completion setup with sources does not install manual keymap unless key is explicit", async () => {
+  const fake = installSayaFake({ result: [] });
+  await setupSayaCompletion({
+    sources: [createBufferWordSource()],
+    sourceTimeoutMs: 0,
+  });
+
+  if (!fake.registered.has("completion.trigger")) {
+    throw new Error("completion command should still be registered");
+  }
+  if (fake.keymaps.length !== 0) {
+    throw new Error(
+      `unexpected implicit keymaps: ${JSON.stringify(fake.keymaps)}`,
+    );
+  }
+});
+
+Deno.test("completion setup can install explicit manual keymap without sources", async () => {
+  const fake = installSayaFake({ result: [] });
+  await setupSayaCompletion({ key: "<C-Space>", sourceTimeoutMs: 0 });
+
+  if (fake.keymaps.length !== 1) {
+    throw new Error(
+      `expected one explicit keymap, got ${JSON.stringify(fake.keymaps)}`,
+    );
+  }
+  if (
+    fake.keymaps[0].mode !== "insert" || fake.keymaps[0].lhs !== "<C-Space>"
+  ) {
+    throw new Error(
+      `unexpected explicit keymap: ${JSON.stringify(fake.keymaps[0])}`,
+    );
+  }
+  const result = await fake.registered.get("completion.trigger")?.();
+  if (result !== false || fake.shown.length !== 0) {
+    throw new Error("keymap-only completion must stay quiet without sources");
+  }
+});
+
+Deno.test("completion request forwards configured operation keys", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 3,
+    currentLine: "pri",
+    text: "pri\nprintln\nprivate\n",
+  });
+  await setupSayaCompletion({
+    sources: [createBufferWordSource()],
+    sourceTimeoutMs: 0,
+    keys: {
+      confirm: ["<Tab>"],
+      close: ["<Esc>"],
+      next: ["j"],
+      previous: ["k"],
+      pageNext: ["<C-f>"],
+      pagePrevious: ["<C-b>"],
+    },
+  });
+
+  await fake.registered.get("completion.trigger")?.();
+  const request = fake.shown[0] as any;
+  if (
+    JSON.stringify(request.keys) !==
+      JSON.stringify({
+        confirm: ["<Tab>"],
+        close: ["<Esc>"],
+        next: ["j"],
+        previous: ["k"],
+        pageNext: ["<C-f>"],
+        pagePrevious: ["<C-b>"],
+      })
+  ) {
+    throw new Error(
+      `unexpected configured keys: ${JSON.stringify(request.keys)}`,
+    );
+  }
+});
+
+Deno.test("completion command with no configured sources stays quiet", async () => {
   const fake = installSayaFake({ result: [] }, {
     cursorCol: 3,
     currentLine: "pri",
     text: "pri\nprintln\nprivate\n",
   });
   await setupSayaCompletion({ sourceTimeoutMs: 0 });
+
+  const registered = fake.registered.get("completion.trigger");
+  if (!registered) throw new Error("completion trigger should be registered");
+  const result = await registered();
+  if (result !== false) {
+    throw new Error(
+      `expected no-source completion to stay quiet, got ${result}`,
+    );
+  }
+  if (fake.shown.length !== 0) {
+    throw new Error(
+      `no-source completion must not show menu: ${fake.shown.length}`,
+    );
+  }
+});
+
+Deno.test("bundled source command runs without startup closure state", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 3,
+    currentLine: "pri",
+    text: "pri\nprintln\nprivate\n",
+  });
+  await setupSayaCompletion({
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
 
   const registered = fake.registered.get("completion.trigger");
   if (!registered) throw new Error("completion trigger should be registered");
@@ -187,6 +354,221 @@ Deno.test("bundled completion command source runs without startup closure state"
   const labels = request.candidates.map((candidate: any) => candidate.label);
   if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
     throw new Error(`unexpected isolated labels: ${JSON.stringify(labels)}`);
+  }
+  if (request.keys !== undefined) {
+    throw new Error(
+      `startup-safe command must not include implicit completion keys: ${
+        JSON.stringify(request.keys)
+      }`,
+    );
+  }
+});
+
+Deno.test("bundled source command forwards configured operation keys", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 3,
+    currentLine: "pri",
+    text: "pri\nprintln\nprivate\n",
+  });
+  await setupSayaCompletion({
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+    keys: {
+      confirm: ["<Tab>"],
+      close: ["<Esc>"],
+      next: ["j"],
+      previous: ["k"],
+      pageNext: ["<C-f>"],
+      pagePrevious: ["<C-b>"],
+    },
+  });
+
+  const result = await fake.registered.get("completion.trigger")?.();
+  if (result !== true) {
+    throw new Error(
+      `expected bundled source command to show menu, got ${result}`,
+    );
+  }
+
+  const request = fake.shown[0] as any;
+  if (
+    JSON.stringify(request.keys) !==
+      JSON.stringify({
+        confirm: ["<Tab>"],
+        close: ["<Esc>"],
+        next: ["j"],
+        previous: ["k"],
+        pageNext: ["<C-f>"],
+        pagePrevious: ["<C-b>"],
+      })
+  ) {
+    throw new Error(
+      `unexpected bundled command keys: ${JSON.stringify(request.keys)}`,
+    );
+  }
+});
+
+Deno.test("bundled buffer source minPrefixLength is explicit", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 1,
+    currentLine: "p",
+    text: "p\nprintln\nprivate\n",
+  });
+  await setupSayaCompletion({
+    minPrefixLength: 1,
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+
+  const result = await fake.registered.get("completion.trigger")?.();
+
+  if (result !== false) {
+    throw new Error(
+      `expected explicit buffer word source to stay quiet for one character, got ${result}`,
+    );
+  }
+  if (fake.shown.length !== 0) {
+    throw new Error(`unexpected one-character menu: ${fake.shown.length}`);
+  }
+});
+
+Deno.test("bundled buffer source can be configured for one-character completion", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 1,
+    currentLine: "p",
+    text: "p\nprintln\nprivate\n",
+  });
+  await setupSayaCompletion({
+    minPrefixLength: 1,
+    sources: [createBufferWordSource({ minPrefixLength: 1 })],
+    sourceTimeoutMs: 0,
+  });
+
+  const result = await fake.registered.get("completion.trigger")?.();
+
+  if (result !== true) {
+    throw new Error(
+      `expected one-character buffer word completion, got ${result}`,
+    );
+  }
+  const labels = (fake.shown[0] as any).candidates.map((candidate: any) =>
+    candidate.label
+  );
+  if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
+    throw new Error(
+      `unexpected one-character labels: ${JSON.stringify(labels)}`,
+    );
+  }
+});
+
+Deno.test("bundled buffer source can auto trigger on one character when configured", async () => {
+  const buffer = {
+    cursorCol: 1,
+    currentLine: "p",
+    text: "p\nprintln\nprivate\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    minPrefixLength: 1,
+    sources: [createBufferWordSource({ minPrefixLength: 1 })],
+    sourceTimeoutMs: 0,
+  });
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  await fake.registered.get("completion.trigger")?.();
+
+  if (fake.shown.length !== 1) {
+    throw new Error(
+      `expected one-character auto buffer completion, got ${fake.shown.length}`,
+    );
+  }
+  const labels = (fake.shown[0] as any).candidates.map((candidate: any) =>
+    candidate.label
+  );
+  if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
+    throw new Error(
+      `unexpected one-character auto labels: ${JSON.stringify(labels)}`,
+    );
+  }
+});
+
+Deno.test("auto trigger with no configured sources stays quiet", async () => {
+  const buffer = {
+    path: "/workspace/main.ts",
+    cursorCol: 3,
+    currentLine: "pri",
+    text: "pri\nprintln\nprivate\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    sourceTimeoutMs: 0,
+  });
+  (globalThis as any).saya.commands.execute = (name: string) => {
+    const callback = fake.registered.get(name);
+    if (!callback) throw new Error(`missing command: ${name}`);
+    return callback();
+  };
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (fake.shown.length !== 0) {
+    throw new Error(
+      `no-source auto trigger must not open: ${fake.shown.length}`,
+    );
+  }
+});
+
+Deno.test("explicit bundled path source auto trigger uses the startup-safe command path", async () => {
+  const buffer = {
+    path: "/workspace/main.ts",
+    cursorCol: 1,
+    currentLine: "/",
+    text: "/",
+  };
+  const fake = installSayaFake({ result: [] }, buffer, {
+    readDir: (path: string) => {
+      if (path !== "/") throw new Error(`unexpected path: ${path}`);
+      return [{ name: "usr", kind: "directory", path: "/usr" }];
+    },
+  });
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    sources: [
+      createPathCompletionSource({
+        minPrefixLength: 1,
+        triggerCharacters: ["/", "."],
+      }),
+    ],
+    sourceTimeoutMs: 0,
+  });
+  (globalThis as any).saya.commands.execute = (name: string) => {
+    if (name === "lsp.completion") return Promise.resolve({ result: [] });
+    const callback = fake.registered.get(name);
+    if (!callback) throw new Error(`missing command: ${name}`);
+    return callback();
+  };
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (shownLength(fake) !== 1) {
+    throw new Error("explicit path source must auto open for slash");
+  }
+  const labels = (fake.shown[0] as any).candidates.map((candidate: any) =>
+    candidate.label
+  );
+  if (JSON.stringify(labels) !== JSON.stringify(["/usr/"])) {
+    throw new Error(
+      `unexpected explicit path auto labels: ${JSON.stringify(labels)}`,
+    );
   }
 });
 
@@ -309,6 +691,7 @@ Deno.test("path source collects directory and file candidates from fs readDir", 
       text: "./src",
     },
     editor: { mode: "Insert" },
+    reason: { kind: "manual" },
   };
   const fake = installSayaFake({ result: [] }, {}, {
     readDir: (path: string) => {
@@ -364,6 +747,7 @@ Deno.test("path source excludes no-op labels dedupes orders and caps max items",
       text: "./src",
     },
     editor: { mode: "Insert" },
+    reason: { kind: "manual" },
   };
   installSayaFake({ result: [] }, {}, {
     readDir: () => [
@@ -526,6 +910,437 @@ Deno.test("LSP source maps completion response into typed completion menu", asyn
     throw new Error(
       `unexpected insertText: ${request.candidates[0].insertText}`,
     );
+  }
+});
+
+Deno.test("auto trigger disabled does not subscribe to buffer changes", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 3,
+    currentLine: "pri",
+    text: "pri\nprintln\n",
+  });
+  await setupSayaCompletion({
+    autoTrigger: false,
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+
+  if (fake.events.has("bufferChanged")) {
+    throw new Error("auto trigger disabled must not register bufferChanged");
+  }
+  if (fake.shown.length !== 0) {
+    throw new Error(`unexpected menu count: ${fake.shown.length}`);
+  }
+});
+
+Deno.test("auto trigger opens from insert buffer changes with debounce", async () => {
+  const buffer = {
+    cursorCol: 3,
+    currentLine: "pri",
+    text: "pri\nprintln\nprivate\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 5,
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  handler({ buffer });
+  handler({ buffer });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  if (fake.shown.length !== 1) {
+    throw new Error(`expected one debounced menu, got ${fake.shown.length}`);
+  }
+  const labels = (fake.shown[0] as any).candidates.map((candidate: any) =>
+    candidate.label
+  );
+  if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
+    throw new Error(`unexpected auto labels: ${JSON.stringify(labels)}`);
+  }
+});
+
+Deno.test("auto trigger respects insert mode and global and source min prefix lengths", async () => {
+  const buffer = {
+    cursorCol: 1,
+    currentLine: "p",
+    text: "p\nprintln\nprivate\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    minPrefixLength: 1,
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (fake.shown.length !== 0) {
+    throw new Error("one-character buffer prefix must not auto open");
+  }
+
+  buffer.cursorCol = 2;
+  buffer.currentLine = "pr";
+  buffer.text = "pr\nprintln\nprivate\n";
+  await handler({ buffer });
+  if (shownLength(fake) !== 1) {
+    throw new Error("two-character buffer prefix must auto open");
+  }
+
+  (globalThis as any).saya.editor.current = () =>
+    Promise.resolve({ mode: "Normal" });
+  buffer.cursorCol = 3;
+  buffer.currentLine = "pri";
+  buffer.text = "pri\nprintln\nprivate\n";
+  await handler({ buffer });
+  if (shownLength(fake) !== 1) {
+    throw new Error("auto trigger must not open outside insert mode");
+  }
+});
+
+Deno.test("auto trigger closes existing menu when prefix falls below source min length", async () => {
+  const buffer = {
+    cursorCol: 2,
+    currentLine: "pr",
+    text: "pr\nprintln\nprivate\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    minPrefixLength: 1,
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (fake.shown.length !== 1) {
+    throw new Error("two-character buffer prefix must auto open");
+  }
+
+  fake.setFloats([{ id: 42, kind: "completionMenu" }]);
+  buffer.cursorCol = 1;
+  buffer.currentLine = "p";
+  buffer.text = "p\nprintln\nprivate\n";
+  await handler({ buffer });
+  if (fake.closed.length !== 1) {
+    throw new Error(
+      `expected stale completion menu to close, got ${
+        JSON.stringify(fake.closed)
+      }`,
+    );
+  }
+});
+
+Deno.test("startup-safe auto trigger closes stale menu when no source is configured", async () => {
+  const buffer = {
+    cursorCol: 1,
+    currentLine: "p",
+    text: "p\nprintln\nprivate\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    sourceTimeoutMs: 0,
+  });
+  (globalThis as any).saya.commands.execute = (name: string) => {
+    if (name === "lsp.completion") return Promise.resolve({ result: [] });
+    const callback = fake.registered.get(name);
+    if (!callback) throw new Error(`missing command: ${name}`);
+    return callback();
+  };
+  fake.setFloats([{ id: 7, kind: "completionMenu" }]);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (fake.shown.length !== 0) {
+    throw new Error("no-source auto trigger must not open a menu");
+  }
+  if (fake.closed.length !== 1) {
+    throw new Error(
+      `expected generated auto callback to close stale menu, got ${
+        JSON.stringify(fake.closed)
+      }`,
+    );
+  }
+});
+
+Deno.test("explicit startup-safe auto trigger closes stale menu outside insert mode", async () => {
+  const buffer = {
+    cursorCol: 2,
+    currentLine: "ty",
+    text: "ty\ntype\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (fake.shown.length !== 1) {
+    throw new Error("insert-mode auto trigger should open before mode changes");
+  }
+
+  fake.setFloats([{ id: 11, kind: "completionMenu" }]);
+  (globalThis as any).saya.editor.current = () =>
+    Promise.resolve({ mode: "Normal" });
+  await handler({ buffer });
+  if (fake.closed.length !== 1) {
+    throw new Error(
+      `expected generated auto callback to close menu outside insert mode, got ${
+        JSON.stringify(fake.closed)
+      }`,
+    );
+  }
+});
+
+Deno.test("custom auto trigger closes stale menu outside insert mode", async () => {
+  const buffer = {
+    cursorCol: 2,
+    currentLine: "ty",
+    text: "ty\ntype\n",
+  };
+  const fake = installSayaFake({ result: [] }, buffer);
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    sources: [createBufferWordSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (fake.shown.length !== 1) {
+    throw new Error(
+      "insert-mode custom auto trigger should open before mode changes",
+    );
+  }
+
+  fake.setFloats([{ id: 13, kind: "completionMenu" }]);
+  (globalThis as any).saya.editor.current = () =>
+    Promise.resolve({ mode: "Normal" });
+  await handler({ buffer });
+  if (fake.closed.length !== 1) {
+    throw new Error(
+      `expected custom auto callback to close menu outside insert mode, got ${
+        JSON.stringify(fake.closed)
+      }`,
+    );
+  }
+});
+
+Deno.test("explicit path auto trigger closes existing menu when path prefix is removed", async () => {
+  const buffer = {
+    path: "/workspace/main.ts",
+    cursorCol: 1,
+    currentLine: "/",
+    text: "/",
+  };
+  const fake = installSayaFake({ result: [] }, buffer, {
+    readDir: (path: string) => {
+      if (path !== "/") throw new Error(`unexpected path: ${path}`);
+      return [{ name: "usr", kind: "directory", path: "/usr" }];
+    },
+  });
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    sources: [
+      createPathCompletionSource({
+        minPrefixLength: 1,
+        triggerCharacters: ["/", "."],
+      }),
+    ],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+  if (fake.shown.length !== 1) {
+    throw new Error("slash should auto open path completion");
+  }
+
+  fake.setFloats([{ id: 12, kind: "completionMenu" }]);
+  buffer.cursorCol = 0;
+  buffer.currentLine = "";
+  buffer.text = "";
+  await handler({ buffer });
+  if (fake.closed.length !== 1) {
+    throw new Error(
+      `expected stale path completion menu to close, got ${
+        JSON.stringify(fake.closed)
+      }`,
+    );
+  }
+});
+
+Deno.test("auto trigger characters can bypass min prefix length", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 1,
+    currentLine: ".",
+    text: ".",
+  });
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    minPrefixLength: 2,
+    sources: [{
+      id: "dot",
+      triggerCharacters: ["."],
+      trigger: (
+        context: SayaCompletionTriggerContext,
+      ): SayaCompletionQuery => ({
+        ...context,
+        sourceId: "dot",
+        prefix: "",
+        replaceRange: {
+          start: { line: 0, character: 1 },
+          end: { line: 0, character: 1 },
+        },
+      }),
+      complete: (query: SayaCompletionQuery) => ({
+        sourceId: query.sourceId,
+        prefix: query.prefix,
+        replaceRange: query.replaceRange,
+        candidates: [{ label: "member", insertText: "member" }],
+      }),
+    }],
+    filters: [],
+    sorters: [],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({
+    buffer: {
+      cursorCol: 1,
+      currentLine: ".",
+    },
+  });
+  if (fake.shown.length !== 1) {
+    throw new Error("trigger character must open auto completion");
+  }
+});
+
+Deno.test("manual trigger is not gated by trigger characters", async () => {
+  const fake = installSayaFake({ result: [] }, {
+    cursorCol: 1,
+    currentLine: "x",
+    text: "x",
+  });
+  await setupSayaCompletion({
+    sources: [{
+      id: "manual",
+      triggerCharacters: ["."],
+      trigger: (
+        context: SayaCompletionTriggerContext,
+      ): SayaCompletionQuery => ({
+        ...context,
+        sourceId: "manual",
+        prefix: "x",
+        replaceRange: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 1 },
+        },
+      }),
+      complete: (query: SayaCompletionQuery) => ({
+        sourceId: query.sourceId,
+        prefix: query.prefix,
+        replaceRange: query.replaceRange,
+        candidates: [{ label: "xray", insertText: "xray" }],
+      }),
+    }],
+    filters: [],
+    sorters: [],
+    sourceTimeoutMs: 0,
+  });
+
+  const result = await fake.registered.get("completion.trigger")?.();
+  if (result !== true || fake.shown.length !== 1) {
+    throw new Error("manual trigger must run without trigger character match");
+  }
+});
+
+Deno.test("path completion auto opens for slash and relative prefixes", async () => {
+  const buffer = {
+    path: "/workspace/main.ts",
+    cursorCol: 1,
+    currentLine: "/",
+    text: "/",
+  };
+  const fake = installSayaFake({ result: [] }, buffer, {
+    readDir: (path: string) => {
+      if (path === "/") {
+        return [{ name: "usr", kind: "directory", path: "/usr" }];
+      }
+      if (path === "/workspace") {
+        return [{ name: "src", kind: "directory", path: "/workspace/src" }];
+      }
+      throw new Error(`unexpected list path: ${path}`);
+    },
+  });
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    sources: [
+      createPathCompletionSource({
+        optional: false,
+        minPrefixLength: 1,
+        triggerCharacters: ["/", "."],
+      }),
+    ],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake);
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({ buffer });
+
+  buffer.cursorCol = 2;
+  buffer.currentLine = "./";
+  buffer.text = "./";
+  await handler({ buffer });
+
+  if (fake.shown.length !== 2) {
+    throw new Error(`expected two path auto menus, got ${fake.shown.length}`);
+  }
+  const labels = fake.shown.map((request: any) =>
+    request.candidates.map((candidate: any) => candidate.label)
+  );
+  if (
+    JSON.stringify(labels) !== JSON.stringify([
+      ["/usr/"],
+      ["./src/"],
+    ])
+  ) {
+    throw new Error(`unexpected path labels: ${JSON.stringify(labels)}`);
   }
 });
 

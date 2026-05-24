@@ -1376,8 +1376,9 @@ export function setupSayaLspClient(options = {}) {
     "source.organizeImports",
   ];
   const normalizedPopupUi = normalizeLspPopupUi(options);
-  const enableBufferEvents = options.enableBufferEvents ?? true;
+  const enableBufferEvents = options.enableBufferEvents ?? false;
   const lsifOptions = options.lsif ?? {};
+  const keymapConfigured = options.keymap !== undefined;
   const keymapOptions = options.keymap ?? {};
   const lsifEnabled = lsifOptions.enabled ?? false;
   const lsifBridgeCommand = lsifOptions.bridgeCommand ?? "lsif.request";
@@ -1517,57 +1518,59 @@ export function setupSayaLspClient(options = {}) {
     );
   }
 
-  saya.keymap.set("normal", keymapOptions.hover ?? "K", saya.commands.execute(commandNames.hover));
-  saya.keymap.set(
-    "normal",
-    keymapOptions.definition ?? "gd",
-    saya.commands.execute(commandNames.definition),
-  );
-  saya.keymap.set(
-    "normal",
-    keymapOptions.references ?? "gR",
-    saya.commands.execute(commandNames.references),
-  );
-  saya.keymap.set(
-    "normal",
-    keymapOptions.documentSymbol ?? "gO",
-    saya.commands.execute(commandNames.documentSymbol),
-  );
-  saya.keymap.set(
-    "insert",
-    keymapOptions.signatureHelp ?? "<C-k>",
-    saya.commands.execute(commandNames.signatureHelp),
-  );
-  saya.keymap.set(
-    "normal",
-    keymapOptions.formatting ?? "gq",
-    saya.commands.execute(commandNames.formatting),
-  );
-  saya.keymap.set(
-    "visual",
-    keymapOptions.rangeFormatting ?? "gq",
-    saya.commands.execute(commandNames.rangeFormatting),
-  );
-  saya.keymap.set(
-    "normal",
-    keymapOptions.rename ?? "grn",
-    saya.commands.execute(commandNames.rename),
-  );
-  saya.keymap.set(
-    "normal",
-    keymapOptions.codeAction ?? "gra",
-    saya.commands.execute(commandNames.codeAction),
-  );
-  saya.keymap.set(
-    "normal",
-    keymapOptions.nextDiagnostic ?? "]d",
-    saya.commands.execute(commandNames.nextDiagnostic),
-  );
-  saya.keymap.set(
-    "normal",
-    keymapOptions.previousDiagnostic ?? "[d",
-    saya.commands.execute(commandNames.previousDiagnostic),
-  );
+  if (keymapConfigured) {
+    saya.keymap.set("normal", keymapOptions.hover ?? "K", saya.commands.execute(commandNames.hover));
+    saya.keymap.set(
+      "normal",
+      keymapOptions.definition ?? "gd",
+      saya.commands.execute(commandNames.definition),
+    );
+    saya.keymap.set(
+      "normal",
+      keymapOptions.references ?? "gR",
+      saya.commands.execute(commandNames.references),
+    );
+    saya.keymap.set(
+      "normal",
+      keymapOptions.documentSymbol ?? "gO",
+      saya.commands.execute(commandNames.documentSymbol),
+    );
+    saya.keymap.set(
+      "insert",
+      keymapOptions.signatureHelp ?? "<C-k>",
+      saya.commands.execute(commandNames.signatureHelp),
+    );
+    saya.keymap.set(
+      "normal",
+      keymapOptions.formatting ?? "gq",
+      saya.commands.execute(commandNames.formatting),
+    );
+    saya.keymap.set(
+      "visual",
+      keymapOptions.rangeFormatting ?? "gq",
+      saya.commands.execute(commandNames.rangeFormatting),
+    );
+    saya.keymap.set(
+      "normal",
+      keymapOptions.rename ?? "grn",
+      saya.commands.execute(commandNames.rename),
+    );
+    saya.keymap.set(
+      "normal",
+      keymapOptions.codeAction ?? "gra",
+      saya.commands.execute(commandNames.codeAction),
+    );
+    saya.keymap.set(
+      "normal",
+      keymapOptions.nextDiagnostic ?? "]d",
+      saya.commands.execute(commandNames.nextDiagnostic),
+    );
+    saya.keymap.set(
+      "normal",
+      keymapOptions.previousDiagnostic ?? "[d",
+      saya.commands.execute(commandNames.previousDiagnostic),
+    );
+  }
 
   if (lsifEnabled) {
     saya.commands.register(
@@ -1612,15 +1615,17 @@ export function setupSayaLspClient(options = {}) {
         lsifDumpPath,
       ),
     );
-    saya.keymap.set(
-      "normal",
-      keymapOptions.lsifHover ?? "gK",
-      saya.commands.execute(commandNames.lsifHover),
-    );
-    saya.keymap.set(
-      "normal",
-      keymapOptions.lsifDefinition ?? "gD",
-      saya.commands.execute(commandNames.lsifDefinition),
-    );
+    if (keymapConfigured) {
+      saya.keymap.set(
+        "normal",
+        keymapOptions.lsifHover ?? "gK",
+        saya.commands.execute(commandNames.lsifHover),
+      );
+      saya.keymap.set(
+        "normal",
+        keymapOptions.lsifDefinition ?? "gD",
+        saya.commands.execute(commandNames.lsifDefinition),
+      );
+    }
   }
 }

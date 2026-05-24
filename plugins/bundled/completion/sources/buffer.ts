@@ -4,6 +4,7 @@ import {
   uniqueByLabel,
 } from "../candidates.ts";
 import type {
+  SayaBufferWordSourceOptions,
   SayaCompletionCandidate,
   SayaCompletionQuery,
   SayaCompletionRange,
@@ -64,14 +65,25 @@ function distanceToCursor(start: number, end: number, cursor: number): number {
   return 0;
 }
 
-export function createBufferWordSource(): SayaCompletionSource {
+export function createBufferWordSource(
+  options: SayaBufferWordSourceOptions = {},
+): SayaCompletionSource {
+  const sourceName = options.sourceName ?? "buffer";
   return {
-    id: "buffer",
+    id: sourceName,
+    minPrefixLength: options.minPrefixLength,
+    triggerCharacters: options.triggerCharacters,
+    __sayaBundledSource: {
+      kind: "buffer",
+      id: sourceName,
+      minPrefixLength: options.minPrefixLength,
+      triggerCharacters: options.triggerCharacters,
+    },
     trigger(context: SayaCompletionTriggerContext): SayaCompletionQuery | null {
       const prefixInfo = wordPrefix(context.buffer);
       return {
         ...context,
-        sourceId: "buffer",
+        sourceId: sourceName,
         prefix: prefixInfo.prefix,
         replaceRange: prefixInfo.range,
       };

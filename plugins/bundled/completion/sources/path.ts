@@ -1,7 +1,4 @@
-import {
-  setCandidateRank,
-  uniqueByLabel,
-} from "../candidates.ts";
+import { setCandidateRank, uniqueByLabel } from "../candidates.ts";
 import type {
   SayaCompletionCandidate,
   SayaCompletionQuery,
@@ -167,6 +164,17 @@ export function createPathCompletionSource(
   const showHidden = options.showHidden ?? true;
   return {
     id: sourceName,
+    minPrefixLength: options.minPrefixLength,
+    triggerCharacters: options.triggerCharacters,
+    __sayaBundledSource: {
+      kind: "path",
+      id: sourceName,
+      optional,
+      maxItems: Number.isFinite(maxItems) ? maxItems : null,
+      showHidden,
+      minPrefixLength: options.minPrefixLength,
+      triggerCharacters: options.triggerCharacters,
+    },
     trigger(context: SayaCompletionTriggerContext): SayaCompletionQuery | null {
       const prefixInfo = pathPrefix(context.buffer);
       if (!prefixInfo) return null;
@@ -229,10 +237,11 @@ export function createPathCompletionSource(
           sourceId: query.sourceId,
           prefix: query.prefix,
           replaceRange: query.replaceRange,
-          candidates: uniqueByLabel(candidates.sort(comparePathCandidates)).slice(
-            0,
-            maxItems,
-          ),
+          candidates: uniqueByLabel(candidates.sort(comparePathCandidates))
+            .slice(
+              0,
+              maxItems,
+            ),
         };
       } catch (error) {
         if (!optional) throw error;

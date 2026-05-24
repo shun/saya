@@ -1,8 +1,8 @@
 # LSP preview
 
-This page documents the preview Language Server Protocol integration for
-`saya`. It covers the TypeScript startup setup, the runtime host boundary, the
-current feature set, LSIF support, and headless verification commands.
+This page documents the preview Language Server Protocol integration for `saya`.
+It covers the TypeScript startup setup, the runtime host boundary, the current
+feature set, LSIF support, and headless verification commands.
 
 > **Note:** This is a preview feature currently under active development.
 
@@ -14,13 +14,23 @@ and LSIF lookup.
 ## Startup setup
 
 Import `plugins/saya-lsp-client.ts` from your `init.ts` file to register the
-preview LSP command set, default keymaps, buffer event handlers, and language
-server definitions.
+preview LSP command set and language server definitions. It doesn't register
+keymaps or buffer lifecycle event handlers unless you opt in with `keymap` and
+`enableBufferEvents`.
 
 ```ts
 import { setupSayaLspClient } from "./plugins/saya-lsp-client.ts";
 
 setupSayaLspClient({
+  enableBufferEvents: true,
+  keymap: {
+    hover: "K",
+    definition: "gd",
+    references: "gR",
+    documentSymbol: "gO",
+    nextDiagnostic: "]d",
+    previousDiagnostic: "[d",
+  },
   trace: "messages",
   positionEncoding: "utf-16",
   languageIdByExtension: {
@@ -55,6 +65,12 @@ workspace root is detected from `go.mod` before falling back to `.git`.
 import { setupSayaLspClient } from "./plugins/saya-lsp-client.ts";
 
 setupSayaLspClient({
+  enableBufferEvents: true,
+  keymap: {
+    hover: "K",
+    definition: "gd",
+    documentSymbol: "gO",
+  },
   clientName: "saya-gopls",
   languageIdByExtension: {
     go: "go",
@@ -100,10 +116,10 @@ The runtime bridge request includes these important fields.
   and LSP positions.
 
 The host validates the bridge payload before dispatch. For live LSP requests,
-the session manager reuses one initialized server session for each workspace
-and server definition, queues work until initialization completes, routes
-responses by JSON-RPC request ID, redacts document text from diagnostics, and
-shuts the process down with `shutdown` followed by `exit`.
+the session manager reuses one initialized server session for each workspace and
+server definition, queues work until initialization completes, routes responses
+by JSON-RPC request ID, redacts document text from diagnostics, and shuts the
+process down with `shutdown` followed by `exit`.
 
 ## Commands and keymaps
 
@@ -121,16 +137,33 @@ shuts the process down with `shutdown` followed by `exit`.
 - `lsif.hover`
 - `lsif.definition`
 
-It also registers these default normal-mode keymaps.
+It registers keymaps only when the `keymap` option is present. When `keymap` is
+present, omitted entries use these standard bindings.
 
 - `K` for hover
 - `gd` for definition
 - `gR` for references
 - `gO` for document symbols
+- `<C-k>` in insert mode for signature help
+- `gq` in normal mode for formatting
+- `gq` in visual mode for range formatting
+- `grn` for rename
+- `gra` for code action
 - `]d` for next diagnostic
 - `[d` for previous diagnostic
 - `gK` for LSIF hover when LSIF is enabled
 - `gD` for LSIF definition when LSIF is enabled
+
+Buffer lifecycle events are also explicit. Set `enableBufferEvents: true` to
+subscribe to `bufferOpen`, `bufferChanged`, `bufferWritePost`, and
+`bufferClosed`. When it is omitted or `false`, the plugin still registers LSP
+commands, but it doesn't start document synchronization from editor events.
+
+Command names remain defaulted because they are internal command identifiers.
+They don't activate LSP behavior until a user maps a key, enables buffer events,
+or executes a command. `languageId`, `trace`, `positionEncoding`,
+`completionTriggerCharacters`, and formatting defaults are protocol request
+defaults used after explicit command or event activation.
 
 ## Feature status
 
@@ -145,18 +178,16 @@ tests.
 
 - LSP 3.17 `Content-Length` JSON-RPC framing.
 - `initialize`, `initialized`, `shutdown`, and `exit` lifecycle handling.
-- `textDocument/didOpen`, `textDocument/didChange`,
-  `textDocument/didSave`, and `textDocument/didClose` using full-document
-  synchronization.
-- `textDocument/hover`, `textDocument/definition`,
-  `textDocument/references`, and `textDocument/documentSymbol` requests.
+- `textDocument/didOpen`, `textDocument/didChange`, `textDocument/didSave`, and
+  `textDocument/didClose` using full-document synchronization.
+- `textDocument/hover`, `textDocument/definition`, `textDocument/references`,
+  and `textDocument/documentSymbol` requests.
 - `textDocument/publishDiagnostics` ingestion and next/previous diagnostic
   navigation.
-- Hover and diagnostic floating surfaces, definition navigation, reference
-  list output, and document symbol outline output.
+- Hover and diagnostic floating surfaces, definition navigation, reference list
+  output, and document symbol outline output.
 - Workspace root detection through runtime `saya.workspace.findRoot()`.
-- Multiple language server definitions selected by language ID or file
-  pattern.
+- Multiple language server definitions selected by language ID or file pattern.
 - UTF-16, UTF-8, and UTF-32 position encoding conversion.
 - Structured diagnostic events for process lifecycle, JSON-RPC requests,
   notifications, responses, timeout, shutdown, and session dispatch.
@@ -168,8 +199,8 @@ coverage expected from a stable LSP client.
 
 - Capability negotiation is recorded after `initialize`, but the preview does
   not yet gate every command on every advertised server capability.
-- Diagnostics are displayed and navigable, but advanced severity filtering,
-  code actions, and related information rendering are not implemented.
+- Diagnostics are displayed and navigable, but advanced severity filtering, code
+  actions, and related information rendering are not implemented.
 - References and document symbols use host-provided output surfaces, not a
   stable quickfix API.
 - Cancellation exists for stale requests, but there is not yet a user-facing
@@ -181,9 +212,9 @@ coverage expected from a stable LSP client.
 
 These LSP areas are outside the current preview scope.
 
-- Completion, signature help, rename, formatting, code actions, semantic
-  tokens, inlay hints, call hierarchy, type hierarchy, workspace symbols, and
-  workspace edits.
+- Completion, signature help, rename, formatting, code actions, semantic tokens,
+  inlay hints, call hierarchy, type hierarchy, workspace symbols, and workspace
+  edits.
 - Incremental text synchronization.
 - Dynamic registration.
 - Remote language servers and TCP transports.
@@ -191,9 +222,9 @@ These LSP areas are outside the current preview scope.
 
 ## Release readiness
 
-The first usable preview has a narrow quality bar. CI validates the deterministic
-protocol path without installing language servers, and real-server smoke tests
-stay opt-in until the public TypeScript API becomes stable.
+The first usable preview has a narrow quality bar. CI validates the
+deterministic protocol path without installing language servers, and real-server
+smoke tests stay opt-in until the public TypeScript API becomes stable.
 
 ### Minimum supported preview feature set
 
@@ -209,8 +240,8 @@ work from TypeScript startup configuration through the host bridge:
 - File URI conversion, workspace root detection, server selection, position
   encoding conversion, and structured diagnostics.
 
-Anything listed as partially supported or not supported is not part of the
-first usable preview contract.
+Anything listed as partially supported or not supported is not part of the first
+usable preview contract.
 
 ### CI reference-server policy
 
@@ -227,8 +258,8 @@ ignored tests.
 ### Public TypeScript API compatibility
 
 The preview documents `setupSayaLspClient()` and `saya.lsp.request()` as a
-provisional API. Before documenting the API as stable, review these compatibility
-points and update this page if any point changes:
+provisional API. Before documenting the API as stable, review these
+compatibility points and update this page if any point changes:
 
 - Keep the `source`, `lspVersion`, `method`, `clientName`, `rootUri`,
   `languageId`, `trace`, `positionEncoding`, `dumpPath`, `textDocument`,
@@ -236,21 +267,23 @@ points and update this page if any point changes:
   backward-compatible.
 - Keep `protocolVersion` as a deserialization alias for `lspVersion` on the host
   side.
-- Keep command names, keymap defaults, and buffer lifecycle event registration
-  documented as preview behavior, not stable extension points.
+- Keep command names, opt-in keymap defaults, and opt-in buffer lifecycle event
+  registration documented as preview behavior, not stable extension points.
 - Treat server selection, capability negotiation, and LSIF lookup options as
   preview configuration until command gating, diagnostics UX, and output
   surfaces are stabilized.
 
 ## LSIF support
 
-Enable LSIF lookup separately from live LSP by passing `lsif.enabled` and a
-dump path. LSIF requests use the same runtime bridge shape with
-`source: "lsif"`.
+Enable LSIF lookup separately from live LSP by passing `lsif.enabled` and a dump
+path. LSIF requests use the same runtime bridge shape with `source: "lsif"`.
 
 ```ts
 setupSayaLspClient({
-  enableBufferEvents: false,
+  keymap: {
+    lsifHover: "gK",
+    lsifDefinition: "gD",
+  },
   lsif: {
     enabled: true,
     dumpPath: ".cache/index.lsif",
@@ -273,8 +306,8 @@ Current LSIF support is intentionally narrow.
 
 ## Headless verification
 
-Use headless tests for repeatable verification. Run commands through
-`gtimeout` so a broken language server or fake server cannot hang the shell.
+Use headless tests for repeatable verification. Run commands through `gtimeout`
+so a broken language server or fake server cannot hang the shell.
 
 ```bash
 gtimeout 180s cargo test --test lsp_transport -- --nocapture

@@ -9,8 +9,8 @@ API instead of this page.
 
 ## Availability
 
-The startup API is available only while `saya` evaluates the startup module
-that you pass through `--config`.
+The startup API is available only while `saya` evaluates the startup module that
+you pass through `--config`.
 
 The startup surface is designed for declaration, not for broad live editor
 control.
@@ -36,8 +36,8 @@ server to understand the startup-only global `saya` object while editing
 ### Preview dired setup
 
 The repository includes `plugins/saya-dired.ts` as a preview TypeScript plugin.
-Import it from `init.ts` when you want the directory editor commands and
-keymaps to be registered at startup.
+Import it from `init.ts` when you want the directory editor commands to be
+registered at startup. Add `keymap` when you want normal-mode mappings.
 
 ```ts
 import { setupSayaDired } from "./plugins/saya-dired.ts";
@@ -63,33 +63,40 @@ setupSayaDired({
 keymaps, root selection, hidden-file policy, sort policy, filter text, and
 destructive operation confirmation strategy. Filesystem mutation still goes
 through the runtime `saya.filer` surface, not through broad startup filesystem
-access.
-The default mark bindings are `m` for marking, `M` for unmarking, and `gM` for
-clearing marks, leaving `u` available for normal-mode undo while editing a
-writable directory listing.
+access. When `keymap` is omitted, no dired mappings are installed. When `keymap`
+is present, the default mark bindings are `m` for marking, `M` for unmarking,
+and `gM` for clearing marks, leaving `u` available for normal-mode undo while
+editing a writable directory listing.
 
 > **Note:** Dired is a preview feature currently under active development. The
 > setup options are public enough for plugin reuse, but they can change before
-> the API is stabilized.
-> See [Dired API v1](dired-api-v1.md) for the versioned local dired contract,
-> migration notes, and plugin author anti-patterns.
+> the API is stabilized. See [Dired API v1](dired-api-v1.md) for the versioned
+> local dired contract, migration notes, and plugin author anti-patterns.
 
 ### Preview LSP setup
 
 The repository includes `plugins/saya-lsp-client.ts` as a preview TypeScript
 plugin. Import it from `init.ts` when you want LSP commands, normal-mode
 keymaps, document synchronization events, and language server definitions to be
-registered at startup.
+registered at startup. Keymaps and buffer lifecycle events are explicit opt-ins.
 
-> **Note:** This is a preview feature currently under active development.
-> See [LSP preview](lsp-preview.md) for the runtime boundary, the `gopls`
-> example, supported features, LSIF limitations, and headless verification
-> commands.
+> **Note:** This is a preview feature currently under active development. See
+> [LSP preview](lsp-preview.md) for the runtime boundary, the `gopls` example,
+> supported features, LSIF limitations, and headless verification commands.
 
 ```ts
 import { setupSayaLspClient } from "./plugins/saya-lsp-client.ts";
 
 setupSayaLspClient({
+  enableBufferEvents: true,
+  keymap: {
+    hover: "K",
+    definition: "gd",
+    references: "gR",
+    documentSymbol: "gO",
+    nextDiagnostic: "]d",
+    previousDiagnostic: "[d",
+  },
   languageIdByExtension: {
     go: "go",
     rs: "rust",
@@ -138,12 +145,18 @@ The default command names are:
 - `lsif.hover`
 - `lsif.definition`
 
-The default normal-mode keymaps are:
+Set `keymap` to install the standard keymaps. Omitted entries inside `keymap`
+use these defaults:
 
 - `K` for hover
 - `gd` for definition
 - `gR` for references
 - `gO` for document symbols
+- `<C-k>` in insert mode for signature help
+- `gq` in normal mode for formatting
+- `gq` in visual mode for range formatting
+- `grn` for rename
+- `gra` for code action
 - `]d` for next diagnostic
 - `[d` for previous diagnostic
 - `gK` for LSIF hover when LSIF is enabled
@@ -166,9 +179,9 @@ setupSayaLspClient({
 });
 ```
 
-Invalid command names, non-`file://` root URIs, empty language IDs, empty
-server commands, and malformed server definitions fail during startup
-evaluation with a configuration error.
+Invalid command names, non-`file://` root URIs, empty language IDs, empty server
+commands, and malformed server definitions fail during startup evaluation with a
+configuration error.
 
 ## Namespace
 
@@ -193,10 +206,10 @@ TypeScript, but option property names stay lowercase Vim-style names such as
 `tabstop`, `number`, `numberwidth`, and `cmdheight`. JavaScript-style camelCase
 names are not part of the public startup API.
 
-The exported TypeScript declaration lets editors and `tsc` report unknown
-option names while you edit `init.ts`. Startup evaluation also records a
-message-area warning for unknown option assignments and ignores that option;
-valid assignments in the same file still apply.
+The exported TypeScript declaration lets editors and `tsc` report unknown option
+names while you edit `init.ts`. Startup evaluation also records a message-area
+warning for unknown option assignments and ignores that option; valid
+assignments in the same file still apply.
 
 ### `saya.options.tabstop`
 
@@ -233,8 +246,8 @@ saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
 
 ## Commands
 
-The commands surface lets you register named startup callbacks and refer to
-them from keymaps.
+The commands surface lets you register named startup callbacks and refer to them
+from keymaps.
 
 ### `saya.commands.register(name, callback)`
 
@@ -258,8 +271,8 @@ saya.keymap.set("normal", "<leader>w", writeRef);
 
 ## Events
 
-The events surface lets you register startup-time event handlers that later
-seed the runtime callback layer.
+The events surface lets you register startup-time event handlers that later seed
+the runtime callback layer.
 
 ### `saya.events.on(name, callback)`
 
@@ -311,8 +324,8 @@ saya.plugins.lazy([
 ```
 
 Plugin declarations support `local` for local directories and `github` for
-GitHub repositories in `owner/repository` form. Add `rev` to pin a GitHub
-plugin to a branch, tag, or commit. When `rev` is absent, plugin sync and update
+GitHub repositories in `owner/repository` form. Add `rev` to pin a GitHub plugin
+to a branch, tag, or commit. When `rev` is absent, plugin sync and update
 commands resolve the latest default-branch revision and record it in the plugin
 cache.
 
@@ -324,8 +337,8 @@ groups.
 
 ### `saya.theme.palette`
 
-Use this object property to define named color tokens. Values must be direct
-hex colors in `#rrggbb` form.
+Use this object property to define named color tokens. Values must be direct hex
+colors in `#rrggbb` form.
 
 ```ts
 saya.theme.palette = {
@@ -366,9 +379,8 @@ The current Markdown keys are `heading`, `heading1`, `heading2`, `heading3`,
 `heading4`, `heading5`, `heading6`, `inlineCode`, `link`, `listMarker`,
 `checkboxChecked`, `checkboxUnchecked`, `table`, and `fencedCodeBlock`.
 Level-specific heading keys inherit from `heading` and override attributes that
-they declare. Boolean attributes can also disable inherited values. For
-example, `heading2: { bold: false }` turns off `heading.bold` for level-two
-headings.
+they declare. Boolean attributes can also disable inherited values. For example,
+`heading2: { bold: false }` turns off `heading.bold` for level-two headings.
 
 ### `saya.theme.ui`
 
@@ -392,8 +404,8 @@ saya.theme.ui = {
 The current UI keys are `text`, `gutter`, `statusActive`, `statusInactive`,
 `message`, `warningMsg`, and `prompt`. `warningMsg` is the Vim-style warning
 message group. Saya uses it for startup warnings, such as ignored unknown
-options. Long message-area warnings wrap to the current editor width and use
-the message pager when they exceed `cmdheight`.
+options. Long message-area warnings wrap to the current editor width and use the
+message pager when they exceed `cmdheight`.
 
 ### `saya.theme.syntax`
 
@@ -419,8 +431,7 @@ The current syntax keys are `comment`, `string`, `constant`, `statement`,
 ## Log
 
 The log surface lets you declare diagnostic logging during startup. Use it for
-headless debugging and issue reproduction rather than normal editor
-interaction.
+headless debugging and issue reproduction rather than normal editor interaction.
 
 ### `saya.log.file`
 
@@ -441,8 +452,7 @@ after startup configuration is evaluated.
 saya.log.level = "warn";
 ```
 
-The accepted levels are `"error"`, `"warn"`, `"info"`, `"debug"`, and
-`"trace"`.
+The accepted levels are `"error"`, `"warn"`, `"info"`, `"debug"`, and `"trace"`.
 
 ## What the startup API does not expose
 

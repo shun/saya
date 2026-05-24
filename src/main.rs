@@ -1348,6 +1348,11 @@ async fn main() {
                                             &mut transient_msg,
                                             &mut need_redraw,
                                             &mut runtime_presentation_intents,
+                                            &mut floating_window_manager,
+                                            &mut completion_float_manager,
+                                            &mut lsp_diagnostic_store,
+                                            &mut terminal_float_manager,
+                                            &mut panel_manager,
                                             Some(&lsif_bridge),
                                         )
                                         .await
@@ -5923,13 +5928,26 @@ async fn dispatch_buffer_changed_with_runtime(
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    floating_window_manager: &mut FloatingWindowManager,
+    completion_float_manager: &mut CompletionFloatManager,
+    lsp_diagnostic_store: &mut LspDiagnosticStore,
+    terminal_float_manager: &mut TerminalFloatManager,
+    panel_manager: &mut PanelManager,
     lsif_bridge: Option<&LsifBridgeHandle>,
 ) -> Option<ShutdownReason> {
     let Some(runtime_session) = runtime_session else {
         return None;
     };
-    let mut host_session =
-        MainRuntimeHostSession::new_with_lsp_session(outcome, session_state, lsif_bridge);
+    let mut host_session = MainRuntimeHostSession::new_with_floating_windows(
+        outcome,
+        session_state,
+        floating_window_manager,
+        completion_float_manager,
+        lsp_diagnostic_store,
+        terminal_float_manager,
+        panel_manager,
+        lsif_bridge,
+    );
     let payload = RuntimeEventMapper::buffer_changed(host_session.current_buffer_snapshot());
     let dispatch_outcome = runtime_session.dispatch(payload, &mut host_session).await;
     apply_runtime_dispatch_outcome(
@@ -7168,6 +7186,32 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             shown
         );
         Ok(shown)
+    }
+
+    fn close_completion(&mut self) -> Result<bool, RuntimeCommandError> {
+        let floating_window_manager =
+            self.floating_window_manager.as_deref_mut().ok_or_else(|| {
+                RuntimeCommandError::CommandFailed {
+                    name: "completion.close".to_string(),
+                    message: "floating window manager is not available".to_string(),
+                }
+            })?;
+        let completion_manager = self
+            .completion_float_manager
+            .as_deref_mut()
+            .ok_or_else(|| RuntimeCommandError::CommandFailed {
+                name: "completion.close".to_string(),
+                message: "completion manager is not available".to_string(),
+            })?;
+        let snapshot = self.outcome.core_bridge.light_snapshot();
+        let restore_window_id = snapshot.active_window_id();
+        let closed = completion_manager.close(floating_window_manager, restore_window_id);
+        log::debug!(
+            "[main][completion] typed completion close applied: restore_window_id={:?}, closed={}",
+            restore_window_id,
+            closed
+        );
+        Ok(closed)
     }
 }
 
@@ -11653,6 +11697,16 @@ mod tests {
                 max_visible_items: 8,
                 documentation_max_width: 72,
                 documentation_max_height: 12,
+                keys: Some(
+                    saya::features::completion::session::CompletionKeyBindingsRequest {
+                        confirm: Some(vec!["<Enter>".to_string()]),
+                        close: None,
+                        next: None,
+                        previous: None,
+                        page_next: None,
+                        page_previous: None,
+                    }
+                ),
             },
         ));
         let active_window_id = outcome
@@ -11708,8 +11762,14 @@ mod tests {
             &config_path,
             format!(
                 r#"
-                    import {{ setupSayaCompletion }} from "{}";
-                    setupSayaCompletion({{ key: "<C-x>", sourceTimeoutMs: 0 }});
+                    import {{ createBufferWordSource, setupSayaCompletion }} from "{}";
+                    setupSayaCompletion({{
+                        key: "<C-x>",
+                        keys: {{ confirm: ["<Enter>"] }},
+                        minPrefixLength: 2,
+                        sourceTimeoutMs: 0,
+                        sources: [createBufferWordSource()],
+                    }});
                 "#,
                 completion_path.to_string_lossy()
             ),
@@ -11810,6 +11870,204 @@ mod tests {
         assert_eq!(
             snapshot.cursor_col, 4,
             "startup completion keymap confirmation should move the insert cursor after the candidate"
+        );
+
+        std::fs::remove_file(target_path).expect("cleanup target");
+        std::fs::remove_file(config_path).expect("cleanup config");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_completion_auto_trigger_opens_menu_from_buffer_changed_event() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("completion-auto-target").with_extension("txt");
+        let config_path = unique_path("completion-auto-init").with_extension("ts");
+        let completion_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+        std::fs::write(&target_path, "ty\ntype\n").expect("target file");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+                    import {{ createBufferWordSource, setupSayaCompletion }} from "{}";
+                    setupSayaCompletion({{
+                        key: "<C-x>",
+                        autoTrigger: true,
+                        autoTriggerDelayMs: 0,
+                        minPrefixLength: 2,
+                        sourceTimeoutMs: 0,
+                        sources: [createBufferWordSource()],
+                    }});
+                "#,
+                completion_path.to_string_lossy()
+            ),
+        )
+        .expect("config file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+
+        outcome.core_bridge.dispatch_key("A").expect("enter insert");
+        let shutdown = dispatch_buffer_changed_with_runtime(
+            Some(&mut runtime_session),
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
+            None,
+        )
+        .await;
+
+        assert_eq!(shutdown, None);
+        assert_eq!(
+            transient_msg, None,
+            "auto completion must not surface runtime callback errors"
+        );
+        assert!(need_redraw, "auto completion should request redraw");
+        assert!(
+            floating_window_manager.windows().iter().any(|window| {
+                matches!(
+                    window.content,
+                    saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+                )
+            }),
+            "bufferChanged auto trigger should open a completion menu"
+        );
+
+        outcome
+            .core_bridge
+            .dispatch_key("\x08")
+            .expect("backspace should shorten completion prefix");
+        let shutdown = dispatch_buffer_changed_with_runtime(
+            Some(&mut runtime_session),
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
+            None,
+        )
+        .await;
+        assert_eq!(shutdown, None);
+        assert_eq!(
+            transient_msg, None,
+            "auto completion close must not surface runtime callback errors"
+        );
+        assert!(
+            !floating_window_manager.windows().iter().any(|window| {
+                matches!(
+                    window.content,
+                    saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+                )
+            }),
+            "bufferChanged auto trigger should close the stale menu when the prefix is too short"
+        );
+
+        std::fs::remove_file(target_path).expect("cleanup target");
+        std::fs::remove_file(config_path).expect("cleanup config");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_completion_auto_trigger_disabled_does_not_open_from_buffer_changed_event() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("completion-auto-disabled-target").with_extension("txt");
+        let config_path = unique_path("completion-auto-disabled-init").with_extension("ts");
+        let completion_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
+        std::fs::write(&target_path, "ty\ntype\n").expect("target file");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+                    import {{ createBufferWordSource, setupSayaCompletion }} from "{}";
+                    setupSayaCompletion({{
+                        key: "<C-x>",
+                        autoTrigger: false,
+                        autoTriggerDelayMs: 0,
+                        minPrefixLength: 2,
+                        sourceTimeoutMs: 0,
+                        sources: [createBufferWordSource()],
+                    }});
+                "#,
+                completion_path.to_string_lossy()
+            ),
+        )
+        .expect("config file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+
+        outcome.core_bridge.dispatch_key("A").expect("enter insert");
+        let shutdown = dispatch_buffer_changed_with_runtime(
+            Some(&mut runtime_session),
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
+            None,
+        )
+        .await;
+
+        assert_eq!(shutdown, None);
+        assert_eq!(transient_msg, None);
+        assert!(
+            !floating_window_manager.windows().iter().any(|window| {
+                matches!(
+                    window.content,
+                    saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+                )
+            }),
+            "disabled auto trigger must not open a completion menu from bufferChanged"
         );
 
         std::fs::remove_file(target_path).expect("cleanup target");
@@ -13142,6 +13400,11 @@ mod tests {
         let mut transient_msg = None;
         let mut need_redraw = false;
         let mut runtime_presentation_intents = Vec::new();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
 
         let before = outcome.core_bridge.light_snapshot();
         outcome.core_bridge.dispatch_key("i").expect("enter insert");
@@ -13165,6 +13428,11 @@ mod tests {
             &mut transient_msg,
             &mut need_redraw,
             &mut runtime_presentation_intents,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
             None,
         )
         .await;
@@ -14378,7 +14646,7 @@ mod tests {
             format!(
                 r#"
                     import {{ setupSayaDired }} from "{}";
-                    setupSayaDired();
+                    setupSayaDired({{ keymap: {{}} }});
                 "#,
                 plugin_path.display()
             ),

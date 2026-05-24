@@ -10,9 +10,9 @@ re-exports the manager for existing configuration files.
 
 ## Responsibility split
 
-Rust owns the host primitives that must run before or during the editor
-session. The TypeScript manager owns plugin declarations, protocol metadata,
-dependency ordering, cache invalidation policy, and operator-facing workflow.
+Rust owns the host primitives that must run before or during the editor session.
+The TypeScript manager owns plugin declarations, protocol metadata, dependency
+ordering, cache invalidation policy, and operator-facing workflow.
 
 Rust host responsibilities:
 
@@ -73,13 +73,13 @@ runtime command. Startup must not run `git clone`, `git fetch`, dependency
 resolution, or the full TypeScript manager to repair external plugin state.
 
 This gives `saya` a dpp-style hot path while keeping vim-jetpack-style
-cache-miss UX: the editor starts, bundled plugins remain available, and the
-user gets a clear sync action for external plugins.
+cache-miss UX: the editor starts, bundled plugins remain available, and the user
+gets a clear sync action for external plugins.
 
 ## Plugin classes
 
-The manager supports two plugin classes. The class controls delivery and
-support policy, not runtime authority.
+The manager supports two plugin classes. The class controls delivery and support
+policy, not runtime authority.
 
 - Bundled plugins ship with `saya`, are versioned with the editor, and are not
   installed through the plugin manager. They are still TypeScript plugins and
@@ -89,8 +89,8 @@ support policy, not runtime authority.
   action.
 
 Use bundled plugins for baseline editor features such as local dired or the
-official LSP client bridge. Use external plugins for optional language,
-theme, formatter, navigation, and integration features. See
+official LSP client bridge. Use external plugins for optional language, theme,
+formatter, navigation, and integration features. See
 [Plugin model](../design/plugin-model.md) for the classification rules.
 
 ## User-facing declarations
@@ -128,13 +128,19 @@ The declaration surface supports these source forms:
   plugin cache during `sy plugin sync` or `sy plugin update`.
 - `rev`, which optionally pins a GitHub plugin to a branch, tag, or commit.
 
-When `rev` is absent, `sy plugin sync` and `sy plugin update` resolve the
-latest revision from the repository's default branch. Normal editor startup
-uses generated cache files and doesn't check the network.
+When `rev` is absent, `sy plugin sync` and `sy plugin update` resolve the latest
+revision from the repository's default branch. Normal editor startup uses
+generated cache files and doesn't check the network.
 
 The default plugin entry point is `mod.ts`, and the default setup export is
 `setup`. You only need to specify alternate entry metadata for non-standard
 plugin layouts.
+
+These declaration defaults are metadata defaults, not bundled feature activation
+defaults. A plugin still has to be declared by the user, loaded by a startup
+plan, or reached through a lazy trigger before its setup code runs. For bundled
+plugins, manifests can keep explicit `module` and `setup` metadata so startup
+fallback can create lazy placeholders without guessing implementation paths.
 
 ## TypeScript manager
 
@@ -143,42 +149,42 @@ plugin spec used for artifact generation. The lower-level manager accepts local
 paths, GitHub shorthand metadata, and manager-owned protocol strings.
 
 ```ts
-import {
-    definePlugins,
-    syncPlugins,
-} from "./plugins/manager/index.ts";
+import { definePlugins, syncPlugins } from "./plugins/manager/index.ts";
 
 const plugins = definePlugins([
-    {
-        name: "workspace-tools",
-        source: { kind: "local", path: "./plugins/workspace-tools.ts" },
-        lazy: {
-            commands: ["WorkspaceRefresh"],
-            events: ["bufferOpen"],
-        },
+  {
+    name: "workspace-tools",
+    source: { kind: "local", path: "./plugins/workspace-tools.ts" },
+    lazy: {
+      commands: ["WorkspaceRefresh"],
+      events: ["bufferOpen"],
     },
+  },
 ]);
 
 await syncPlugins(plugins, {
-    cacheRoot: Deno.env.get("SAYA_CACHE_DIR") ?? `${Deno.env.get("HOME")}/.cache/saya`,
-    sourceHash: "manager-input-hash",
-    bundled: [
-        {
-            version: 1,
-            name: "dired",
-            module: "plugins/bundled/dired/index.ts",
-            setup: "setupSayaDired",
-            lazy: { commands: ["dired.open"] },
-        },
-    ],
-    writeTextFile: Deno.writeTextFile,
+  cacheRoot: Deno.env.get("SAYA_CACHE_DIR") ??
+    `${Deno.env.get("HOME")}/.cache/saya`,
+  sourceHash: "manager-input-hash",
+  bundled: [
+    {
+      version: 1,
+      name: "dired",
+      module: "plugins/bundled/dired/index.ts",
+      setup: "setupSayaDired",
+      lazy: { commands: ["dired.open"] },
+    },
+  ],
+  writeTextFile: Deno.writeTextFile,
 });
 ```
 
 Bundled manifests can contribute startup and lazy artifacts, but they are not
-written to `plugin-lock.json`. The lockfile tracks external plugins only.
-Complete installs distribute bundled manifests and plugin sources under
-`SAYA_HOME/runtime/plugins/bundled`; see
+written to `plugin-lock.json`. Lazy placeholders make bundled entry points
+available after an explicit command or event trigger; they don't call setup
+functions or install bundled keymaps, sources, or event handlers by themselves.
+The lockfile tracks external plugins only. Complete installs distribute bundled
+manifests and plugin sources under `SAYA_HOME/runtime/plugins/bundled`; see
 [Install layout design](../design/install-layout.md).
 
 ## CLI commands
