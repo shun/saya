@@ -447,11 +447,13 @@ fn bundled_path_completion_does_not_replace_buffer_with_directory_listing() {
     let root_path = unique_path("completion-path-root");
     let target_path = root_path.join("main.go");
     let dir_path = root_path.join("a_dir");
+    let child_path = dir_path.join("child.go");
     let file_path = root_path.join("z.txt");
     let config_path = unique_path("completion-path-init.ts");
     let completion_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
     std::fs::create_dir_all(&dir_path).expect("directory candidate should be created");
+    std::fs::write(&child_path, "package child\n").expect("child file candidate should be created");
     std::fs::write(&file_path, "z\n").expect("file candidate should be created");
     std::fs::write(&target_path, "./\n").expect("target file should be created");
     std::fs::write(
@@ -461,9 +463,14 @@ fn bundled_path_completion_does_not_replace_buffer_with_directory_listing() {
                 import {{ createPathCompletionSource, setupSayaCompletion }} from "{}";
                 setupSayaCompletion({{
                     key: "<C-x>",
-                    keys: {{ confirm: ["<Enter>"] }},
+                    keys: {{ confirm: ["<Tab>"] }},
+                    autoTrigger: true,
+                    autoTriggerDelayMs: 0,
                     sourceTimeoutMs: 0,
-                    sources: [createPathCompletionSource()],
+                    sources: [createPathCompletionSource({{
+                        minPrefixLength: 1,
+                        triggerCharacters: ["/", "."],
+                    }})],
                 }});
             "#,
             completion_path.to_string_lossy()
@@ -477,7 +484,11 @@ fn bundled_path_completion_does_not_replace_buffer_with_directory_listing() {
             config_path.to_str().expect("config path should be UTF-8"),
             target_path.to_str().expect("target path should be UTF-8"),
         ],
-        &[("SAYA_LOG", "0")],
+        &[
+            ("SAYA_LOG", "0"),
+            ("SAYA_COMPLETION_SMOKE_CONFIRM_TAB", "1"),
+            ("SAYA_COMPLETION_SMOKE_EXPECT_REOPEN_AFTER_CONFIRM", "1"),
+        ],
     );
 
     assert!(
@@ -505,8 +516,19 @@ fn bundled_path_completion_does_not_replace_buffer_with_directory_listing() {
     assert_eq!(after_confirm["cursorRow"], 0);
     assert_eq!(after_confirm["cursorCol"], 8);
     assert_eq!(after_confirm["mode"], "Insert");
+    let reopened = smoke_state(&output.stderr, "completion-menu-reopened-after-confirm");
+    let reopened_lines = reopened["lines"]
+        .as_array()
+        .expect("reopened path completion lines should be an array");
+    assert!(
+        reopened_lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|line| line.contains("./a_dir/child.go"))),
+        "Tab-confirmed directory should immediately show child path candidates: {reopened_lines:?}"
+    );
 
     std::fs::remove_file(&target_path).expect("cleanup target");
+    std::fs::remove_file(&child_path).expect("cleanup child file");
     std::fs::remove_file(&file_path).expect("cleanup file");
     std::fs::remove_dir(&dir_path).expect("cleanup dir");
     std::fs::remove_dir(&root_path).expect("cleanup root");

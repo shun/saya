@@ -1118,6 +1118,7 @@ async fn main() {
                                 })
                                 .or_else(|| outcome.core_bridge.snapshot().active_window_id())
                                 .unwrap_or(0);
+                            let before_completion_snapshot = outcome.core_bridge.light_snapshot();
                             if let Some(effect) = handle_completion_float_key(
                                 &mut completion_float_manager,
                                 &mut floating_window_manager,
@@ -1139,6 +1140,53 @@ async fn main() {
                                             "[main] completion float closed from focused input: id={}",
                                             id.0
                                         );
+                                        consume_core_outcomes_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
+                                            &mut need_redraw,
+                                        );
+
+                                        if let Some(reason) =
+                                            process_pending_host_actions_with_runtime(
+                                                &mut outcome,
+                                                &mut outcome_accumulator,
+                                                &mut session_state,
+                                                &mut transient_msg,
+                                                &mut system_warning,
+                                                &mut host_action_runtime,
+                                                runtime_session.as_mut(),
+                                                &mut need_redraw,
+                                                &mut runtime_presentation_intents,
+                                                Some(&lsif_bridge),
+                                            )
+                                            .await
+                                        {
+                                            break 'main reason;
+                                        }
+                                        let after_completion_snapshot =
+                                            outcome.core_bridge.light_snapshot();
+                                        if after_completion_snapshot.revision
+                                            != before_completion_snapshot.revision
+                                            && let Some(reason) =
+                                                dispatch_buffer_changed_with_runtime(
+                                                    runtime_session.as_mut(),
+                                                    &mut outcome,
+                                                    &mut session_state,
+                                                    &mut transient_msg,
+                                                    &mut need_redraw,
+                                                    &mut runtime_presentation_intents,
+                                                    &mut floating_window_manager,
+                                                    &mut completion_float_manager,
+                                                    &mut lsp_diagnostic_store,
+                                                    &mut terminal_float_manager,
+                                                    &mut panel_manager,
+                                                    Some(&lsif_bridge),
+                                                )
+                                                .await
+                                        {
+                                            break 'main reason;
+                                        }
+                                        session_state.update_dirty(outcome.core_bridge.dirty());
                                     }
                                 }
                             }
@@ -2000,6 +2048,7 @@ async fn run_binary_completion_smoke(
     let mut transient_msg = None;
     let mut need_redraw = false;
     let mut runtime_presentation_intents = Vec::new();
+    let mut outcome_accumulator = MainOutcomeAccumulator::default();
 
     outcome
         .core_bridge
@@ -2106,17 +2155,56 @@ async fn run_binary_completion_smoke(
             }),
         );
     }
+    let before_confirm_snapshot = outcome.core_bridge.light_snapshot();
+    let confirm_key = if std::env::var_os("SAYA_COMPLETION_SMOKE_CONFIRM_TAB").is_some() {
+        KeyInput::Tab
+    } else {
+        KeyInput::Enter
+    };
     match handle_completion_float_key(
         &mut completion_float_manager,
         &mut floating_window_manager,
         &mut outcome.core_bridge,
-        &KeyInput::Enter,
+        &confirm_key,
         active_window_id,
     ) {
         Some(FloatingWindowKeyHandling::Closed { .. }) => {}
         other => {
             return Err(format!(
-                "completion smoke Enter did not accept the active menu: {other:?}"
+                "completion smoke confirm key did not accept the active menu: key={confirm_key:?}, outcome={other:?}"
+            ));
+        }
+    }
+    consume_core_outcomes_from_core(
+        &mut outcome.core_bridge,
+        &mut outcome_accumulator,
+        &mut need_redraw,
+    );
+    let after_confirm_snapshot = outcome.core_bridge.light_snapshot();
+    if after_confirm_snapshot.revision != before_confirm_snapshot.revision {
+        if let Some(reason) = dispatch_buffer_changed_with_runtime(
+            Some(&mut runtime_session),
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
+            None,
+        )
+        .await
+        {
+            return Err(format!(
+                "completion smoke bufferChanged requested shutdown: {reason:?}"
+            ));
+        }
+        if let Some(message) = transient_msg.take() {
+            return Err(format!(
+                "completion smoke bufferChanged failed after confirm: {message}"
             ));
         }
     }
@@ -2134,6 +2222,29 @@ async fn run_binary_completion_smoke(
             "mode": format!("{:?}", snapshot.mode),
         }),
     );
+    if std::env::var_os("SAYA_COMPLETION_SMOKE_EXPECT_REOPEN_AFTER_CONFIRM").is_some() {
+        let reopened_lines = floating_window_manager
+            .windows()
+            .iter()
+            .find(|window| matches!(window.content, FloatingContentRef::CompletionMenu { .. }))
+            .map(|window| window.lines.clone())
+            .unwrap_or_default();
+        if reopened_lines.is_empty() {
+            return Err(
+                "completion smoke expected completion menu to reopen after confirm".to_string(),
+            );
+        }
+        eprintln!(
+            "[main][smoke][completion] menu reopened after confirm: lines={:?}",
+            reopened_lines
+        );
+        emit_binary_smoke_state(
+            "completion-menu-reopened-after-confirm",
+            serde_json::json!({
+                "lines": reopened_lines,
+            }),
+        );
+    }
     let save = save_snapshot_result(&snapshot.text, &mut session_state);
     if !save.wrote {
         return Err(format!(
@@ -8330,7 +8441,27 @@ fn handle_completion_float_key(
             );
             Some(FloatingWindowKeyHandling::Closed { id: menu_id })
         }
-        CompletionFloatInputOutcome::Closed { menu_id } => {
+        CompletionFloatInputOutcome::Closed {
+            menu_id,
+            editor_key,
+        } => {
+            if let Some(editor_key) = editor_key {
+                if let EditorIntent::EditKey(core_key) = resolve_intent(&editor_key) {
+                    let before = core_bridge.light_snapshot();
+                    if let Err(error) = core_bridge.dispatch_key(&core_key) {
+                        log::debug!(
+                            "[main] completion close editor key dispatch failed: menu_id={}, key={:?}, core_key={:?}, error={:?}",
+                            menu_id.0,
+                            editor_key,
+                            core_key,
+                            error
+                        );
+                    }
+                    let after = core_bridge.light_snapshot();
+                    let _ =
+                        apply_floating_lifecycle_after_core_edit(floating_manager, &before, &after);
+                }
+            }
             Some(FloatingWindowKeyHandling::Closed { id: menu_id })
         }
         CompletionFloatInputOutcome::Ignored => None,
@@ -11885,7 +12016,7 @@ mod tests {
         let config_path = unique_path("completion-auto-init").with_extension("ts");
         let completion_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/bundled/completion/index.ts");
-        std::fs::write(&target_path, "ty\ntype\n").expect("target file");
+        std::fs::write(&target_path, "t\ntype\n").expect("target file");
         std::fs::write(
             &config_path,
             format!(
@@ -11895,7 +12026,6 @@ mod tests {
                         key: "<C-x>",
                         autoTrigger: true,
                         autoTriggerDelayMs: 0,
-                        minPrefixLength: 2,
                         sourceTimeoutMs: 0,
                         sources: [createBufferWordSource()],
                     }});
@@ -11953,13 +12083,72 @@ mod tests {
                     saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
                 )
             }),
-            "bufferChanged auto trigger should open a completion menu"
+            "bufferChanged auto trigger should open a completion menu after one character"
+        );
+        let active_window_id = outcome
+            .core_bridge
+            .light_snapshot()
+            .active_window_id()
+            .unwrap_or(1);
+        assert!(matches!(
+            handle_completion_float_key(
+                &mut completion_float_manager,
+                &mut floating_window_manager,
+                &mut outcome.core_bridge,
+                &KeyInput::Escape,
+                active_window_id,
+            ),
+            Some(FloatingWindowKeyHandling::Closed { .. })
+        ));
+        assert!(
+            !floating_window_manager.windows().iter().any(|window| {
+                matches!(
+                    window.content,
+                    saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+                )
+            }),
+            "Esc should close the completion menu before leaving insert mode"
+        );
+        assert_eq!(
+            outcome.core_bridge.light_snapshot().mode,
+            vim_core_rs::CoreMode::Normal,
+            "Esc should leave insert mode after closing the completion menu"
         );
 
         outcome
             .core_bridge
-            .dispatch_key("\x08")
-            .expect("backspace should shorten completion prefix");
+            .dispatch_key("A")
+            .expect("re-enter insert");
+        let shutdown = dispatch_buffer_changed_with_runtime(
+            Some(&mut runtime_session),
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
+            None,
+        )
+        .await;
+        assert_eq!(shutdown, None);
+        assert!(
+            floating_window_manager.windows().iter().any(|window| {
+                matches!(
+                    window.content,
+                    saya::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+                )
+            }),
+            "bufferChanged auto trigger should reopen the one-character completion menu"
+        );
+
+        outcome
+            .core_bridge
+            .replace_buffer_text("\n")
+            .expect("empty prefix buffer text");
         let shutdown = dispatch_buffer_changed_with_runtime(
             Some(&mut runtime_session),
             &mut outcome,

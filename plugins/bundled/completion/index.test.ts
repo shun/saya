@@ -220,9 +220,21 @@ Deno.test("buffer completion request uses typed menu shape and max items", async
   if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
     throw new Error(`unexpected request candidates: ${JSON.stringify(labels)}`);
   }
-  if (request.keys !== undefined) {
+  if (
+    JSON.stringify(request.keys) !==
+      JSON.stringify({
+        confirm: ["<Enter>", "<Tab>", "<C-y>"],
+        close: ["<C-e>"],
+        next: ["<Down>", "<C-n>"],
+        previous: ["<Up>", "<C-p>"],
+        pageNext: ["<PageDown>"],
+        pagePrevious: ["<PageUp>"],
+      })
+  ) {
     throw new Error(
-      `menu keys must be explicit: ${JSON.stringify(request.keys)}`,
+      `menu keys should default to standard bindings: ${
+        JSON.stringify(request.keys)
+      }`,
     );
   }
 });
@@ -355,9 +367,19 @@ Deno.test("bundled source command runs without startup closure state", async () 
   if (JSON.stringify(labels) !== JSON.stringify(["println", "private"])) {
     throw new Error(`unexpected isolated labels: ${JSON.stringify(labels)}`);
   }
-  if (request.keys !== undefined) {
+  if (
+    JSON.stringify(request.keys) !==
+      JSON.stringify({
+        confirm: ["<Enter>", "<Tab>", "<C-y>"],
+        close: ["<C-e>"],
+        next: ["<Down>", "<C-n>"],
+        previous: ["<Up>", "<C-p>"],
+        pageNext: ["<PageDown>"],
+        pagePrevious: ["<PageUp>"],
+      })
+  ) {
     throw new Error(
-      `startup-safe command must not include implicit completion keys: ${
+      `startup-safe command should include default completion keys: ${
         JSON.stringify(request.keys)
       }`,
     );

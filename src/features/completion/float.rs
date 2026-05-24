@@ -70,6 +70,7 @@ pub enum CompletionFloatInputOutcome {
     },
     Closed {
         menu_id: FloatingWindowId,
+        editor_key: Option<KeyInput>,
     },
 }
 
@@ -118,7 +119,7 @@ impl Default for CompletionMenuKeyBindings {
     fn default() -> Self {
         Self {
             confirm: vec![KeyInput::Enter, KeyInput::Tab, KeyInput::Ctrl('y')],
-            close: vec![KeyInput::Escape, KeyInput::Ctrl('[')],
+            close: vec![KeyInput::Ctrl('e')],
             next: vec![KeyInput::Down, KeyInput::Ctrl('n')],
             previous: vec![KeyInput::Up, KeyInput::Ctrl('p')],
             page_next: vec![KeyInput::PageDown],
@@ -130,14 +131,7 @@ impl Default for CompletionMenuKeyBindings {
 impl CompletionMenuKeyBindings {
     fn from_request(request: Option<&CompletionKeyBindingsRequest>) -> Self {
         let Some(request) = request else {
-            return Self {
-                confirm: Vec::new(),
-                close: Vec::new(),
-                next: Vec::new(),
-                previous: Vec::new(),
-                page_next: Vec::new(),
-                page_previous: Vec::new(),
-            };
+            return Self::default();
         };
         let defaults = Self::default();
         Self {
@@ -354,6 +348,14 @@ impl CompletionFloatManager {
             return CompletionFloatInputOutcome::Ignored;
         }
 
+        if completion_modal_escape_key(key) {
+            self.close_menu(floats, menu_id, restore_window_id);
+            return CompletionFloatInputOutcome::Closed {
+                menu_id,
+                editor_key: Some(key.clone()),
+            };
+        }
+
         let action = self
             .menus
             .get(&menu_id)
@@ -362,7 +364,10 @@ impl CompletionFloatManager {
         match action {
             Some(CompletionMenuKeyAction::Close) => {
                 self.close_menu(floats, menu_id, restore_window_id);
-                CompletionFloatInputOutcome::Closed { menu_id }
+                CompletionFloatInputOutcome::Closed {
+                    menu_id,
+                    editor_key: None,
+                }
             }
             Some(CompletionMenuKeyAction::Confirm) => {
                 let candidate = self
@@ -779,9 +784,13 @@ impl From<CompletionFloatInputOutcome> for FloatingInputOutcome {
             CompletionFloatInputOutcome::Ignored => FloatingInputOutcome::Ignored,
             CompletionFloatInputOutcome::Selected { .. }
             | CompletionFloatInputOutcome::Accepted { .. } => FloatingInputOutcome::Consumed,
-            CompletionFloatInputOutcome::Closed { menu_id } => {
+            CompletionFloatInputOutcome::Closed { menu_id, .. } => {
                 FloatingInputOutcome::Closed { id: menu_id }
             }
         }
     }
+}
+
+fn completion_modal_escape_key(key: &KeyInput) -> bool {
+    matches!(key, KeyInput::Escape | KeyInput::Ctrl('['))
 }

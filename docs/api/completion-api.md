@@ -11,9 +11,12 @@ lifecycle, stale request rejection, rendering, and confirm-time text edits.
 
 Use `setupSayaCompletion()` from the bundled `saya-completion` plugin in your
 startup configuration. The setup registers `completion.trigger`. It doesn't
-enable any completion source, manual trigger keymap, completion menu operation
-keys, or automatic trigger event unless you configure those options, so
-completion stays quiet by default.
+enable any completion source, manual trigger keymap, or automatic trigger event
+unless you configure those options, so completion stays quiet by default.
+Menus use standard operation keys such as `<Enter>`, `<Tab>`, `<C-y>`,
+`<C-e>`, `<C-n>`, and `<C-p>` unless you override them. `<Esc>` and `<C-[>`
+close the menu and continue as editor escape keys, so insert mode exits just as
+it does in Vim and Neovim.
 
 ```ts
 import {
@@ -27,7 +30,7 @@ setupSayaCompletion({
   key: "<C-Space>",
   keys: {
     confirm: ["<Enter>", "<Tab>", "<C-y>"],
-    close: ["<Esc>", "<C-[>"],
+    close: ["<C-e>"],
     next: ["<Down>", "<C-n>"],
     previous: ["<Up>", "<C-p>"],
     pageNext: ["<PageDown>"],
@@ -39,7 +42,7 @@ setupSayaCompletion({
       minPrefixLength: 1,
       triggerCharacters: ["/", "."],
     }),
-    createBufferWordSource({ minPrefixLength: 2 }),
+    createBufferWordSource({ minPrefixLength: 1 }),
   ],
 });
 ```
@@ -57,7 +60,7 @@ setupSayaCompletion({
       minPrefixLength: 1,
       triggerCharacters: ["/", "."],
     }),
-    createBufferWordSource({ minPrefixLength: 2 }),
+    createBufferWordSource({ minPrefixLength: 1 }),
   ],
 });
 ```
@@ -72,8 +75,8 @@ The setup uses explicit behavior options:
 - `key` is unset by default. Set it to register a manual insert-mode keymap.
 - `autoTrigger: false`.
 - `autoTriggerDelayMs: 80`.
-- `keys` is unset by default. Set it to install menu operation keys for
-  completion menus opened by this setup.
+- `keys` defaults to standard menu operation keys. Set it to override menu keys
+  for completion menus opened by this setup.
 - `minPrefixLength: 1`.
 - `maxItems: 50`.
 - `sourceTimeoutMs: 1000`.
@@ -117,17 +120,24 @@ checks source `triggerCharacters`, so a source can open on a character such as
 
 ## Menu operations
 
-Completion menu operations are disabled unless you configure `keys`. When `keys`
-is present, missing operation groups use the standard completion menu bindings.
+Completion menu operations use standard completion menu bindings by default.
+When `keys` is present, missing operation groups use the standard bindings.
 Providing an empty array disables that operation for menus opened by this setup.
-Key strings use Vim-like names such as `<Tab>`, `<Enter>`, `<Esc>`, `<C-n>`,
+Key strings use Vim-like names such as `<Tab>`, `<Enter>`, `<C-e>`, `<C-n>`,
 `<PageDown>`, or a single printable character such as `j`.
+
+The `close` group means "close the menu and stay in the current editor mode."
+Use `<C-e>` for Vim-style completion cancellation. `<Esc>` and `<C-[>` are
+handled as modal editor escape keys even when they aren't listed in `close`:
+the host closes the completion menu first, then dispatches the key to the
+editor so insert mode changes to normal mode. Empty `close` arrays disable
+close-only keys, but they don't disable `<Esc>` or `<C-[>`.
 
 ```ts
 setupSayaCompletion({
   keys: {
     confirm: ["<Tab>", "<C-y>"],
-    close: ["<Esc>"],
+    close: ["<C-e>"],
     next: ["<C-n>", "j"],
     previous: ["<C-p>", "k"],
     pageNext: ["<PageDown>", "<C-f>"],
@@ -141,10 +151,9 @@ The bundled plugin passes the normalized key policy with every typed
 menu key policy; `triggerCharacters` only affects whether automatic source
 execution starts.
 
-The Rust completion menu treats missing `request.keys` as "no operation
-keymaps." This keeps host-side safety defaults separate from user-facing bundled
-plugin behavior. Once a `keys` object is present, omitted operation groups use
-the standard bindings for that request.
+The Rust completion menu treats missing `request.keys` as the standard operation
+keys. Once a `keys` object is present, omitted operation groups use the standard
+bindings for that request, and empty arrays disable that operation.
 
 ## Sources
 
@@ -216,7 +225,7 @@ a trigger. A timed out source result contributes no candidates for that request.
 ```ts
 setupSayaCompletion({
   sourceTimeoutMs: 750,
-  sources: [createBufferWordSource({ minPrefixLength: 2 })],
+  sources: [createBufferWordSource({ minPrefixLength: 1 })],
 });
 ```
 
@@ -295,7 +304,7 @@ await saya.completion.show({
   selectedIndex: 0,
   keys: {
     confirm: ["<Tab>"],
-    close: ["<Esc>"],
+    close: ["<C-e>"],
     next: ["<C-n>"],
     previous: ["<C-p>"],
     pageNext: ["<PageDown>"],

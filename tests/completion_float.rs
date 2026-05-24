@@ -59,7 +59,7 @@ fn default_completion_keys() -> CompletionKeyBindingsRequest {
             "<Tab>".to_string(),
             "<C-y>".to_string(),
         ]),
-        close: Some(vec!["<Esc>".to_string(), "<C-[>".to_string()]),
+        close: Some(vec!["<C-e>".to_string()]),
         next: Some(vec!["<Down>".to_string(), "<C-n>".to_string()]),
         previous: Some(vec!["<Up>".to_string(), "<C-p>".to_string()]),
         page_next: Some(vec!["<PageDown>".to_string()]),
@@ -135,31 +135,33 @@ fn completion_menu_opens_structured_candidate_owner_and_documentation_float() {
 }
 
 #[test]
-fn completion_menu_without_request_keys_has_no_operation_key_bindings() {
+fn completion_menu_without_request_keys_uses_default_operation_key_bindings() {
     let mut floats = FloatingWindowManager::default();
     let mut completion = CompletionFloatManager::default();
-    let mut request = request();
-    request.keys = None;
+    let mut menu_request = request();
+    menu_request.keys = None;
     let opened = completion
-        .open_menu(&mut floats, request)
+        .open_menu(&mut floats, menu_request)
         .expect("completion candidates should open a menu");
     assert!(floats.focus_float(opened.menu_id));
 
     assert_eq!(
         completion.handle_key(&mut floats, &KeyInput::Down, Some(7)),
-        CompletionFloatInputOutcome::Ignored
+        CompletionFloatInputOutcome::Selected {
+            menu_id: opened.menu_id,
+            selected_index: 2
+        }
     );
     assert_eq!(
         completion.handle_key(&mut floats, &KeyInput::Enter, Some(7)),
-        CompletionFloatInputOutcome::Ignored
-    );
-    assert_eq!(
-        completion.handle_key(&mut floats, &KeyInput::Escape, Some(7)),
-        CompletionFloatInputOutcome::Ignored
+        CompletionFloatInputOutcome::Accepted {
+            menu_id: opened.menu_id,
+            candidate: request().candidates[2].clone()
+        }
     );
     assert!(
-        floats.debug_window(opened.menu_id).is_some(),
-        "menu should remain open without explicit close keys"
+        floats.debug_window(opened.menu_id).is_none(),
+        "standard bindings should work when request keys are omitted"
     );
 }
 
@@ -246,7 +248,28 @@ fn completion_enter_accepts_candidate_and_escape_closes_menu_and_docs() {
     assert_eq!(
         completion.handle_key(&mut floats, &KeyInput::Escape, Some(7)),
         CompletionFloatInputOutcome::Closed {
-            menu_id: opened.menu_id
+            menu_id: opened.menu_id,
+            editor_key: Some(KeyInput::Escape)
+        }
+    );
+    assert_eq!(floats.focus(), Some(WorkspaceFocus::Pane { window_id: 7 }));
+    assert!(floats.debug_window(opened.menu_id).is_none());
+}
+
+#[test]
+fn completion_ctrl_e_closes_menu_without_editor_dispatch() {
+    let mut floats = FloatingWindowManager::default();
+    let mut completion = CompletionFloatManager::default();
+    let opened = completion
+        .open_menu(&mut floats, request())
+        .expect("completion candidates should open a menu");
+    assert!(floats.focus_float(opened.menu_id));
+
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Ctrl('e'), Some(7)),
+        CompletionFloatInputOutcome::Closed {
+            menu_id: opened.menu_id,
+            editor_key: None
         }
     );
     assert_eq!(floats.focus(), Some(WorkspaceFocus::Pane { window_id: 7 }));
@@ -354,10 +377,19 @@ fn completion_menu_allows_empty_key_groups_to_disable_operations() {
         CompletionFloatInputOutcome::Ignored
     );
     assert_eq!(
-        completion.handle_key(&mut floats, &KeyInput::Escape, Some(7)),
+        completion.handle_key(&mut floats, &KeyInput::Ctrl('e'), Some(7)),
         CompletionFloatInputOutcome::Ignored
     );
     assert!(floats.debug_window(opened.menu_id).is_some());
+    assert_eq!(
+        completion.handle_key(&mut floats, &KeyInput::Escape, Some(7)),
+        CompletionFloatInputOutcome::Closed {
+            menu_id: opened.menu_id,
+            editor_key: Some(KeyInput::Escape)
+        },
+        "Esc is an editor escape key, not a disableable completion close key"
+    );
+    assert!(floats.debug_window(opened.menu_id).is_none());
 }
 
 #[test]

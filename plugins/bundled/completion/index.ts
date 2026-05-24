@@ -22,7 +22,7 @@ type BundledCompletionSourceDescriptor = Record<string, any>;
 const DEFAULT_AUTO_TRIGGER_DELAY_MS = 80;
 const DEFAULT_COMPLETION_KEYS: Required<SayaCompletionKeyBindings> = {
   confirm: ["<Enter>", "<Tab>", "<C-y>"],
-  close: ["<Esc>", "<C-[>"],
+  close: ["<C-e>"],
   next: ["<Down>", "<C-n>"],
   previous: ["<Up>", "<C-p>"],
   pageNext: ["<PageDown>"],
@@ -73,9 +73,7 @@ export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {
   const autoTrigger = options.autoTrigger ?? false;
   const autoTriggerDelayMs = options.autoTriggerDelayMs ??
     DEFAULT_AUTO_TRIGGER_DELAY_MS;
-  const keys = options.keys === undefined
-    ? undefined
-    : normalizeCompletionKeys(options.keys);
+  const keys = normalizeCompletionKeys(options.keys);
   const sources = options.sources ?? [];
   const filters = options.filters ?? [prefixFilter];
   const sorters = options.sorters ?? [labelSorter];
@@ -165,7 +163,7 @@ export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {
       replaceRange: selected.replaceRange,
       candidates,
       selectedIndex: 0,
-      ...(keys === undefined ? {} : { keys }),
+      keys,
     });
   };
 
@@ -708,7 +706,7 @@ function createBundledCompletionRuntimeCommand(
         replaceRange: selected.replaceRange,
         candidates,
         selectedIndex: 0,
-        ...(keys === undefined ? {} : { keys }),
+        keys,
       });
     };
   `;
