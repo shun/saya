@@ -1244,7 +1244,7 @@ impl EditorSessionState {
     }
 }
 
-fn read_directory_buffer_state_with_options(
+pub(crate) fn read_directory_buffer_state_with_options(
     path: &Path,
     options: DirectoryBufferListingOptions,
 ) -> std::io::Result<DirectoryBufferState> {

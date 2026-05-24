@@ -6,7 +6,9 @@ use std::time::Instant;
 use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 
 use crate::app::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
-use crate::app::session::EditorSessionState;
+use crate::app::session::{
+    DirectoryBufferListingOptions, EditorSessionState, read_directory_buffer_state_with_options,
+};
 use crate::core::bridge::CoreBridge;
 use crate::presentation::theme::{ResolvedTheme, ThemeRegistry};
 use crate::runtime::callback_registry_seed::CallbackRegistrySeed;
@@ -174,6 +176,21 @@ struct ResolvedStartupState {
     warnings: Vec<BootstrapWarning>,
 }
 
+#[derive(Debug)]
+struct InitialBuffer {
+    target_path: Option<PathBuf>,
+    text: String,
+    source: InitialBufferSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitialBufferSource {
+    Empty,
+    File,
+    Directory,
+    Stdin,
+}
+
 impl StartupRegistrySnapshot {
     pub fn from_apply_state(state: &ConfigApplyState) -> Self {
         log::debug!(
@@ -271,49 +288,9 @@ fn prepare_launch_with_guard<R: Read>(
     session_guard: SessionGuard,
     reader: &mut R,
 ) -> Result<BootstrapOutcome, BootstrapError> {
-    let target_path = target_path_from_input_source(&request.input_source);
-    let initial_text = match &request.input_source {
-        InputSource::File(target_path) => {
-            let started_at = Instant::now();
-            log::debug!(
-                "[bootstrap] loading target contents before terminal enter: {}",
-                target_path.display()
-            );
-            let text = fs::read_to_string(target_path).map_err(|error| {
-                BootstrapError::TargetReadFailed {
-                    path: target_path.clone(),
-                    message: error.to_string(),
-                }
-            })?;
-            log::debug!(
-                "[PERF][bootstrap] target file read: path={}, bytes={}, elapsed_ms={}",
-                target_path.display(),
-                text.len(),
-                started_at.elapsed().as_millis()
-            );
-            text
-        }
-        InputSource::Stdin => {
-            let started_at = Instant::now();
-            log::debug!("[bootstrap] reading startup buffer contents from stdin");
-            let mut initial_text = String::new();
-            reader.read_to_string(&mut initial_text).map_err(|error| {
-                BootstrapError::StdinReadFailed {
-                    message: error.to_string(),
-                }
-            })?;
-            log::debug!(
-                "[PERF][bootstrap] stdin read: bytes={}, elapsed_ms={}",
-                initial_text.len(),
-                started_at.elapsed().as_millis()
-            );
-            initial_text
-        }
-        InputSource::Empty => {
-            log::debug!("[bootstrap] starting with an empty buffer");
-            String::new()
-        }
-    };
+    let initial_buffer = load_initial_buffer(&request.input_source, reader)?;
+    let target_path = initial_buffer.target_path;
+    let initial_text = initial_buffer.text;
 
     let core_started_at = Instant::now();
     let mut core_bridge = if let Some(target_path) = target_path.as_ref() {
@@ -323,7 +300,8 @@ fn prepare_launch_with_guard<R: Read>(
     }
     .expect("vim-core-rs session should initialize after preflight session guard acquisition");
     log::debug!(
-        "[PERF][bootstrap] core bridge initialized: initial_text_len={}, elapsed_ms={}",
+        "[PERF][bootstrap] core bridge initialized: source={:?}, initial_text_len={}, elapsed_ms={}",
+        initial_buffer.source,
         initial_text.len(),
         core_started_at.elapsed().as_millis()
     );
@@ -374,9 +352,10 @@ fn prepare_launch_with_guard<R: Read>(
     let initial_number_width = bootstrap_state.startup_registry.options.number_width;
 
     log::debug!(
-        "[bootstrap] startup preflight completed: warnings={}, target_present={}, mode={:?}, dirty={}, tab_size={}, number_width={}",
+        "[bootstrap] startup preflight completed: warnings={}, target_present={}, source={:?}, mode={:?}, dirty={}, tab_size={}, number_width={}",
         warnings.len(),
         target_path.is_some(),
+        initial_buffer.source,
         initial_snapshot.mode,
         initial_snapshot.dirty,
         initial_tab_size,
@@ -402,6 +381,105 @@ fn prepare_launch_with_guard<R: Read>(
     })
 }
 
+fn load_initial_buffer<R: Read>(
+    input_source: &InputSource,
+    reader: &mut R,
+) -> Result<InitialBuffer, BootstrapError> {
+    match input_source {
+        InputSource::File(target_path) => load_path_initial_buffer(target_path),
+        InputSource::Stdin => load_stdin_initial_buffer(reader),
+        InputSource::Empty => {
+            log::debug!("[bootstrap] starting with an empty buffer");
+            Ok(InitialBuffer {
+                target_path: None,
+                text: String::new(),
+                source: InitialBufferSource::Empty,
+            })
+        }
+    }
+}
+
+fn load_path_initial_buffer(target_path: &Path) -> Result<InitialBuffer, BootstrapError> {
+    let started_at = Instant::now();
+    log::debug!(
+        "[bootstrap] inspecting target path before terminal enter: {}",
+        target_path.display()
+    );
+    let metadata = fs::metadata(target_path).map_err(|error| BootstrapError::TargetReadFailed {
+        path: target_path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+
+    if metadata.is_dir() {
+        log::debug!(
+            "[bootstrap][dired] target path is a directory; building startup listing: path={}",
+            target_path.display()
+        );
+        let directory_buffer = read_directory_buffer_state_with_options(
+            target_path,
+            DirectoryBufferListingOptions::default(),
+        )
+        .map_err(|error| BootstrapError::TargetReadFailed {
+            path: target_path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        log::debug!(
+            "[PERF][bootstrap][dired] startup directory listing read: path={}, entries={}, display_bytes={}, elapsed_ms={}",
+            target_path.display(),
+            directory_buffer.entries.len(),
+            directory_buffer.display_text.len(),
+            started_at.elapsed().as_millis()
+        );
+        return Ok(InitialBuffer {
+            target_path: Some(target_path.to_path_buf()),
+            text: directory_buffer.display_text,
+            source: InitialBufferSource::Directory,
+        });
+    }
+
+    log::debug!(
+        "[bootstrap] loading target file contents before terminal enter: {}",
+        target_path.display()
+    );
+    let text =
+        fs::read_to_string(target_path).map_err(|error| BootstrapError::TargetReadFailed {
+            path: target_path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    log::debug!(
+        "[PERF][bootstrap] target file read: path={}, bytes={}, elapsed_ms={}",
+        target_path.display(),
+        text.len(),
+        started_at.elapsed().as_millis()
+    );
+    Ok(InitialBuffer {
+        target_path: Some(target_path.to_path_buf()),
+        text,
+        source: InitialBufferSource::File,
+    })
+}
+
+fn load_stdin_initial_buffer<R: Read>(reader: &mut R) -> Result<InitialBuffer, BootstrapError> {
+    let started_at = Instant::now();
+    log::debug!("[bootstrap] reading startup buffer contents from stdin");
+    let mut initial_text = String::new();
+    reader
+        .read_to_string(&mut initial_text)
+        .map_err(|error| BootstrapError::StdinReadFailed {
+            message: error.to_string(),
+        })?;
+    log::debug!(
+        "[PERF][bootstrap] stdin read: bytes={}, elapsed_ms={}",
+        initial_text.len(),
+        started_at.elapsed().as_millis()
+    );
+    Ok(InitialBuffer {
+        target_path: None,
+        text: initial_text,
+        source: InitialBufferSource::Stdin,
+    })
+}
+
 fn snapshot_from_light_snapshot(light: &CoreLightSnapshot, text: String) -> CoreSnapshot {
     CoreSnapshot {
         text,
@@ -415,13 +493,6 @@ fn snapshot_from_light_snapshot(light: &CoreLightSnapshot, text: String) -> Core
         buffers: light.buffers.clone(),
         windows: light.windows.clone(),
         pum: light.pum.clone(),
-    }
-}
-
-fn target_path_from_input_source(input_source: &InputSource) -> Option<PathBuf> {
-    match input_source {
-        InputSource::File(path) => Some(path.clone()),
-        InputSource::Empty | InputSource::Stdin => None,
     }
 }
 
@@ -1361,38 +1432,42 @@ mod tests {
     }
 
     #[test]
-    fn returns_fatal_error_when_target_is_a_directory() {
+    fn opens_directory_target_as_initial_dired_buffer() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir_path = unique_path("target-is-directory");
-        std::fs::create_dir_all(&dir_path).expect("create directory");
+        let nested_path = dir_path.join("src");
+        let readme_path = dir_path.join("README.md");
+        std::fs::create_dir_all(&nested_path).expect("create directory");
+        std::fs::write(&readme_path, "hello\n").expect("create directory entry file");
 
-        let result = prepare_launch(LaunchRequest {
+        let outcome = prepare_launch(LaunchRequest {
             input_source: InputSource::File(dir_path.clone()),
             config_source: ConfigSource::Default,
             ..default_request()
-        });
+        })
+        .expect("directory target should bootstrap as dired buffer");
 
-        match result {
-            Err(BootstrapError::TargetReadFailed { path, message }) => {
-                assert_eq!(path, dir_path.clone());
-                assert!(
-                    !message.is_empty(),
-                    "ディレクトリ読み込み失敗メッセージは空でない必要がある"
-                );
-                log::debug!(
-                    "[test] directory target error message for display: {}",
-                    message
-                );
-            }
-            other => panic!(
-                "directory target should return TargetReadFailed, got: {:?}",
-                other
-            ),
-        }
+        assert_eq!(outcome.target_path, Some(dir_path.clone()));
+        assert!(
+            outcome.initial_snapshot.text.contains("README.md\n"),
+            "directory startup snapshot should project file entry: {:?}",
+            outcome.initial_snapshot.text
+        );
+        assert!(
+            outcome.initial_snapshot.text.contains("src/\n"),
+            "directory startup snapshot should project nested directory entry: {:?}",
+            outcome.initial_snapshot.text
+        );
+        let session_state = outcome.editor_session_state();
+        let directory_buffer = session_state
+            .directory_buffer()
+            .expect("directory target should initialize directory buffer metadata");
+        assert_eq!(directory_buffer.root_path, dir_path);
+        assert_eq!(directory_buffer.display_text, outcome.initial_snapshot.text);
 
-        let _ = std::fs::remove_dir(&dir_path);
+        let _ = std::fs::remove_dir_all(directory_buffer.root_path.clone());
     }
 
     #[test]

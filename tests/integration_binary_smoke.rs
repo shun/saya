@@ -145,6 +145,39 @@ fn opening_editing_once_and_quitting_cleanly_works_through_the_sy_binary() {
 }
 
 #[test]
+fn starting_with_directory_opens_dired_listing_through_the_sy_binary() {
+    let root_path = unique_path("dired-startup-root");
+    let nested_path = root_path.join("src");
+    let file_path = root_path.join("README.md");
+    let config_path = unique_path("dired-startup-init.ts");
+    std::fs::create_dir_all(&nested_path).expect("nested directory should be created");
+    std::fs::write(&file_path, "hello\n").expect("directory entry file should be created");
+    std::fs::write(&config_path, "").expect("empty startup config should be created");
+
+    let root_path_arg = root_path.to_str().expect("root path should be valid UTF-8");
+    let config_path_arg = config_path
+        .to_str()
+        .expect("config path should be valid UTF-8");
+    let output = run_sy_headless_smoke(&["-u", config_path_arg, root_path_arg]);
+
+    assert!(
+        output.status.success(),
+        "directory smoke should exit cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let startup_state = smoke_state(&output.stderr, "startup");
+    assert_eq!(startup_state["firstLine"], "README.md");
+    assert_eq!(startup_state["fileName"], root_path_arg);
+    assert_eq!(startup_state["mode"], "NORMAL");
+    assert_eq!(startup_state["dirty"], false);
+
+    std::fs::remove_dir_all(&root_path).expect("cleanup directory root");
+    std::fs::remove_file(&config_path).expect("cleanup config");
+}
+
+#[test]
 fn opening_with_u_init_ts_projects_startup_configuration_into_the_ui() {
     let target_path = unique_path("startup-config-target.txt");
     let config_path = unique_path("init.ts");
