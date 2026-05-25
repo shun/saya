@@ -79,7 +79,7 @@ impl Default for DirectoryBufferListingOptions {
     fn default() -> Self {
         Self {
             show_hidden: true,
-            sort_by: DirectoryBufferSortKey::Name,
+            sort_by: DirectoryBufferSortKey::Kind,
             filter: None,
         }
     }
@@ -1311,6 +1311,18 @@ pub(crate) fn read_directory_buffer_state_with_options(
         })
         .collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by(|left, right| directory_buffer_compare_entries(left, right, options.sort_by));
+    if options.sort_by == DirectoryBufferSortKey::Kind {
+        let directory_count = entries
+            .iter()
+            .filter(|entry| entry.kind == DirectoryBufferEntryKind::Directory)
+            .count();
+        log::debug!(
+            "[editor_session][dired] sorted directory buffer with eza-style directory grouping: root_path={}, directories={}, non_directories={}",
+            path.display(),
+            directory_count,
+            entries.len().saturating_sub(directory_count)
+        );
+    }
     let display_text = if entries.is_empty() {
         String::new()
     } else {
@@ -1338,8 +1350,8 @@ fn directory_buffer_compare_entries(
 ) -> std::cmp::Ordering {
     match sort_by {
         DirectoryBufferSortKey::Name => left.display_text.cmp(&right.display_text),
-        DirectoryBufferSortKey::Kind => directory_buffer_entry_sort_rank(left.kind)
-            .cmp(&directory_buffer_entry_sort_rank(right.kind))
+        DirectoryBufferSortKey::Kind => directory_buffer_directory_group_rank(left.kind)
+            .cmp(&directory_buffer_directory_group_rank(right.kind))
             .then_with(|| left.display_text.cmp(&right.display_text)),
         DirectoryBufferSortKey::ModifiedTime => left
             .modified_time_ms
@@ -1352,12 +1364,12 @@ fn directory_buffer_compare_entries(
     }
 }
 
-fn directory_buffer_entry_sort_rank(kind: DirectoryBufferEntryKind) -> usize {
+fn directory_buffer_directory_group_rank(kind: DirectoryBufferEntryKind) -> usize {
     match kind {
         DirectoryBufferEntryKind::Directory => 0,
-        DirectoryBufferEntryKind::File => 1,
-        DirectoryBufferEntryKind::Symlink => 2,
-        DirectoryBufferEntryKind::Other => 3,
+        DirectoryBufferEntryKind::File
+        | DirectoryBufferEntryKind::Symlink
+        | DirectoryBufferEntryKind::Other => 1,
     }
 }
 
@@ -2143,27 +2155,68 @@ mod tests {
             .expect("directory target should initialize directory buffer metadata");
 
         assert_eq!(directory_buffer.root_path, root_path);
-        assert_eq!(directory_buffer.display_text, "README.md\nsrc/\n");
+        assert_eq!(directory_buffer.display_text, "src/\nREADME.md\n");
         assert_eq!(directory_buffer.entries.len(), 2);
-        assert_eq!(directory_buffer.entries[0].name, "README.md");
-        assert_eq!(directory_buffer.entries[0].path, readme_path);
+        assert_eq!(directory_buffer.entries[0].name, "src");
         assert_eq!(
             directory_buffer.entries[0].kind,
-            DirectoryBufferEntryKind::File
+            DirectoryBufferEntryKind::Directory
         );
-        assert_eq!(directory_buffer.entries[0].display_text, "README.md");
+        assert_eq!(directory_buffer.entries[0].display_text, "src/");
         assert_ne!(
             directory_buffer.entries[0].id, directory_buffer.entries[1].id,
             "entry ids should distinguish entries in the same directory"
         );
-        assert_eq!(directory_buffer.entries[1].name, "src");
+        assert_eq!(directory_buffer.entries[1].name, "README.md");
+        assert_eq!(directory_buffer.entries[1].path, readme_path);
         assert_eq!(
             directory_buffer.entries[1].kind,
-            DirectoryBufferEntryKind::Directory
+            DirectoryBufferEntryKind::File
         );
-        assert_eq!(directory_buffer.entries[1].display_text, "src/");
+        assert_eq!(directory_buffer.entries[1].display_text, "README.md");
 
         std::fs::remove_dir_all(directory_buffer.root_path.clone()).expect("cleanup directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_buffer_kind_sort_groups_directories_then_sorts_other_entries_by_name() {
+        let root_path = std::env::temp_dir().join(format!(
+            "saya-editor-session-directory-kind-sort-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        let directory_path = root_path.join("middle-dir");
+        let file_path = root_path.join("z-file.txt");
+        let target_path = root_path.join("target.md");
+        let link_path = root_path.join("a-link.md");
+        std::fs::create_dir_all(&directory_path).expect("nested directory");
+        std::fs::write(&file_path, "file\n").expect("file entry");
+        std::fs::write(&target_path, "target\n").expect("symlink target");
+        std::os::unix::fs::symlink(&target_path, &link_path).expect("symlink");
+
+        let directory_buffer = read_directory_buffer_state_with_options(
+            &root_path,
+            DirectoryBufferListingOptions {
+                show_hidden: true,
+                sort_by: DirectoryBufferSortKey::Kind,
+                filter: None,
+            },
+        )
+        .expect("directory listing");
+
+        assert_eq!(
+            directory_buffer
+                .entries
+                .iter()
+                .map(|entry| entry.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["middle-dir/", "a-link.md@", "target.md", "z-file.txt"]
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
     }
 
     #[cfg(unix)]

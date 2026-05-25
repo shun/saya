@@ -61,7 +61,8 @@ The public setup options are:
   `unmark`, `clearMarks`, and `bulkDeletePreview`.
 - `root`, as the startup root path used by the open and refresh commands.
 - `hiddenFilePolicy`, as `"show"` or `"hide"`.
-- `sortPolicy`, as `"name"`, `"kind"`, `"modifiedTime"`, or `"size"`.
+- `sortPolicy`, as `"name"`, `"kind"`, `"modifiedTime"`, or `"size"`. The
+  `"kind"` value groups directories before other entries.
 - `filter`, as the case-insensitive listing filter.
 - `confirmStrategy`, as `"preview"` or `"disabled"` for the bulk-delete preview
   command.
@@ -237,7 +238,7 @@ The current migration baseline is from the earlier unversioned preview API to
 
 - Prefer grouped `commands` and `keymap` options over legacy flat option names.
 - Treat `saya.filer.list(path, options)` defaults as `showHidden: true` and
-  `sortBy: "kind"`.
+  `sortBy: "kind"`, with directories grouped before other entries.
 - Expect operation reports to use `operation`, `path`, `targetPath`, `entries`,
   and `previewId`.
 - Keep destructive operations behind explicit confirmation and preview flows.

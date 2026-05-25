@@ -168,7 +168,7 @@ fn starting_with_directory_opens_dired_listing_through_the_sy_binary() {
         String::from_utf8_lossy(&output.stderr)
     );
     let startup_state = smoke_state(&output.stderr, "startup");
-    assert_eq!(startup_state["firstLine"], "README.md");
+    assert_eq!(startup_state["firstLine"], "src/");
     assert_eq!(startup_state["fileName"], root_path_arg);
     assert_eq!(startup_state["mode"], "NORMAL");
     assert_eq!(startup_state["dirty"], false);

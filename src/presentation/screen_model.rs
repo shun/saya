@@ -3738,7 +3738,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).expect("mkdir");
         std::fs::write(root.join("README.md"), "hello").expect("file");
-        let bridge = CoreBridge::new("README.md\nsrc/\n").expect("core bridge");
+        let bridge = CoreBridge::new("src/\nREADME.md\n").expect("core bridge");
         let snapshot = bridge.snapshot();
         let mut session_state = EditorSessionState::new(Some(root.clone()));
         let directory = session_state
@@ -3759,19 +3759,19 @@ mod tests {
             model
                 .filer_style_ranges
                 .iter()
-                .any(|range| { range.row == 0 && range.key == FilerSemanticStyleKey::File })
+                .any(|range| { range.row == 1 && range.key == FilerSemanticStyleKey::File })
         );
         assert!(
             model
                 .filer_style_ranges
                 .iter()
-                .any(|range| { range.row == 1 && range.key == FilerSemanticStyleKey::Directory })
+                .any(|range| { range.row == 0 && range.key == FilerSemanticStyleKey::Directory })
         );
         assert!(
             model
                 .filer_style_ranges
                 .iter()
-                .any(|range| { range.row == 1 && range.key == FilerSemanticStyleKey::Marked })
+                .any(|range| { range.row == 0 && range.key == FilerSemanticStyleKey::Marked })
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }

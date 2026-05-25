@@ -455,9 +455,10 @@ requirements.
 
 ### `saya.filer.list(path, options)`
 
-Use this method to read a sorted directory listing. The default order preserves
-the existing kind-first listing: directories, files, symlinks, and other
-entries, with each group sorted by display text.
+Use this method to read a sorted directory listing. The default order groups
+directories before other entries, matching `eza --group-directories-first`.
+Within the directory group and the non-directory group, entries are sorted by
+display text.
 
 ```ts
 const entries = await saya.filer.list(".", {
@@ -474,7 +475,7 @@ The optional `options` object supports:
   default is `true` for compatibility with earlier `saya.filer.list(path)`
   behavior.
 - `sortBy`, as `"name"`, `"kind"`, `"modifiedTime"`, or `"size"`. The default is
-  `"kind"` for compatibility with earlier listings.
+  `"kind"`, which groups directories before other entries.
 - `filter`, as a case-insensitive substring matched against `name` and
   `displayText`. Empty strings and omitted values keep the listing unfiltered.
 

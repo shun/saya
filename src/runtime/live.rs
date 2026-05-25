@@ -3554,6 +3554,18 @@ pub fn list_local_filer_entries(
         })
         .collect::<Result<Vec<_>, RuntimeFilerError>>()?;
     entries.sort_by(|left, right| runtime_filer_compare_entries(left, right, options.sort_by));
+    if options.sort_by == RuntimeFilerSortKey::Kind {
+        let directory_count = entries
+            .iter()
+            .filter(|entry| entry.kind == RuntimeFilerEntryKind::Directory)
+            .count();
+        log::debug!(
+            "[saya_live_runtime] sorted local filer entries with eza-style directory grouping: path={}, directories={}, non_directories={}",
+            path.display(),
+            directory_count,
+            entries.len().saturating_sub(directory_count)
+        );
+    }
     log::debug!(
         "[saya_live_runtime] listed local filer entries: path={}, count={}, duration_ms={}, show_hidden={}, sort_by={:?}, filter={:?}",
         path.display(),
@@ -3582,8 +3594,8 @@ fn runtime_filer_compare_entries(
 ) -> std::cmp::Ordering {
     match sort_by {
         RuntimeFilerSortKey::Name => left.display_text.cmp(&right.display_text),
-        RuntimeFilerSortKey::Kind => filer_entry_sort_rank(&left.kind)
-            .cmp(&filer_entry_sort_rank(&right.kind))
+        RuntimeFilerSortKey::Kind => filer_directory_group_rank(&left.kind)
+            .cmp(&filer_directory_group_rank(&right.kind))
             .then_with(|| left.display_text.cmp(&right.display_text)),
         RuntimeFilerSortKey::ModifiedTime => left
             .modified_time_ms
@@ -3596,12 +3608,12 @@ fn runtime_filer_compare_entries(
     }
 }
 
-fn filer_entry_sort_rank(kind: &RuntimeFilerEntryKind) -> usize {
+fn filer_directory_group_rank(kind: &RuntimeFilerEntryKind) -> usize {
     match kind {
         RuntimeFilerEntryKind::Directory => 0,
-        RuntimeFilerEntryKind::File => 1,
-        RuntimeFilerEntryKind::Symlink => 2,
-        RuntimeFilerEntryKind::Other => 3,
+        RuntimeFilerEntryKind::File
+        | RuntimeFilerEntryKind::Symlink
+        | RuntimeFilerEntryKind::Other => 1,
     }
 }
 
@@ -4669,6 +4681,40 @@ mod tests {
         assert!(
             entries.iter().all(|entry| entry.modified_time_ms.is_some()),
             "metadata should include modified_time_ms without removing existing fields"
+        );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filer_kind_sort_groups_directories_then_sorts_other_entries_by_name() {
+        let root_path = unique_path("filer-kind-sort");
+        let directory_path = root_path.join("middle-dir");
+        let file_path = root_path.join("z-file.txt");
+        let target_path = root_path.join("target.md");
+        let link_path = root_path.join("a-link.md");
+        std::fs::create_dir_all(&directory_path).expect("nested directory");
+        std::fs::write(&file_path, "file\n").expect("file entry");
+        std::fs::write(&target_path, "target\n").expect("symlink target");
+        std::os::unix::fs::symlink(&target_path, &link_path).expect("symlink");
+
+        let entries = super::list_local_filer_entries(
+            root_path.clone(),
+            super::RuntimeFilerListOptions {
+                show_hidden: true,
+                sort_by: super::RuntimeFilerSortKey::Kind,
+                filter: None,
+            },
+        )
+        .expect("filer list should succeed");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.display_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["middle-dir/", "a-link.md@", "target.md", "z-file.txt"]
         );
 
         std::fs::remove_dir_all(root_path).expect("cleanup directory");

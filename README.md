@@ -187,6 +187,8 @@ setupSayaDired({
 });
 ```
 
+The default `sortPolicy: "kind"` groups directories before other entries.
+
 > **Note:** Dired is a preview feature. The command names, keymap shape,
 > `hiddenFilePolicy`, `sortPolicy`, `filter`, and `confirmStrategy` options are
 > public setup points, but they can still change before the dired API is

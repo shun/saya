@@ -139,7 +139,7 @@ fn local_vfs_host_opens_directory_locator_as_sorted_listing() {
     drain_vfs_until_idle(&mut bridge, &mut runtime);
 
     let snapshot = bridge.snapshot();
-    assert_eq!(snapshot.text, "README.md\nsrc/\n");
+    assert_eq!(snapshot.text, "src/\nREADME.md\n");
 
     std::fs::remove_file(&readme_path).expect("cleanup file");
     std::fs::remove_dir(&nested_path).expect("cleanup nested directory");
@@ -191,7 +191,7 @@ fn local_vfs_host_preserves_space_names_in_directory_listing() {
     drain_vfs_until_idle(&mut bridge, &mut runtime);
 
     let snapshot = bridge.snapshot();
-    assert_eq!(snapshot.text, "daily notes.md\nsrc dir/\n");
+    assert_eq!(snapshot.text, "src dir/\ndaily notes.md\n");
 
     std::fs::remove_file(&notes_path).expect("cleanup file");
     std::fs::remove_dir(&nested_path).expect("cleanup nested directory");
@@ -221,7 +221,7 @@ fn local_vfs_host_opens_relative_directory_locator_from_current_directory() {
 
     std::env::set_current_dir(previous_dir).expect("restore current dir");
     let snapshot = bridge.snapshot();
-    assert_eq!(snapshot.text, "README.md\nsrc/\n");
+    assert_eq!(snapshot.text, "src/\nREADME.md\n");
 
     std::fs::remove_file(&readme_path).expect("cleanup file");
     std::fs::remove_dir(&nested_path).expect("cleanup nested directory");

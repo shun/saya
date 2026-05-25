@@ -231,21 +231,42 @@ fn render_directory_listing(path: &Path) -> std::io::Result<DirectoryListing> {
         .map(|entry| {
             let entry = entry?;
             let file_type = entry.file_type()?;
+            let is_directory = file_type.is_dir();
             let mut name = entry.file_name().to_string_lossy().into_owned();
-            if file_type.is_dir() {
+            if is_directory {
                 name.push('/');
             }
-            Ok(name)
+            Ok((is_directory, name))
         })
         .collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort();
+    entries.sort_by(|left, right| {
+        directory_group_rank(left.0)
+            .cmp(&directory_group_rank(right.0))
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    let directory_count = entries.iter().filter(|entry| entry.0).count();
     let entry_count = entries.len();
+    log::debug!(
+        "[core_host_actions][dired] rendered directory listing with eza-style directory grouping: path={}, directories={}, non_directories={}",
+        path.display(),
+        directory_count,
+        entry_count.saturating_sub(directory_count)
+    );
     let text = if entries.is_empty() {
         String::new()
     } else {
-        entries.join("\n") + "\n"
+        entries
+            .iter()
+            .map(|entry| entry.1.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
     };
     Ok(DirectoryListing { text, entry_count })
+}
+
+fn directory_group_rank(is_directory: bool) -> usize {
+    if is_directory { 0 } else { 1 }
 }
 
 fn locator_to_path(locator: &str) -> PathBuf {

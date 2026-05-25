@@ -66,7 +66,8 @@ through the runtime `saya.filer` surface, not through broad startup filesystem
 access. When `keymap` is omitted, no dired mappings are installed. When `keymap`
 is present, the default mark bindings are `m` for marking, `M` for unmarking,
 and `gM` for clearing marks, leaving `u` available for normal-mode undo while
-editing a writable directory listing.
+editing a writable directory listing. The default `sortPolicy: "kind"` groups
+directories before other entries.
 
 > **Note:** Dired is a preview feature currently under active development. The
 > setup options are public enough for plugin reuse, but they can change before

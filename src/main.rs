@@ -13204,7 +13204,6 @@ mod tests {
             &mut session_state,
         )
         .expect("open root listing");
-        outcome.core_bridge.dispatch_key("j").expect("move to src");
         outcome
             .core_bridge
             .dispatch_key("i")
@@ -13328,7 +13327,7 @@ mod tests {
         )
         .expect("runtime edit command should load directory listing");
 
-        assert_eq!(outcome.core_bridge.snapshot().text, "README.md\nsrc/\n");
+        assert_eq!(outcome.core_bridge.snapshot().text, "src/\nREADME.md\n");
 
         std::fs::remove_file(readme_path).expect("cleanup file");
         std::fs::remove_dir(nested_path).expect("cleanup nested directory");
@@ -13705,7 +13704,6 @@ mod tests {
             &mut session_state,
         )
         .expect("open root listing");
-        outcome.core_bridge.dispatch_key("j").expect("move to src");
         execute_runtime_command_for_test(
             &mut outcome,
             &mut session_state,
@@ -14791,9 +14789,9 @@ mod tests {
         assert!(floating_window_manager.is_empty());
         assert_eq!(completion_float_manager.active_documentation_id(), None);
         assert!(panel_manager.snapshots().is_empty());
-        let mut expected_entries = vec!["README.md", "notes.txt", "src/"];
+        let mut expected_entries = vec!["src/", "README.md", "notes.txt"];
         if root_path.join(".notes.txt.swp").exists() {
-            expected_entries.insert(0, ".notes.txt.swp");
+            expected_entries.insert(1, ".notes.txt.swp");
         }
         let expected_listing = expected_entries.join("\n") + "\n";
         assert_directory_listing_state(&outcome, &session_state, &root_path, &expected_listing);
