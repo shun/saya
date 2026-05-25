@@ -760,6 +760,7 @@ declare global {
         | "cursorLast"
         | "pageDown"
         | "pageUp"
+        | "show"
         | "hide"
         | "cancel";
 

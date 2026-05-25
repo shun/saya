@@ -161,6 +161,7 @@ pub enum RuntimeSelectorControllerCommand {
     CursorLast,
     PageDown,
     PageUp,
+    Show,
     Hide,
     Cancel,
 }
@@ -849,6 +850,7 @@ impl From<RuntimeSelectorControllerCommand> for SelectorControllerCommand {
             RuntimeSelectorControllerCommand::CursorLast => Self::CursorLast,
             RuntimeSelectorControllerCommand::PageDown => Self::PageDown,
             RuntimeSelectorControllerCommand::PageUp => Self::PageUp,
+            RuntimeSelectorControllerCommand::Show => Self::Show,
             RuntimeSelectorControllerCommand::Hide => Self::Hide,
             RuntimeSelectorControllerCommand::Cancel => Self::Cancel,
         }

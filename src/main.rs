@@ -243,6 +243,7 @@ async fn main() {
     let mut command_line_prompt: Option<char> = None;
     let mut command_line_edit = CommandLineEdit::default();
     let mut runtime_input_prompt: Option<RuntimeInputPromptUiState> = None;
+    let mut startup_keymap_pending_lhs: Option<String> = None;
     let mut command_line_histories = load_histories_from_default_cache();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
@@ -1240,84 +1241,99 @@ async fn main() {
                                 session_state.message_pager_active(),
                                 workspace_projection_dirty
                             );
-                        } else if !handled
-                            && let Some(action) = startup_keymap_action_for_snapshot_input(
+                        } else if !handled {
+                            let pending_lhs_before = startup_keymap_pending_lhs.clone();
+                            if let Some(action) = startup_keymap_action_for_snapshot_input(
                                 &outcome.startup_registry.keymaps,
                                 &outcome.core_bridge.light_snapshot(),
                                 &key,
-                            )
-                        {
-                            handled = true;
-                            log::debug!(
-                                "[main] applying startup keymap before core dispatch: key={:?}, action={:?}",
-                                key,
-                                action
-                            );
-                            if outcome.core_bridge.pending_input_is_pending() {
-                                let _ = outcome.core_bridge.dispatch_key("\x1b");
-                                consume_core_outcomes_from_core(
-                                    &mut outcome.core_bridge,
-                                    &mut outcome_accumulator,
-                                    &mut need_redraw,
+                                &mut startup_keymap_pending_lhs,
+                            ) {
+                                handled = true;
+                                log::debug!(
+                                    "[main] applying startup keymap before core dispatch: key={:?}, action={:?}",
+                                    key,
+                                    action
                                 );
-                            }
-                            match action {
-                                StartupKeymapAction::Literal(rhs) => {
-                                    let _ = outcome.core_bridge.dispatch_key(&rhs);
+                                if outcome.core_bridge.pending_input_is_pending() {
+                                    let _ = outcome.core_bridge.dispatch_key("\x1b");
                                     consume_core_outcomes_from_core(
                                         &mut outcome.core_bridge,
                                         &mut outcome_accumulator,
                                         &mut need_redraw,
                                     );
+                                }
+                                match action {
+                                    StartupKeymapAction::Literal(rhs) => {
+                                        let _ = outcome.core_bridge.dispatch_key(&rhs);
+                                        consume_core_outcomes_from_core(
+                                            &mut outcome.core_bridge,
+                                            &mut outcome_accumulator,
+                                            &mut need_redraw,
+                                        );
 
-                                    if let Some(reason) = process_pending_host_actions_with_runtime(
-                                        &mut outcome,
-                                        &mut outcome_accumulator,
-                                        &mut session_state,
-                                        &mut transient_msg,
-                                        &mut system_warning,
-                                        &mut host_action_runtime,
-                                        runtime_session.as_mut(),
-                                        &mut need_redraw,
-                                        &mut runtime_presentation_intents,
-                                        Some(&lsif_bridge),
-                                    )
-                                    .await
-                                    {
-                                        break 'main reason;
+                                        if let Some(reason) =
+                                            process_pending_host_actions_with_runtime(
+                                                &mut outcome,
+                                                &mut outcome_accumulator,
+                                                &mut session_state,
+                                                &mut transient_msg,
+                                                &mut system_warning,
+                                                &mut host_action_runtime,
+                                                runtime_session.as_mut(),
+                                                &mut need_redraw,
+                                                &mut runtime_presentation_intents,
+                                                Some(&lsif_bridge),
+                                            )
+                                            .await
+                                        {
+                                            break 'main reason;
+                                        }
+                                        session_state.update_dirty(outcome.core_bridge.dirty());
                                     }
-                                    session_state.update_dirty(outcome.core_bridge.dirty());
-                                }
-                                StartupKeymapAction::RegisteredCommand(command_name) => {
-                                    log::info!(
-                                        "[main][keymap] executing registered command from keymap: key={:?}, command={}",
-                                        key,
-                                        command_name
-                                    );
-                                    if let Some(reason) = execute_startup_keymap_registered_command(
-                                        runtime_session.as_mut(),
-                                        &command_name,
-                                        &mut outcome,
-                                        &mut session_state,
-                                        &mut floating_window_manager,
-                                        &mut completion_float_manager,
-                                        &mut lsp_diagnostic_store,
-                                        &mut terminal_float_manager,
-                                        &mut panel_manager,
-                                        Some(&mut runtime_input_prompt),
-                                        &mut transient_msg,
-                                        &mut need_redraw,
-                                        &mut runtime_presentation_intents,
-                                        Some(&lsif_bridge),
-                                    )
-                                    .await
-                                    {
-                                        break 'main reason;
+                                    StartupKeymapAction::RegisteredCommand(command_name) => {
+                                        log::info!(
+                                            "[main][keymap] executing registered command from keymap: key={:?}, command={}",
+                                            key,
+                                            command_name
+                                        );
+                                        if let Some(reason) =
+                                            execute_startup_keymap_registered_command(
+                                                runtime_session.as_mut(),
+                                                &command_name,
+                                                &mut outcome,
+                                                &mut session_state,
+                                                &mut floating_window_manager,
+                                                &mut completion_float_manager,
+                                                &mut lsp_diagnostic_store,
+                                                &mut terminal_float_manager,
+                                                &mut panel_manager,
+                                                Some(&mut runtime_input_prompt),
+                                                &mut transient_msg,
+                                                &mut need_redraw,
+                                                &mut runtime_presentation_intents,
+                                                Some(&lsif_bridge),
+                                            )
+                                            .await
+                                        {
+                                            break 'main reason;
+                                        }
                                     }
                                 }
+                                need_redraw = true;
+                            } else if startup_keymap_pending_lhs.is_some()
+                                && startup_keymap_pending_lhs != pending_lhs_before
+                            {
+                                handled = true;
+                                log::debug!(
+                                    "[main] startup keymap prefix pending: key={:?}, pending_lhs={:?}",
+                                    key,
+                                    startup_keymap_pending_lhs
+                                );
                             }
-                            need_redraw = true;
-                        } else if !handled
+                        }
+
+                        if !handled
                             && (key == KeyInput::Char(':') || key == KeyInput::Char('/'))
                             && outcome.core_bridge.mode() == CoreMode::Normal
                         {
@@ -1331,6 +1347,7 @@ async fn main() {
                         }
 
                         if !handled {
+                            startup_keymap_pending_lhs = None;
                             let intent = resolve_intent(&key);
                             log::info!(
                                 "[main][input] key not handled by startup keymap, dispatching intent: key={:?}, intent={:?}",
@@ -2091,10 +2108,12 @@ async fn run_binary_completion_smoke(
         .core_bridge
         .dispatch_key("A")
         .map_err(|error| format!("completion smoke insert mode failed: {error:?}"))?;
+    let mut startup_keymap_pending_lhs = None;
     let action = startup_keymap_action_for_snapshot_input(
         &outcome.startup_registry.keymaps,
         &outcome.core_bridge.light_snapshot(),
         &KeyInput::Ctrl('x'),
+        &mut startup_keymap_pending_lhs,
     )
     .ok_or_else(|| {
         format!(
@@ -5449,14 +5468,14 @@ async fn handle_selector_accept_action(
     match execute_selector_rg_jump(&location, outcome, session_state) {
         Ok(mut dispatch_outcome) => {
             let mut host_session = MainRuntimeHostSession::new(outcome, session_state);
-            let cancel_outcome = runtime_session
+            let hide_outcome = runtime_session
                 .control_selector(
                     selector_model.session_id,
-                    RuntimeSelectorControllerCommand::Cancel,
+                    RuntimeSelectorControllerCommand::Hide,
                     &mut host_session,
                 )
                 .await;
-            merge_runtime_dispatch_outcome(&mut dispatch_outcome, cancel_outcome);
+            merge_runtime_dispatch_outcome(&mut dispatch_outcome, hide_outcome);
             dispatch_outcome
         }
         Err(error) => {
@@ -6202,6 +6221,7 @@ async fn execute_startup_keymap_registered_command(
     )
 }
 
+#[cfg(test)]
 fn startup_keymap_action_for_input(
     keymaps: &[saya::app::bootstrap::StartupKeymapSnapshot],
     mode: CoreMode,
@@ -6209,22 +6229,36 @@ fn startup_keymap_action_for_input(
 ) -> Option<StartupKeymapAction> {
     let mode = startup_keymap_mode_from_core_mode(mode)?;
     let lhs = startup_keymap_lhs_from_input(key)?;
-    keymaps
-        .iter()
-        .rev()
-        .find(|keymap| keymap.mode == mode && keymap.lhs == lhs)
-        .map(|keymap| keymap.action.clone())
+    startup_keymap_action_for_lhs(keymaps, mode, &lhs)
 }
 
 fn startup_keymap_action_for_snapshot_input(
     keymaps: &[saya::app::bootstrap::StartupKeymapSnapshot],
     snapshot: &vim_core_rs::CoreLightSnapshot,
     key: &KeyInput,
+    pending_lhs: &mut Option<String>,
 ) -> Option<StartupKeymapAction> {
     let mode = startup_keymap_mode_from_core_mode(snapshot.mode)?;
     let key_lhs = startup_keymap_lhs_from_input(key)?;
+    if let Some(prefix) = pending_lhs.take() {
+        let lhs = format!("{prefix}{key_lhs}");
+        if let Some(action) = startup_keymap_action_for_lhs(keymaps, mode, &lhs) {
+            return Some(action);
+        }
+        if startup_keymap_has_longer_prefix(keymaps, mode, &lhs) {
+            *pending_lhs = Some(lhs);
+            return None;
+        }
+    }
+
     if snapshot.pending_input.pending_keys.is_empty() {
-        return startup_keymap_action_for_input(keymaps, snapshot.mode, key);
+        if let Some(action) = startup_keymap_action_for_lhs(keymaps, mode, &key_lhs) {
+            return Some(action);
+        }
+        if startup_keymap_has_longer_prefix(keymaps, mode, &key_lhs) {
+            *pending_lhs = Some(key_lhs);
+        }
+        return None;
     }
     let pending_lhs = (!snapshot.pending_input.pending_keys.is_empty())
         .then(|| format!("{}{}", snapshot.pending_input.pending_keys, key_lhs));
@@ -6240,6 +6274,28 @@ fn startup_keymap_action_for_snapshot_input(
                 .find(|keymap| keymap.mode == mode && keymap.lhs == lhs)
                 .map(|keymap| keymap.action.clone())
         })
+}
+
+fn startup_keymap_action_for_lhs(
+    keymaps: &[saya::app::bootstrap::StartupKeymapSnapshot],
+    mode: StartupKeymapMode,
+    lhs: &str,
+) -> Option<StartupKeymapAction> {
+    keymaps
+        .iter()
+        .rev()
+        .find(|keymap| keymap.mode == mode && keymap.lhs == lhs)
+        .map(|keymap| keymap.action.clone())
+}
+
+fn startup_keymap_has_longer_prefix(
+    keymaps: &[saya::app::bootstrap::StartupKeymapSnapshot],
+    mode: StartupKeymapMode,
+    lhs: &str,
+) -> bool {
+    keymaps
+        .iter()
+        .any(|keymap| keymap.mode == mode && keymap.lhs.starts_with(lhs) && keymap.lhs != lhs)
 }
 
 fn startup_keymap_mode_from_core_mode(mode: CoreMode) -> Option<StartupKeymapMode> {
@@ -11959,10 +12015,12 @@ mod tests {
         let mut runtime_presentation_intents = Vec::new();
 
         outcome.core_bridge.dispatch_key("A").expect("enter insert");
+        let mut startup_keymap_pending_lhs = None;
         let action = startup_keymap_action_for_snapshot_input(
             &outcome.startup_registry.keymaps,
             &outcome.core_bridge.light_snapshot(),
             &KeyInput::Ctrl('x'),
+            &mut startup_keymap_pending_lhs,
         )
         .unwrap_or_else(|| {
             panic!(
@@ -13143,16 +13201,65 @@ mod tests {
 
         bridge.dispatch_key("g").expect("g should become pending");
 
+        let mut startup_keymap_pending_lhs = None;
         assert_eq!(
             startup_keymap_action_for_snapshot_input(
                 &keymaps,
                 &bridge.light_snapshot(),
-                &KeyInput::Char('r')
+                &KeyInput::Char('r'),
+                &mut startup_keymap_pending_lhs,
             ),
             Some(StartupKeymapAction::RegisteredCommand(
                 "dired.refresh".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn startup_keymap_action_for_input_tracks_custom_two_key_prefix() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let keymaps = vec![
+            saya::app::bootstrap::StartupKeymapSnapshot {
+                mode: StartupKeymapMode::Normal,
+                lhs: "sg".to_string(),
+                action: StartupKeymapAction::RegisteredCommand("selector.rg".to_string()),
+            },
+            saya::app::bootstrap::StartupKeymapSnapshot {
+                mode: StartupKeymapMode::Normal,
+                lhs: "sr".to_string(),
+                action: StartupKeymapAction::RegisteredCommand("selector.resume".to_string()),
+            },
+        ];
+        let bridge = saya::core::bridge::CoreBridge::new("README.md\n")
+            .expect("core bridge should initialize");
+        let snapshot = bridge.light_snapshot();
+        let mut pending_lhs = None;
+
+        assert_eq!(
+            startup_keymap_action_for_snapshot_input(
+                &keymaps,
+                &snapshot,
+                &KeyInput::Char('s'),
+                &mut pending_lhs,
+            ),
+            None
+        );
+        assert_eq!(pending_lhs.as_deref(), Some("s"));
+
+        assert_eq!(
+            startup_keymap_action_for_snapshot_input(
+                &keymaps,
+                &snapshot,
+                &KeyInput::Char('r'),
+                &mut pending_lhs,
+            ),
+            Some(StartupKeymapAction::RegisteredCommand(
+                "selector.resume".to_string()
+            ))
+        );
+        assert_eq!(pending_lhs, None);
     }
 
     #[test]
@@ -15956,7 +16063,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn selector_accept_action_opens_selected_rg_location_and_cancels_selector() {
+    async fn selector_accept_action_opens_selected_rg_location_and_hides_reopenable_selector() {
         let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -16033,11 +16140,43 @@ mod tests {
         let snapshot = outcome.core_bridge.light_snapshot();
         assert_eq!(snapshot.cursor_row, 1, "rg line is 1-based");
         assert_eq!(snapshot.cursor_col, 3, "rg column is 1-based");
-        let cancelled_model = runtime_session
+        let hidden_model = runtime_session
             .selector_tui_projection_sink()
             .current_model()
-            .expect("selector cancel should publish model");
-        assert!(cancelled_model.cancelled);
+            .expect("selector hide should publish model");
+        assert!(hidden_model.hidden);
+        assert!(!hidden_model.cancelled);
+        assert_eq!(
+            hidden_model
+                .selected_row
+                .as_ref()
+                .map(|row| row.item.id.as_str()),
+            Some("rg-target")
+        );
+        {
+            let mut host_session = MainRuntimeHostSession::new(&mut outcome, &mut session_state);
+            let reopen_outcome = runtime_session
+                .control_selector(
+                    hidden_model.session_id,
+                    RuntimeSelectorControllerCommand::Show,
+                    &mut host_session,
+                )
+                .await;
+            assert!(reopen_outcome.requires_redraw);
+        }
+        let reopened_model = runtime_session
+            .selector_tui_projection_sink()
+            .current_model()
+            .expect("selector show should publish model");
+        assert!(!reopened_model.hidden);
+        assert!(!reopened_model.cancelled);
+        assert_eq!(
+            reopened_model
+                .selected_row
+                .as_ref()
+                .map(|row| row.item.id.as_str()),
+            Some("rg-target")
+        );
         assert!(
             outcome.core_bridge.buffer_text().contains("abcdef"),
             "Enter must open the selected file instead of leaking into normal editing"

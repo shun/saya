@@ -262,8 +262,19 @@ fn selector_controller_distinguishes_hide_from_cancel_state() {
     assert!(view.hidden);
     assert!(!view.cancelled);
 
+    controller.apply(&mut view, SelectorControllerCommand::Show);
+    assert!(!view.hidden);
+    assert!(!view.cancelled);
+
     controller.apply(&mut view, SelectorControllerCommand::Cancel);
     assert!(view.hidden);
+    assert!(view.cancelled);
+
+    controller.apply(&mut view, SelectorControllerCommand::Show);
+    assert!(
+        view.hidden,
+        "show must not resurrect a cancelled selector session"
+    );
     assert!(view.cancelled);
 }
 

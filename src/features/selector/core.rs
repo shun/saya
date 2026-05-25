@@ -214,6 +214,7 @@ pub enum SelectorControllerCommand {
     CursorLast,
     PageDown,
     PageUp,
+    Show,
     Hide,
     Cancel,
 }
@@ -268,6 +269,11 @@ impl SelectorController {
             SelectorControllerCommand::PageUp => {
                 view.cursor = view.cursor.saturating_sub(self.page_size);
                 view.offset = view.cursor;
+            }
+            SelectorControllerCommand::Show => {
+                if !view.cancelled {
+                    view.hidden = false;
+                }
             }
             SelectorControllerCommand::Hide => {
                 view.hidden = true;

@@ -735,6 +735,11 @@ async fn runtime_selector_headless_controller_updates_view_state_and_selected_it
                     throw new Error(`hide should keep session and completed work state: ${JSON.stringify(stillThere)}`);
                 }
 
+                const shown = await saya.selector.control(opened.id, { command: "show" });
+                if (shown.view.hidden || shown.view.cancelled || shown.selectedItem?.id !== "row-0") {
+                    throw new Error(`show should redisplay the same selector session: ${JSON.stringify(shown)}`);
+                }
+
                 const cancelled = await saya.selector.control(opened.id, { command: "cancel" });
                 if (!cancelled.view.hidden || !cancelled.view.cancelled || cancelled.status.match.state !== "cancelled") {
                     throw new Error(`cancel should mark hidden/cancelled and cancel active work: ${JSON.stringify(cancelled)}`);
@@ -1073,6 +1078,12 @@ async fn runtime_selector_tui_state_projects_visible_and_hidden_workspace_float_
                 }
                 await saya.commands.execute(`selector-hidden:${hiddenCurrent.id}:${hiddenCurrent.view.hidden}`);
 
+                const shownCurrent = await saya.selector.control(opened.id, { command: "show" });
+                if (shownCurrent.view.hidden || shownCurrent.view.cancelled) {
+                    throw new Error(`show should redisplay a hidden selector session: ${JSON.stringify(shownCurrent.view)}`);
+                }
+                await saya.commands.execute(`selector-shown:${shownCurrent.id}:${shownCurrent.view.hidden}`);
+
                 await saya.selector.control(opened.id, { command: "cancel" });
                 const cancelledCurrent = await saya.selector.current(opened.id);
                 if (!cancelledCurrent.view.hidden || !cancelledCurrent.view.cancelled) {
@@ -1107,6 +1118,7 @@ async fn runtime_selector_tui_state_projects_visible_and_hidden_workspace_float_
         vec![
             "selector-visible:1".to_string(),
             "selector-hidden:1:true".to_string(),
+            "selector-shown:1:false".to_string(),
             "selector-cancelled:1:true".to_string()
         ]
     );
