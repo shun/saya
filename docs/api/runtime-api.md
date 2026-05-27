@@ -120,7 +120,8 @@ user-safe messages.
 
 ## Buffer
 
-The buffer surface lets you read the current buffer snapshot.
+The buffer surface lets you read the current buffer path or snapshot. Use the
+path-only API when a command only needs to resolve a filesystem location.
 
 ### `saya.buffer.current()`
 
@@ -142,6 +143,18 @@ The returned snapshot currently includes:
 `cursorRow` and `currentLine` are read-only snapshot fields for plugins that
 need display context. Dired-style commands use `saya.filer.currentEntry()` when
 they need the filesystem entry associated with the cursor row.
+
+### `saya.buffer.currentPath()`
+
+Use this method to retrieve only the current buffer path without fetching the
+buffer text.
+
+```ts
+const path = await saya.buffer.currentPath();
+```
+
+This is the preferred API for path-based commands such as opening the parent
+directory.
 
 ## Window
 

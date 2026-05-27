@@ -50,6 +50,9 @@ pub enum RuntimeShutdownIntent {
 
 pub trait RuntimeHostSession {
     fn current_buffer_snapshot(&mut self) -> ReadonlyBufferSnapshot;
+    fn current_buffer_metadata_snapshot(&mut self) -> ReadonlyBufferSnapshot {
+        self.current_buffer_snapshot()
+    }
     fn current_selection_snapshot(&mut self) -> Option<ReadonlySelectionSnapshot> {
         None
     }
@@ -304,6 +307,10 @@ struct RuntimeHostCommandRequest {
     reply: oneshot::Sender<Result<(), RuntimeCommandError>>,
 }
 
+struct RuntimeCurrentBufferRequest {
+    reply: oneshot::Sender<ReadonlyBufferSnapshot>,
+}
+
 struct RuntimeInputPromptChannelRequest {
     request: RuntimeInputPromptRequest,
     reply: oneshot::Sender<Result<RuntimeInputPromptResponse, RuntimeCommandError>>,
@@ -431,6 +438,7 @@ fn runtime_filer_operation_parts(
 struct ChannelBackedHostBridge {
     snapshots: Arc<Mutex<CachedRuntimeSnapshots>>,
     selector_view_backend: Arc<dyn SelectorViewBackend>,
+    buffer_snapshot_sender: mpsc::UnboundedSender<RuntimeCurrentBufferRequest>,
     command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
     input_prompt_sender: mpsc::UnboundedSender<RuntimeInputPromptChannelRequest>,
     lsif_request_sender: mpsc::UnboundedSender<RuntimeLsifRequest>,
@@ -570,12 +578,41 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
     }
 
     fn current_buffer(&self) -> crate::runtime::live::BoxFuture<ReadonlyBufferSnapshot> {
+        let buffer_snapshot_sender = self.buffer_snapshot_sender.clone();
+        let snapshots = self.snapshots.clone();
+        Box::pin(async move {
+            let fallback = snapshots
+                .lock()
+                .expect("runtime snapshots mutex should not poison")
+                .buffer
+                .clone();
+            let (reply, receiver) = oneshot::channel();
+            if buffer_snapshot_sender
+                .send(RuntimeCurrentBufferRequest { reply })
+                .is_err()
+            {
+                log::debug!(
+                    "[runtime_integration] full buffer snapshot channel closed; returning cached metadata snapshot"
+                );
+                return fallback;
+            }
+            receiver.await.unwrap_or_else(|_| {
+                log::debug!(
+                    "[runtime_integration] full buffer snapshot reply dropped; returning cached metadata snapshot"
+                );
+                fallback
+            })
+        })
+    }
+
+    fn current_buffer_path(&self) -> crate::runtime::live::BoxFuture<Option<std::path::PathBuf>> {
         let snapshots = self.snapshots.clone();
         Box::pin(async move {
             snapshots
                 .lock()
                 .expect("runtime snapshots mutex should not poison")
                 .buffer
+                .path
                 .clone()
         })
     }
@@ -929,6 +966,8 @@ pub struct RuntimeSessionOwner {
     selector_tui_projection_sink: Arc<SelectorTuiProjectionSink>,
     _command_sender: mpsc::UnboundedSender<RuntimeHostCommandRequest>,
     command_receiver: mpsc::UnboundedReceiver<RuntimeHostCommandRequest>,
+    _buffer_snapshot_sender: mpsc::UnboundedSender<RuntimeCurrentBufferRequest>,
+    buffer_snapshot_receiver: mpsc::UnboundedReceiver<RuntimeCurrentBufferRequest>,
     _input_prompt_sender: mpsc::UnboundedSender<RuntimeInputPromptChannelRequest>,
     input_prompt_receiver: mpsc::UnboundedReceiver<RuntimeInputPromptChannelRequest>,
     pending_input_prompt_reply:
@@ -977,6 +1016,7 @@ impl RuntimeSessionOwner {
             selector_tui_projection_sink.clone(),
             10,
         ));
+        let (buffer_snapshot_sender, buffer_snapshot_receiver) = mpsc::unbounded_channel();
         let (command_sender, command_receiver) = mpsc::unbounded_channel();
         let (input_prompt_sender, input_prompt_receiver) = mpsc::unbounded_channel();
         let (lsif_request_sender, lsif_request_receiver) = mpsc::unbounded_channel();
@@ -996,6 +1036,7 @@ impl RuntimeSessionOwner {
         let bridge = Arc::new(ChannelBackedHostBridge {
             snapshots: snapshots.clone(),
             selector_view_backend,
+            buffer_snapshot_sender: buffer_snapshot_sender.clone(),
             command_sender: command_sender.clone(),
             input_prompt_sender: input_prompt_sender.clone(),
             lsif_request_sender: lsif_request_sender.clone(),
@@ -1020,6 +1061,8 @@ impl RuntimeSessionOwner {
             selector_tui_projection_sink,
             _command_sender: command_sender,
             command_receiver,
+            _buffer_snapshot_sender: buffer_snapshot_sender,
+            buffer_snapshot_receiver,
             _input_prompt_sender: input_prompt_sender,
             input_prompt_receiver,
             pending_input_prompt_reply: None,
@@ -1230,6 +1273,7 @@ impl RuntimeSessionOwner {
             };
         }
         self.refresh_cached_snapshots(host_session);
+        let command_started_at = std::time::Instant::now();
         log::info!(
             "[runtime_integration][command] execute runtime command through session owner: command={}",
             name
@@ -1277,6 +1321,11 @@ impl RuntimeSessionOwner {
                 self.dispatch(event, host_session).await,
             );
         }
+        log::debug!(
+            "[PERF][runtime_integration][command] runtime command completed through session owner: command={}, elapsed_ms={}",
+            name,
+            command_started_at.elapsed().as_millis()
+        );
         dispatch_outcome
     }
 
@@ -1413,6 +1462,17 @@ impl RuntimeSessionOwner {
                             let _ = request.reply.send(Err(error));
                         }
                     }
+                }
+                request = self.buffer_snapshot_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] buffer snapshot channel closed while dispatch was in flight");
+                        break;
+                    };
+                    log::debug!(
+                        "[runtime_integration] servicing runtime current buffer snapshot request during event dispatch"
+                    );
+                    let snapshot = host_session.current_buffer_snapshot();
+                    let _ = request.reply.send(snapshot);
                 }
                 request = self.input_prompt_receiver.recv() => {
                     let Some(request) = request else {
@@ -1711,7 +1771,7 @@ impl RuntimeSessionOwner {
     }
 
     fn refresh_cached_snapshots<H: RuntimeHostSession>(&self, host_session: &mut H) {
-        let buffer = host_session.current_buffer_snapshot();
+        let buffer = host_session.current_buffer_metadata_snapshot();
         let selection = host_session.current_selection_snapshot();
         let window = host_session.current_window_snapshot();
         let editor = host_session.current_editor_snapshot();
@@ -1789,6 +1849,7 @@ impl RuntimeSessionOwner {
                         log::debug!("[runtime_integration] host command channel closed while runtime command was in flight");
                         break;
                     };
+                    let host_command_started_at = std::time::Instant::now();
                     log::info!(
                         "[runtime_integration][host_command] servicing runtime host command request during command execution: command={}",
                         request.name
@@ -1813,6 +1874,22 @@ impl RuntimeSessionOwner {
                             let _ = request.reply.send(Err(error));
                         }
                     }
+                    log::debug!(
+                        "[PERF][runtime_integration][host_command] serviced runtime host command request: command={}, elapsed_ms={}",
+                        request.name,
+                        host_command_started_at.elapsed().as_millis()
+                    );
+                }
+                request = self.buffer_snapshot_receiver.recv() => {
+                    let Some(request) = request else {
+                        log::debug!("[runtime_integration] buffer snapshot channel closed while runtime command was in flight");
+                        break;
+                    };
+                    log::debug!(
+                        "[runtime_integration] servicing runtime current buffer snapshot request during command execution"
+                    );
+                    let snapshot = host_session.current_buffer_snapshot();
+                    let _ = request.reply.send(snapshot);
                 }
                 request = self.input_prompt_receiver.recv() => {
                     let Some(request) = request else {

@@ -460,6 +460,7 @@ The accepted levels are `"error"`, `"warn"`, `"info"`, `"debug"`, and `"trace"`.
 The startup surface deliberately excludes runtime-only and high-risk features.
 
 - `saya.buffer.current()`
+- `saya.buffer.currentPath()`
 - `saya.window.current()`
 - `saya.editor.current()`
 - `saya.editor.mode()`

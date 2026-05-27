@@ -35,6 +35,7 @@ const RUNTIME_CALLBACK_ERROR_PREFIX: &str = "__SAYA_RUNTIME_CALLBACK_ERROR__";
 const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.commands.execute",
     "saya.buffer.current",
+    "saya.buffer.currentPath",
     "saya.buffer.selection",
     "saya.window.current",
     "saya.window.openFloat",
@@ -147,6 +148,9 @@ globalThis.saya = {
     buffer: {
         current() {
             return Deno.core.ops.op_runtime_current_buffer();
+        },
+        currentPath() {
+            return Deno.core.ops.op_runtime_current_buffer_path();
         },
         selection() {
             return Deno.core.ops.op_runtime_current_selection();
@@ -622,6 +626,7 @@ declare global {
 
     interface SayaRuntimeBufferSurface {
         current(): Promise<SayaReadonlyBufferSnapshot>;
+        currentPath(): Promise<string | null>;
         selection(): Promise<SayaReadonlySelectionSnapshot | null>;
     }
 
@@ -1593,6 +1598,10 @@ pub trait HostCapabilityBridge: Send + Sync + 'static {
         })
     }
     fn current_buffer(&self) -> BoxFuture<ReadonlyBufferSnapshot>;
+    fn current_buffer_path(&self) -> BoxFuture<Option<PathBuf>> {
+        let buffer = self.current_buffer();
+        Box::pin(async move { buffer.await.path })
+    }
     fn current_selection(&self) -> BoxFuture<Option<ReadonlySelectionSnapshot>> {
         Box::pin(async move { None })
     }
@@ -2394,6 +2403,16 @@ async fn op_runtime_current_buffer(
 
 #[op2(async(deferred), fast)]
 #[serde]
+async fn op_runtime_current_buffer_path(
+    state: Rc<RefCell<OpState>>,
+) -> Result<Option<PathBuf>, JsErrorBox> {
+    let bridge = state.borrow().borrow::<LiveRuntimeOpState>().bridge.clone();
+    log::debug!("[saya_live_runtime] runtime op current_buffer_path");
+    Ok(bridge.current_buffer_path().await)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
 async fn op_runtime_current_selection(
     state: Rc<RefCell<OpState>>,
 ) -> Result<Option<ReadonlySelectionSnapshot>, JsErrorBox> {
@@ -3145,6 +3164,7 @@ deno_core::extension!(
         op_runtime_workspace_find_root,
         op_runtime_fs_read_dir,
         op_runtime_current_buffer,
+        op_runtime_current_buffer_path,
         op_runtime_current_selection,
         op_runtime_current_window,
         op_runtime_window_open_float,
@@ -4084,6 +4104,10 @@ pub struct RuntimeBufferApi {
 impl RuntimeBufferApi {
     pub async fn current(&self) -> ReadonlyBufferSnapshot {
         self.bridge.current_buffer().await
+    }
+
+    pub async fn current_path(&self) -> Option<PathBuf> {
+        self.bridge.current_buffer_path().await
     }
 }
 

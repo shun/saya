@@ -882,6 +882,8 @@ async fn runtime_window_float_api_routes_typed_requests_through_host_bridge() {
 
 struct RecordingRuntimeHostSession {
     executed_commands: Vec<String>,
+    full_buffer_snapshot_reads: usize,
+    metadata_buffer_snapshot_reads: usize,
     transient_messages: Vec<String>,
     dispatched_follow_up_events: Vec<RuntimeEventPayload>,
     dispatched_shutdown_intents: Vec<RuntimeShutdownIntent>,
@@ -898,6 +900,8 @@ impl Default for RecordingRuntimeHostSession {
     fn default() -> Self {
         Self {
             executed_commands: Vec::new(),
+            full_buffer_snapshot_reads: 0,
+            metadata_buffer_snapshot_reads: 0,
             transient_messages: Vec::new(),
             dispatched_follow_up_events: Vec::new(),
             dispatched_shutdown_intents: Vec::new(),
@@ -945,7 +949,16 @@ impl RecordingRuntimeHostSession {
 
 impl RuntimeHostSession for RecordingRuntimeHostSession {
     fn current_buffer_snapshot(&mut self) -> ReadonlyBufferSnapshot {
+        self.full_buffer_snapshot_reads += 1;
         self.buffer.clone()
+    }
+
+    fn current_buffer_metadata_snapshot(&mut self) -> ReadonlyBufferSnapshot {
+        self.metadata_buffer_snapshot_reads += 1;
+        ReadonlyBufferSnapshot {
+            text: String::new(),
+            ..self.buffer.clone()
+        }
     }
 
     fn current_window_snapshot(&mut self) -> ReadonlyWindowSnapshot {
@@ -1110,6 +1123,51 @@ async fn runtime_session_owner_dispatches_buffer_open_and_follow_up_write_post_t
     assert!(
         host_session.dispatched_shutdown_intents.is_empty(),
         "write only の host command は shutdown intent を持たないこと"
+    );
+
+    std::fs::remove_file(&config_path).expect("remove config");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_current_buffer_path_uses_cached_metadata_without_fetching_full_text() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let config_path = unique_path("runtime-current-path-init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            saya.commands.register("pathOnly", async () => {
+                const path = await saya.buffer.currentPath();
+                await saya.commands.execute(`path:${path}`);
+            });
+        "#,
+    )
+    .expect("config file");
+
+    let outcome = saya::app::bootstrap::prepare_launch(LaunchRequest {
+        input_source: InputSource::Empty,
+        config_source: ConfigSource::File(config_path.clone()),
+        ..LaunchRequest::default()
+    })
+    .expect("startup config should prepare callback seed");
+
+    let mut runtime = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+        .expect("live runtime session owner should initialize");
+    let mut host_session = RecordingRuntimeHostSession::with_buffer("huge.md", 200_000);
+    host_session.buffer.text = "x".repeat(2_000_000);
+
+    let dispatch_outcome = runtime.execute_command("pathOnly", &mut host_session).await;
+
+    assert_eq!(dispatch_outcome.transient_message, None);
+    assert_eq!(host_session.executed_commands, vec!["path:huge.md"]);
+    assert_eq!(
+        host_session.full_buffer_snapshot_reads, 0,
+        "currentPath should not request the full buffer snapshot"
+    );
+    assert!(
+        host_session.metadata_buffer_snapshot_reads >= 1,
+        "runtime command still needs cheap path/cursor metadata"
     );
 
     std::fs::remove_file(&config_path).expect("remove config");

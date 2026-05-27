@@ -59,7 +59,7 @@ use saya::presentation::floating_window::{
     FloatingWindowManager, FloatingZIndex,
 };
 use saya::presentation::markdown::structure::{
-    MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey,
+    MarkdownCacheStatus, MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey,
 };
 use saya::presentation::overlay::asset_store::OverlayAssetStore;
 use saya::presentation::overlay::effect::RuntimePresentationIntent;
@@ -136,6 +136,15 @@ struct MainOutcomeAccumulator {
     last_projection_frame: Option<ProjectionFrame>,
     last_structural_refresh: Option<StructuralRefreshOutcome>,
     suspend_requested: bool,
+}
+
+#[derive(Debug)]
+struct MainInputPerfTrace {
+    id: u64,
+    key: String,
+    command: Option<String>,
+    started_at: std::time::Instant,
+    command_elapsed_ms: Option<u128>,
 }
 
 #[tokio::main]
@@ -258,6 +267,8 @@ async fn main() {
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
     let mut terminal_display_redraw_plan: Option<RedrawPlan> = None;
     let mut workspace_projection_dirty = false;
+    let mut next_input_perf_trace_id = 1_u64;
+    let mut pending_input_perf_trace: Option<MainInputPerfTrace> = None;
 
     let mut startup_runtime_redraw = false;
     let startup_shutdown_reason = dispatch_buffer_open_with_runtime(
@@ -388,6 +399,15 @@ async fn main() {
                     UiEvent::Input(key) => {
                         let mut handled = false;
                         let input_snapshot = outcome.core_bridge.light_snapshot();
+                        let input_perf_trace_id = next_input_perf_trace_id;
+                        next_input_perf_trace_id = next_input_perf_trace_id.saturating_add(1);
+                        pending_input_perf_trace = Some(MainInputPerfTrace {
+                            id: input_perf_trace_id,
+                            key: format!("{key:?}"),
+                            command: None,
+                            started_at: std::time::Instant::now(),
+                            command_elapsed_ms: None,
+                        });
                         log::info!(
                             "[main][input] key={:?}, mode={:?}, prompt={:?}, cursor=({},{}), revision={}, keymaps={}",
                             key,
@@ -397,6 +417,13 @@ async fn main() {
                             input_snapshot.cursor_col,
                             input_snapshot.revision,
                             outcome.startup_registry.keymaps.len()
+                        );
+                        log::info!(
+                            "[PERF][main][input_trace] start trace_id={} key={:?} mode={:?} revision={}",
+                            input_perf_trace_id,
+                            key,
+                            input_snapshot.mode,
+                            input_snapshot.revision
                         );
 
                         if let Some(reason) =
@@ -1297,6 +1324,17 @@ async fn main() {
                                             key,
                                             command_name
                                         );
+                                        if let Some(trace) = pending_input_perf_trace.as_mut() {
+                                            trace.command = Some(command_name.clone());
+                                            log::info!(
+                                                "[PERF][main][input_trace] registered_command_start trace_id={} key={} command={} elapsed_ms={}",
+                                                trace.id,
+                                                trace.key,
+                                                command_name,
+                                                trace.started_at.elapsed().as_millis()
+                                            );
+                                        }
+                                        let command_started_at = std::time::Instant::now();
                                         if let Some(reason) =
                                             execute_startup_keymap_registered_command(
                                                 runtime_session.as_mut(),
@@ -1317,6 +1355,19 @@ async fn main() {
                                             .await
                                         {
                                             break 'main reason;
+                                        }
+                                        if let Some(trace) = pending_input_perf_trace.as_mut() {
+                                            let command_elapsed_ms =
+                                                command_started_at.elapsed().as_millis();
+                                            trace.command_elapsed_ms = Some(command_elapsed_ms);
+                                            log::info!(
+                                                "[PERF][main][input_trace] registered_command_done trace_id={} key={} command={} command_ms={} total_ms={}",
+                                                trace.id,
+                                                trace.key,
+                                                command_name,
+                                                command_elapsed_ms,
+                                                trace.started_at.elapsed().as_millis()
+                                            );
                                         }
                                     }
                                 }
@@ -1676,6 +1727,7 @@ async fn main() {
                         "command-line-only redraw bypassed because terminal display was invalidated"
                     ));
                 }
+                let redraw_started_at = std::time::Instant::now();
                 let redraw_result = build_workspace_render_output(
                     &mut outcome,
                     &mut session_state,
@@ -1728,6 +1780,29 @@ async fn main() {
                         }
                         last_workspace_model = Some(render_output.rendered_workspace.clone());
                         mark_structural_refresh_rendered(&mut outcome_accumulator);
+                        if let Some(trace) = pending_input_perf_trace.take() {
+                            let first_line = render_output
+                                .rendered_workspace
+                                .panes
+                                .iter()
+                                .find(|pane| pane.is_active)
+                                .or_else(|| render_output.rendered_workspace.panes.first())
+                                .and_then(|pane| pane.lines.first())
+                                .cloned()
+                                .unwrap_or_default();
+                            log::info!(
+                                "[PERF][main][input_trace] redraw_complete trace_id={} key={} command={} command_ms={:?} redraw_ms={} total_to_draw_ms={} active_window_id={} panes={} first_line={:?}",
+                                trace.id,
+                                trace.key,
+                                trace.command.as_deref().unwrap_or("<none>"),
+                                trace.command_elapsed_ms,
+                                redraw_started_at.elapsed().as_millis(),
+                                trace.started_at.elapsed().as_millis(),
+                                render_output.rendered_workspace.active_window_id,
+                                render_output.rendered_workspace.panes.len(),
+                                first_line
+                            );
+                        }
                         if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
                             trace_workspace_render_pipeline(
                                 "redraw",
@@ -2757,6 +2832,15 @@ async fn process_pending_host_actions_with_runtime(
                     {
                         continue;
                     }
+                    if handle_directory_buffer_vfs_load_request(
+                        outcome,
+                        session_state,
+                        request.clone(),
+                    )
+                    .is_some()
+                    {
+                        continue;
+                    }
                     if let Err(error) =
                         host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
                     {
@@ -2934,6 +3018,15 @@ fn process_pending_host_actions_without_runtime(
                         session_state,
                         request.clone(),
                         transient_msg,
+                    )
+                    .is_some()
+                    {
+                        continue;
+                    }
+                    if handle_directory_buffer_vfs_load_request(
+                        outcome,
+                        session_state,
+                        request.clone(),
                     )
                     .is_some()
                     {
@@ -3250,6 +3343,96 @@ fn handle_directory_buffer_vfs_save_request(
     Some(save_outcome)
 }
 
+fn handle_directory_buffer_vfs_load_request(
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    session_state: &mut saya::app::session::EditorSessionState,
+    request: CoreVfsRequest,
+) -> Option<bool> {
+    let CoreVfsRequest::Load {
+        request_id,
+        document_id,
+        ..
+    } = request
+    else {
+        return None;
+    };
+    let path = path_from_core_vfs_document_id(&document_id)?;
+    if !path.is_dir() {
+        return None;
+    }
+
+    let started_at = std::time::Instant::now();
+    let existing_directory_buffer = session_state.directory_buffer().filter(|directory_buffer| {
+        paths_refer_to_same_location_main(&directory_buffer.root_path, &path)
+    });
+    let listing_path = existing_directory_buffer
+        .map(|directory_buffer| directory_buffer.root_path.clone())
+        .unwrap_or_else(|| path.clone());
+    let listing_options = existing_directory_buffer
+        .map(|directory_buffer| directory_buffer.listing_options.clone())
+        .unwrap_or_default();
+    let response = match session_state
+        .refresh_directory_buffer_listing(listing_path.clone(), listing_options)
+    {
+        Ok(entries) => {
+            let text = session_state
+                .directory_buffer()
+                .map(|directory_buffer| directory_buffer.display_text.clone())
+                .unwrap_or_default();
+            log::debug!(
+                "[PERF][main][dired] handled directory VFS load via session metadata: path={}, entries={}, text_len={}, elapsed_ms={}",
+                listing_path.display(),
+                entries.len(),
+                text.len(),
+                started_at.elapsed().as_millis()
+            );
+            CoreVfsResponse::Loaded {
+                request_id,
+                document_id,
+                text,
+            }
+        }
+        Err(error) => {
+            log::debug!(
+                "[main][dired] failed to handle directory VFS load via session metadata: path={}, elapsed_ms={}, error={}",
+                listing_path.display(),
+                started_at.elapsed().as_millis(),
+                error
+            );
+            CoreVfsResponse::Failed {
+                request_id,
+                error: CoreVfsError {
+                    kind: CoreVfsErrorKind::HostUnavailable,
+                    message: Some(error.to_string()),
+                },
+            }
+        }
+    };
+    let load_failed = matches!(response, CoreVfsResponse::Failed { .. });
+    if let Err(error) = outcome.core_bridge.submit_vfs_response(response) {
+        log::debug!(
+            "[main][dired] failed to submit directory VFS load response: {:?}",
+            error
+        );
+    }
+    Some(load_failed)
+}
+
+fn path_from_core_vfs_document_id(document_id: &str) -> Option<std::path::PathBuf> {
+    document_id
+        .strip_prefix("file://")
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(std::path::PathBuf::from(document_id)).filter(|path| path.exists()))
+}
+
+fn paths_refer_to_same_location_main(left: &std::path::Path, right: &std::path::Path) -> bool {
+    left == right
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SaveSnapshotOutcome {
     transient_message: Option<String>,
@@ -3425,10 +3608,28 @@ fn apply_directory_buffer_operation_plan(
             for (from, to) in &transaction.rename_marks {
                 session_state.record_directory_entry_rename(from, to);
             }
+            if let Err(error) =
+                session_state.refresh_directory_buffer_for_target_path(&plan.root_path)
+            {
+                log::debug!(
+                    "[main][dired][writable] failed to refresh directory buffer after confirmed operation plan: root_path={}, error={}",
+                    plan.root_path.display(),
+                    error
+                );
+            }
             session_state.replace_target_path(plan.root_path.clone());
             Ok(plan.operations.len())
         }
         Err(error) => {
+            if let Err(refresh_error) =
+                session_state.refresh_directory_buffer_for_target_path(&plan.root_path)
+            {
+                log::debug!(
+                    "[main][dired][writable] failed to refresh directory buffer after failed operation plan: root_path={}, error={}",
+                    plan.root_path.display(),
+                    refresh_error
+                );
+            }
             session_state.replace_target_path(plan.root_path.clone());
             Err(error)
         }
@@ -4269,6 +4470,14 @@ fn execute_runtime_host_command_through_core(
                         }
                         continue;
                     }
+                    if let Some(load_failed) = handle_directory_buffer_vfs_load_request(
+                        outcome,
+                        session_state,
+                        request.clone(),
+                    ) {
+                        effect.vfs_load_failed |= load_failed;
+                        continue;
+                    }
                     match host_action_runtime.handle_vfs_request(&mut outcome.core_bridge, request)
                     {
                         Ok(vfs_effect) => {
@@ -4323,6 +4532,32 @@ fn execute_runtime_host_command_through_core(
     Ok(effect)
 }
 
+fn runtime_edit_ex_command(
+    path: &std::path::Path,
+    outcome: &saya::app::bootstrap::BootstrapOutcome,
+) -> String {
+    let snapshot = outcome.core_bridge.light_snapshot();
+    let Some(active_window) = snapshot.active_window() else {
+        return format!(":edit {}", escape_runtime_edit_path(path));
+    };
+    let active_buffer_id = active_window.buf_id;
+    let visible_count = snapshot
+        .windows
+        .iter()
+        .filter(|window| window.buf_id == active_buffer_id)
+        .count();
+    let command = if path.is_dir() && visible_count > 1 {
+        "hide noswapfile edit"
+    } else if path.is_dir() {
+        "noswapfile edit"
+    } else if visible_count > 1 {
+        "hide edit"
+    } else {
+        "edit"
+    };
+    format!(":{command} {}", escape_runtime_edit_path(path))
+}
+
 fn execute_runtime_host_command(
     command: &str,
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
@@ -4337,6 +4572,10 @@ fn execute_runtime_host_command(
         None,
         None,
     )
+}
+
+fn is_swap_attention_message(message: &str) -> bool {
+    message.starts_with("E301: ") || message.starts_with("E325: ")
 }
 
 fn execute_runtime_host_command_with_floats(
@@ -4378,25 +4617,55 @@ fn execute_runtime_host_command_with_floats(
             Ok(effect)
         }
         Some(MainHostCommand::Edit(path)) => {
-            let ex_command = format!(":edit {}", escape_runtime_edit_path(&path));
+            let is_directory_edit = path.is_dir();
+            let ex_command = runtime_edit_ex_command(&path, outcome);
             log::debug!(
                 "[main] routing runtime edit command through core VFS coordinator: path={}, core_command={}",
                 path.display(),
                 ex_command
             );
-            let effect =
+            let mut effect =
                 execute_runtime_host_command_through_core(&ex_command, outcome, session_state)?;
-            if effect.vfs_load_failed {
+            if is_directory_edit
+                && effect
+                    .transient_message
+                    .as_deref()
+                    .is_some_and(is_swap_attention_message)
+            {
+                log::debug!(
+                    "[main][dired] suppressing swap attention message during directory edit: path={}, message={:?}",
+                    path.display(),
+                    effect.transient_message
+                );
+                effect.transient_message = None;
+            }
+            if effect.vfs_load_failed && !is_directory_edit {
                 log::debug!(
                     "[main] runtime edit command left host target unchanged because core VFS load failed: path={}",
                     path.display()
                 );
                 return Ok(effect);
             }
-            session_state.replace_target_path(path.clone());
-            if let Some(directory_buffer) = session_state
-                .directory_buffer()
-                .filter(|directory_buffer| directory_buffer.root_path == path)
+            if effect.vfs_load_failed {
+                log::debug!(
+                    "[main][dired] continuing directory edit after core VFS load failure because host metadata will project listing: path={}",
+                    path.display()
+                );
+            }
+            if is_directory_edit {
+                session_state
+                    .refresh_directory_buffer_for_target_path(&path)
+                    .map_err(|error| RuntimeCommandError::CommandFailed {
+                        name: command.to_string(),
+                        message: format!("failed to refresh directory buffer: {error:?}"),
+                    })?;
+            } else {
+                session_state.replace_target_path(path.clone());
+            }
+            if let Some(directory_buffer) =
+                session_state.directory_buffer().filter(|directory_buffer| {
+                    paths_refer_to_same_location_main(&directory_buffer.root_path, &path)
+                })
             {
                 outcome
                     .core_bridge
@@ -6971,6 +7240,7 @@ impl<'a> MainRuntimeHostSession<'a> {
 
 impl RuntimeHostSession for MainRuntimeHostSession<'_> {
     fn current_buffer_snapshot(&mut self) -> ReadonlyBufferSnapshot {
+        let started_at = std::time::Instant::now();
         let snapshot = self.outcome.core_bridge.light_snapshot();
         let active_buffer_id = snapshot
             .buffers
@@ -6983,7 +7253,15 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             snapshot.cursor_row,
             1,
         );
-        ReadonlyBufferSnapshot {
+        let text_started_at = std::time::Instant::now();
+        let text = self.outcome.core_bridge.buffer_text();
+        log::debug!(
+            "[PERF][main][runtime] fetched full current buffer snapshot text: buffer_id={}, bytes={}, elapsed_ms={}",
+            active_buffer_id,
+            text.len(),
+            text_started_at.elapsed().as_millis()
+        );
+        let snapshot = ReadonlyBufferSnapshot {
             id: active_buffer_id,
             path: self.session_state.target_path().cloned(),
             line_count: current_line_range
@@ -6995,8 +7273,50 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             current_line: current_line_range
                 .and_then(|range| range.lines.into_iter().next())
                 .unwrap_or_default(),
-            text: self.outcome.core_bridge.buffer_text(),
-        }
+            text,
+        };
+        log::debug!(
+            "[PERF][main][runtime] built full current buffer snapshot: buffer_id={}, elapsed_ms={}",
+            active_buffer_id,
+            started_at.elapsed().as_millis()
+        );
+        snapshot
+    }
+
+    fn current_buffer_metadata_snapshot(&mut self) -> ReadonlyBufferSnapshot {
+        let started_at = std::time::Instant::now();
+        let snapshot = self.outcome.core_bridge.light_snapshot();
+        let active_buffer_id = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.is_active)
+            .map(|buffer| buffer.id as u64)
+            .unwrap_or(1);
+        let current_line_range = self.outcome.core_bridge.buffer_line_range(
+            active_buffer_id as i32,
+            snapshot.cursor_row,
+            1,
+        );
+        let snapshot = ReadonlyBufferSnapshot {
+            id: active_buffer_id,
+            path: self.session_state.target_path().cloned(),
+            line_count: current_line_range
+                .as_ref()
+                .map(|range| range.total_line_count)
+                .unwrap_or(1),
+            cursor_row: snapshot.cursor_row,
+            cursor_col: snapshot.cursor_col,
+            current_line: current_line_range
+                .and_then(|range| range.lines.into_iter().next())
+                .unwrap_or_default(),
+            text: String::new(),
+        };
+        log::debug!(
+            "[PERF][main][runtime] built lightweight current buffer metadata snapshot: buffer_id={}, elapsed_ms={}",
+            active_buffer_id,
+            started_at.elapsed().as_millis()
+        );
+        snapshot
     }
 
     fn current_selection_snapshot(
@@ -7499,8 +7819,14 @@ fn execute_runtime_filer_operation(
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     session_state: &mut saya::app::session::EditorSessionState,
 ) -> Result<RuntimeFilerOperationReport, RuntimeFilerError> {
-    let refresh_path = runtime_filer_operation_refresh_path(&operation)
-        .or_else(|| session_state.target_path().cloned());
+    let refresh_path = runtime_filer_operation_refresh_path(&operation).or_else(|| {
+        matches!(
+            operation,
+            RuntimeFilerOperation::BulkDelete { confirm: true, .. }
+        )
+        .then(|| session_state.target_path().cloned())
+        .flatten()
+    });
     log::info!(
         "[main][runtime][filer] executing host-mediated filer operation: operation={:?}, refresh_path={:?}",
         operation,
@@ -7641,21 +7967,19 @@ fn execute_runtime_filer_operation(
             refresh_path.display(),
             previous_row
         );
-        execute_runtime_host_command(
-            &format!("edit {}", refresh_path.display()),
-            outcome,
-            session_state,
-        )
-        .map_err(|error| RuntimeFilerError::OperationFailed {
-            operation: report.operation,
-            path: std::path::PathBuf::from(report.path.clone()),
-            target_path: report.target_path.clone().map(std::path::PathBuf::from),
-            kind: RuntimeFilerErrorKind::Io,
-            message: format!("failed to refresh directory buffer: {error:?}"),
-        })?;
-        if let Some(directory_buffer) = session_state
-            .directory_buffer()
-            .filter(|directory_buffer| directory_buffer.root_path == refresh_path)
+        session_state
+            .refresh_directory_buffer_for_target_path(&refresh_path)
+            .map_err(|error| RuntimeFilerError::OperationFailed {
+                operation: report.operation,
+                path: std::path::PathBuf::from(report.path.clone()),
+                target_path: report.target_path.clone().map(std::path::PathBuf::from),
+                kind: RuntimeFilerErrorKind::Io,
+                message: format!("failed to refresh directory buffer: {error:?}"),
+            })?;
+        if let Some(directory_buffer) =
+            session_state.directory_buffer().filter(|directory_buffer| {
+                paths_refer_to_same_location_main(&directory_buffer.root_path, &refresh_path)
+            })
         {
             outcome
                 .core_bridge
@@ -8118,18 +8442,11 @@ fn build_workspace_render_output(
     #[cfg(feature = "tree-sitter-syntax")]
     let tree_sitter_ms = tree_sitter_started_at.elapsed().as_millis();
     let markdown_started_at = std::time::Instant::now();
-    let markdown_source_text = if session_state.markdown_render()
-        && is_markdown_target_path(session_state.target_path())
-    {
-        outcome.core_bridge.buffer_text()
-    } else {
-        String::new()
-    };
     let markdown_document_maps = collect_workspace_markdown_document_maps(
         markdown_metadata_cache,
         session_state,
+        &outcome.core_bridge,
         &snapshot,
-        &markdown_source_text,
     );
     let markdown_ms = markdown_started_at.elapsed().as_millis();
     let command_preview =
@@ -9350,8 +9667,8 @@ fn tree_sitter_coverage_contains_range(
 fn collect_workspace_markdown_document_maps(
     markdown_metadata_cache: &mut MarkdownMetadataCache,
     session_state: &saya::app::session::EditorSessionState,
+    core_bridge: &saya::core::bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
-    source_text: &str,
 ) -> BTreeMap<i32, Arc<MarkdownDocumentMap>> {
     if !session_state.markdown_render() {
         if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
@@ -9367,73 +9684,121 @@ fn collect_workspace_markdown_document_maps(
         return BTreeMap::new();
     }
 
-    if !is_markdown_target_path(session_state.target_path()) {
-        if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
-            log::debug!(
-                "[saya-trace][main][markdown] collected=false reason=not_markdown_path target_path={:?}",
-                session_state.target_path()
-            );
+    let mut document_maps_by_buffer = BTreeMap::<i32, Arc<MarkdownDocumentMap>>::new();
+    let mut cache_status_by_buffer = BTreeMap::new();
+    for window in &snapshot.windows {
+        if document_maps_by_buffer.contains_key(&window.buf_id) {
+            continue;
         }
-        log::debug!(
-            "[main] skipping markdown metadata collection because target path is not markdown: target_path={:?}",
-            session_state.target_path()
-        );
-        return BTreeMap::new();
+        let Some(buffer) = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id == window.buf_id)
+        else {
+            log::debug!(
+                "[main] skipping markdown metadata collection because window buffer is missing: window_id={}, buffer_id={}",
+                window.id,
+                window.buf_id
+            );
+            continue;
+        };
+        if !is_markdown_buffer_name(&buffer.name) {
+            log::debug!(
+                "[main] skipping markdown metadata collection because buffer is not markdown: window_id={}, buffer_id={}, buffer_name={:?}",
+                window.id,
+                buffer.id,
+                buffer.name
+            );
+            continue;
+        }
+        let key = MarkdownMetadataKey {
+            buffer_id: i64::from(buffer.id),
+            revision: buffer.source_revision.value,
+        };
+        if let Some(document_map) = markdown_metadata_cache.cached_document_map(key) {
+            cache_status_by_buffer.insert(buffer.id, MarkdownCacheStatus::Hit);
+            document_maps_by_buffer.insert(buffer.id, document_map);
+            continue;
+        }
+        if !window.is_active {
+            log::debug!(
+                "[main] skipping inactive markdown metadata cache miss to avoid fetching unrelated buffer text: window_id={}, buffer_id={}, buffer_name={:?}",
+                window.id,
+                buffer.id,
+                buffer.name
+            );
+            continue;
+        }
+        let outcome = markdown_metadata_cache.document_map_with_source(key, || {
+            let Some(line_count_range) = core_bridge.buffer_line_range(buffer.id, 0, 0) else {
+                log::debug!(
+                    "[main] markdown metadata source unavailable because buffer line count is missing: window_id={}, buffer_id={}",
+                    window.id,
+                    buffer.id
+                );
+                return String::new();
+            };
+            let Some(full_range) =
+                core_bridge.buffer_line_range(buffer.id, 0, line_count_range.total_line_count)
+            else {
+                log::debug!(
+                    "[main] markdown metadata source unavailable because buffer text is missing: window_id={}, buffer_id={}",
+                    window.id,
+                    buffer.id
+                );
+                return String::new();
+            };
+            let mut source_text = full_range.lines.join("\n");
+            if !source_text.is_empty() {
+                source_text.push('\n');
+            }
+            source_text
+        });
+        cache_status_by_buffer.insert(buffer.id, outcome.status);
+        document_maps_by_buffer.insert(buffer.id, Arc::clone(&outcome.document_map));
     }
 
-    let Some(active_window_id) = snapshot.active_window_id() else {
-        log::debug!(
-            "[main] skipping markdown metadata collection because active window is missing"
-        );
-        return BTreeMap::new();
-    };
-    let Some(active_window) = snapshot.window(active_window_id) else {
-        log::debug!(
-            "[main] skipping markdown metadata collection because active window metadata is missing: window_id={}",
-            active_window_id
-        );
-        return BTreeMap::new();
-    };
-
-    let active_buffer_id = active_window.buf_id;
-    let outcome = markdown_metadata_cache.document_map(
-        MarkdownMetadataKey {
-            buffer_id: i64::from(active_buffer_id),
-            revision: snapshot.revision,
-        },
-        source_text,
-    );
     let maps = snapshot
         .windows
         .iter()
-        .filter(|window| window.buf_id == active_buffer_id)
-        .map(|window| (window.id, Arc::clone(&outcome.document_map)))
+        .filter_map(|window| {
+            document_maps_by_buffer
+                .get(&window.buf_id)
+                .map(|document_map| (window.id, Arc::clone(document_map)))
+        })
         .collect::<BTreeMap<_, _>>();
     if std::env::var_os("SAYA_TRACE_RENDER").is_some() {
         log::debug!(
-            "[saya-trace][main][markdown] collected=true target_path={:?} markdownrender={} active_window_id={} buffer_id={} revision={} first_line={:?} blocks={} inlines={} mapped_windows={:?}",
+            "[saya-trace][main][markdown] collected=true target_path={:?} markdownrender={} mapped_buffers={:?} mapped_windows={:?}",
             session_state.target_path(),
             session_state.markdown_render(),
-            active_window_id,
-            active_buffer_id,
-            snapshot.revision,
-            source_text.lines().next().unwrap_or(""),
-            outcome.document_map.blocks.len(),
-            outcome.document_map.inlines.len(),
+            document_maps_by_buffer.keys().copied().collect::<Vec<_>>(),
             maps.keys().copied().collect::<Vec<_>>()
         );
     }
     log::debug!(
-        "[main] collected workspace markdown metadata: active_window_id={}, buffer_id={}, revision={}, cache_status={:?}, mapped_windows={:?}",
-        active_window_id,
-        active_buffer_id,
-        snapshot.revision,
-        outcome.status,
+        "[main] collected workspace markdown metadata: mapped_buffers={:?}, cache_status_by_buffer={:?}, mapped_windows={:?}",
+        document_maps_by_buffer.keys().copied().collect::<Vec<_>>(),
+        cache_status_by_buffer,
         maps.keys().copied().collect::<Vec<_>>()
     );
     maps
 }
 
+fn is_markdown_buffer_name(buffer_name: &str) -> bool {
+    std::path::Path::new(buffer_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "md" | "markdown" | "mdown"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
 fn is_markdown_target_path(path: Option<&std::path::PathBuf>) -> bool {
     path.and_then(|path| path.extension())
         .and_then(|extension| extension.to_str())
@@ -10145,8 +10510,8 @@ mod tests {
         let maps = collect_workspace_markdown_document_maps(
             &mut markdown_metadata_cache,
             &session_state,
+            &outcome.core_bridge,
             &outcome.core_bridge.snapshot(),
-            &outcome.core_bridge.buffer_text(),
         );
 
         assert!(
@@ -12053,12 +12418,9 @@ mod tests {
         )
         .await;
         assert_eq!(shutdown, None);
-        assert!(
-            matches!(
-                transient_msg.as_deref(),
-                None | Some("E301: Oops, lost the swap file!!!")
-            ),
-            "dired startup command should not surface runtime command errors: {transient_msg:?}"
+        assert_eq!(
+            transient_msg, None,
+            "dired startup command should not surface swap or pager messages"
         );
         assert!(
             floating_window_manager.windows().iter().any(|window| {
@@ -12160,7 +12522,6 @@ mod tests {
             None,
         )
         .await;
-
         assert_eq!(shutdown, None);
         assert_eq!(
             transient_msg, None,
@@ -13826,6 +14187,334 @@ mod tests {
         std::fs::remove_dir_all(root_path).expect("cleanup root directory");
     }
 
+    async fn assert_dired_open_in_split_keeps_inactive_shared_buffer_unchanged(
+        split_command: &str,
+        fixture_name: &str,
+    ) {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path(&format!("dired-open-{fixture_name}-root"));
+        let nested_path = root_path.join("src");
+        let readme_path = root_path.join("README.md");
+        let target_path = root_path.join("notes.txt");
+        let config_path =
+            unique_path(&format!("dired-open-{fixture_name}-init")).with_extension("ts");
+        std::fs::create_dir_all(&nested_path).expect("nested directory");
+        std::fs::write(&readme_path, "hello\n").expect("readme file");
+        std::fs::write(&target_path, "notes\n").expect("target file");
+        std::fs::write(
+            &config_path,
+            r#"
+                saya.commands.register("dired.open", async () => {
+                    const buffer = await saya.buffer.current();
+                    const currentPath = buffer.path || ".";
+                    const directory = currentPath.endsWith("/")
+                        ? (currentPath.slice(0, -1) || "/")
+                        : (currentPath.lastIndexOf("/") >= 0 ? currentPath.slice(0, currentPath.lastIndexOf("/")) || "/" : ".");
+                    await saya.commands.execute(`edit ${directory}`);
+                });
+            "#,
+        )
+        .expect("config file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        outcome
+            .core_bridge
+            .apply_ex_command(split_command)
+            .unwrap_or_else(|_| panic!("{split_command} should succeed"));
+        let split_snapshot = outcome.core_bridge.snapshot();
+        assert_eq!(split_snapshot.windows.len(), 2);
+        let inactive_window = split_snapshot
+            .windows
+            .iter()
+            .find(|window| !window.is_active)
+            .expect("split should leave an inactive window")
+            .clone();
+        assert_eq!(
+            split_snapshot
+                .active_window()
+                .expect("split should keep an active window")
+                .buf_id,
+            inactive_window.buf_id,
+            "vsplit starts with both windows displaying the same buffer"
+        );
+
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.open",
+        )
+        .await;
+
+        let after = outcome.core_bridge.snapshot();
+        let active_window = after
+            .active_window()
+            .expect("dired.open should leave an active window");
+        let inactive_after = after
+            .window(inactive_window.id)
+            .expect("inactive split window should stay open");
+        assert_ne!(
+            active_window.buf_id, inactive_after.buf_id,
+            "dired.open must detach the active split before loading the directory"
+        );
+        let active_text = outcome.core_bridge.snapshot().text;
+        assert!(
+            active_text.contains("src/\n")
+                && active_text.contains("README.md\n")
+                && active_text.contains("notes.txt\n"),
+            "active pane should show the directory listing: {active_text:?}"
+        );
+        let inactive_text = outcome
+            .core_bridge
+            .buffer_line_range(inactive_after.buf_id, 0, 16)
+            .expect("inactive buffer text should remain readable")
+            .lines
+            .join("\n");
+        assert_eq!(
+            inactive_text, "notes",
+            "inactive split pane should keep the original file buffer"
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_open_in_vertical_split_keeps_inactive_shared_buffer_unchanged() {
+        assert_dired_open_in_split_keeps_inactive_shared_buffer_unchanged(":vsplit", "vsplit")
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_open_in_horizontal_split_keeps_inactive_shared_buffer_unchanged() {
+        assert_dired_open_in_split_keeps_inactive_shared_buffer_unchanged(":split", "split").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_open_in_split_keeps_inactive_markdown_highlight_metadata() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-open-markdown-highlight-root");
+        let target_path = root_path.join("AGENTS.md");
+        let config_path = unique_path("dired-open-markdown-highlight-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(
+            &target_path,
+            "# AGENTS.md\n\n## Project\n\n- keep markdown metadata visible\n",
+        )
+        .expect("markdown file");
+        std::fs::write(
+            &config_path,
+            r#"
+                saya.commands.register("dired.open", async () => {
+                    const buffer = await saya.buffer.current();
+                    const currentPath = buffer.path || ".";
+                    const directory = currentPath.endsWith("/")
+                        ? (currentPath.slice(0, -1) || "/")
+                        : (currentPath.lastIndexOf("/") >= 0 ? currentPath.slice(0, currentPath.lastIndexOf("/")) || "/" : ".");
+                    await saya.commands.execute(`edit ${directory}`);
+                });
+            "#,
+        )
+        .expect("config file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":vsplit")
+            .expect("vsplit should succeed");
+        let inactive_window = outcome
+            .core_bridge
+            .snapshot()
+            .windows
+            .iter()
+            .find(|window| !window.is_active)
+            .expect("split should leave an inactive window")
+            .clone();
+        let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+        let before_dired = outcome.core_bridge.snapshot();
+        let before_maps = collect_workspace_markdown_document_maps(
+            &mut markdown_metadata_cache,
+            &session_state,
+            &outcome.core_bridge,
+            &before_dired,
+        );
+        assert!(
+            before_maps.contains_key(&inactive_window.id),
+            "initial markdown render should populate metadata for the split buffer"
+        );
+
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.open",
+        )
+        .await;
+
+        let after = outcome.core_bridge.snapshot();
+        let active_window = after
+            .active_window()
+            .expect("dired.open should leave an active window");
+        assert_ne!(
+            active_window.buf_id, inactive_window.buf_id,
+            "dired.open should detach the active pane from the shared markdown buffer"
+        );
+
+        let maps = collect_workspace_markdown_document_maps(
+            &mut markdown_metadata_cache,
+            &session_state,
+            &outcome.core_bridge,
+            &after,
+        );
+
+        assert!(
+            maps.contains_key(&inactive_window.id),
+            "inactive markdown pane should keep markdown metadata after active pane opens dired"
+        );
+        assert!(
+            !maps.contains_key(&active_window.id),
+            "active dired pane should not receive markdown metadata"
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_enter_from_split_listing_keeps_inactive_file_buffer_unchanged() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("dired-enter-split-root");
+        let nested_path = root_path.join("src");
+        let readme_path = root_path.join("README.md");
+        let target_path = root_path.join("notes.txt");
+        let config_path = unique_path("dired-enter-split-init").with_extension("ts");
+        std::fs::create_dir_all(&nested_path).expect("nested directory");
+        std::fs::write(&readme_path, "hello\n").expect("readme file");
+        std::fs::write(&target_path, "notes\n").expect("target file");
+        std::fs::write(
+            &config_path,
+            r#"
+                saya.commands.register("dired.open", async () => {
+                    const dirname = (path) => {
+                        const normalized = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+                        const index = normalized.lastIndexOf("/");
+                        if (index < 0) return ".";
+                        return index === 0 ? "/" : normalized.slice(0, index);
+                    };
+                    const buffer = await saya.buffer.current();
+                    await saya.commands.execute(`edit ${dirname(buffer.path || ".")}`);
+                });
+                saya.commands.register("dired.enter", async () => {
+                    const entry = await saya.filer.currentEntry();
+                    if (entry) {
+                        await saya.commands.execute(`edit ${entry.path}`);
+                    }
+                });
+            "#,
+        )
+        .expect("config file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":vsplit")
+            .expect("vsplit should succeed");
+        let inactive_window = outcome
+            .core_bridge
+            .snapshot()
+            .windows
+            .iter()
+            .find(|window| !window.is_active)
+            .expect("split should leave an inactive window")
+            .clone();
+
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.open",
+        )
+        .await;
+        let readme_row = outcome
+            .core_bridge
+            .snapshot()
+            .text
+            .lines()
+            .position(|line| line == "README.md")
+            .expect("README.md should appear in the dired listing");
+        for _ in 0..readme_row {
+            outcome
+                .core_bridge
+                .dispatch_key("j")
+                .expect("move in dired");
+        }
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.enter",
+        )
+        .await;
+
+        assert_eq!(
+            outcome.core_bridge.snapshot().text,
+            "hello\n",
+            "active dired pane should open the selected file"
+        );
+        let inactive_after = outcome
+            .core_bridge
+            .snapshot()
+            .window(inactive_window.id)
+            .expect("inactive split window should stay open")
+            .clone();
+        let inactive_text = outcome
+            .core_bridge
+            .buffer_line_range(inactive_after.buf_id, 0, 16)
+            .expect("inactive buffer text should remain readable")
+            .lines
+            .join("\n");
+        assert_eq!(
+            inactive_text, "notes",
+            "inactive split pane should keep the original file buffer after dired.enter"
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn dired_enter_opens_file_entry_from_current_line() {
         let _lock = saya::app::bootstrap::launch_test_lock()
@@ -14885,12 +15574,9 @@ mod tests {
         .await;
 
         assert_eq!(shutdown, None);
-        assert!(
-            matches!(
-                transient_msg.as_deref(),
-                None | Some("E301: Oops, lost the swap file!!!")
-            ),
-            "dired startup command should not surface runtime command errors: {transient_msg:?}"
+        assert_eq!(
+            transient_msg, None,
+            "dired startup command should not surface swap or pager messages"
         );
         assert!(runtime_presentation_intents.is_empty());
         assert!(floating_window_manager.is_empty());
@@ -15079,12 +15765,9 @@ mod tests {
                 None,
             )
             .await;
-            assert!(
-                matches!(
-                    transient_msg.as_deref(),
-                    None | Some("E301: Oops, lost the swap file!!!")
-                ),
-                "dired up should not surface unrelated runtime errors: {transient_msg:?}"
+            assert_eq!(
+                transient_msg, None,
+                "dired up should not surface swap or pager messages"
             );
         }
 

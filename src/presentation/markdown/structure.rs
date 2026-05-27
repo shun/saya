@@ -237,7 +237,21 @@ impl MarkdownMetadataCache {
         Self::default()
     }
 
-    pub fn document_map(&mut self, key: MarkdownMetadataKey, source: &str) -> MarkdownCacheOutcome {
+    pub fn cached_document_map(
+        &self,
+        key: MarkdownMetadataKey,
+    ) -> Option<Arc<MarkdownDocumentMap>> {
+        self.entries
+            .get(&key.buffer_id)
+            .filter(|entry| entry.revision == key.revision)
+            .map(|entry| Arc::clone(&entry.document_map))
+    }
+
+    pub fn document_map_with_source(
+        &mut self,
+        key: MarkdownMetadataKey,
+        source: impl FnOnce() -> String,
+    ) -> MarkdownCacheOutcome {
         if let Some(entry) = self.entries.get(&key.buffer_id) {
             if entry.revision == key.revision {
                 log::debug!(
@@ -260,7 +274,8 @@ impl MarkdownMetadataCache {
                 entry.revision,
                 key.revision
             );
-            let document_map = Arc::new(MarkdownDocumentMap::parse(source));
+            let source = source();
+            let document_map = Arc::new(MarkdownDocumentMap::parse(&source));
             self.entries.insert(
                 key.buffer_id,
                 CachedMarkdownDocumentMap {
@@ -280,7 +295,8 @@ impl MarkdownMetadataCache {
             key.buffer_id,
             key.revision
         );
-        let document_map = Arc::new(MarkdownDocumentMap::parse(source));
+        let source = source();
+        let document_map = Arc::new(MarkdownDocumentMap::parse(&source));
         self.entries.insert(
             key.buffer_id,
             CachedMarkdownDocumentMap {
@@ -293,6 +309,10 @@ impl MarkdownMetadataCache {
             status: MarkdownCacheStatus::Miss,
             document_map,
         }
+    }
+
+    pub fn document_map(&mut self, key: MarkdownMetadataKey, source: &str) -> MarkdownCacheOutcome {
+        self.document_map_with_source(key, || source.to_string())
     }
 
     pub fn invalidate_buffer(&mut self, buffer_id: i64) -> bool {
@@ -665,6 +685,24 @@ mod tests {
             changed.document_map.blocks[0].kind,
             MarkdownBlockKind::Heading { level: 1 }
         );
+    }
+
+    #[test]
+    fn cache_hit_does_not_evaluate_deferred_source() {
+        let mut cache = MarkdownMetadataCache::new();
+        let key = MarkdownMetadataKey {
+            buffer_id: 7,
+            revision: 10,
+        };
+
+        let first = cache.document_map_with_source(key, || "# One\n".to_string());
+        let second = cache.document_map_with_source(key, || {
+            panic!("source text should not be fetched for a cache hit")
+        });
+
+        assert_eq!(first.status, MarkdownCacheStatus::Miss);
+        assert_eq!(second.status, MarkdownCacheStatus::Hit);
+        assert!(Arc::ptr_eq(&first.document_map, &second.document_map));
     }
 
     #[test]

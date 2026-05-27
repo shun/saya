@@ -85,6 +85,20 @@ impl Default for DirectoryBufferListingOptions {
     }
 }
 
+fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
+    left == right
+        || std::fs::canonicalize(left)
+            .ok()
+            .zip(std::fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn rebase_path_under_root(path: &Path, old_root: &Path, new_root: &Path) -> Option<PathBuf> {
+    path.strip_prefix(old_root)
+        .ok()
+        .map(|relative_path| new_root.join(relative_path))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectoryBufferSortKey {
     Name,
@@ -520,7 +534,20 @@ impl EditorSessionState {
             self.target_path,
             target_path.display()
         );
-        if let Err(error) = self.refresh_directory_buffer_for_path(&target_path) {
+        let directory_buffer_is_current = target_path.is_dir()
+            && self
+                .directory_buffer
+                .as_ref()
+                .is_some_and(|directory_buffer| {
+                    paths_refer_to_same_location(&directory_buffer.root_path, &target_path)
+                });
+        if directory_buffer_is_current {
+            self.rebase_directory_buffer_root(&target_path);
+            log::debug!(
+                "[editor_session][dired] reusing already refreshed directory buffer metadata during target replacement: path={}",
+                target_path.display()
+            );
+        } else if let Err(error) = self.refresh_directory_buffer_for_path(&target_path) {
             log::debug!(
                 "[editor_session] failed to refresh directory buffer metadata during target replacement: path={}, error={}",
                 target_path.display(),
@@ -556,6 +583,40 @@ impl EditorSessionState {
         self.dirty = false;
         self.last_save_error = None;
         Ok(entries)
+    }
+
+    pub fn refresh_directory_buffer_for_target_path(&mut self, path: &Path) -> std::io::Result<()> {
+        self.refresh_directory_buffer_for_path(path)?;
+        self.target_path = Some(path.to_path_buf());
+        self.dirty = false;
+        self.last_save_error = None;
+        Ok(())
+    }
+
+    fn rebase_directory_buffer_root(&mut self, target_path: &Path) {
+        let Some(directory_buffer) = self.directory_buffer.as_mut() else {
+            return;
+        };
+        if directory_buffer.root_path == target_path
+            || !paths_refer_to_same_location(&directory_buffer.root_path, target_path)
+        {
+            return;
+        }
+
+        let old_root = directory_buffer.root_path.clone();
+        for entry in &mut directory_buffer.entries {
+            if let Some(rebased) = rebase_path_under_root(&entry.path, &old_root, target_path) {
+                entry.path = rebased;
+            }
+        }
+        directory_buffer.root_path = target_path.to_path_buf();
+        self.directory_marked_paths = self
+            .directory_marked_paths
+            .iter()
+            .map(|path| {
+                rebase_path_under_root(path, &old_root, target_path).unwrap_or_else(|| path.clone())
+            })
+            .collect();
     }
 
     pub fn current_directory_entry(&self, cursor_row: usize) -> Option<&DirectoryBufferEntry> {
@@ -845,7 +906,9 @@ impl EditorSessionState {
         if self
             .directory_buffer
             .as_ref()
-            .is_some_and(|directory_buffer| directory_buffer.root_path != path)
+            .is_some_and(|directory_buffer| {
+                !paths_refer_to_same_location(&directory_buffer.root_path, path)
+            })
         {
             log::debug!(
                 "[editor_session][dired] clearing marks because directory root changed: old_root={}, new_root={}, marked_count={}",
@@ -861,7 +924,9 @@ impl EditorSessionState {
         let options = self
             .directory_buffer
             .as_ref()
-            .filter(|directory_buffer| directory_buffer.root_path == path)
+            .filter(|directory_buffer| {
+                paths_refer_to_same_location(&directory_buffer.root_path, path)
+            })
             .map(|directory_buffer| directory_buffer.listing_options.clone())
             .unwrap_or_default();
         let directory_buffer = read_directory_buffer_state_with_options(path, options)?;
@@ -1252,12 +1317,14 @@ pub(crate) fn read_directory_buffer_state_with_options(
     path: &Path,
     options: DirectoryBufferListingOptions,
 ) -> std::io::Result<DirectoryBufferState> {
+    let started_at = std::time::Instant::now();
     let normalized_filter = options
         .filter
         .as_deref()
         .map(str::trim)
         .filter(|filter| !filter.is_empty())
         .map(|filter| filter.to_ascii_lowercase());
+    let read_dir_started_at = std::time::Instant::now();
     let mut entries = fs::read_dir(path)?
         .map(|entry| {
             let entry = entry?;
@@ -1310,7 +1377,10 @@ pub(crate) fn read_directory_buffer_state_with_options(
             Err(error) => Some(Err(error)),
         })
         .collect::<std::io::Result<Vec<_>>>()?;
+    let read_dir_ms = read_dir_started_at.elapsed().as_millis();
+    let sort_started_at = std::time::Instant::now();
     entries.sort_by(|left, right| directory_buffer_compare_entries(left, right, options.sort_by));
+    let sort_ms = sort_started_at.elapsed().as_millis();
     if options.sort_by == DirectoryBufferSortKey::Kind {
         let directory_count = entries
             .iter()
@@ -1323,6 +1393,7 @@ pub(crate) fn read_directory_buffer_state_with_options(
             entries.len().saturating_sub(directory_count)
         );
     }
+    let display_started_at = std::time::Instant::now();
     let display_text = if entries.is_empty() {
         String::new()
     } else {
@@ -1333,6 +1404,17 @@ pub(crate) fn read_directory_buffer_state_with_options(
             .join("\n")
             + "\n"
     };
+    let display_ms = display_started_at.elapsed().as_millis();
+    log::debug!(
+        "[PERF][editor_session][dired] read directory buffer state: root_path={}, entries={}, text_len={}, read_dir_ms={}, sort_ms={}, display_ms={}, elapsed_ms={}",
+        path.display(),
+        entries.len(),
+        display_text.len(),
+        read_dir_ms,
+        sort_ms,
+        display_ms,
+        started_at.elapsed().as_millis()
+    );
 
     Ok(DirectoryBufferState {
         root_path: path.to_path_buf(),

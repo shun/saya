@@ -1800,6 +1800,21 @@ fn project_filer_style_ranges(
     let Some(directory_buffer) = input.session_state.directory_buffer() else {
         return Vec::new();
     };
+    let Some(buffer) = input
+        .snapshot
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id == input.buffer_id)
+    else {
+        return Vec::new();
+    };
+    let buffer_path = std::path::Path::new(&buffer.name);
+    if buffer_path != directory_buffer.root_path
+        && !line_range_matches_directory_buffer(input.line_range, directory_buffer)
+        && !(input.is_active && buffer_path.is_dir())
+    {
+        return Vec::new();
+    }
     let theme = input.session_state.resolved_theme();
     let viewport_bottom = input
         .viewport_top
@@ -1846,6 +1861,26 @@ fn project_filer_style_ranges(
         ranges.len()
     );
     ranges
+}
+
+fn line_range_matches_directory_buffer(
+    line_range: Option<&CoreBufferLineRange>,
+    directory_buffer: &crate::app::session::DirectoryBufferState,
+) -> bool {
+    let Some(line_range) = line_range else {
+        return false;
+    };
+    let directory_lines = directory_buffer.display_text.lines().collect::<Vec<_>>();
+    if line_range.start_row >= directory_lines.len()
+        || line_range.start_row.saturating_add(line_range.lines.len()) > directory_lines.len()
+    {
+        return false;
+    }
+    line_range
+        .lines
+        .iter()
+        .zip(directory_lines.iter().skip(line_range.start_row))
+        .all(|(line, directory_line)| line == directory_line)
 }
 
 fn filer_key_for_entry_kind(kind: DirectoryBufferEntryKind) -> FilerSemanticStyleKey {
@@ -3739,7 +3774,8 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("mkdir");
         std::fs::write(root.join("README.md"), "hello").expect("file");
         let bridge = CoreBridge::new("src/\nREADME.md\n").expect("core bridge");
-        let snapshot = bridge.snapshot();
+        let mut snapshot = bridge.snapshot();
+        snapshot.buffers[0].name = root.display().to_string();
         let mut session_state = EditorSessionState::new(Some(root.clone()));
         let directory = session_state
             .directory_buffer()
@@ -3772,6 +3808,69 @@ mod tests {
                 .filer_style_ranges
                 .iter()
                 .any(|range| { range.row == 0 && range.key == FilerSemanticStyleKey::Marked })
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn projects_filer_styles_only_for_matching_directory_buffer_pane() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let root =
+            std::env::temp_dir().join(format!("saya-filer-pane-isolation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("mkdir");
+        std::fs::write(root.join("AGENTS.md"), "# Agents\n").expect("file");
+        let bridge = CoreBridge::new("# AGENTS.md\nsrc/\n").expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.buffers[0].name = root.join("AGENTS.md").display().to_string();
+        let session_state = EditorSessionState::new(Some(root.clone()));
+
+        let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
+
+        assert!(
+            model.filer_style_ranges.is_empty(),
+            "regular markdown panes should not inherit dired styles from another buffer"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn projects_filer_styles_after_directory_root_changes_with_stale_buffer_name() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let root = std::env::temp_dir().join(format!("saya-filer-up-{}", std::process::id()));
+        let child = root.join("child");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&child).expect("mkdir");
+        let bridge = CoreBridge::new("child/\n").expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.buffers[0].name = child.display().to_string();
+        let session_state = EditorSessionState::new(Some(root.clone()));
+        let line_range = CoreBufferLineRange {
+            buffer_id: 1,
+            source_revision: CoreBufferRevision { value: 1 },
+            start_row: 0,
+            line_count: 1,
+            total_line_count: 1,
+            lines: vec!["child/".to_string()],
+        };
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_line_range(Some(&line_range));
+        input.is_active = false;
+
+        let model = project(&input);
+
+        assert!(
+            model
+                .filer_style_ranges
+                .iter()
+                .any(|range| range.row == 0 && range.key == FilerSemanticStyleKey::Directory),
+            "dired listing should keep filer styles after moving to a parent directory"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }

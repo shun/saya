@@ -146,8 +146,7 @@ export function setupSayaDired(options: SayaDiredOptions = {}): void {
     "return async () => {\n" +
       helpers +
       `  const configuredRoot = ${quoteRuntimeString(root)};\n` +
-      "  const buffer = await saya.buffer.current();\n" +
-      "  const currentPath = configuredRoot || buffer.path || \".\";\n" +
+      "  const currentPath = configuredRoot || await saya.buffer.currentPath() || \".\";\n" +
       "  await saya.commands.execute(`edit ${escapeEditPath(dirname(currentPath))}`);\n" +
       "};",
   )();
@@ -155,8 +154,8 @@ export function setupSayaDired(options: SayaDiredOptions = {}): void {
   const upCallback = new Function(
     "return async () => {\n" +
       helpers +
-      "  const buffer = await saya.buffer.current();\n" +
-      "  await saya.commands.execute(`edit ${escapeEditPath(parentDirectory(buffer.path || '.'))}`);\n" +
+      "  const currentPath = await saya.buffer.currentPath() || \".\";\n" +
+      "  await saya.commands.execute(`edit ${escapeEditPath(parentDirectory(currentPath))}`);\n" +
       "};",
   )();
 
@@ -167,8 +166,7 @@ export function setupSayaDired(options: SayaDiredOptions = {}): void {
       `  const showHidden = ${hiddenFilePolicy === "show"};\n` +
       `  const sortBy = ${quoteRuntimeString(sortPolicy)};\n` +
       `  const filter = ${quoteRuntimeString(filter)};\n` +
-      "  const buffer = await saya.buffer.current();\n" +
-      "  const directory = configuredRoot || buffer.path || '.';\n" +
+      "  const directory = configuredRoot || await saya.buffer.currentPath() || '.';\n" +
       "  await saya.filer.list(directory, { showHidden, sortBy, filter });\n" +
       "  await saya.commands.execute(`edit ${escapeEditPath(directory)}`);\n" +
       "};",

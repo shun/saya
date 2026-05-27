@@ -110,6 +110,7 @@ prioritize typed, read-only state access plus explicit command execution.
 
 - The runtime surface must expose `saya.commands.execute(name)`.
 - The runtime surface must expose `saya.buffer.current()`.
+- The runtime surface must expose `saya.buffer.currentPath()`.
 - The runtime surface must expose `saya.window.current()`.
 - The runtime surface must expose `saya.editor.current()`.
 - The runtime surface must expose `saya.editor.mode()`.
