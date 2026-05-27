@@ -949,7 +949,10 @@ async fn main() {
                                     }
                                     session_state.update_dirty(outcome.core_bridge.dirty());
                                 }
-                                KeyInput::Backspace | KeyInput::Delete => {
+                                KeyInput::Backspace
+                                | KeyInput::Ctrl('h')
+                                | KeyInput::Ctrl('H')
+                                | KeyInput::Delete => {
                                     command_line_histories.reset_navigation();
                                     let changed = command_line_edit.apply_action(
                                         command_line_edit_action_for_key(&key).expect(

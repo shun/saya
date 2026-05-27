@@ -165,7 +165,9 @@ pub fn command_line_edit_action_for_key(key: &KeyInput) -> Option<CommandLineEdi
         KeyInput::End | KeyInput::Ctrl('e') | KeyInput::Ctrl('E') => {
             Some(CommandLineEditAction::MoveEnd)
         }
-        KeyInput::Backspace => Some(CommandLineEditAction::Backspace),
+        KeyInput::Backspace | KeyInput::Ctrl('h') | KeyInput::Ctrl('H') => {
+            Some(CommandLineEditAction::Backspace)
+        }
         KeyInput::Delete => Some(CommandLineEditAction::Delete),
         _ => None,
     }

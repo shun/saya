@@ -67,3 +67,13 @@ fn key_mapping_covers_vim_command_line_cursor_keys() {
     assert!(command_line_edit_action_for_key(&KeyInput::Ctrl('a')).is_some());
     assert!(command_line_edit_action_for_key(&KeyInput::Ctrl('e')).is_some());
 }
+
+#[test]
+fn ctrl_h_maps_to_command_line_backspace() {
+    for key in [KeyInput::Ctrl('h'), KeyInput::Ctrl('H')] {
+        assert_eq!(
+            command_line_edit_action_for_key(&key),
+            Some(saya::input::command_line_editor::CommandLineEditAction::Backspace)
+        );
+    }
+}
