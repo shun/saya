@@ -7289,10 +7289,13 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
     fn current_buffer_metadata_snapshot(&mut self) -> ReadonlyBufferSnapshot {
         let started_at = std::time::Instant::now();
         let snapshot = self.outcome.core_bridge.light_snapshot();
-        let active_buffer_id = snapshot
+        let active_buffer = snapshot
             .buffers
             .iter()
             .find(|buffer| buffer.is_active)
+            .cloned();
+        let active_buffer_id = active_buffer
+            .as_ref()
             .map(|buffer| buffer.id as u64)
             .unwrap_or(1);
         let current_line_range = self.outcome.core_bridge.buffer_line_range(
@@ -7315,8 +7318,16 @@ impl RuntimeHostSession for MainRuntimeHostSession<'_> {
             text: String::new(),
         };
         log::debug!(
-            "[PERF][main][runtime] built lightweight current buffer metadata snapshot: buffer_id={}, elapsed_ms={}",
+            "[PERF][main][runtime] built lightweight current buffer metadata snapshot: buffer_id={}, buffer_name={:?}, document_id={:?}, session_target_path={:?}, snapshot_path={:?}, cursor=({},{}), elapsed_ms={}",
             active_buffer_id,
+            active_buffer.as_ref().map(|buffer| &buffer.name),
+            active_buffer
+                .as_ref()
+                .and_then(|buffer| buffer.document_id.as_deref()),
+            self.session_state.target_path(),
+            snapshot.path,
+            snapshot.cursor_row,
+            snapshot.cursor_col,
             started_at.elapsed().as_millis()
         );
         snapshot
@@ -8332,6 +8343,26 @@ fn build_workspace_render_output(
     let light_snapshot = outcome.core_bridge.light_snapshot();
     let snapshot = snapshot_from_light_snapshot(&light_snapshot, String::new());
     let snapshot_ms = snapshot_started_at.elapsed().as_millis();
+    if let Some(active_window) = snapshot.active_window() {
+        let active_buffer = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id == active_window.buf_id);
+        log::debug!(
+            "[main][render] active buffer identity: window_id={}, buffer_id={}, buffer_name={:?}, document_id={:?}, session_target_path={:?}, syntax_enabled={}",
+            active_window.id,
+            active_window.buf_id,
+            active_buffer.map(|buffer| &buffer.name),
+            active_buffer.and_then(|buffer| buffer.document_id.as_deref()),
+            session_state.target_path(),
+            outcome.core_bridge.is_syntax_enabled()
+        );
+    } else {
+        log::debug!(
+            "[main][render] no active window while building workspace render output: session_target_path={:?}",
+            session_state.target_path()
+        );
+    }
     trace_redraw_diagnostic(format_args!(
         "workspace render build started: revision={}, mode={:?}, cursor=({},{}), windows={}, command_prompt={:?}, command_buffer_len={}, structural_refresh_present={}",
         snapshot.revision,
@@ -9541,15 +9572,15 @@ fn collect_workspace_tree_sitter_syntax(
             );
             continue;
         }
-        let filetype_hint = tree_sitter_filetype_hint(&buffer.name);
-        if filetype_hint.is_none() {
+        let buffer_path_hint = buffer_path_hint(buffer);
+        if buffer_path_hint != buffer.name {
             log::debug!(
-                "[main] Tree-sitter syntax skipped because buffer has no supported language hint: window_id={}, buffer_id={}, buffer_name={:?}",
+                "[main] using buffer document identity for Tree-sitter language hint: window_id={}, buffer_id={}, buffer_name={:?}, path_hint={:?}",
                 window.id,
                 buffer.id,
-                buffer.name
+                buffer.name,
+                buffer_path_hint
             );
-            continue;
         }
         let range = vim_core_rs::CoreTextRange {
             start: vim_core_rs::CoreTextPosition {
@@ -9561,12 +9592,34 @@ fn collect_workspace_tree_sitter_syntax(
                 col: 0,
             },
         };
+        let root_language = vim_core_rs::VimCoreSession::resolve_tree_sitter_root_language(
+            vim_core_rs::CoreRootLanguageResolutionRequest {
+                range,
+                vim_filetype: None,
+                buffer_name: (!buffer_path_hint.is_empty()).then(|| buffer_path_hint.to_string()),
+                host_language_hint: None,
+            },
+        );
+        if !matches!(
+            root_language.status,
+            vim_core_rs::CoreLanguageResolutionStatus::Resolved
+        ) {
+            log::debug!(
+                "[main] Tree-sitter syntax skipped because vim-core-rs could not resolve a supported language: window_id={}, buffer_id={}, buffer_name={:?}, path_hint={:?}, resolution={:?}",
+                window.id,
+                buffer.id,
+                buffer.name,
+                buffer_path_hint,
+                root_language
+            );
+            continue;
+        }
         let request = vim_core_rs::CoreTreeSitterPreparationRequest {
             buffer_id: buffer.id,
             source_revision: Some(buffer.source_revision),
             range,
-            vim_filetype: filetype_hint,
-            buffer_name: (!buffer.name.is_empty()).then(|| buffer.name.clone()),
+            vim_filetype: None,
+            buffer_name: (!buffer_path_hint.is_empty()).then(|| buffer_path_hint.to_string()),
             host_language_hint: None,
             snapshot_policy: vim_core_rs::CoreTreeSitterSnapshotPolicy::default(),
         };
@@ -9644,20 +9697,6 @@ fn collect_workspace_tree_sitter_syntax(
 }
 
 #[cfg(feature = "tree-sitter-syntax")]
-fn tree_sitter_filetype_hint(buffer_name: &str) -> Option<String> {
-    std::path::Path::new(buffer_name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .and_then(|extension| match extension {
-            "rs" => Some("rust"),
-            "md" | "markdown" => Some("markdown"),
-            "ts" => Some("typescript"),
-            _ => None,
-        })
-        .map(str::to_string)
-}
-
-#[cfg(feature = "tree-sitter-syntax")]
 fn tree_sitter_coverage_contains_range(
     covered_ranges: &[vim_core_rs::CoreTextRange],
     range: vim_core_rs::CoreTextRange,
@@ -9705,12 +9744,23 @@ fn collect_workspace_markdown_document_maps(
             );
             continue;
         };
-        if !is_markdown_buffer_name(&buffer.name) {
+        let buffer_path_hint = buffer_path_hint(buffer);
+        if buffer_path_hint != buffer.name {
             log::debug!(
-                "[main] skipping markdown metadata collection because buffer is not markdown: window_id={}, buffer_id={}, buffer_name={:?}",
+                "[main] using buffer document identity for markdown metadata: window_id={}, buffer_id={}, buffer_name={:?}, path_hint={:?}",
                 window.id,
                 buffer.id,
-                buffer.name
+                buffer.name,
+                buffer_path_hint
+            );
+        }
+        if !is_markdown_buffer_name(buffer_path_hint) {
+            log::debug!(
+                "[main] skipping markdown metadata collection because buffer is not markdown: window_id={}, buffer_id={}, buffer_name={:?}, path_hint={:?}",
+                window.id,
+                buffer.id,
+                buffer.name,
+                buffer_path_hint
             );
             continue;
         }
@@ -9786,6 +9836,15 @@ fn collect_workspace_markdown_document_maps(
         maps.keys().copied().collect::<Vec<_>>()
     );
     maps
+}
+
+fn buffer_path_hint(buffer: &vim_core_rs::CoreBufferInfo) -> &str {
+    buffer
+        .document_id
+        .as_deref()
+        .and_then(|document_id| document_id.strip_prefix("file://"))
+        .filter(|document_id| !document_id.is_empty())
+        .unwrap_or(&buffer.name)
 }
 
 fn is_markdown_buffer_name(buffer_name: &str) -> bool {
@@ -14555,9 +14614,365 @@ mod tests {
 
         assert_eq!(outcome.target_path, Some(readme_path.clone()));
         assert_eq!(outcome.core_bridge.snapshot().text, "hello\n");
+        let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+        let snapshot = outcome.core_bridge.snapshot();
+        let active_window = snapshot
+            .active_window()
+            .expect("dired.enter should leave an active markdown window");
+        let active_buffer = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id == active_window.buf_id)
+            .expect("active buffer metadata should exist");
+        assert_eq!(
+            active_buffer.name,
+            root_path.display().to_string(),
+            "regression guard: dired-entered file keeps the stale directory buffer name"
+        );
+        assert!(
+            active_buffer
+                .document_id
+                .as_deref()
+                .is_some_and(|document_id| document_id.starts_with("file://")
+                    && document_id.ends_with("README.md")),
+            "dired VFS load should expose README.md through document_id"
+        );
+        let maps = collect_workspace_markdown_document_maps(
+            &mut markdown_metadata_cache,
+            &session_state,
+            &outcome.core_bridge,
+            &snapshot,
+        );
+        assert!(
+            maps.contains_key(&active_window.id),
+            "markdown file opened from dired should collect markdown metadata for highlighting; active_window={:?}, buffers={:?}, target_path={:?}, session_target={:?}",
+            active_window,
+            snapshot.buffers,
+            outcome.target_path,
+            session_state.target_path()
+        );
 
         std::fs::remove_file(config_path).expect("cleanup config");
         std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
+    #[cfg(feature = "tree-sitter-syntax")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_enter_collects_tree_sitter_highlight_for_supported_languages() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (file_name, source, expected_language) in [
+            ("main.rs", "fn main() { let value = 1; }\n", "rust"),
+            (
+                "main.ts",
+                "export function main(value: number): number { return value + 1; }\n",
+                "typescript",
+            ),
+            ("main.go", "package main\n\nfunc main() {}\n", "go"),
+            (
+                "App.tsx",
+                "export const App = () => <main>{1}</main>;\n",
+                "tsx",
+            ),
+        ] {
+            let root_path = unique_path(&format!("dired-enter-syntax-{expected_language}-root"));
+            let source_path = root_path.join(file_name);
+            let config_path = unique_path(&format!("dired-enter-syntax-{expected_language}-init"))
+                .with_extension("ts");
+            std::fs::create_dir_all(&root_path).expect("root directory");
+            std::fs::write(&source_path, source).expect("source file");
+            std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
+            let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+                input_source: saya::app::cli::InputSource::Empty,
+                config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+                ..saya::app::cli::LaunchRequest::default()
+            })
+            .expect("launch should succeed");
+            outcome.core_bridge.set_screen_size(24, 80);
+            outcome
+                .core_bridge
+                .apply_ex_command("syntax on")
+                .expect("syntax on should enable Tree-sitter highlight collection");
+            let mut session_state = outcome.editor_session_state();
+            let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+                .expect("runtime session should initialize");
+
+            execute_runtime_host_command(
+                &format!("edit {}", root_path.display()),
+                &mut outcome,
+                &mut session_state,
+            )
+            .expect("open root listing");
+            execute_runtime_command_for_test(
+                &mut outcome,
+                &mut session_state,
+                &mut runtime_session,
+                "dired.enter",
+            )
+            .await;
+
+            assert_eq!(outcome.target_path, Some(source_path.clone()));
+            let snapshot = outcome.core_bridge.snapshot();
+            let active_window = snapshot
+                .active_window()
+                .expect("dired.enter should leave an active source window");
+            let active_buffer = snapshot
+                .buffers
+                .iter()
+                .find(|buffer| buffer.id == active_window.buf_id)
+                .expect("active buffer metadata should exist");
+            assert_eq!(
+                active_buffer.name,
+                root_path.display().to_string(),
+                "regression guard: dired-entered {file_name} keeps the stale directory buffer name"
+            );
+            assert!(
+                active_buffer
+                    .document_id
+                    .as_deref()
+                    .is_some_and(|document_id| document_id.starts_with("file://")
+                        && document_id.ends_with(file_name)),
+                "dired VFS load should expose the opened file through document_id"
+            );
+            let mut viewport_store = WindowViewportStore::new();
+            let line_ranges =
+                collect_workspace_line_ranges(&outcome.core_bridge, &snapshot, &viewport_store);
+            let mut languages = BTreeSet::new();
+            for _ in 0..20 {
+                let syntax_by_window = collect_workspace_tree_sitter_syntax(
+                    &mut outcome.core_bridge,
+                    &snapshot,
+                    &viewport_store,
+                    &line_ranges,
+                );
+                languages = syntax_by_window
+                    .get(&active_window.id)
+                    .into_iter()
+                    .map(|syntax| syntax.provenance.language_id.as_str())
+                    .map(str::to_string)
+                    .collect();
+                if languages.contains(expected_language) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                languages.contains(expected_language),
+                "dired-opened {file_name} should collect Tree-sitter syntax for {expected_language}; languages={languages:?}, active_buffer={active_buffer:?}"
+            );
+            let mut search_refresh_store = WindowSearchRefreshStore::default();
+            let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+            let mut rendered_languages = BTreeSet::new();
+            for _ in 0..20 {
+                let workspace = build_workspace_render_output(
+                    &mut outcome,
+                    &mut session_state,
+                    &mut viewport_store,
+                    ViewportSyncMode::Core,
+                    &mut search_refresh_store,
+                    &mut markdown_metadata_cache,
+                    None,
+                    "",
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    80,
+                    24,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("dired-opened source workspace should render");
+                rendered_languages = workspace
+                    .panes
+                    .iter()
+                    .flat_map(|pane| pane.syntax_chunks.iter())
+                    .filter_map(|chunk| chunk.language.as_deref())
+                    .map(str::to_string)
+                    .collect();
+                if rendered_languages.contains(expected_language) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                rendered_languages.contains(expected_language),
+                "dired-opened {file_name} should render Tree-sitter syntax for {expected_language}; rendered_languages={rendered_languages:?}"
+            );
+
+            std::fs::remove_file(config_path).expect("cleanup config");
+            std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+        }
+    }
+
+    #[cfg(feature = "tree-sitter-syntax")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_open_then_enter_renders_tree_sitter_highlight_for_another_file() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (file_name, source, expected_language) in [
+            ("main.rs", "fn main() { let value = 1; }\n", "rust"),
+            (
+                "main.ts",
+                "export function main(value: number): number { return value + 1; }\n",
+                "typescript",
+            ),
+        ] {
+            let root_path = unique_path(&format!("dired-open-enter-{expected_language}-root"));
+            let initial_path = root_path.join("aaa.txt");
+            let source_path = root_path.join(file_name);
+            let config_path = unique_path(&format!("dired-open-enter-{expected_language}-init"))
+                .with_extension("ts");
+            std::fs::create_dir_all(&root_path).expect("root directory");
+            std::fs::write(&initial_path, "initial\n").expect("initial file");
+            std::fs::write(&source_path, source).expect("source file");
+            std::fs::write(
+                &config_path,
+                r#"
+                    saya.commands.register("dired.open", async () => {
+                        const trimTrailingSlash = (path) => path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+                        const dirname = (path) => {
+                            const normalized = trimTrailingSlash(path || ".");
+                            const index = normalized.lastIndexOf("/");
+                            if (index < 0) return ".";
+                            return index === 0 ? "/" : normalized.slice(0, index);
+                        };
+                        const currentPath = await saya.buffer.currentPath() || ".";
+                        await saya.commands.execute(`edit ${dirname(currentPath)}`);
+                    });
+                    saya.commands.register("dired.enter", async () => {
+                        const entry = await saya.filer.currentEntry();
+                        if (entry) {
+                            await saya.commands.execute(`edit ${entry.path}`);
+                        }
+                    });
+                    saya.keymap.set("normal", "-", saya.commands.execute("dired.open"));
+                    saya.keymap.set("normal", "<Enter>", saya.commands.execute("dired.enter"));
+                "#,
+            )
+            .expect("config file");
+
+            let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+                input_source: saya::app::cli::InputSource::File(initial_path.clone()),
+                config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+                ..saya::app::cli::LaunchRequest::default()
+            })
+            .expect("launch should succeed");
+            outcome.core_bridge.set_screen_size(24, 80);
+            outcome
+                .core_bridge
+                .apply_ex_command("syntax on")
+                .expect("syntax on should enable Tree-sitter highlight collection");
+            let mut session_state = outcome.editor_session_state();
+            let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+                .expect("runtime session should initialize");
+
+            execute_runtime_command_for_test(
+                &mut outcome,
+                &mut session_state,
+                &mut runtime_session,
+                "dired.open",
+            )
+            .await;
+            let target_row = outcome
+                .core_bridge
+                .snapshot()
+                .text
+                .lines()
+                .position(|line| line == file_name)
+                .unwrap_or_else(|| panic!("{file_name} should appear in dired listing"));
+            for _ in 0..target_row {
+                outcome
+                    .core_bridge
+                    .dispatch_key("j")
+                    .expect("move in dired");
+            }
+            execute_runtime_command_for_test(
+                &mut outcome,
+                &mut session_state,
+                &mut runtime_session,
+                "dired.enter",
+            )
+            .await;
+
+            assert_eq!(outcome.target_path, Some(source_path.clone()));
+            let snapshot = outcome.core_bridge.snapshot();
+            let active_window = snapshot
+                .active_window()
+                .expect("dired.enter should leave an active source window");
+            let active_buffer = snapshot
+                .buffers
+                .iter()
+                .find(|buffer| buffer.id == active_window.buf_id)
+                .expect("active buffer metadata should exist");
+            assert_eq!(
+                active_buffer.name,
+                root_path.display().to_string(),
+                "regression guard: dired-open then dired-enter keeps stale directory buffer name"
+            );
+            assert!(
+                active_buffer
+                    .document_id
+                    .as_deref()
+                    .is_some_and(|document_id| document_id.starts_with("file://")
+                        && document_id.ends_with(file_name)),
+                "dired-open then dired-enter should expose the opened file through document_id"
+            );
+
+            let mut viewport_store = WindowViewportStore::new();
+            let mut search_refresh_store = WindowSearchRefreshStore::default();
+            let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+            let mut rendered_languages = BTreeSet::new();
+            for _ in 0..20 {
+                let workspace = build_workspace_render_output(
+                    &mut outcome,
+                    &mut session_state,
+                    &mut viewport_store,
+                    ViewportSyncMode::Core,
+                    &mut search_refresh_store,
+                    &mut markdown_metadata_cache,
+                    None,
+                    "",
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    80,
+                    24,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("dired-opened source workspace should render");
+                rendered_languages = workspace
+                    .panes
+                    .iter()
+                    .flat_map(|pane| pane.syntax_chunks.iter())
+                    .filter_map(|chunk| chunk.language.as_deref())
+                    .map(str::to_string)
+                    .collect();
+                if rendered_languages.contains(expected_language) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                rendered_languages.contains(expected_language),
+                "dired-open then dired-enter should render Tree-sitter syntax for {expected_language}; rendered_languages={rendered_languages:?}, active_buffer={active_buffer:?}"
+            );
+
+            std::fs::remove_file(config_path).expect("cleanup config");
+            std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

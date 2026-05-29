@@ -11,7 +11,8 @@ use std::time::Instant;
 
 use unicode_width::UnicodeWidthChar;
 use vim_core_rs::{
-    CoreBufferLineRange, CoreLightSnapshot, CoreMode, CoreSnapshot, CoreSyntaxChunk, CoreWindowInfo,
+    CoreBufferInfo, CoreBufferLineRange, CoreLightSnapshot, CoreMode, CoreSnapshot,
+    CoreSyntaxChunk, CoreWindowInfo,
 };
 
 use crate::app::session::{DirectoryBufferEntryKind, EditorSessionState};
@@ -2015,12 +2016,34 @@ fn markdown_embedded_language_id(
 }
 
 fn buffer_language_id(input: &ProjectionInput<'_>) -> Option<String> {
-    input
+    let buffer = input
         .snapshot
         .buffers
         .iter()
-        .find(|buffer| buffer.id == input.buffer_id)
-        .and_then(|buffer| language_id_from_path_hint(&buffer.name))
+        .find(|buffer| buffer.id == input.buffer_id)?;
+    let path_hint = buffer_path_hint(buffer);
+    let language = language_id_from_path_hint(path_hint);
+    if path_hint != buffer.name {
+        log::debug!(
+            "[screen_model] using buffer document identity for syntax language: window_id={}, buffer_id={}, buffer_name={:?}, document_id={:?}, path_hint={:?}, language={:?}",
+            input.window_id,
+            input.buffer_id,
+            buffer.name,
+            buffer.document_id,
+            path_hint,
+            language
+        );
+    }
+    language
+}
+
+fn buffer_path_hint(buffer: &CoreBufferInfo) -> &str {
+    buffer
+        .document_id
+        .as_deref()
+        .and_then(|document_id| document_id.strip_prefix("file://"))
+        .filter(|document_id| !document_id.is_empty())
+        .unwrap_or(&buffer.name)
 }
 
 fn language_id_from_path_hint(path: &str) -> Option<String> {
@@ -3724,6 +3747,43 @@ mod tests {
                 tree_sitter: None,
             }],
             "syntax chunks should be projected through Markdown rich display-space"
+        );
+    }
+
+    #[test]
+    fn projects_syntax_chunk_language_from_document_id_when_buffer_name_is_stale() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let bridge = CoreBridge::new("fn main() {}\n").expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.buffers[0].name = "/tmp/project".to_string();
+        snapshot.buffers[0].document_id = Some("file:///tmp/project/src/main.rs".to_string());
+        let session_state = EditorSessionState::new(None);
+        let mut syntax_lines = BTreeMap::new();
+        syntax_lines.insert(
+            0,
+            vec![CoreSyntaxChunk {
+                start_col: 0,
+                end_col: 2,
+                syn_id: 11,
+                name: Some("Statement".to_string()),
+            }],
+        );
+
+        let model = project(
+            &ProjectionInput::new(&snapshot, &session_state, None)
+                .with_syntax_lines(Some(&syntax_lines)),
+        );
+
+        assert_eq!(
+            model
+                .syntax_chunks
+                .first()
+                .and_then(|chunk| chunk.language.as_deref()),
+            Some("rust"),
+            "syntax chunk language should use document_id file path before stale buffer.name"
         );
     }
 

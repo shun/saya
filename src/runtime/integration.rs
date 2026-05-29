@@ -608,12 +608,17 @@ impl HostCapabilityBridge for ChannelBackedHostBridge {
     fn current_buffer_path(&self) -> crate::runtime::live::BoxFuture<Option<std::path::PathBuf>> {
         let snapshots = self.snapshots.clone();
         Box::pin(async move {
-            snapshots
+            let path = snapshots
                 .lock()
                 .expect("runtime snapshots mutex should not poison")
                 .buffer
                 .path
-                .clone()
+                .clone();
+            log::debug!(
+                "[runtime_integration] current_buffer_path from cached metadata: path={:?}",
+                path
+            );
+            path
         })
     }
 
