@@ -12,6 +12,7 @@ use saya::app::session::{
 use saya::app::startup::{
     LaunchStartError, PreparedTuiStartup, TuiStartupContextError, prepare_tui_startup_context,
 };
+use saya::core::bridge::CoreBridge;
 use saya::core::host_actions::HostActionRuntime;
 use saya::core::notification_prompt::{
     InputPromptStatus, InputPromptView, NotificationPromptProjectionState, PagerPromptView,
@@ -917,6 +918,23 @@ async fn main() {
                                                         &mut outcome_accumulator,
                                                         &mut need_redraw,
                                                     );
+                                                    if let Some(reason) =
+                                                        process_pending_host_actions_with_runtime(
+                                                            &mut outcome,
+                                                            &mut outcome_accumulator,
+                                                            &mut session_state,
+                                                            &mut transient_msg,
+                                                            &mut system_warning,
+                                                            &mut host_action_runtime,
+                                                            runtime_session.as_mut(),
+                                                            &mut need_redraw,
+                                                            &mut runtime_presentation_intents,
+                                                            Some(&lsif_bridge),
+                                                        )
+                                                        .await
+                                                    {
+                                                        break 'main reason;
+                                                    }
                                                 }
                                             }
                                             ExCommandRoute::UnsupportedPlanned => {
@@ -947,7 +965,10 @@ async fn main() {
                                         command_line_prompt = None;
                                         command_line_edit.clear();
                                     }
-                                    session_state.update_dirty(outcome.core_bridge.dirty());
+                                    sync_session_dirty_from_core(
+                                        &mut session_state,
+                                        &outcome.core_bridge,
+                                    );
                                 }
                                 KeyInput::Backspace
                                 | KeyInput::Ctrl('h')
@@ -1124,7 +1145,10 @@ async fn main() {
                                         {
                                             break 'main reason;
                                         }
-                                        session_state.update_dirty(outcome.core_bridge.dirty());
+                                        sync_session_dirty_from_core(
+                                            &mut session_state,
+                                            &outcome.core_bridge,
+                                        );
                                     }
                                     FloatingWindowKeyHandling::Closed { id } => {
                                         handled = true;
@@ -1217,7 +1241,10 @@ async fn main() {
                                         {
                                             break 'main reason;
                                         }
-                                        session_state.update_dirty(outcome.core_bridge.dirty());
+                                        sync_session_dirty_from_core(
+                                            &mut session_state,
+                                            &outcome.core_bridge,
+                                        );
                                     }
                                 }
                             }
@@ -1319,7 +1346,10 @@ async fn main() {
                                         {
                                             break 'main reason;
                                         }
-                                        session_state.update_dirty(outcome.core_bridge.dirty());
+                                        sync_session_dirty_from_core(
+                                            &mut session_state,
+                                            &outcome.core_bridge,
+                                        );
                                     }
                                     StartupKeymapAction::RegisteredCommand(command_name) => {
                                         log::info!(
@@ -1480,7 +1510,10 @@ async fn main() {
                                         }
                                     }
 
-                                    session_state.update_dirty(outcome.core_bridge.dirty());
+                                    sync_session_dirty_from_core(
+                                        &mut session_state,
+                                        &outcome.core_bridge,
+                                    );
                                     trace_redraw_diagnostic(format_args!(
                                         "edit key host policy forcing redraw after dispatch: key={:?}, cursor=({},{}), revision={}, prior_need_redraw={}",
                                         k,
@@ -1613,7 +1646,7 @@ async fn main() {
                                 break 'main reason;
                             }
 
-                            session_state.update_dirty(outcome.core_bridge.dirty());
+                            sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
                         } else {
                             log::debug!(
                                 "[main] ignoring mouse click outside editor body: column={}, row={}",
@@ -1654,7 +1687,7 @@ async fn main() {
                             break 'main reason;
                         }
 
-                        session_state.update_dirty(outcome.core_bridge.dirty());
+                        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
                         need_redraw = true;
                     }
                     UiEvent::Shutdown(reason) => {
@@ -2064,7 +2097,7 @@ async fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Resu
             &mut outcome_accumulator,
             &mut need_redraw,
         );
-        session_state.update_dirty(outcome.core_bridge.dirty());
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
         let reason = process_pending_host_actions_without_runtime(
             &mut outcome,
             &mut outcome_accumulator,
@@ -2108,7 +2141,7 @@ async fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Resu
         &mut outcome_accumulator,
         &mut need_redraw,
     );
-    session_state.update_dirty(outcome.core_bridge.dirty());
+    sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
 
     if session_state.target_path().is_none() {
         eprintln!("[main][smoke] stdin startup detected, verifying save-path restriction");
@@ -2129,7 +2162,7 @@ async fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Resu
         &mut outcome_accumulator,
         &mut need_redraw,
     );
-    session_state.update_dirty(outcome.core_bridge.dirty());
+    sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
 
     let reason = process_pending_host_actions_without_runtime(
         &mut outcome,
@@ -2948,6 +2981,13 @@ fn prioritize_save_family_host_directives(
     writes
 }
 
+fn sync_session_dirty_from_core(
+    session_state: &mut saya::app::session::EditorSessionState,
+    core_bridge: &CoreBridge,
+) {
+    session_state.update_dirty_at_revision(core_bridge.dirty(), Some(core_bridge.revision()));
+}
+
 fn process_pending_host_actions_without_runtime(
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     outcome_accumulator: &mut MainOutcomeAccumulator,
@@ -2985,6 +3025,7 @@ fn process_pending_host_actions_without_runtime(
                         session_state,
                         Some(path.as_str()),
                         force,
+                        Some(current_revision),
                     );
                     *transient_msg = save_outcome.transient_message;
                     if save_outcome.wrote {
@@ -3111,6 +3152,7 @@ async fn handle_write_host_action_with_runtime(
         session_state,
         path_override,
         confirmed,
+        Some(outcome.core_bridge.revision()),
     );
     *transient_msg = save_outcome.transient_message;
     if save_outcome.wrote {
@@ -3180,8 +3222,13 @@ fn handle_directory_operation_confirmation_key_without_runtime(
     match action {
         DirectoryOperationConfirmationKeyAction::Confirm => {
             let snapshot = outcome.core_bridge.snapshot();
-            let save_outcome =
-                save_snapshot_result_with_confirmation(&snapshot.text, session_state, None, true);
+            let save_outcome = save_snapshot_result_with_confirmation(
+                &snapshot.text,
+                session_state,
+                None,
+                true,
+                Some(outcome.core_bridge.revision()),
+            );
             *transient_msg = save_outcome.transient_message;
             if save_outcome.wrote {
                 refresh_directory_buffer_after_confirmed_save(
@@ -3219,8 +3266,13 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
     match action {
         DirectoryOperationConfirmationKeyAction::Confirm => {
             let snapshot = outcome.core_bridge.snapshot();
-            let save_outcome =
-                save_snapshot_result_with_confirmation(&snapshot.text, session_state, None, true);
+            let save_outcome = save_snapshot_result_with_confirmation(
+                &snapshot.text,
+                session_state,
+                None,
+                true,
+                Some(outcome.core_bridge.revision()),
+            );
             *transient_msg = save_outcome.transient_message;
             if save_outcome.wrote {
                 refresh_directory_buffer_after_confirmed_save(
@@ -3318,7 +3370,7 @@ fn handle_directory_buffer_vfs_save_request(
         text.len()
     );
     let save_outcome =
-        save_snapshot_result_with_confirmation(&text, session_state, path_override, force);
+        save_snapshot_result_with_confirmation(&text, session_state, path_override, force, None);
     *transient_msg = save_outcome.transient_message.clone();
     let response = if save_outcome.wrote {
         CoreVfsResponse::Saved {
@@ -3454,7 +3506,13 @@ fn save_snapshot_result_with_path_override(
     session_state: &mut saya::app::session::EditorSessionState,
     path_override: Option<&str>,
 ) -> SaveSnapshotOutcome {
-    save_snapshot_result_with_confirmation(buffer_contents, session_state, path_override, false)
+    save_snapshot_result_with_confirmation(
+        buffer_contents,
+        session_state,
+        path_override,
+        false,
+        None,
+    )
 }
 
 fn save_snapshot_result_with_confirmation(
@@ -3462,6 +3520,7 @@ fn save_snapshot_result_with_confirmation(
     session_state: &mut saya::app::session::EditorSessionState,
     path_override: Option<&str>,
     confirmed: bool,
+    core_revision: Option<u64>,
 ) -> SaveSnapshotOutcome {
     let path_override = effective_host_write_path_override(session_state, path_override);
     if path_override.is_none() && session_state.directory_buffer().is_some() {
@@ -3470,7 +3529,7 @@ fn save_snapshot_result_with_confirmation(
                 Ok(plan) => match apply_directory_buffer_operation_plan(session_state, &plan) {
                     Ok(applied_count) => {
                         session_state.clear_pending_directory_operation_preview();
-                        session_state.record_save_success();
+                        session_state.record_save_success_at_revision(core_revision);
                         log::info!(
                             "[main][dired][writable] applied confirmed directory operation plan: root_path={}, operations={}",
                             plan.root_path.display(),
@@ -3572,7 +3631,7 @@ fn save_snapshot_result_with_confirmation(
     match build_save_request_for_host_write(buffer_contents, session_state, path_override) {
         Ok(req) => match write_to_path(&req) {
             SaveResult::Saved => {
-                session_state.record_save_success();
+                session_state.record_save_success_at_revision(core_revision);
                 SaveSnapshotOutcome {
                     transient_message: Some("Saved successfully".to_string()),
                     wrote: true,
@@ -4421,6 +4480,7 @@ fn execute_runtime_host_command_through_core(
                         session_state,
                         Some(path.as_str()),
                         force,
+                        Some(current_revision),
                     );
                     effect.transient_message = save_outcome.transient_message;
                     if save_outcome.wrote {
@@ -10817,7 +10877,7 @@ mod tests {
         outcome.core_bridge.dispatch_key("i").unwrap();
         outcome.core_bridge.dispatch_key("X").unwrap();
         outcome.core_bridge.dispatch_key("\x1b").unwrap();
-        session_state.update_dirty(outcome.core_bridge.dirty());
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
 
         outcome
             .core_bridge
@@ -11120,8 +11180,13 @@ mod tests {
         let preview_outcome = save_snapshot_result(edited_text, &mut session_state);
         assert!(!preview_outcome.wrote);
 
-        let apply_outcome =
-            save_snapshot_result_with_confirmation(edited_text, &mut session_state, None, true);
+        let apply_outcome = save_snapshot_result_with_confirmation(
+            edited_text,
+            &mut session_state,
+            None,
+            true,
+            None,
+        );
 
         assert_eq!(
             apply_outcome.transient_message,
@@ -11178,8 +11243,13 @@ mod tests {
         assert_eq!(preview.high_risk_count, 1);
         assert!(alpha_path.exists());
 
-        let apply_outcome =
-            save_snapshot_result_with_confirmation("beta.md\n", &mut session_state, None, true);
+        let apply_outcome = save_snapshot_result_with_confirmation(
+            "beta.md\n",
+            &mut session_state,
+            None,
+            true,
+            None,
+        );
 
         assert_eq!(
             apply_outcome.transient_message,
@@ -11344,8 +11414,13 @@ mod tests {
         let preview_outcome = save_snapshot_result("beta.md\n", &mut session_state);
         assert!(!preview_outcome.wrote);
 
-        let apply_outcome =
-            save_snapshot_result_with_confirmation("alpha.md\n", &mut session_state, None, true);
+        let apply_outcome = save_snapshot_result_with_confirmation(
+            "alpha.md\n",
+            &mut session_state,
+            None,
+            true,
+            None,
+        );
 
         assert_eq!(
             apply_outcome.transient_message,
@@ -11567,7 +11642,7 @@ mod tests {
         assert!(!preview_outcome.wrote);
 
         let apply_outcome =
-            save_snapshot_result_with_confirmation("", &mut session_state, None, true);
+            save_snapshot_result_with_confirmation("", &mut session_state, None, true, None);
 
         let message = apply_outcome
             .transient_message
@@ -13806,7 +13881,7 @@ mod tests {
         outcome.core_bridge.dispatch_key("i").unwrap();
         outcome.core_bridge.dispatch_key("X").unwrap();
         outcome.core_bridge.dispatch_key("\x1b").unwrap();
-        session_state.update_dirty(outcome.core_bridge.dirty());
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
 
         let effect = execute_runtime_host_command("exit", &mut outcome, &mut session_state)
             .expect("runtime quit-family command should succeed");
@@ -13829,6 +13904,106 @@ mod tests {
         );
 
         std::fs::remove_file(&target_path).expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn save_then_dirty_sync_keeps_normal_quit_allowed() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("save-then-quit-clean");
+        std::fs::write(&target_path, "initial\n").expect("test file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut outcome_accumulator = MainOutcomeAccumulator::default();
+        let mut transient_msg = None;
+        let mut system_warning = None;
+        let mut host_action_runtime = HostActionRuntime::default();
+        let mut runtime_presentation_intents = Vec::new();
+        let mut need_redraw = false;
+
+        outcome.core_bridge.dispatch_key("i").expect("enter insert");
+        outcome.core_bridge.dispatch_key("X").expect("insert text");
+        outcome
+            .core_bridge
+            .dispatch_key("\x1b")
+            .expect("leave insert");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
+        assert!(session_state.is_dirty(), "edit should make session dirty");
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":write")
+            .expect(":write should be accepted");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        let save_shutdown = process_pending_host_actions_with_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+            None,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            None,
+        )
+        .await;
+        assert_eq!(save_shutdown, None);
+        assert_eq!(transient_msg, Some("Saved successfully".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(&target_path).expect("saved file"),
+            "Xinitial\n"
+        );
+
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
+        assert!(
+            !session_state.is_dirty(),
+            "stale core dirty at the saved revision must not re-dirty the session"
+        );
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":quit")
+            .expect(":quit should be accepted");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
+        let quit_shutdown = process_pending_host_actions_with_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+            None,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            None,
+        )
+        .await;
+
+        assert_eq!(quit_shutdown, Some(ShutdownReason::UserQuit));
+        assert_eq!(system_warning, None);
+        std::fs::remove_file(target_path).expect("cleanup");
     }
 
     #[tokio::test(flavor = "current_thread")]

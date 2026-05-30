@@ -300,6 +300,8 @@ pub struct EditorSessionState {
     read_only: bool,
     /// 現在 dirty 状態かどうか
     dirty: bool,
+    /// 最後に保存成功として扱った CoreBridge revision。
+    last_clean_core_revision: Option<u64>,
     /// 直近の保存失敗メッセージ
     last_save_error: Option<String>,
     /// directory buffer の表示と操作対象 metadata。
@@ -387,6 +389,7 @@ impl EditorSessionState {
             resolved_theme: ResolvedTheme::default(),
             read_only,
             dirty: false,
+            last_clean_core_revision: None,
             last_save_error: None,
             directory_buffer: None,
             directory_marked_paths: BTreeSet::new(),
@@ -457,6 +460,11 @@ impl EditorSessionState {
 
     /// dirty 状態を更新する（CoreBridge の snapshot から反映する想定）。
     pub fn update_dirty(&mut self, dirty: bool) {
+        self.update_dirty_at_revision(dirty, None);
+    }
+
+    /// dirty 状態を CoreBridge の revision と合わせて更新する。
+    pub fn update_dirty_at_revision(&mut self, dirty: bool, core_revision: Option<u64>) {
         if let Some(directory_buffer) = &self.directory_buffer {
             log::debug!(
                 "[editor_session][dired] dirty update projected for directory buffer: previous={}, requested={}, root_path={}, entries={}",
@@ -468,6 +476,20 @@ impl EditorSessionState {
             self.dirty = dirty;
             return;
         }
+        let dirty = if dirty
+            && core_revision
+                .zip(self.last_clean_core_revision)
+                .is_some_and(|(revision, clean_revision)| revision <= clean_revision)
+        {
+            log::debug!(
+                "[editor_session] ignoring stale core dirty at saved revision: revision={:?}, last_clean_core_revision={:?}",
+                core_revision,
+                self.last_clean_core_revision
+            );
+            false
+        } else {
+            dirty
+        };
         log::debug!(
             "[editor_session] dirty state updated: {} -> {}",
             self.dirty,
@@ -488,8 +510,14 @@ impl EditorSessionState {
 
     /// 保存成功を記録し、dirty 状態を解除する。
     pub fn record_save_success(&mut self) {
+        self.record_save_success_at_revision(None);
+    }
+
+    /// 保存成功を CoreBridge の revision と合わせて記録する。
+    pub fn record_save_success_at_revision(&mut self, core_revision: Option<u64>) {
         log::debug!("[editor_session] save success recorded: dirty -> false");
         self.dirty = false;
+        self.last_clean_core_revision = core_revision;
         self.last_save_error = None;
     }
 
@@ -1800,6 +1828,35 @@ mod tests {
         state.record_save_success();
 
         assert!(!state.is_dirty(), "保存成功後は dirty が解除されること");
+    }
+
+    #[test]
+    fn saved_core_revision_keeps_stale_dirty_projection_clean() {
+        let mut state = EditorSessionState::new(Some(PathBuf::from("/tmp/test.txt")));
+        state.update_dirty_at_revision(true, Some(7));
+        assert!(state.is_dirty(), "保存前は dirty であること");
+
+        state.record_save_success_at_revision(Some(7));
+        state.update_dirty_at_revision(true, Some(7));
+
+        assert!(
+            !state.is_dirty(),
+            "保存済み revision の core dirty は stale として無視すること"
+        );
+    }
+
+    #[test]
+    fn newer_core_revision_can_dirty_after_save_success() {
+        let mut state = EditorSessionState::new(Some(PathBuf::from("/tmp/test.txt")));
+        state.update_dirty_at_revision(true, Some(7));
+        state.record_save_success_at_revision(Some(7));
+
+        state.update_dirty_at_revision(true, Some(8));
+
+        assert!(
+            state.is_dirty(),
+            "保存後に進んだ revision の dirty は新しい編集として反映すること"
+        );
     }
 
     #[test]

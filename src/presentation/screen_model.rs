@@ -482,6 +482,7 @@ pub struct ProjectionInput<'a> {
     pub cursor_col: usize,
     pub viewport_top: usize,
     pub body_height: usize,
+    pub dirty_override: Option<bool>,
 }
 
 impl<'a> ProjectionInput<'a> {
@@ -520,6 +521,7 @@ impl<'a> ProjectionInput<'a> {
                 .unwrap_or(snapshot.cursor_col),
             viewport_top: 0,
             body_height: usize::MAX,
+            dirty_override: None,
         }
     }
 
@@ -598,6 +600,11 @@ impl<'a> ProjectionInput<'a> {
         self.cursor_col = window.cursor_col;
         self
     }
+
+    pub fn with_dirty_override(mut self, dirty: Option<bool>) -> Self {
+        self.dirty_override = dirty;
+        self
+    }
 }
 
 pub struct WorkspaceProjectionInput<'a> {
@@ -652,7 +659,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let file_name = resolve_file_name(input.snapshot, input.session_state);
     let mode_label = mode_to_label(input.snapshot.mode);
     let cursor_style = mode_to_cursor_style(input.snapshot.mode);
-    let dirty = input.snapshot.dirty;
+    let dirty = input.dirty_override.unwrap_or(input.snapshot.dirty);
     let markdown_display = project_markdown_display_lines(input);
     let lines = markdown_display.lines;
     let line_projections = markdown_display.line_projections;
@@ -671,11 +678,13 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let message_line = message_state.as_ref().map(|state| state.text.clone());
 
     log::debug!(
-        "[screen_model] projected: file_name={:?}, mode_label={:?}, cursor_style={:?}, dirty={}, lines_count={}, cursor=({},{}), search_overlays={}, markdown_style_ranges={}, syntax_chunks={}, message_state_kind={:?}, message_line={:?}",
+        "[screen_model] projected: file_name={:?}, mode_label={:?}, cursor_style={:?}, dirty={}, snapshot_dirty={}, dirty_override={:?}, lines_count={}, cursor=({},{}), search_overlays={}, markdown_style_ranges={}, syntax_chunks={}, message_state_kind={:?}, message_line={:?}",
         file_name,
         mode_label,
         cursor_style,
         dirty,
+        input.snapshot.dirty,
+        input.dirty_override,
         lines.len(),
         cursor_row,
         cursor_col,
@@ -774,8 +783,19 @@ pub fn project_workspace(
                 .map(|viewport| viewport.top_line())
                 .unwrap_or_else(|| window.topline.saturating_sub(1));
             let is_active = active_window_id == window_id;
+            let pane_dirty = if is_active {
+                Some(input.session_state.is_dirty())
+            } else {
+                input
+                    .snapshot
+                    .buffers
+                    .iter()
+                    .find(|buffer| buffer.id == window.buf_id)
+                    .map(|buffer| buffer.dirty)
+            };
             let pane_input = ProjectionInput::new(input.snapshot, input.session_state, None)
                 .with_window(window, rect, is_active)
+                .with_dirty_override(pane_dirty)
                 .with_line_range(input.line_ranges.get(&window.id))
                 .with_visual_selection(if is_active {
                     input.visual_selection
@@ -5178,6 +5198,47 @@ mod tests {
         assert_eq!(model.panes[0].lines.len(), 12);
         assert_eq!(model.panes[0].lines[0], "    43 range-line-42");
         assert_eq!(model.panes[0].lines[11], "    54 range-line-53");
+    }
+
+    #[test]
+    fn project_workspace_uses_session_dirty_for_active_status_line() {
+        let mut snapshot = snapshot_for_projection_text("saved\n".to_string(), 0, 0, 0, 1);
+        snapshot.dirty = true;
+        snapshot.buffers[0].dirty = true;
+        let session_state = EditorSessionState::new(Some(PathBuf::from("hoge.md")));
+        let mut viewport_store = WindowViewportStore::new();
+        viewport_store.sync_from_windows(&snapshot.windows);
+        let line_ranges = BTreeMap::new();
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+        let markdown_document_maps = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &line_ranges,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            #[cfg(feature = "tree-sitter-syntax")]
+            tree_sitter_syntax: &BTreeMap::new(),
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: Some("Saved successfully"),
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 14,
+        })
+        .expect("workspace projection");
+
+        assert!(
+            !model.panes[0].dirty,
+            "active status line should use session dirty after save"
+        );
     }
 
     #[test]
