@@ -115,6 +115,7 @@ fn runtime_surface_excludes_compatibility_string_apis() {
         "saya.selector.dispose",
         "saya.completion.show",
         "saya.completion.close",
+        "saya.lsp.connect",
         "saya.plugins.loadLazy",
     ] {
         assert!(

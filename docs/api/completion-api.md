@@ -231,6 +231,35 @@ setupSayaCompletion({
 
 Set `sourceTimeoutMs` to `0` to disable this timeout.
 
+## Ranking
+
+Use `ranking` when you want the built-in sources to keep the startup-safe
+runtime path while changing candidate order. The default behavior is unchanged
+when `ranking` is omitted.
+
+```ts
+setupSayaCompletion({
+  ranking: {
+    sourcePriority: ["lsp", "path", "buffer"],
+    deepCompletionPriority: "last",
+    duplicateLabels: "preferFirstSource",
+  },
+  sources: [
+    createLspCompletionSource({ minPrefixLength: 1 }),
+    createPathCompletionSource({ minPrefixLength: 1 }),
+    createBufferWordSource({ minPrefixLength: 1 }),
+  ],
+});
+```
+
+`sourcePriority` ranks candidates by source before the fallback label sorter.
+`deepCompletionPriority: "last"` keeps deep LSP completions, such as
+`Default().Println`, but ranks them after direct and fallback candidates.
+`deepCompletionPriority: "afterDirect"` keeps deep completions after direct
+candidates within the same source priority group. Final deduplication keeps the
+first candidate for each label, so `duplicateLabels: "preferFirstSource"` works
+with `sourcePriority` to keep the preferred source.
+
 ## Filters and sorters
 
 Filters receive one source result and its query, and can remove or rewrite

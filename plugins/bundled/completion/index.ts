@@ -7,6 +7,8 @@ import type {
   SayaCompletionKeyBindings,
   SayaCompletionOptions,
   SayaCompletionQuery,
+  SayaCompletionRankingOptions,
+  SayaCompletionSorter,
   SayaCompletionSource,
   SayaCompletionSourceResult,
   SayaCompletionTriggerContext,
@@ -35,6 +37,7 @@ interface BundledCompletionRuntimeOptions {
   sourceTimeoutMs: number;
   keys?: Required<SayaCompletionKeyBindings>;
   sources: BundledCompletionSourceDescriptor[];
+  ranking?: SayaCompletionRankingOptions;
 }
 
 interface BundledCompletionAutoTriggerOptions {
@@ -64,6 +67,48 @@ export function labelSorter(
   return [...candidates].sort(compareCandidates);
 }
 
+export function rankingSorter(
+  ranking: SayaCompletionRankingOptions,
+): SayaCompletionSorter {
+  const sourceOrder = new Map(
+    (ranking.sourcePriority ?? []).map((source, index) => [
+      source,
+      index,
+    ]),
+  );
+  const sourceRank = (candidate: SayaCompletionCandidate) =>
+    sourceOrder.get(String(candidate.source ?? "")) ??
+      Number.POSITIVE_INFINITY;
+  const isDeep = (candidate: SayaCompletionCandidate) =>
+    String(candidate.source ?? "") === "lsp" &&
+    String(candidate.label ?? "").includes(".");
+  const deepRank = (candidate: SayaCompletionCandidate) =>
+    isDeep(candidate) ? 1 : 0;
+
+  return (candidates) =>
+    [...candidates].sort((left, right) => {
+      if (ranking.deepCompletionPriority === "last") {
+        const leftDeepRank = deepRank(left);
+        const rightDeepRank = deepRank(right);
+        if (leftDeepRank !== rightDeepRank) return leftDeepRank - rightDeepRank;
+      }
+
+      const leftSourceRank = sourceRank(left);
+      const rightSourceRank = sourceRank(right);
+      if (leftSourceRank !== rightSourceRank) {
+        return leftSourceRank - rightSourceRank;
+      }
+
+      if (ranking.deepCompletionPriority === "afterDirect") {
+        const leftDeepRank = deepRank(left);
+        const rightDeepRank = deepRank(right);
+        if (leftDeepRank !== rightDeepRank) return leftDeepRank - rightDeepRank;
+      }
+
+      return compareCandidates(left, right);
+    });
+}
+
 export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {
   const commandName = options.commandName ?? "completion.trigger";
   const key = options.key;
@@ -76,7 +121,8 @@ export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {
   const keys = normalizeCompletionKeys(options.keys);
   const sources = options.sources ?? [];
   const filters = options.filters ?? [prefixFilter];
-  const sorters = options.sorters ?? [labelSorter];
+  const sorters = options.sorters ??
+    (options.ranking ? [rankingSorter(options.ranking)] : [labelSorter]);
   const bundledSourceDescriptors = bundledSourceDescriptorsFor(sources);
   const canUseStartupSafeRuntimeCommand = bundledSourceDescriptors != null &&
     options.filters == null && options.sorters == null;
@@ -87,6 +133,7 @@ export async function setupSayaCompletion(options: SayaCompletionOptions = {}) {
       sourceTimeoutMs,
       keys,
       sources: bundledSourceDescriptors,
+      ranking: options.ranking,
     });
     saya.commands.register(commandName, run);
     if (key !== undefined) {
@@ -303,6 +350,7 @@ function createBundledCompletionRuntimeCommand(
   const sourceTimeoutMs = JSON.stringify(options.sourceTimeoutMs);
   const keys = JSON.stringify(options.keys);
   const sourceDescriptors = JSON.stringify(options.sources);
+  const ranking = JSON.stringify(options.ranking ?? null);
   const source = `
     return async function sayaCompletionTrigger() {
       const minPrefixLength = ${minPrefixLength};
@@ -310,6 +358,7 @@ function createBundledCompletionRuntimeCommand(
       const sourceTimeoutMs = ${sourceTimeoutMs};
       const keys = ${keys};
       const sourceDescriptors = ${sourceDescriptors};
+      const ranking = ${ranking};
       const requestIdKey = "__sayaCompletionNextRequestId";
       const triggerReasonKey = "__sayaCompletionTriggerReason";
       globalThis[requestIdKey] = Number.isFinite(Number(globalThis[requestIdKey]))
@@ -353,6 +402,35 @@ function createBundledCompletionRuntimeCommand(
           return left.label.length - right.label.length;
         }
         return left.label.localeCompare(right.label);
+      };
+      const sourcePriorityOrder = (() => {
+        const priorities = ranking && Array.isArray(ranking.sourcePriority) ? ranking.sourcePriority : [];
+        const order = new Map();
+        for (let index = 0; index < priorities.length; index += 1) {
+          order.set(String(priorities[index]), index);
+        }
+        return order;
+      })();
+      const isDeepCompletionCandidate = (candidate) =>
+        String(candidate.source ?? "") === "lsp" &&
+        String(candidate.label ?? "").includes(".");
+      const rankedCompareCandidates = (left, right) => {
+        if (!ranking) return compareCandidates(left, right);
+        const deepPriority = ranking.deepCompletionPriority ?? "default";
+        if (deepPriority === "last") {
+          const leftDeepRank = isDeepCompletionCandidate(left) ? 1 : 0;
+          const rightDeepRank = isDeepCompletionCandidate(right) ? 1 : 0;
+          if (leftDeepRank !== rightDeepRank) return leftDeepRank - rightDeepRank;
+        }
+        const leftSourceRank = sourcePriorityOrder.get(String(left.source ?? "")) ?? Number.POSITIVE_INFINITY;
+        const rightSourceRank = sourcePriorityOrder.get(String(right.source ?? "")) ?? Number.POSITIVE_INFINITY;
+        if (leftSourceRank !== rightSourceRank) return leftSourceRank - rightSourceRank;
+        if (deepPriority === "afterDirect") {
+          const leftDeepRank = isDeepCompletionCandidate(left) ? 1 : 0;
+          const rightDeepRank = isDeepCompletionCandidate(right) ? 1 : 0;
+          if (leftDeepRank !== rightDeepRank) return leftDeepRank - rightDeepRank;
+        }
+        return compareCandidates(left, right);
       };
       const uniqueByLabel = (candidates) => {
         const seen = new Set();
@@ -485,6 +563,43 @@ function createBundledCompletionRuntimeCommand(
         if (value && typeof value === "object") return documentation(field(value, "value"));
         return [];
       };
+      const lspCompletionKindName = (kind) => {
+        if (kind == null) return null;
+        const names = {
+          1: "Text",
+          2: "Method",
+          3: "Function",
+          4: "Constructor",
+          5: "Field",
+          6: "Variable",
+          7: "Class",
+          8: "Interface",
+          9: "Module",
+          10: "Property",
+          11: "Unit",
+          12: "Value",
+          13: "Enum",
+          14: "Keyword",
+          15: "Snippet",
+          16: "Color",
+          17: "File",
+          18: "Reference",
+          19: "Folder",
+          20: "EnumMember",
+          21: "Constant",
+          22: "Struct",
+          23: "Event",
+          24: "Operator",
+          25: "TypeParameter",
+        };
+        const numeric = Number(kind);
+        if (Number.isInteger(numeric) && Object.prototype.hasOwnProperty.call(names, numeric)) {
+          return names[numeric];
+        }
+        const text = String(kind).trim();
+        return text.length > 0 ? text : null;
+      };
+      const isDeepCompletionItem = (item) => String(field(item, "label") ?? "").includes(".");
       const normalizeLspItem = (item) => {
         if (!item || typeof item !== "object") return null;
         const label = String(field(item, "label") ?? "").trim();
@@ -494,7 +609,7 @@ function createBundledCompletionRuntimeCommand(
         return {
           label,
           insertText: typeof insertText === "string" ? insertText : label,
-          kind: field(item, "kind") == null ? null : String(field(item, "kind")),
+          kind: lspCompletionKindName(field(item, "kind")),
           detail: typeof field(item, "detail") === "string" ? String(field(item, "detail")) : null,
           documentation: documentation(field(item, "documentation")),
           source: "lsp",
@@ -581,7 +696,10 @@ function createBundledCompletionRuntimeCommand(
           const result = await withTimeout(query.sourceId, query.prefix, query.replaceRange, async () => {
             try {
               const response = await saya.commands.execute(query.descriptor.commandName || "lsp.completion");
-              const items = lspItems(response);
+              const includeDeepCompletions = query.descriptor.includeDeepCompletions !== false;
+              const items = lspItems(response).filter((item) =>
+                includeDeepCompletions || !isDeepCompletionItem(item)
+              );
               let replaceRange = query.replaceRange;
               for (const item of items) {
                 const range = lspRange(item);
@@ -698,7 +816,7 @@ function createBundledCompletionRuntimeCommand(
         order: Math.min(...group.map((result) => order.get(result.sourceId) ?? Number.POSITIVE_INFINITY)),
       })).sort((left, right) => left.order - right.order)[0];
       let candidates = selected.results.flatMap((result) => result.candidates);
-      candidates = uniqueByLabel(candidates.sort(compareCandidates)).slice(0, maxItems);
+      candidates = uniqueByLabel(candidates.sort(rankedCompareCandidates)).slice(0, maxItems);
       if (candidates.length === 0) return false;
       return await saya.completion.show({
         sessionId: "buffer:" + buffer.id + ":" + buffer.cursorRow + ":" + buffer.cursorCol,
@@ -859,6 +977,7 @@ export type {
   SayaCompletionOptions,
   SayaCompletionQuery,
   SayaCompletionRange,
+  SayaCompletionRankingOptions,
   SayaCompletionSource,
   SayaCompletionSourceResult,
   SayaCompletionTriggerContext,

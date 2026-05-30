@@ -75,6 +75,12 @@ export type SayaCompletionSorter = (
   result: SayaCompletionSourceResult,
 ) => SayaCompletionCandidate[];
 
+export interface SayaCompletionRankingOptions {
+  sourcePriority?: string[];
+  deepCompletionPriority?: "default" | "afterDirect" | "last";
+  duplicateLabels?: "default" | "preferFirstSource";
+}
+
 export interface SayaCompletionKeyBindings {
   confirm?: string[];
   close?: string[];
@@ -96,12 +102,14 @@ export interface SayaCompletionOptions {
   sources?: SayaCompletionSource[];
   filters?: SayaCompletionFilter[];
   sorters?: SayaCompletionSorter[];
+  ranking?: SayaCompletionRankingOptions;
 }
 
 export interface SayaLspCompletionSourceOptions {
   commandName?: string;
   sourceName?: string;
   optional?: boolean;
+  includeDeepCompletions?: boolean;
   minPrefixLength?: number;
   triggerCharacters?: string[];
 }

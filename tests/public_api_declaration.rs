@@ -112,6 +112,10 @@ fn runtime_public_api_type_declaration_covers_formal_execution_surface() {
     assert!(declaration.contains("close(): Promise<boolean>"));
     assert!(declaration.contains("editor"));
     assert!(declaration.contains("filer"));
+    assert!(declaration.contains("lsp"));
+    assert!(declaration.contains("SayaRuntimeLspSurface"));
+    assert!(declaration.contains("connect(options: SayaLspConnectOptions)"));
+    assert!(declaration.contains("interface SayaRuntimeLspClient"));
     assert!(declaration.contains("lsif"));
     assert!(declaration.contains("SayaRuntimeLsifSurface"));
     assert!(declaration.contains("SayaLsifRuntimeBridgeRequest"));

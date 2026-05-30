@@ -9,8 +9,10 @@ feature set, LSIF support, and headless verification commands.
 The LSP preview is split across a TypeScript plugin and host-mediated runtime
 capabilities. Startup code declares language server configuration. At runtime,
 the bundled plugin owns server selection, JSON-RPC request construction,
-response interpretation, and UI routing. It uses `saya.process.spawn()` for
-language server process I/O and `saya.lsif.request()` for LSIF lookup.
+response interpretation, and UI routing. The Rust host owns language server
+startup, stdio transport, JSON-RPC response routing, lifecycle cleanup, and
+permission checks through the managed `saya.lsp.connect()` session API. LSIF
+lookup remains separate through `saya.lsif.request()`.
 
 ## Startup setup
 
@@ -96,14 +98,22 @@ setupSayaLspClient({
 
 When the current buffer path ends in `.go`, the plugin resolves the language ID
 to `go`, picks the `gopls` server definition, finds the nearest workspace root,
-and sends live server requests through its TypeScript-side session manager.
+and sends live server requests through a host-managed LSP session.
 
 ## Runtime boundary
 
-The TypeScript plugin owns the current live LSP session manager. It starts the
-configured language server through the host-mediated `saya.process.spawn()`
-surface, writes and reads LSP JSON-RPC messages over piped stdio, and keeps
-long-running server work outside the startup layer.
+The runtime boundary is a managed LSP session API, not the old single-call
+`saya.lsp.request` bridge and not a general `saya.process.spawn()` contract.
+The TypeScript plugin selects a server and builds the LSP payloads. It then
+calls `saya.lsp.connect({ server, initializeParams })` to open a host-owned
+session. The returned client exposes `request(method, params)`,
+`notify(method, params)`, `takeNotifications()`, and `close()`.
+
+The Rust host validates the selected server definition, starts the language
+server with piped stdio, owns JSON-RPC framing and response routing, queues
+server notifications, and cleans up the process when the session closes or the
+runtime stops. This keeps arbitrary process management out of the LSP preview
+contract while preserving TypeScript-level policy and UI flexibility.
 
 The live request construction includes these important inputs.
 
@@ -115,11 +125,10 @@ The live request construction includes these important inputs.
 - `buffer` and `editor`, as read-only snapshots used to compute document URIs
   and LSP positions.
 
-For live LSP requests, the TypeScript session manager reuses one initialized
-server session for each workspace and server definition, queues work until
-initialization completes, routes responses by JSON-RPC request ID, redacts
-document text from diagnostics, and shuts the process down with `shutdown`
-followed by `exit`.
+For live LSP requests, the TypeScript manager reuses one initialized managed
+session for each server definition, queues work until initialization completes,
+redacts document text from diagnostics, and shuts the server down with
+`shutdown`, `exit`, and `close()`.
 
 LSIF lookup remains host-side and uses the runtime `saya.lsif.request()`
 surface.
@@ -187,7 +196,7 @@ is stabilized.
 These features are implemented and covered by host-side or bridge contract
 tests.
 
-- LSP 3.17 `Content-Length` JSON-RPC framing.
+- Host-managed LSP 3.17 `Content-Length` JSON-RPC framing.
 - `initialize`, `initialized`, `shutdown`, and `exit` lifecycle handling.
 - `textDocument/didOpen`, `textDocument/didChange`, `textDocument/didSave`, and
   `textDocument/didClose` using full-document synchronization.
@@ -206,7 +215,7 @@ tests.
 - Workspace root detection through runtime `saya.workspace.findRoot()`.
 - Multiple language server definitions selected by language ID or file pattern.
 - UTF-16, UTF-8, and UTF-32 position encoding conversion.
-- Structured diagnostic events for process lifecycle, JSON-RPC requests,
+- Structured diagnostic events for managed session lifecycle, JSON-RPC requests,
   notifications, responses, timeout, shutdown, and session dispatch.
 
 ### Partially supported
@@ -278,10 +287,9 @@ ignored tests.
 
 ### Public TypeScript API compatibility
 
-The preview documents `setupSayaLspClient()` and the current process-backed
-TypeScript session manager as provisional API. Before documenting the API as
-stable, review these compatibility points and update this page if any point
-changes:
+The preview documents `setupSayaLspClient()` and the managed LSP session API
+as provisional API. Before documenting the API as stable, review these
+compatibility points and update this page if any point changes:
 
 - Keep the LSP setup options, command names, keymap defaults, server selection
   rules, lifecycle event names, and LSIF request fields backward-compatible
@@ -339,9 +347,9 @@ gtimeout 240s cargo test --no-run
 ```
 
 The `saya_lsp_e2e` test uses a local Perl fake server. It validates initialize,
-hover, shutdown, and process-backed routing without requiring `gopls` or network
-access. Use ad hoc local `gopls` smoke testing only as extra manual confidence;
-fake-server tests remain the deterministic protocol coverage.
+hover, shutdown, and managed-session routing without requiring `gopls` or
+network access. Use ad hoc local `gopls` smoke testing only as extra manual
+confidence; fake-server tests remain the deterministic protocol coverage.
 
 ## Next steps
 

@@ -189,6 +189,34 @@ declare global {
         request(payload: SayaLsifRuntimeBridgeRequest): Promise<SayaLsifRuntimeBridgeResponse>;
     }
 
+    interface SayaLspServerDefinition {
+        name: string;
+        command: string;
+        args?: string[];
+        env?: Record<string, string>;
+        cwd?: string | null;
+        rootMarkers?: string[];
+        initializationOptions?: unknown;
+    }
+
+    interface SayaLspConnectOptions {
+        server: SayaLspServerDefinition;
+        initializeParams: unknown;
+    }
+
+    interface SayaRuntimeLspClient {
+        readonly id: number;
+        readonly initializeResult: unknown;
+        takeNotifications(): unknown[];
+        request(method: string, params?: unknown): Promise<unknown>;
+        notify(method: string, params?: unknown): Promise<void>;
+        close(): Promise<void>;
+    }
+
+    interface SayaRuntimeLspSurface {
+        connect(options: SayaLspConnectOptions): Promise<SayaRuntimeLspClient>;
+    }
+
     interface SayaInputPromptOptions {
         title: string;
         placeholder?: string | null;
@@ -601,6 +629,7 @@ declare global {
         workspace: SayaRuntimeWorkspaceSurface;
         fs: SayaRuntimeFsSurface;
         filer: SayaRuntimeFilerSurface;
+        lsp: SayaRuntimeLspSurface;
         lsif: SayaRuntimeLsifSurface;
         input: SayaRuntimeInputSurface;
         selector: SayaRuntimeSelectorSurface;

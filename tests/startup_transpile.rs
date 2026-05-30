@@ -650,7 +650,8 @@ fn lsp_client_manager_routes_server_notifications_to_ui_commands() {
     let source = std::fs::read_to_string(plugin_path).expect("lsp client should be readable");
 
     assert!(
-        source.contains("session.onNotification(function (message)")
+        source.contains("const session = await saya.lsp.connect")
+            && source.contains("session.takeNotifications()")
             && source.contains("pendingNotifications.push")
             && source.contains("api.drainNotifications")
             && source.contains("for (const notification of manager.drainNotifications())")

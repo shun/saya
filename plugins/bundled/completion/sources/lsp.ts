@@ -28,6 +28,41 @@ function normalizeDocumentation(documentation: unknown): string[] {
   return [];
 }
 
+function completionItemKindName(kind: unknown): string | null {
+  if (kind == null) return null;
+  const names: Record<number, string> = {
+    1: "Text",
+    2: "Method",
+    3: "Function",
+    4: "Constructor",
+    5: "Field",
+    6: "Variable",
+    7: "Class",
+    8: "Interface",
+    9: "Module",
+    10: "Property",
+    11: "Unit",
+    12: "Value",
+    13: "Enum",
+    14: "Keyword",
+    15: "Snippet",
+    16: "Color",
+    17: "File",
+    18: "Reference",
+    19: "Folder",
+    20: "EnumMember",
+    21: "Constant",
+    22: "Struct",
+    23: "Event",
+    24: "Operator",
+    25: "TypeParameter",
+  };
+  const numeric = Number(kind);
+  if (Number.isInteger(numeric) && names[numeric]) return names[numeric];
+  const text = String(kind).trim();
+  return text.length > 0 ? text : null;
+}
+
 function normalizeCompletionItem(
   item: unknown,
   sourceName: string,
@@ -44,13 +79,18 @@ function normalizeCompletionItem(
   return {
     label,
     insertText: typeof insertText === "string" ? insertText : label,
-    kind: field(item, "kind") == null ? null : String(field(item, "kind")),
+    kind: completionItemKindName(field(item, "kind")),
     detail: typeof field(item, "detail") === "string"
       ? String(field(item, "detail"))
       : null,
     documentation: normalizeDocumentation(field(item, "documentation")),
     source: sourceName,
   };
+}
+
+function isDeepCompletionItem(item: unknown): boolean {
+  const label = String(field(item, "label") ?? "");
+  return label.includes(".");
 }
 
 function completionItemsFromResponse(response: unknown): unknown[] {
@@ -110,6 +150,7 @@ export function createLspCompletionSource(
   const commandName = options.commandName ?? "lsp.completion";
   const sourceName = options.sourceName ?? "lsp";
   const optional = options.optional ?? true;
+  const includeDeepCompletions = options.includeDeepCompletions ?? true;
   return {
     id: sourceName,
     minPrefixLength: options.minPrefixLength,
@@ -119,6 +160,7 @@ export function createLspCompletionSource(
       id: sourceName,
       commandName,
       optional,
+      includeDeepCompletions,
       minPrefixLength: options.minPrefixLength,
       triggerCharacters: options.triggerCharacters,
     },
@@ -134,7 +176,9 @@ export function createLspCompletionSource(
     async complete(query): Promise<SayaCompletionSourceResult> {
       try {
         const response = await saya.commands.execute(commandName);
-        const items = completionItemsFromResponse(response);
+        const items = completionItemsFromResponse(response).filter((item) =>
+          includeDeepCompletions || !isDeepCompletionItem(item)
+        );
         const replaceRange = chooseLspReplaceRange(
           items,
           query.replaceRange,

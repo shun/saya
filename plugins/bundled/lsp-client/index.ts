@@ -617,7 +617,7 @@ function namespaceToSource(varName, ns) {
 // - request.server が無い / command が無い: bridge fallback
 // - method === "initialize": getOrStart 経由で session を起動し、capability を返す
 // - method === "initialized" / "exit": 既に start / shutdown 内で送出済みなので no-op
-// - method === "shutdown": session.shutdown() を呼ぶ
+// - method === "shutdown": shutdown request → exit notify → close を呼ぶ
 // - method が "textDocument/did*" で response 不要: notify
 // - その他: request して result を返す
 const __lspManagerSourceTemplate =
@@ -633,21 +633,14 @@ const __lspManagerSourceTemplate =
   "  const inflightCancels = new Map();\n" +
   "  function spawnSession(serverConfig, initializeParams) {\n" +
   "    const promise = (async function () {\n" +
-  "      const spec = {};\n" +
-  "      spec.command = serverConfig.command;\n" +
-  "      spec.args = serverConfig.args || [];\n" +
-  "      spec.env = serverConfig.env || {};\n" +
-  "      spec.cwd = serverConfig.cwd || null;\n" +
-  "      spec.stdin = 'piped';\n" +
-  "      spec.stdout = 'piped';\n" +
-  "      spec.stderr = 'piped';\n" +
-  "      const child = await saya.process.spawn(spec);\n" +
-  "      const transport = __lspTransport.createFromProcess(child);\n" +
-  "      const session = __lspSession.create(transport, {});\n" +
-  "      session.onNotification(function (message) {\n" +
-  "        pendingNotifications.push({ source: 'lsp', method: message && message.method, params: message && message.params, result: message });\n" +
-  "      });\n" +
-  "      const initializeResult = await session.start(initializeParams);\n" +
+  "      if (!saya.lsp || typeof saya.lsp.connect !== 'function') {\n" +
+  "        throw new Error('saya.lsp.connect is required for managed LSP sessions');\n" +
+  "      }\n" +
+  "      const session = await saya.lsp.connect({ server: serverConfig, initializeParams });\n" +
+  "      for (const notification of session.takeNotifications()) {\n" +
+  "        pendingNotifications.push({ source: 'lsp', method: notification && notification.method, params: notification && notification.params, result: notification });\n" +
+  "      }\n" +
+  "      const initializeResult = session.initializeResult || {};\n" +
   "      initializeResults.set(serverConfig.name, initializeResult);\n" +
   "      return session;\n" +
   "    })();\n" +
@@ -745,7 +738,9 @@ const __lspManagerSourceTemplate =
   "        for (let i = 0; i < staleKeys.length; i = i + 1) {\n" +
   "          supersedePreviousInflight(staleKeys[i]);\n" +
   "        }\n" +
-  "        await session.shutdown();\n" +
+  "        await session.request('shutdown', null);\n" +
+  "        await session.notify('exit', null);\n" +
+  "        await session.close();\n" +
   "        sessions.delete(request.server.name);\n" +
   "        initializeResults.delete(request.server.name);\n" +
   "        const r = {};\n" +
@@ -760,6 +755,9 @@ const __lspManagerSourceTemplate =
   "        || method === 'textDocument/didClose';\n" +
   "      if (isNotification) {\n" +
   "        await session.notify(method, request.params);\n" +
+  "        for (const notification of session.takeNotifications()) {\n" +
+  "          pendingNotifications.push({ source: 'lsp', method: notification && notification.method, params: notification && notification.params, result: notification });\n" +
+  "        }\n" +
   "        const r = {};\n" +
   "        r.source = 'lsp';\n" +
   "        r.method = method;\n" +
@@ -778,6 +776,9 @@ const __lspManagerSourceTemplate =
   "      }\n" +
   "      try {\n" +
   "        const result = await session.request(method, request.params, requestOptions);\n" +
+  "        for (const notification of session.takeNotifications()) {\n" +
+  "          pendingNotifications.push({ source: 'lsp', method: notification && notification.method, params: notification && notification.params, result: notification });\n" +
+  "        }\n" +
   "        if (cancellable && inflightCancels.get(cancelKey) === token) {\n" +
   "          inflightCancels.delete(cancelKey);\n" +
   "        }\n" +
@@ -815,7 +816,7 @@ const __lspManagerSourceTemplate =
   "    for (let i = 0; i < all.length; i = i + 1) {\n" +
   "      try {\n" +
   "        const s = await all[i];\n" +
-  "        await s.shutdown();\n" +
+  "        await s.close();\n" +
   "      } catch (_err) {\n" +
   "        // best-effort\n" +
   "      }\n" +

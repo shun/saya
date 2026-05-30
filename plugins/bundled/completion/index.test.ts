@@ -894,6 +894,12 @@ Deno.test("LSP source maps completion response into typed completion menu", asyn
             newText: "println($0)",
           },
         },
+        {
+          label: "logger.Println",
+          insertText: "logger.Println($0)",
+          kind: 2,
+          detail: "func(v ...any)",
+        },
       ],
     },
   });
@@ -932,6 +938,97 @@ Deno.test("LSP source maps completion response into typed completion menu", asyn
     throw new Error(
       `unexpected insertText: ${request.candidates[0].insertText}`,
     );
+  }
+  if (request.candidates[0].kind !== "Function") {
+    throw new Error(`unexpected candidate kind: ${request.candidates[0].kind}`);
+  }
+  if (
+    !request.candidates.some((candidate: any) =>
+      candidate.label === "logger.Println"
+    )
+  ) {
+    throw new Error(
+      `deep completion should be included by default: ${
+        JSON.stringify(request.candidates)
+      }`,
+    );
+  }
+});
+
+Deno.test("LSP source can hide deep completion candidates", async () => {
+  const fake = installSayaFake({
+    method: "textDocument/completion",
+    result: {
+      items: [
+        { label: "Println", kind: 3, detail: "func(v ...any)" },
+        {
+          label: "Default().Println",
+          kind: 2,
+          detail: "func(v ...any)",
+        },
+      ],
+    },
+  }, {
+    cursorCol: 3,
+    currentLine: "Pri",
+    text: "Pri\n",
+  });
+
+  await setupSayaCompletion({
+    sources: [createLspCompletionSource({ includeDeepCompletions: false })],
+    sourceTimeoutMs: 0,
+  });
+  await fake.registered.get("completion.trigger")?.();
+
+  const labels = (fake.shown[0] as any).candidates.map((candidate: any) =>
+    candidate.label
+  );
+  if (JSON.stringify(labels) !== JSON.stringify(["Println"])) {
+    throw new Error(`unexpected filtered labels: ${JSON.stringify(labels)}`);
+  }
+});
+
+Deno.test("ranking can prefer LSP direct candidates and keep deep completion last", async () => {
+  const fake = installSayaFake({
+    method: "textDocument/completion",
+    result: {
+      items: [
+        { label: "Print", kind: 3, detail: "func(v ...any)" },
+        {
+          label: "Default().Print",
+          kind: 2,
+          detail: "func(v ...any)",
+        },
+      ],
+    },
+  }, {
+    cursorCol: 3,
+    currentLine: "Pri",
+    text: "Pri\nPrintln\nPrinter\n",
+  });
+
+  await setupSayaCompletion({
+    sources: [
+      createLspCompletionSource({ minPrefixLength: 1 }),
+      createBufferWordSource({ minPrefixLength: 1 }),
+    ],
+    ranking: {
+      sourcePriority: ["lsp", "buffer"],
+      deepCompletionPriority: "last",
+      duplicateLabels: "preferFirstSource",
+    },
+    sourceTimeoutMs: 0,
+  });
+  await fake.registered.get("completion.trigger")?.();
+
+  const labels = (fake.shown[0] as any).candidates.map((candidate: any) =>
+    candidate.label
+  );
+  if (
+    JSON.stringify(labels) !==
+      JSON.stringify(["Print", "Println", "Printer", "Default().Print"])
+  ) {
+    throw new Error(`unexpected ranked labels: ${JSON.stringify(labels)}`);
   }
 });
 

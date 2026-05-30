@@ -339,6 +339,7 @@ fn runtime_surface_excludes_filesystem_and_network_capabilities() {
             "panel",
             "editor",
             "filer",
+            "lsp",
             "lsif",
             "input",
             "selector",

@@ -75,16 +75,58 @@ The method returns a path string when a marker matches and `null` when no marker
 is found. The LSP preview plugin uses this API to resolve per-server workspace
 roots from marker lists such as `go.mod`, `Cargo.toml`, and `.git`.
 
-## LSIF
+## LSP and LSIF
 
-The LSIF surface exposes one typed host bridge for preview LSIF lookup. Live
-LSP commands currently go through the bundled LSP plugin's TypeScript manager,
-which uses `saya.process.spawn()` for language server process I/O and
-`saya.lsif.request()` for LSIF lookup.
+The LSP surface exposes a narrow managed session capability for preview live
+language server integration. The bundled LSP plugin uses it after selecting a
+server and constructing protocol payloads. The host owns server startup, stdio
+transport, JSON-RPC framing, lifecycle cleanup, and validation. TypeScript owns
+server selection, feature policy, response interpretation, and UI routing.
+
+The LSIF surface remains a separate typed host bridge for preview static index
+lookup.
 
 > **Note:** This is a preview feature currently under active development. See
 > [LSP preview](lsp-preview.md) for setup examples, the feature support matrix,
-> LSIF limitations, and verification commands.
+> managed-session details, LSIF limitations, and verification commands.
+
+### `saya.lsp.connect(options)`
+
+Use this method to open a host-managed LSP session. Most users call it
+indirectly through `setupSayaLspClient()` from the bundled LSP plugin.
+
+```ts
+const client = await saya.lsp.connect({
+  server: {
+    name: "gopls",
+    command: "gopls",
+    args: ["serve"],
+    rootMarkers: ["go.mod", ".git"],
+  },
+  initializeParams: {
+    processId: null,
+    rootUri: "file:///workspace",
+    capabilities: {},
+  },
+});
+
+const hover = await client.request("textDocument/hover", {
+  textDocument: { uri: "file:///workspace/main.go" },
+  position: { line: 0, character: 0 },
+});
+
+for (const notification of client.takeNotifications()) {
+  console.log(notification);
+}
+
+await client.notify("exit", null);
+await client.close();
+```
+
+The returned client exposes `request(method, params)`,
+`notify(method, params)`, `takeNotifications()`, and `close()`. The host keeps
+the child process and transport private to the session. Use this capability for
+LSP integration instead of building LSP on top of `saya.process.spawn()`.
 
 ### `saya.lsif.request(payload)`
 
@@ -367,7 +409,8 @@ Use `saya.completion.close()` to close the active completion menu.
 ## Process
 
 The process surface is a preview capability used by bundled runtime plugins
-that need host-mediated process I/O.
+that need host-mediated process I/O. It is not the stable foundation for LSP;
+use `saya.lsp.connect()` for language server sessions.
 
 ### `saya.process.spawn(spec)`
 

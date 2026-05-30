@@ -128,8 +128,8 @@ setupSayaLspClient({
 server definition names the executable command, optional arguments,
 initialization options, language IDs, file patterns, and workspace root markers.
 At runtime, the plugin selects the matching server for the current buffer,
-detects the workspace root through the narrow runtime workspace API, and runs
-the selected server through the process-backed runtime manager.
+detects the workspace root through the narrow runtime workspace API, and opens
+the selected server through the managed `saya.lsp.connect()` runtime API.
 
 The default command names are:
 

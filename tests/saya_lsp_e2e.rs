@@ -1,19 +1,17 @@
-//! Phase B end-to-end integration: TS LSP プラグインが
-//! `useProcessManager: true` で起動された時、`saya.process.spawn(...)`
-//! 経由で実サーバを起こし、JSON-RPC over stdio で hover が動くことを
-//! 検証する。
+//! Managed LSP session end-to-end integration: TS LSP プラグインが
+//! `saya.lsp.connect(...)` 経由で Rust host 管理のサーバ session を開き、
+//! JSON-RPC over stdio で hover が動くことを検証する。
 //!
 //! 仕組み:
 //! - tmp dir に perl 製の fake LSP server スクリプトを書く
-//! - `setupSayaLspClient` で `useProcessManager: true` と `command: "perl"`,
-//!   `args: [<script path>]` を設定する
+//! - `setupSayaLspClient` で `command: "perl"` と `args: [<script path>]` を設定する
 //! - `prepare_init_module` → `collect_startup_registry` → `spawn_from_seed`
 //! - `lsp.hover` コマンドを execute し、ホスト bridge が `lsp.floatHover ...`
 //!   コマンドを観測することで応答ルーティングが完結したことを確認する
 //!
-//! 旧 `saya.lsp.request` を一切経由しないことが重要。host bridge の
-//! `execute_lsp_request` 実装は呼ばれた時点で panic させ、新経路だけが
-//! 使われていることを保証する。
+//! 旧 `saya.lsp.request` と汎用 `saya.process.spawn` 依存を一切経由しないことが
+//! 重要。host bridge の LSIF bridge 実装は呼ばれた時点で panic させ、
+//! managed session 経路だけが使われていることを保証する。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -129,9 +127,9 @@ while (defined(my $message = read_message())) {
 }
 "#;
 
-/// 旧 `saya.lsp.request` 経路が呼ばれたら即 panic するホスト bridge。
-/// host コマンド呼び出しは記録する。新経路 (manager) だけが使われている
-/// ことを保証する。
+/// LSIF bridge 経路が呼ばれたら即 panic するホスト bridge。
+/// host コマンド呼び出しは記録する。managed LSP session 経路だけが
+/// 使われていることを保証する。
 struct ManagerOnlyHostBridge {
     host_commands: Arc<StdMutex<Vec<String>>>,
     buffer: Arc<StdMutex<ReadonlyBufferSnapshot>>,
@@ -194,12 +192,12 @@ impl HostCapabilityBridge for ManagerOnlyHostBridge {
     }
 }
 
-/// Phase B E2E: useProcessManager で hover が saya.process 経由で動くこと。
+/// Managed-session E2E: hover が `saya.lsp.connect` 経由で動くこと。
 ///
-/// 旧 saya.lsp.request 経路が呼ばれたら ManagerOnlyHostBridge が panic
-/// するため、新経路だけが使われていることが GREEN の証拠になる。
+/// 旧 bridge 経路が呼ばれたら ManagerOnlyHostBridge が panic するため、
+/// managed session 経路だけが使われていることが GREEN の証拠になる。
 #[tokio::test(flavor = "current_thread")]
-async fn manager_e2e_hover_via_saya_process_with_perl_fake_server() {
+async fn manager_e2e_hover_via_managed_lsp_session_with_perl_fake_server() {
     // 1. workspace + fake server script + ターゲットファイルを作る
     let workspace = unique_path("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
@@ -219,7 +217,6 @@ async fn manager_e2e_hover_via_saya_process_with_perl_fake_server() {
             r#"
                 import {{ setupSayaLspClient }} from "{plugin}";
                 setupSayaLspClient({{
-                    useProcessManager: true,
                     clientName: "saya-e2e",
                     rootUri: "{root}",
                     languageIdByExtension: {{ go: "go" }},

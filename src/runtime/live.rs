@@ -10,6 +10,7 @@ use std::thread;
 use deno_core::{JsBuffer, JsRuntime, OpState, RuntimeOptions, op2};
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -22,6 +23,10 @@ use crate::features::selector::runtime::{
     RuntimeSelectorUpdateRequest, SelectorViewBackend, parse_rg_vimgrep_output,
 };
 use crate::runtime::callback_registry_seed::CallbackRegistrySeed;
+use crate::runtime::lsp_session::{
+    ManagedLspConnectRequest, ManagedLspConnectResponse, ManagedLspNotifyResponse,
+    ManagedLspRequestResponse, ManagedLspSessionError, ManagedLspSessionPool,
+};
 use crate::runtime::process_pool::{ProcessPool, ProcessPoolError, ProcessSpec, StdioMode};
 #[cfg(test)]
 use crate::runtime::startup::{
@@ -64,6 +69,7 @@ const RUNTIME_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.filer.clearMarks",
     "saya.filer.bulkDeletePreview",
     "saya.filer.bulkDelete",
+    "saya.lsp.connect",
     "saya.lsif.request",
     "saya.input.prompt",
     "saya.selector.open",
@@ -297,6 +303,26 @@ globalThis.saya = {
             return Deno.core.ops.op_runtime_lsif_request(JSON.stringify(payload ?? {}));
         },
     },
+    lsp: {
+        async connect(options) {
+            const server = options?.server ?? {};
+            const request = {
+                server: {
+                    name: String(server?.name ?? ""),
+                    command: String(server?.command ?? ""),
+                    args: Array.isArray(server?.args) ? server.args.map((arg) => String(arg)) : [],
+                    env: server?.env && typeof server.env === "object" ? server.env : {},
+                    cwd: server?.cwd === undefined || server?.cwd === null ? null : String(server.cwd),
+                    rootMarkers: Array.isArray(server?.rootMarkers) ? server.rootMarkers.map((marker) => String(marker)) : [],
+                    initializationOptions: server?.initializationOptions ?? null,
+                },
+                initializeParams: options?.initializeParams ?? {},
+            };
+            console.info(`[saya.lsp] connect server=${request.server.name} command=${request.server.command}`);
+            const connected = await Deno.core.ops.op_runtime_lsp_connect(JSON.stringify(request));
+            return makeLspClient(connected);
+        },
+    },
     input: {
         async prompt(options) {
             const request = {
@@ -428,11 +454,42 @@ function makeProcessHandle(id) {
     return Object.freeze(handle);
 }
 
+function makeLspClient(connected) {
+    const id = Number(connected?.sessionId ?? 0);
+    const client = {
+        id,
+        initializeResult: connected?.initializeResult ?? null,
+        takeNotifications() {
+            const notifications = Array.isArray(connected?.notifications) ? connected.notifications : [];
+            connected.notifications = [];
+            return notifications;
+        },
+        async request(method, params) {
+            const response = await Deno.core.ops.op_runtime_lsp_request(id, String(method), JSON.stringify(params ?? null));
+            if (Array.isArray(response?.notifications) && response.notifications.length > 0) {
+                connected.notifications = (connected.notifications ?? []).concat(response.notifications);
+            }
+            return response?.result ?? null;
+        },
+        async notify(method, params) {
+            const response = await Deno.core.ops.op_runtime_lsp_notify(id, String(method), JSON.stringify(params ?? null));
+            if (Array.isArray(response?.notifications) && response.notifications.length > 0) {
+                connected.notifications = (connected.notifications ?? []).concat(response.notifications);
+            }
+        },
+        async close() {
+            await Deno.core.ops.op_runtime_lsp_close(id);
+        },
+    };
+    return Object.freeze(client);
+}
+
 Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.buffer);
 Object.freeze(globalThis.saya.window);
 Object.freeze(globalThis.saya.editor);
 Object.freeze(globalThis.saya.filer);
+Object.freeze(globalThis.saya.lsp);
 Object.freeze(globalThis.saya.lsif);
 Object.freeze(globalThis.saya.input);
 Object.freeze(globalThis.saya.selector);
@@ -496,6 +553,7 @@ const RUNTIME_PUBLIC_SURFACE_NAMES: &[&str] = &[
     "panel",
     "editor",
     "filer",
+    "lsp",
     "lsif",
     "input",
     "selector",
@@ -693,6 +751,34 @@ declare global {
 
     interface SayaRuntimeLsifSurface {
         request(payload: SayaLsifRuntimeBridgeRequest): Promise<SayaLsifRuntimeBridgeResponse>;
+    }
+
+    interface SayaLspServerDefinition {
+        name: string;
+        command: string;
+        args?: string[];
+        env?: Record<string, string>;
+        cwd?: string | null;
+        rootMarkers?: string[];
+        initializationOptions?: unknown;
+    }
+
+    interface SayaLspConnectOptions {
+        server: SayaLspServerDefinition;
+        initializeParams: unknown;
+    }
+
+    interface SayaRuntimeLspClient {
+        readonly id: number;
+        readonly initializeResult: unknown;
+        takeNotifications(): unknown[];
+        request(method: string, params?: unknown): Promise<unknown>;
+        notify(method: string, params?: unknown): Promise<void>;
+        close(): Promise<void>;
+    }
+
+    interface SayaRuntimeLspSurface {
+        connect(options: SayaLspConnectOptions): Promise<SayaRuntimeLspClient>;
     }
 
     interface SayaInputPromptOptions {
@@ -1107,6 +1193,7 @@ declare global {
         workspace: SayaRuntimeWorkspaceSurface;
         fs: SayaRuntimeFsSurface;
         filer: SayaRuntimeFilerSurface;
+        lsp: SayaRuntimeLspSurface;
         lsif: SayaRuntimeLsifSurface;
         input: SayaRuntimeInputSurface;
         selector: SayaRuntimeSelectorSurface;
@@ -1933,6 +2020,11 @@ struct LiveRuntimeOpState {
     /// Bootstrap script の `saya.process.spawn(...)` ラッパおよびテスト
     /// 用 `Deno.core.ops.op_process_*` から参照される。
     process_pool: Arc<crate::runtime::process_pool::ProcessPool>,
+    /// LSP 専用の managed session capability。
+    ///
+    /// TypeScript plugin は server selection と request construction を
+    /// 維持しつつ、process lifecycle と JSON-RPC transport はここへ委譲する。
+    lsp_session_pool: Arc<ManagedLspSessionPool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -2963,6 +3055,87 @@ fn process_pool_error_to_js_error(error: ProcessPoolError) -> JsErrorBox {
     JsErrorBox::generic(error.to_string())
 }
 
+fn managed_lsp_error_to_js_error(error: ManagedLspSessionError) -> JsErrorBox {
+    JsErrorBox::generic(error.to_string())
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_lsp_connect(
+    state: Rc<RefCell<OpState>>,
+    #[string] request_json: String,
+) -> Result<ManagedLspConnectResponse, JsErrorBox> {
+    let request =
+        serde_json::from_str::<ManagedLspConnectRequest>(&request_json).map_err(|error| {
+            log::debug!("[saya_live_runtime][lsp] connect rejected: invalid request json: {error}");
+            JsErrorBox::generic(format!("invalid LSP connect request: {error}"))
+        })?;
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .lsp_session_pool
+        .clone();
+    pool.connect(request)
+        .await
+        .map_err(managed_lsp_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_lsp_request(
+    state: Rc<RefCell<OpState>>,
+    #[smi] session_id: u32,
+    #[string] method: String,
+    #[string] params_json: String,
+) -> Result<ManagedLspRequestResponse, JsErrorBox> {
+    let params = serde_json::from_str::<Value>(&params_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid LSP request params: {error}")))?;
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .lsp_session_pool
+        .clone();
+    pool.request(session_id, method, params)
+        .await
+        .map_err(managed_lsp_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+#[serde]
+async fn op_runtime_lsp_notify(
+    state: Rc<RefCell<OpState>>,
+    #[smi] session_id: u32,
+    #[string] method: String,
+    #[string] params_json: String,
+) -> Result<ManagedLspNotifyResponse, JsErrorBox> {
+    let params = serde_json::from_str::<Value>(&params_json).map_err(|error| {
+        JsErrorBox::generic(format!("invalid LSP notification params: {error}"))
+    })?;
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .lsp_session_pool
+        .clone();
+    pool.notify(session_id, method, params)
+        .await
+        .map_err(managed_lsp_error_to_js_error)
+}
+
+#[op2(async(deferred), fast)]
+async fn op_runtime_lsp_close(
+    state: Rc<RefCell<OpState>>,
+    #[smi] session_id: u32,
+) -> Result<(), JsErrorBox> {
+    let pool = state
+        .borrow()
+        .borrow::<LiveRuntimeOpState>()
+        .lsp_session_pool
+        .clone();
+    pool.close(session_id)
+        .await
+        .map_err(managed_lsp_error_to_js_error)
+}
+
 /// Phase A.2: 子プロセスを spawn し、ハンドル ID を返す。
 ///
 /// `spec_json` は `RuntimeProcessSpec` の JSON 表現。`stdin`/`stdout`/
@@ -3152,6 +3325,10 @@ deno_core::extension!(
         op_runtime_execute_host_command,
         op_runtime_plugin_load_lazy,
         op_runtime_lsif_request,
+        op_runtime_lsp_connect,
+        op_runtime_lsp_request,
+        op_runtime_lsp_notify,
+        op_runtime_lsp_close,
         op_runtime_completion_show,
         op_runtime_completion_close,
         op_runtime_input_prompt,
@@ -3203,12 +3380,14 @@ deno_core::extension!(
         bridge: Arc<dyn HostCapabilityBridge>,
         selector_sessions: Arc<StdMutex<RuntimeSelectorSessions>>,
         process_pool: Arc<ProcessPool>,
+        lsp_session_pool: Arc<ManagedLspSessionPool>,
     },
     state = |state, options| {
         state.put(LiveRuntimeOpState {
             bridge: options.bridge,
             selector_sessions: options.selector_sessions,
             process_pool: options.process_pool,
+            lsp_session_pool: options.lsp_session_pool,
         });
     }
 );
@@ -3723,6 +3902,7 @@ fn create_seed_runtime(
         JsRuntime,
         SeedRuntimeMetadata,
         Arc<ProcessPool>,
+        Arc<ManagedLspSessionPool>,
         Arc<StdMutex<RuntimeSelectorSessions>>,
     ),
     RuntimeInitError,
@@ -3735,6 +3915,7 @@ fn create_seed_runtime(
     // Phase A.2: 共有プロセスプールを生成し、extension にも、worker
     // ループ脱出時の sweeper にも参照を渡せるよう Arc を 2 部複製する。
     let process_pool = Arc::new(ProcessPool::new());
+    let lsp_session_pool = Arc::new(ManagedLspSessionPool::new(process_pool.clone()));
     let selector_sessions = Arc::new(StdMutex::new(RuntimeSelectorSessions::new(
         bridge.selector_view_backend(),
     )));
@@ -3743,6 +3924,7 @@ fn create_seed_runtime(
             bridge,
             selector_sessions.clone(),
             process_pool.clone(),
+            lsp_session_pool.clone(),
         )],
         ..Default::default()
     });
@@ -3760,7 +3942,13 @@ fn create_seed_runtime(
             message: error.to_string(),
         })?;
 
-    Ok((runtime, metadata, process_pool, selector_sessions))
+    Ok((
+        runtime,
+        metadata,
+        process_pool,
+        lsp_session_pool,
+        selector_sessions,
+    ))
 }
 
 async fn dispatch_event_in_seed_runtime(
@@ -4255,7 +4443,7 @@ impl SayaLiveRuntime {
 
                 runtime.block_on(async move {
                     let mut receiver = receiver;
-                    let (mut js_runtime, metadata, process_pool, selector_sessions) =
+                    let (mut js_runtime, metadata, process_pool, lsp_session_pool, selector_sessions) =
                         match create_seed_runtime(bridge, &seed) {
                             Ok(runtime) => runtime,
                             Err(error) => {
@@ -4325,6 +4513,16 @@ impl SayaLiveRuntime {
                     log::info!(
                         "[saya_live_runtime] worker loop ended; sweeping process pool"
                     );
+                    if let Err(_elapsed) = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        lsp_session_pool.shutdown_all(),
+                    )
+                    .await
+                    {
+                        log::debug!(
+                            "[saya_live_runtime] managed LSP session shutdown timed out (some children may rely on kill_on_drop)"
+                        );
+                    }
                     if let Err(_elapsed) = tokio::time::timeout(
                         std::time::Duration::from_secs(2),
                         process_pool.shutdown_all(),
