@@ -255,16 +255,12 @@ can fail with `SessionAlreadyActive`.
 Serial execution does not fix every failing test, but it removes the most
 obvious concurrency-related noise.
 
-## Current known issue
+## Current serial-suite health
 
-As of March 23, 2026, the full serial test suite still has one known failing
-unit test.
-
-- `bootstrap::tests::extracts_initial_tab_size_from_config_file`
-
-At the same time, the TypeScript startup and runtime integration tests pass,
-which means the public capability surfaces are in better shape than the single
-failing bootstrap assertion suggests.
+As of May 30, 2026, the previously documented
+`bootstrap::tests::extracts_initial_tab_size_from_config_file` failure is no
+longer a known failing test. Keep using serial execution when you assess the
+full suite so single-session failures don't obscure real regressions.
 
 ## High-value test files
 

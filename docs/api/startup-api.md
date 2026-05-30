@@ -21,7 +21,7 @@ declarations, and evaluates the combined startup module.
 
 ```ts
 /// <reference path="./plugins/saya-startup.d.ts" />
-import { setupSayaDired } from "./plugins/saya-dired.ts";
+import { setupSayaDired } from "./plugins/bundled/dired/index.ts";
 
 setupSayaDired();
 ```
@@ -35,12 +35,12 @@ server to understand the startup-only global `saya` object while editing
 
 ### Preview dired setup
 
-The repository includes `plugins/saya-dired.ts` as a preview TypeScript plugin.
+The repository includes `plugins/bundled/dired/index.ts` as a preview TypeScript plugin.
 Import it from `init.ts` when you want the directory editor commands to be
 registered at startup. Add `keymap` when you want normal-mode mappings.
 
 ```ts
-import { setupSayaDired } from "./plugins/saya-dired.ts";
+import { setupSayaDired } from "./plugins/bundled/dired/index.ts";
 
 setupSayaDired({
   root: ".",
@@ -76,17 +76,17 @@ directories before other entries.
 
 ### Preview LSP setup
 
-The repository includes `plugins/saya-lsp-client.ts` as a preview TypeScript
-plugin. Import it from `init.ts` when you want LSP commands, normal-mode
-keymaps, document synchronization events, and language server definitions to be
-registered at startup. Keymaps and buffer lifecycle events are explicit opt-ins.
+The repository includes `plugins/bundled/lsp-client/index.ts` as a preview TypeScript
+plugin. Import it from `init.ts` when you want LSP commands, keymaps, document
+synchronization events, and language server definitions to be registered at
+startup. Keymaps and buffer lifecycle events are explicit opt-ins.
 
 > **Note:** This is a preview feature currently under active development. See
 > [LSP preview](lsp-preview.md) for the runtime boundary, the `gopls` example,
 > supported features, LSIF limitations, and headless verification commands.
 
 ```ts
-import { setupSayaLspClient } from "./plugins/saya-lsp-client.ts";
+import { setupSayaLspClient } from "./plugins/bundled/lsp-client/index.ts";
 
 setupSayaLspClient({
   enableBufferEvents: true,
@@ -112,7 +112,6 @@ setupSayaLspClient({
       rootMarkers: ["go.mod", ".git"],
       initializationOptions: {
         semanticTokens: true,
-      },
     },
     {
       name: "rust-analyzer",
@@ -129,8 +128,8 @@ setupSayaLspClient({
 server definition names the executable command, optional arguments,
 initialization options, language IDs, file patterns, and workspace root markers.
 At runtime, the plugin selects the matching server for the current buffer,
-detects the workspace root through the narrow runtime workspace API, and sends
-the selected server definition through `saya.lsp.request`.
+detects the workspace root through the narrow runtime workspace API, and runs
+the selected server through the process-backed runtime manager.
 
 The default command names are:
 
@@ -140,6 +139,14 @@ The default command names are:
 - `lsp.definition`
 - `lsp.references`
 - `lsp.documentSymbol`
+- `lsp.completion`
+- `lsp.completionResolve`
+- `lsp.signatureHelp`
+- `lsp.formatting`
+- `lsp.rangeFormatting`
+- `lsp.rename`
+- `lsp.codeAction`
+- `lsp.codeActionResolve`
 - `lsp.nextDiagnostic`
 - `lsp.previousDiagnostic`
 - `lsp.shutdown`
@@ -282,7 +289,9 @@ Use this method to register an event callback during startup.
 The current typed event names are:
 
 - `"bufferOpen"`
+- `"bufferChanged"`
 - `"bufferWritePost"`
+- `"bufferClosed"`
 
 ```ts
 saya.events.on("bufferOpen", (payload) => {
@@ -326,9 +335,8 @@ saya.plugins.lazy([
 
 Plugin declarations support `local` for local directories and `github` for
 GitHub repositories in `owner/repository` form. Add `rev` to pin a GitHub plugin
-to a branch, tag, or commit. When `rev` is absent, plugin sync and update
-commands resolve the latest default-branch revision and record it in the plugin
-cache.
+to a branch, tag, or commit. When `rev` is absent, the current plugin manager
+stores `HEAD` as the unresolved revision marker in the plugin cache.
 
 ## Theme
 

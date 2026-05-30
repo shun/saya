@@ -185,10 +185,11 @@ Bundled plugins are versioned with `saya`, but they are distributed as runtime
 files under `SAYA_HOME/runtime/plugins/bundled`, not as external plugin manager
 installs.
 
-The host must not fetch bundled plugins from the network during startup. If
-bundled runtime files are missing, `sy` must report a clear installation or
-runtime-home error instead of silently falling back to external plugin
-resolution.
+The host must not fetch bundled plugins from the network during startup. When
+`SAYA_HOME` is set explicitly, missing bundled runtime files must report a clear
+installation or runtime-home error instead of silently falling back to external
+plugin resolution. Development checkouts may use repository-relative fallback
+paths so local builds can run before a release layout is installed.
 
 External plugins remain under the plugin manager cache and lockfile model. They
 are not part of the release archive's bundled runtime tree.

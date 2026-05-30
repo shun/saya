@@ -14,10 +14,9 @@ run it, and find the permanent documentation under `docs/`.
 ## What you can find here
 
 This repository currently contains a working CLI editor MVP, a startup
-TypeScript configuration runtime, and a separate runtime callback foundation.
-The TUI and the long-lived runtime are not fully integrated yet, so the
-repository is best understood as a working editor plus an evolving
-TypeScript-first extension model.
+TypeScript configuration runtime, and a long-lived runtime callback foundation.
+The TUI now wires the runtime into current command and buffer-event paths, while
+the public API and feature coverage remain preview work.
 
 ## Documentation
 
@@ -43,8 +42,10 @@ If you want the Japanese entry page, see
 
 ## Build
 
-This repository depends on the published `vim-core-rs` crate from crates.io,
-so Cargo downloads it automatically during the build.
+This checkout depends on the sibling `vim-core-rs` repository through the local
+path configured in `Cargo.toml`. Keep
+`/Users/skudo/ghq/github.com/shun/saya_ws/vim-core-rs` available when you build
+this development tree.
 
 Before you build, make sure you have these prerequisites.
 
@@ -150,25 +151,24 @@ You can import local TypeScript plugins from `init.ts`. Static local imports
 are resolved before startup evaluation.
 
 ```ts
-import { setupSayaDired } from "./plugins/saya-dired.ts";
+import { setupSayaDired } from "./plugins/bundled/dired/index.ts";
 
 setupSayaDired();
 ```
 
 ### Preview dired setup
 
-`setupSayaDired()` registers the preview directory editor commands and normal
-mode keymaps. The default bindings are `-` for parent directory navigation,
-`<Enter>` for opening the current entry, `gr` for refresh, `m` for marking,
-`M` for unmarking, `gM` for clearing marks, and `D` for a bulk-delete
-preview. The defaults avoid binding `u` so normal-mode undo remains available
-while editing writable directory listings.
+`setupSayaDired()` registers the preview directory editor commands by default.
+Normal-mode keymaps are opt-in: add the `keymap` option or legacy flat key
+options when you want mappings such as `-`, `<Enter>`, `gr`, `m`, `M`, `gM`, or
+`D`. The defaults avoid binding `u` so normal-mode undo remains available while
+editing writable directory listings.
 
 You can customize the public setup surface without exposing broad filesystem
 access to TypeScript plugins.
 
 ```ts
-import { setupSayaDired } from "./plugins/saya-dired.ts";
+import { setupSayaDired } from "./plugins/bundled/dired/index.ts";
 
 setupSayaDired({
   root: ".",
@@ -187,8 +187,6 @@ setupSayaDired({
 });
 ```
 
-The default `sortPolicy: "kind"` groups directories before other entries.
-
 > **Note:** Dired is a preview feature. The command names, keymap shape,
 > `hiddenFilePolicy`, `sortPolicy`, `filter`, and `confirmStrategy` options are
 > public setup points, but they can still change before the dired API is
@@ -197,9 +195,9 @@ The default `sortPolicy: "kind"` groups directories before other entries.
 > [`docs/api/dired-api-v1.md`](docs/api/dired-api-v1.md), including migration
 > notes and plugin author anti-patterns.
 
-At the moment, `tabstop` and `number` are the most visible startup
-settings in the TUI. Command and event registration are implemented and tested
-headlessly, but their full live integration is still in progress.
+At the moment, `tabstop` and `number` are the most visible startup settings in
+the TUI. Command and event registration are implemented, tested headlessly, and
+wired into the current live runtime paths.
 
 ## Current scope
 
@@ -212,7 +210,7 @@ The current implementation gives you these capabilities.
 - Dirty-state tracking in the UI
 - Tab expansion and line number projection
 - TypeScript startup evaluation through `deno_core`
-- A separate runtime callback layer with typed buffer and editor snapshots
+- A live runtime callback layer with typed buffer and editor snapshots
 
 ## License
 

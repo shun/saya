@@ -141,9 +141,10 @@ integration itself is under test.
 
 ### Review log: March 28, 2026
 
-This repository review re-inventoried the current `saya` test suite against
-ADR 0001 and the current `vim-core-rs` contract suites after a large migration
-of detailed editing semantics into `vim-core-rs`.
+This historical repository review re-inventoried the `saya` test suite against
+ADR 0001 and the then-current `vim-core-rs` contract suites after a large
+migration of detailed editing semantics into `vim-core-rs`. It is retained as
+context, not as a current complete inventory of every test file.
 
 #### `saya` tests that remain clearly host/application integration
 

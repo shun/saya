@@ -27,9 +27,15 @@ top-level areas.
 - `saya.window`
 - `saya.editor`
 - `saya.workspace`
-- `saya.lsp`
+- `saya.fs`
+- `saya.lsif`
+- `saya.input`
+- `saya.selector`
+- `saya.completion`
+- `saya.process`
 - `saya.panel`
 - `saya.filer`
+- `saya.plugins`
 
 ## Commands
 
@@ -69,44 +75,33 @@ The method returns a path string when a marker matches and `null` when no marker
 is found. The LSP preview plugin uses this API to resolve per-server workspace
 roots from marker lists such as `go.mod`, `Cargo.toml`, and `.git`.
 
-## LSP
+## LSIF
 
-The LSP surface exposes one typed host bridge for preview LSP and LSIF requests.
-It is intentionally narrower than a general process or filesystem API. Runtime
-code describes the request, and the Rust host owns process lifecycle, JSON-RPC
-framing, document synchronization, diagnostic logging, and LSIF index lookup.
+The LSIF surface exposes one typed host bridge for preview LSIF lookup. Live
+LSP commands currently go through the bundled LSP plugin's TypeScript manager,
+which uses `saya.process.spawn()` for language server process I/O and
+`saya.lsif.request()` for LSIF lookup.
 
 > **Note:** This is a preview feature currently under active development. See
 > [LSP preview](lsp-preview.md) for setup examples, the feature support matrix,
 > LSIF limitations, and verification commands.
 
-### `saya.lsp.request(payload)`
+### `saya.lsif.request(payload)`
 
-Use this method to send a validated LSP or LSIF bridge request to the host. Most
-users call it indirectly through `setupSayaLspClient()` from
-`plugins/saya-lsp-client.ts`.
+Use this method to send a validated LSIF lookup request to the host. Most users
+call it indirectly through `setupSayaLspClient()` from the bundled LSP plugin.
 
 ```ts
-const response = await saya.lsp.request({
-  source: "lsp",
+const response = await saya.lsif.request({
+  source: "lsif",
   lspVersion: "3.17",
   method: "textDocument/hover",
-  clientName: "gopls",
+  clientName: "saya-lsif",
   rootUri: "file:///workspace",
   languageId: "go",
-  trace: "messages",
   positionEncoding: "utf-16",
-  dumpPath: "",
+  dumpPath: ".cache/index.lsif",
   textDocument: { uri: "file:///workspace/main.go" },
-  server: {
-    name: "gopls",
-    command: "gopls",
-    args: ["serve"],
-    env: {},
-    cwd: null,
-    rootMarkers: ["go.mod", ".git"],
-    initializationOptions: {},
-  },
   position: { line: 0, character: 0 },
   params: {},
   buffer: await saya.buffer.current(),
@@ -114,8 +109,8 @@ const response = await saya.lsp.request({
 });
 ```
 
-The method returns `{ source, method, result }` when the host completes the
-request. Invalid payloads and host failures surface as command errors with
+The method returns `{ source, method, result }` when the host completes the LSIF
+lookup. Invalid payloads and host failures surface as command errors with
 user-safe messages.
 
 ## Buffer
@@ -138,11 +133,30 @@ The returned snapshot currently includes:
 - `path`
 - `lineCount`
 - `cursorRow`
+- `cursorCol`
 - `currentLine`
+- `text`
 
-`cursorRow` and `currentLine` are read-only snapshot fields for plugins that
-need display context. Dired-style commands use `saya.filer.currentEntry()` when
-they need the filesystem entry associated with the cursor row.
+`cursorRow`, `cursorCol`, `currentLine`, and `text` are read-only snapshot
+fields for plugins that need display context. Dired-style commands use
+`saya.filer.currentEntry()` when they need the filesystem entry associated with
+the cursor row.
+
+### `saya.buffer.selection()`
+
+Use this method to retrieve the current visual selection snapshot when the
+editor is in a visual mode.
+
+```ts
+const selection = await saya.buffer.selection();
+if (selection) {
+  console.log(selection.mode, selection.text);
+}
+```
+
+The method returns `null` when no visual selection is active. Active selection
+snapshots include `mode`, `startLine`, `startColumn`, `endLine`, `endColumn`,
+and `text`.
 
 ### `saya.buffer.currentPath()`
 
@@ -258,6 +272,138 @@ const floats = await saya.window.floats();
 for (const float of floats) {
   console.log(float.id, float.kind, float.focused);
 }
+```
+
+## Filesystem
+
+The filesystem surface is intentionally narrow. It exists for read-only
+directory listing helpers that don't need the full filer operation surface.
+
+### `saya.fs.readDir(path, options)`
+
+Use this method to read a directory listing with the same listing options used
+by `saya.filer.list()`.
+
+```ts
+const entries = await saya.fs.readDir(".", {
+  showHidden: false,
+  sortBy: "kind",
+  filter: "rs",
+});
+```
+
+The method returns filer-style entries with `name`, `path`, `kind`,
+`displayText`, and optional metadata such as `size` and `modifiedTimeMs`.
+
+## Input
+
+The input surface lets runtime callbacks ask the host for a focused prompt
+without exposing raw terminal input.
+
+### `saya.input.prompt(options)`
+
+Use this method to show a prompt and wait for a string response.
+
+```ts
+const name = await saya.input.prompt({
+  title: "New file",
+  placeholder: "notes.md",
+});
+```
+
+The method returns the entered text, or `null` when the prompt is cancelled.
+
+## Selector
+
+The selector surface opens and controls host-managed selection workflows for
+static items or `rg`-backed searches.
+
+### `saya.selector.open(options)`
+
+Use this method to open a selector.
+
+```ts
+const selector = await saya.selector.open({
+  source: {
+    kind: "static",
+    items: [
+      { id: "a", value: "alpha", kind: "item", detail: null },
+      { id: "b", value: "beta", kind: "item", detail: null },
+    ],
+  },
+  matcher: "substringAnd",
+});
+```
+
+The selector surface also exposes `update(id, options)`, `current(id)`,
+`control(id, options)`, `cancel(id)`, and `dispose(id)` for query updates,
+snapshot reads, cursor control, cancellation, and cleanup.
+
+## Completion
+
+The completion surface lets runtime callbacks open and close the typed
+completion menu. Source orchestration lives in the bundled completion plugin.
+
+### `saya.completion.show(request)`
+
+Use this method to show completion candidates for a request-scoped replace
+range.
+
+```ts
+await saya.completion.show({
+  sessionId: "buffer-1",
+  requestId: 1,
+  replaceRange: {
+    start: { line: 0, character: 0 },
+    end: { line: 0, character: 3 },
+  },
+  candidates: [{ label: "alpha", insertText: "alpha" }],
+  selectedIndex: 0,
+});
+```
+
+Use `saya.completion.close()` to close the active completion menu.
+
+## Process
+
+The process surface is a preview capability used by bundled runtime plugins
+that need host-mediated process I/O.
+
+### `saya.process.spawn(spec)`
+
+Use this method to spawn a process through the host.
+
+```ts
+const handle = await saya.process.spawn({
+  command: "rg",
+  args: ["--line-number", "needle", "."],
+  stdout: "piped",
+  stderr: "piped",
+});
+```
+
+The returned handle exposes `stdin`, `stdout`, `stderr`, `kill()`, and `wait()`.
+Treat this surface as preview-only while the plugin and permission model is
+still settling.
+
+## Plugins
+
+The plugins surface is used by the plugin manager to load lazy plugins after a
+declared trigger fires.
+
+### `saya.plugins.loadLazy(request)`
+
+Use this method to load a lazy plugin module selected by the startup plugin
+declarations.
+
+```ts
+await saya.plugins.loadLazy({
+  kind: "command",
+  name: "GitStatus",
+  plugin: "git-tools",
+  module: "index.ts",
+  exportName: "setup",
+});
 ```
 
 ## Panels

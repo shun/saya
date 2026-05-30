@@ -1,8 +1,9 @@
 # Selector design
 
-This page defines the proposed `saya` selector design. The selector is a
-host-managed selection workflow for search results, files, buffer lines, LSP
-locations, diagnostics, sessions, and future item sources.
+This page defines the `saya` selector design. The initial preview API is
+implemented for host-managed static and `rg`-backed selection workflows, and
+the later sections keep future expansion notes for files, buffer lines, LSP
+locations, diagnostics, sessions, and additional item sources.
 
 The design borrows the useful split points from `ddu.vim` and `fall.vim`
 without importing Vim or Neovim compatibility layers. `saya` owns the visible
@@ -634,16 +635,24 @@ await saya.selector.open({
 });
 ```
 
-Runtime resume:
+Future runtime resume sketch:
 
 ```ts
 await saya.selector.resumeLast();
 await saya.selector.reloadLast();
 ```
 
-This API sketch implies new runtime host capabilities:
+The implemented preview runtime capabilities are:
 
 - `saya.selector.open(...)`
+- `saya.selector.update(...)`
+- `saya.selector.current(...)`
+- `saya.selector.control(...)`
+- `saya.selector.cancel(...)`
+- `saya.selector.dispose(...)`
+
+The future sketch may add:
+
 - `saya.selector.resumeLast(...)`
 - `saya.selector.reloadLast(...)`
 - `saya.editor.jump(...)`

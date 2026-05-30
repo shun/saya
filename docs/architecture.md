@@ -104,17 +104,16 @@ The surrounding runtime modules keep capability setup, configuration parsing,
 worker-boundary integration, process operations, dispatch messages, and redraw
 refresh decisions out of the TUI drawing path.
 
-This layer must stay isolated from the TUI main loop. The repository already
-tests worker-boundary execution and phase separation, even though full live
-integration is still incomplete.
+This layer must keep a clear boundary from TUI drawing. The repository already
+tests worker-boundary execution, phase separation, and the current live command
+and buffer-event integration paths.
 
 The LSP preview follows this boundary. TypeScript startup code declares server
-configuration through `plugins/saya-lsp-client.ts`, and runtime callbacks send
-typed requests through `saya.lsp.request`. The Rust application layer owns the
-host-side feature boundary in `src/features/lsp/` and runtime bridging through
-`src/features/lsp/runtime_bridge.rs`, including LSIF index lookup and typed
-request or response routing. TypeScript plugins don't receive raw process
-handles or broad filesystem access.
+configuration through `plugins/bundled/lsp-client/index.ts`. Runtime LSP work
+uses the TypeScript-side process-backed manager, while LSIF lookup uses the
+host-side feature boundary in `src/features/lsp/` and
+`src/features/lsp/runtime_bridge.rs`. TypeScript plugins receive narrow runtime
+capabilities instead of raw renderer access or network access.
 
 ### Layer 4: User configuration and future extensions
 
@@ -158,11 +157,12 @@ repository state:
 
 - The code is a single Rust crate with a layered `src/` module tree, not a split
   Cargo workspace.
-- `vim-core-rs` is consumed as a published crates.io dependency.
+- This development checkout consumes `vim-core-rs` through the local path in
+  `Cargo.toml`.
 - The TUI uses `ratatui` and `crossterm`.
 - The TypeScript runtime uses `deno_core`.
-- The main TUI loop does not yet host the full long-lived runtime callback
-  lifecycle.
+- The main TUI loop hosts the current command and buffer-event runtime callback
+  paths. API stabilization and broader coverage remain in progress.
 
 Use [Status](status.md) for the current implementation state, and use the
 design pages for flow-level details. Use

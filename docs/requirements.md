@@ -111,9 +111,22 @@ prioritize typed, read-only state access plus explicit command execution.
 - The runtime surface must expose `saya.commands.execute(name)`.
 - The runtime surface must expose `saya.buffer.current()`.
 - The runtime surface must expose `saya.buffer.currentPath()`.
+- The runtime surface must expose `saya.buffer.selection()`.
 - The runtime surface must expose `saya.window.current()`.
 - The runtime surface must expose `saya.editor.current()`.
 - The runtime surface must expose `saya.editor.mode()`.
+- The runtime surface must expose `saya.workspace.findRoot(path, markers)`.
+- The runtime surface must expose `saya.lsif.request(payload)` for preview LSIF
+  lookup.
+- The runtime surface must expose `saya.input.prompt(options)`.
+- The runtime surface must expose `saya.selector.*` for host-managed selector
+  workflows.
+- The runtime surface must expose `saya.completion.*` for typed completion menu
+  lifecycle.
+- The runtime surface must expose preview `saya.process.spawn(spec)` for
+  host-mediated plugin process I/O.
+- The runtime surface must expose `saya.plugins.loadLazy(request)` for plugin
+  manager lazy-load dispatch.
 - The runtime surface must expose `saya.filer.list(path, options)` for
   read-only directory listing plugins, including narrow sort, hidden-file, and
   substring filter options.
@@ -122,8 +135,9 @@ prioritize typed, read-only state access plus explicit command execution.
 - The runtime surface must expose host-mediated filer operations for creating
   one file, creating one directory, copying one regular file, moving or
   renaming one path, and deleting one explicitly confirmed path.
-- The runtime buffer snapshot must include the current cursor row and rendered
-  current line for non-mutating directory navigation commands.
+- The runtime buffer snapshot must include the current cursor row, cursor
+  column, full text, and rendered current line for non-mutating runtime
+  commands.
 - Directory listing buffers must not be saved as regular files. Writable
   directory buffers must convert rendered listing edits into a save-time
   preview, require a matching confirmation before apply, and execute confirmed
@@ -138,9 +152,9 @@ blur registration logic and live callback execution.
 - Runtime-only state access APIs must not leak into startup evaluation.
 - Public APIs must stay under the `saya` namespace.
 - Public APIs must not center compatibility-oriented string DSLs.
-- Public APIs must not include broad filesystem or network access in the MVP.
-- Filer plugins must use the dedicated read-only filer surface instead of a
-  general filesystem namespace.
+- Public APIs must not include broad network access in the MVP.
+- Filer plugins must use the dedicated filer surface or the narrow
+  `saya.fs.readDir()` helper instead of a broad filesystem namespace.
 
 ## Next steps
 

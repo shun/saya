@@ -107,6 +107,9 @@ plugins/
 The legacy `plugins/saya-dired.ts`, `plugins/saya-lsp-client.ts`, and
 `plugins/saya-plugin-manager.ts` paths are re-export shims for existing
 configuration files. New code must import from the structured directories.
+The declarations in `plugins/types/startup.d.ts` and
+`plugins/types/runtime.d.ts` are published editor-facing declarations and must
+stay in sync with the Rust startup and live runtime declarations.
 
 The Rust host only reads these artifacts and merges them into the existing
 startup and runtime registries. The TypeScript manager remains responsible for

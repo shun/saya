@@ -128,9 +128,9 @@ The declaration surface supports these source forms:
   plugin cache during `sy plugin sync` or `sy plugin update`.
 - `rev`, which optionally pins a GitHub plugin to a branch, tag, or commit.
 
-When `rev` is absent, `sy plugin sync` and `sy plugin update` resolve the latest
-revision from the repository's default branch. Normal editor startup uses
-generated cache files and doesn't check the network.
+When `rev` is absent, the current lockfile records `HEAD` as the unresolved
+revision marker. Normal editor startup uses generated cache files and doesn't
+check the network.
 
 The default plugin entry point is `mod.ts`, and the default setup export is
 `setup`. You only need to specify alternate entry metadata for non-standard

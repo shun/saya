@@ -6,20 +6,21 @@ feature set, LSIF support, and headless verification commands.
 
 > **Note:** This is a preview feature currently under active development.
 
-The LSP preview is split across a TypeScript plugin and host-owned Rust
-services. Startup code declares language server configuration, while the host
-owns process execution, JSON-RPC framing, document synchronization, diagnostics,
-and LSIF lookup.
+The LSP preview is split across a TypeScript plugin and host-mediated runtime
+capabilities. Startup code declares language server configuration. At runtime,
+the bundled plugin owns server selection, JSON-RPC request construction,
+response interpretation, and UI routing. It uses `saya.process.spawn()` for
+language server process I/O and `saya.lsif.request()` for LSIF lookup.
 
 ## Startup setup
 
-Import `plugins/saya-lsp-client.ts` from your `init.ts` file to register the
+Import `plugins/bundled/lsp-client/index.ts` from your `init.ts` file to register the
 preview LSP command set and language server definitions. It doesn't register
 keymaps or buffer lifecycle event handlers unless you opt in with `keymap` and
 `enableBufferEvents`.
 
 ```ts
-import { setupSayaLspClient } from "./plugins/saya-lsp-client.ts";
+import { setupSayaLspClient } from "./plugins/bundled/lsp-client/index.ts";
 
 setupSayaLspClient({
   enableBufferEvents: true,
@@ -62,7 +63,7 @@ The server is matched to Go buffers by extension and language ID, and the
 workspace root is detected from `go.mod` before falling back to `.git`.
 
 ```ts
-import { setupSayaLspClient } from "./plugins/saya-lsp-client.ts";
+import { setupSayaLspClient } from "./plugins/bundled/lsp-client/index.ts";
 
 setupSayaLspClient({
   enableBufferEvents: true,
@@ -95,18 +96,17 @@ setupSayaLspClient({
 
 When the current buffer path ends in `.go`, the plugin resolves the language ID
 to `go`, picks the `gopls` server definition, finds the nearest workspace root,
-and sends requests through `saya.lsp.request`.
+and sends live server requests through its TypeScript-side session manager.
 
 ## Runtime boundary
 
-The TypeScript plugin doesn't spawn language server processes. It builds typed
-bridge requests and sends them through the runtime `saya.lsp.request` surface.
-The host-side LSP session manager owns the process lifecycle and keeps long
-running server work outside the startup layer.
+The TypeScript plugin owns the current live LSP session manager. It starts the
+configured language server through the host-mediated `saya.process.spawn()`
+surface, writes and reads LSP JSON-RPC messages over piped stdio, and keeps
+long-running server work outside the startup layer.
 
-The runtime bridge request includes these important fields.
+The live request construction includes these important inputs.
 
-- `source`, as `"lsp"` for live language servers or `"lsif"` for LSIF lookup.
 - `lspVersion`, currently sent as `"3.17"`.
 - `method`, such as `initialize`, `textDocument/hover`, or `shutdown`.
 - `clientName`, `languageId`, `rootUri`, and `positionEncoding`.
@@ -115,11 +115,14 @@ The runtime bridge request includes these important fields.
 - `buffer` and `editor`, as read-only snapshots used to compute document URIs
   and LSP positions.
 
-The host validates the bridge payload before dispatch. For live LSP requests,
-the session manager reuses one initialized server session for each workspace and
-server definition, queues work until initialization completes, routes responses
-by JSON-RPC request ID, redacts document text from diagnostics, and shuts the
-process down with `shutdown` followed by `exit`.
+For live LSP requests, the TypeScript session manager reuses one initialized
+server session for each workspace and server definition, queues work until
+initialization completes, routes responses by JSON-RPC request ID, redacts
+document text from diagnostics, and shuts the process down with `shutdown`
+followed by `exit`.
+
+LSIF lookup remains host-side and uses the runtime `saya.lsif.request()`
+surface.
 
 ## Commands and keymaps
 
@@ -131,6 +134,14 @@ process down with `shutdown` followed by `exit`.
 - `lsp.definition`
 - `lsp.references`
 - `lsp.documentSymbol`
+- `lsp.completion`
+- `lsp.completionResolve`
+- `lsp.signatureHelp`
+- `lsp.formatting`
+- `lsp.rangeFormatting`
+- `lsp.rename`
+- `lsp.codeAction`
+- `lsp.codeActionResolve`
 - `lsp.nextDiagnostic`
 - `lsp.previousDiagnostic`
 - `lsp.shutdown`
@@ -182,10 +193,16 @@ tests.
   `textDocument/didClose` using full-document synchronization.
 - `textDocument/hover`, `textDocument/definition`, `textDocument/references`,
   and `textDocument/documentSymbol` requests.
+- `textDocument/completion`, `completionItem/resolve`,
+  `textDocument/signatureHelp`, `textDocument/formatting`,
+  `textDocument/rangeFormatting`, `textDocument/rename`,
+  `textDocument/codeAction`, and `codeAction/resolve` request paths.
 - `textDocument/publishDiagnostics` ingestion and next/previous diagnostic
   navigation.
 - Hover and diagnostic floating surfaces, definition navigation, reference list
   output, and document symbol outline output.
+- Completion integration through the bundled completion plugin when the LSP
+  completion source is configured.
 - Workspace root detection through runtime `saya.workspace.findRoot()`.
 - Multiple language server definitions selected by language ID or file pattern.
 - UTF-16, UTF-8, and UTF-32 position encoding conversion.
@@ -203,18 +220,20 @@ coverage expected from a stable LSP client.
   actions, and related information rendering are not implemented.
 - References and document symbols use host-provided output surfaces, not a
   stable quickfix API.
+- Signature help, formatting, rename, and code actions have protocol request
+  paths, but their user experience and capability gating are still preview
+  quality.
 - Cancellation exists for stale requests, but there is not yet a user-facing
   cancellation command.
-- Real-server smoke coverage exists for `gopls`, but CI-safe behavior relies on
-  fake-server tests.
+- Real-server smoke testing is manual. CI-safe behavior relies on fake-server
+  tests.
 
 ### Not supported
 
 These LSP areas are outside the current preview scope.
 
-- Completion, signature help, rename, formatting, code actions, semantic tokens,
-  inlay hints, call hierarchy, type hierarchy, workspace symbols, and workspace
-  edits.
+- Semantic tokens, inlay hints, call hierarchy, type hierarchy, workspace
+  symbols, and workspace edits.
 - Incremental text synchronization.
 - Dynamic registration.
 - Remote language servers and TCP transports.
@@ -230,11 +249,13 @@ smoke tests stay opt-in until the public TypeScript API becomes stable.
 
 The first usable preview supports the LSP features listed in the supported
 section only. In practice, that means the preview is usable when these flows
-work from TypeScript startup configuration through the host bridge:
+work from TypeScript startup configuration through the runtime process and LSIF
+surfaces:
 
 - `initialize`, `initialized`, `shutdown`, and `exit`.
 - Full-document `didOpen`, `didChange`, `didSave`, and `didClose` sync.
-- Hover, definition, references, and document symbols.
+- Hover, definition, references, document symbols, completion, signature help,
+  formatting, range formatting, rename, and code action request paths.
 - Publish diagnostics, diagnostic navigation, hover floats, definition
   navigation, reference lists, and document symbol output.
 - File URI conversion, workspace root detection, server selection, position
@@ -257,14 +278,14 @@ ignored tests.
 
 ### Public TypeScript API compatibility
 
-The preview documents `setupSayaLspClient()` and `saya.lsp.request()` as a
-provisional API. Before documenting the API as stable, review these
-compatibility points and update this page if any point changes:
+The preview documents `setupSayaLspClient()` and the current process-backed
+TypeScript session manager as provisional API. Before documenting the API as
+stable, review these compatibility points and update this page if any point
+changes:
 
-- Keep the `source`, `lspVersion`, `method`, `clientName`, `rootUri`,
-  `languageId`, `trace`, `positionEncoding`, `dumpPath`, `textDocument`,
-  `server`, `position`, `params`, `buffer`, `editor`, and `event` fields
-  backward-compatible.
+- Keep the LSP setup options, command names, keymap defaults, server selection
+  rules, lifecycle event names, and LSIF request fields backward-compatible
+  within the preview contract.
 - Keep `protocolVersion` as a deserialization alias for `lspVersion` on the host
   side.
 - Keep command names, opt-in keymap defaults, and opt-in buffer lifecycle event
@@ -276,7 +297,7 @@ compatibility points and update this page if any point changes:
 ## LSIF support
 
 Enable LSIF lookup separately from live LSP by passing `lsif.enabled` and a dump
-path. LSIF requests use the same runtime bridge shape with `source: "lsif"`.
+path. LSIF requests use `saya.lsif.request()` with `source: "lsif"`.
 
 ```ts
 setupSayaLspClient({
@@ -310,29 +331,17 @@ Use headless tests for repeatable verification. Run commands through `gtimeout`
 so a broken language server or fake server cannot hang the shell.
 
 ```bash
-gtimeout 180s cargo test --test lsp_transport -- --nocapture
-gtimeout 180s cargo test --test lsp_session -- --nocapture
-gtimeout 180s cargo test --test lsp_runtime_bridge_contract -- --nocapture
-gtimeout 240s cargo test --test startup_runtime_scaffold \
-  repository_lsp_client_plugin_bridge_fake_server_covers_protocol_flow_for_ci \
-  -- --nocapture
+gtimeout 180s cargo test --test saya_lsp_module -- --nocapture
+gtimeout 180s cargo test --test saya_lsp_e2e -- --nocapture
+gtimeout 180s cargo test --test lsp_float -- --nocapture
 gtimeout 120s cargo test --test lsif_index -- --nocapture
 gtimeout 240s cargo test --no-run
 ```
 
-For the opt-in real-server smoke path, install `go` and `gopls`, then run the
-ignored startup scaffold test that reaches `gopls` through the preview bridge.
-
-```bash
-SAYA_RUN_GOPLS_SMOKE=1 gtimeout 240s cargo test --test startup_runtime_scaffold \
-  repository_lsp_client_plugin_bridge_smoke_reaches_gopls_with_logs \
-  -- --ignored --exact --nocapture
-```
-
-The `gopls` smoke test validates real initialize, initialized, didOpen, hover,
-documentSymbol, didChange, didSave, didClose, and shutdown traffic. It is useful
-for local validation, but fake-server tests remain the deterministic protocol
-coverage.
+The `saya_lsp_e2e` test uses a local Perl fake server. It validates initialize,
+hover, shutdown, and process-backed routing without requiring `gopls` or network
+access. Use ad hoc local `gopls` smoke testing only as extra manual confidence;
+fake-server tests remain the deterministic protocol coverage.
 
 ## Next steps
 

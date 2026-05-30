@@ -32,7 +32,10 @@ The current repository already implements these behaviors.
   styles
 - Resolved Markdown theme projection for headings, inline code, and links,
   with plain text terminal fallback that preserves text
-- Runtime callback dispatch with typed payloads in headless tests
+- Runtime callback dispatch with typed payloads in headless tests and current
+  live command and buffer-event paths
+- Preview dired, completion, LSP, LSIF, selector, panel, plugin manager, and
+  process APIs documented under `docs/api/` and `docs/design/`
 - Headless integration coverage for the main application path around
   `vim-core-rs`
 
@@ -40,10 +43,26 @@ The current repository already implements these behaviors.
 
 The current repository also has visible work in progress.
 
-- Full integration of `SayaLiveRuntime` into the main TUI lifecycle
+- Stabilization of the preview TypeScript runtime API surface
 - Broader command and event coverage in the live application path
 - More polished documentation around the evolving API surface
-- Cleanup of known bootstrap test inconsistencies
+
+## Feature status matrix
+
+Use this matrix to separate implemented behavior from preview and design-only
+work.
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| CLI editing and save or quit flows | Implemented | Uses `vim-core-rs` for editing semantics and host actions for I/O. |
+| Startup TypeScript API | Implemented | Covers options, keymaps, commands, events, theme, and plugin declarations. |
+| Live runtime callbacks | Preview | Wired for current command and buffer-event paths, with API stabilization in progress. |
+| Dired v1 | Preview | Commands register by default; keymaps are opt-in. |
+| Completion | Preview | Manual and automatic completion paths use the typed completion menu. |
+| LSP and LSIF | Preview | Live LSP uses the TypeScript process-backed manager; LSIF uses host lookup. |
+| Selector | Preview | Runtime selector APIs are implemented, while some future design notes remain open. |
+| Plugin manager | Preview | Startup declarations and lazy runtime load dispatch exist. |
+| Rust crate modules | Internal/test support | Public Rust modules are not documented as a stable external library API. |
 
 ## Constraints
 
@@ -61,20 +80,18 @@ documentation and code review.
   compatibility suites
 - `saya` remains the host application layer around that editing core
 - Public TypeScript APIs remain under the `saya` namespace
-- Filesystem and network capabilities remain out of the public MVP API
+- Broad filesystem and network capabilities remain out of the public MVP API
 - Neovim compatibility is not a goal
 - Vim script compatibility is not a goal
-- The current binary does not initialize a logger backend even though many code
-  paths emit log calls
+- The current binary initializes diagnostic logging when the environment or
+  startup path requests it
 
 ## Known testing issues
 
-You must know two testing caveats when you assess repository health.
+You must know this testing caveat when you assess repository health.
 
 - Parallel test execution can trigger `SessionAlreadyActive` failures because of
   the single-session contract.
-- The full serial suite currently has one known failing test:
-  `bootstrap::tests::extracts_initial_tab_size_from_config_file`
 
 Use [Testing](testing.md) for the exact commands and context.
 

@@ -13,6 +13,18 @@ fn startup_public_api_type_declaration_is_published_for_external_language_server
     );
 }
 
+#[test]
+fn runtime_public_api_type_declaration_is_published_for_external_language_servers() {
+    let declaration = std::fs::read_to_string("plugins/types/runtime.d.ts")
+        .expect("runtime API declaration should be published for TypeScript language servers");
+
+    assert_eq!(
+        strip_deno_fmt_ignore_file(&declaration),
+        RUNTIME_SAYA_TYPE_DECLARATION.trim(),
+        "published runtime declaration must stay in sync with the live runtime surface"
+    );
+}
+
 fn strip_deno_fmt_ignore_file(declaration: &str) -> &str {
     declaration
         .strip_prefix("// deno-fmt-ignore-file\n\n")

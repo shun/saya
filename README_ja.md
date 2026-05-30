@@ -15,10 +15,9 @@ TUI を構築し、設定と拡張の公開面を Vim script ではなく TypeSc
 ## このリポジトリの位置づけ
 
 現在の `saya` には、動作する CLI エディタ MVP、startup 用の TypeScript
-設定 runtime、そして別レイヤーとしての runtime callback 基盤があります。
-一方で、TUI と常駐 runtime の完全統合はまだ途中なので、現状は
-「動く CLI エディタ」と「育成中の TypeScript-first 拡張モデル」を
-合わせ持つリポジトリです。
+設定 runtime、そして常駐 runtime callback 基盤があります。TUI は現在の
+command と buffer event の経路で runtime と接続済みで、公開 API と機能
+カバレッジは preview として継続的に整備しています。
 
 ## ドキュメント
 
@@ -45,8 +44,10 @@ TUI を構築し、設定と拡張の公開面を Vim script ではなく TypeSc
 
 ## ビルド
 
-このリポジトリは crates.io で公開された `vim-core-rs` crate を参照します。
-そのため、Cargo がビルド時に自動で取得します。
+この checkout は、`Cargo.toml` に設定された local path 経由で sibling
+repository の `vim-core-rs` に依存します。ビルド時は
+`/Users/skudo/ghq/github.com/shun/saya_ws/vim-core-rs` を利用できる状態に
+してください。
 
 ビルド前に、次の前提を満たしてください。
 
@@ -150,8 +151,8 @@ saya.events.on("bufferOpen", (payload) => {
 ```
 
 現時点で TUI 上で最も確認しやすい設定は `tabstop` と `number` です。
-command と event の登録は実装済みで headless テストもありますが、常駐 runtime
-との本番統合はまだ進行中です。
+command と event の登録は実装済みで headless テストもあり、現在の live
+runtime 経路にも接続されています。
 
 ## 現在のスコープ
 
@@ -164,7 +165,7 @@ command と event の登録は実装済みで headless テストもあります�
 - UI 上の dirty state 表示
 - tab 展開と行番号表示
 - `deno_core` を使った TypeScript startup 評価
-- typed snapshot を使う runtime callback 基盤
+- typed snapshot を使う live runtime callback 基盤
 
 ## ライセンス
 

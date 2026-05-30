@@ -27,12 +27,12 @@ the declaration guard tests. Breaking changes include:
 
 ## Startup setup contract
 
-Use `setupSayaDired(options)` from `plugins/saya-dired.ts` to register the local
+Use `setupSayaDired(options)` from `plugins/bundled/dired/index.ts` to register the local
 dired commands at startup. It doesn't register normal-mode keymaps unless you
 provide `keymap` or a legacy flat key option.
 
 ```ts
-import { setupSayaDired } from "./plugins/saya-dired.ts";
+import { setupSayaDired } from "./plugins/bundled/dired/index.ts";
 
 setupSayaDired({
   root: ".",
