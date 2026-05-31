@@ -312,6 +312,7 @@ pub struct EditorSessionState {
         DirectoryBufferOperationPlan,
     )>,
     directory_operation_confirmation_dialog_active: bool,
+    pending_directory_save_then_quit_force: Option<bool>,
 }
 
 impl EditorSessionState {
@@ -395,6 +396,7 @@ impl EditorSessionState {
             directory_marked_paths: BTreeSet::new(),
             pending_directory_operation_preview: None,
             directory_operation_confirmation_dialog_active: false,
+            pending_directory_save_then_quit_force: None,
         };
         if let Some(path) = state.target_path.clone() {
             if let Err(error) = state.refresh_directory_buffer_for_path(&path) {
@@ -903,6 +905,7 @@ impl EditorSessionState {
             preview.high_risk_count
         );
         self.directory_operation_confirmation_dialog_active = false;
+        self.pending_directory_save_then_quit_force = None;
         Some(preview)
     }
 
@@ -915,6 +918,21 @@ impl EditorSessionState {
                 preview.operation_count
             );
         }
+    }
+
+    pub fn defer_directory_save_then_quit(&mut self, force: bool) {
+        if self.directory_operation_confirmation_dialog_active {
+            log::debug!(
+                "[editor_session][dired][writable] deferring save-then-quit until directory operation confirmation: force={}",
+                force
+            );
+            self.pending_directory_save_then_quit_force = Some(force);
+        }
+    }
+
+    pub fn take_pending_directory_save_then_quit_decision(&mut self) -> Option<QuitDecision> {
+        let force = self.pending_directory_save_then_quit_force.take()?;
+        Some(self.evaluate_quit(force))
     }
 
     fn refresh_directory_buffer_for_path(&mut self, path: &Path) -> std::io::Result<()> {

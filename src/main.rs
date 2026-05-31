@@ -2855,26 +2855,39 @@ async fn process_pending_host_actions_with_runtime(
             break;
         }
 
+        let mut last_write_pending_directory_confirmation = false;
         for directive in prioritize_save_family_host_directives(directives, current_revision) {
             match directive {
                 NormalizedHostDirective::Write { path, force, .. } => {
-                    if let Some(reason) = handle_write_host_action_with_runtime(
+                    let write_effect = handle_write_host_action_with_runtime(
                         outcome,
                         session_state,
                         Some(path.as_str()),
                         force,
                         transient_msg,
+                        system_warning,
                         runtime_session.as_deref_mut(),
                         need_redraw,
                         runtime_presentation_intents,
                         lsif_bridge,
                     )
-                    .await
-                    {
+                    .await;
+                    if let Some(reason) = write_effect.shutdown_reason {
                         merge_shutdown_reason(&mut shutdown_reason, Some(reason));
                     }
+                    last_write_pending_directory_confirmation =
+                        write_effect.pending_directory_confirmation;
                 }
                 NormalizedHostDirective::Quit { force, .. } => {
+                    if defer_directory_save_then_quit_if_confirmation_pending(
+                        session_state,
+                        force,
+                        last_write_pending_directory_confirmation,
+                    ) {
+                        last_write_pending_directory_confirmation = false;
+                        continue;
+                    }
+                    last_write_pending_directory_confirmation = false;
                     let decision = session_state.evaluate_quit(force);
                     if let Some(reason) =
                         shutdown_reason_from_quit_decision(decision, force, system_warning)
@@ -2900,6 +2913,7 @@ async fn process_pending_host_actions_with_runtime(
                         session_state,
                         request.clone(),
                         transient_msg,
+                        system_warning,
                     )
                     .is_some()
                     {
@@ -3053,6 +3067,7 @@ fn process_pending_host_actions_without_runtime(
             break;
         }
 
+        let mut last_write_pending_directory_confirmation = false;
         for directive in prioritize_save_family_host_directives(directives, current_revision) {
             match directive {
                 NormalizedHostDirective::Write { path, force, .. } => {
@@ -3065,6 +3080,10 @@ fn process_pending_host_actions_without_runtime(
                         Some(current_revision),
                     );
                     *transient_msg = save_outcome.transient_message;
+                    clear_stale_quit_warning_after_write_attempt(
+                        system_warning,
+                        transient_msg.as_deref(),
+                    );
                     if save_outcome.wrote {
                         refresh_directory_buffer_after_confirmed_save(
                             outcome,
@@ -3072,8 +3091,19 @@ fn process_pending_host_actions_without_runtime(
                             transient_msg,
                         );
                     }
+                    last_write_pending_directory_confirmation =
+                        save_outcome.pending_directory_confirmation;
                 }
                 NormalizedHostDirective::Quit { force, .. } => {
+                    if defer_directory_save_then_quit_if_confirmation_pending(
+                        session_state,
+                        force,
+                        last_write_pending_directory_confirmation,
+                    ) {
+                        last_write_pending_directory_confirmation = false;
+                        continue;
+                    }
+                    last_write_pending_directory_confirmation = false;
                     let decision = session_state.evaluate_quit(force);
                     if let Some(reason) =
                         shutdown_reason_from_quit_decision(decision, force, system_warning)
@@ -3099,6 +3129,7 @@ fn process_pending_host_actions_without_runtime(
                         session_state,
                         request.clone(),
                         transient_msg,
+                        system_warning,
                     )
                     .is_some()
                     {
@@ -3166,17 +3197,24 @@ fn process_pending_host_actions_without_runtime(
     None
 }
 
+#[derive(Debug, Default)]
+struct WriteHostActionEffect {
+    shutdown_reason: Option<ShutdownReason>,
+    pending_directory_confirmation: bool,
+}
+
 async fn handle_write_host_action_with_runtime(
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     session_state: &mut saya::app::session::EditorSessionState,
     path_override: Option<&str>,
     confirmed: bool,
     transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
     runtime_session: Option<&mut RuntimeSessionOwner>,
     need_redraw: &mut bool,
     runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
     lsif_bridge: Option<&LsifBridgeHandle>,
-) -> Option<ShutdownReason> {
+) -> WriteHostActionEffect {
     let snapshot = outcome.core_bridge.snapshot();
     log::debug!(
         "[main] processing write host action with runtime integration: path_present={}, contents_len={}",
@@ -3192,21 +3230,28 @@ async fn handle_write_host_action_with_runtime(
         Some(outcome.core_bridge.revision()),
     );
     *transient_msg = save_outcome.transient_message;
+    clear_stale_quit_warning_after_write_attempt(system_warning, transient_msg.as_deref());
     if save_outcome.wrote {
         refresh_directory_buffer_after_confirmed_save(outcome, session_state, transient_msg);
-        return dispatch_buffer_write_post_with_runtime(
-            runtime_session,
-            outcome,
-            session_state,
-            transient_msg,
-            need_redraw,
-            runtime_presentation_intents,
-            lsif_bridge,
-        )
-        .await;
+        return WriteHostActionEffect {
+            shutdown_reason: dispatch_buffer_write_post_with_runtime(
+                runtime_session,
+                outcome,
+                session_state,
+                transient_msg,
+                need_redraw,
+                runtime_presentation_intents,
+                lsif_bridge,
+            )
+            .await,
+            pending_directory_confirmation: false,
+        };
     }
 
-    None
+    WriteHostActionEffect {
+        shutdown_reason: None,
+        pending_directory_confirmation: save_outcome.pending_directory_confirmation,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3251,11 +3296,12 @@ fn handle_directory_operation_confirmation_key_without_runtime(
     session_state: &mut saya::app::session::EditorSessionState,
     transient_msg: &mut Option<String>,
     need_redraw: &mut bool,
-) -> bool {
+) -> Option<Option<ShutdownReason>> {
     let Some(action) = directory_operation_confirmation_key_action(key, session_state) else {
-        return false;
+        return None;
     };
     *need_redraw = true;
+    let mut shutdown_reason = None;
     match action {
         DirectoryOperationConfirmationKeyAction::Confirm => {
             let snapshot = outcome.core_bridge.snapshot();
@@ -3273,6 +3319,7 @@ fn handle_directory_operation_confirmation_key_without_runtime(
                     session_state,
                     transient_msg,
                 );
+                shutdown_reason = take_pending_directory_save_then_quit_shutdown(session_state);
             }
         }
         DirectoryOperationConfirmationKeyAction::Cancel => {
@@ -3285,7 +3332,7 @@ fn handle_directory_operation_confirmation_key_without_runtime(
             );
         }
     }
-    true
+    Some(shutdown_reason)
 }
 
 async fn handle_directory_operation_confirmation_key_with_runtime(
@@ -3317,7 +3364,7 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
                     session_state,
                     transient_msg,
                 );
-                return Some(
+                return Some(merge_confirmation_shutdown_reason(
                     dispatch_buffer_write_post_with_runtime(
                         runtime_session,
                         outcome,
@@ -3328,7 +3375,8 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
                         lsif_bridge,
                     )
                     .await,
-                );
+                    take_pending_directory_save_then_quit_shutdown(session_state),
+                ));
             }
         }
         DirectoryOperationConfirmationKeyAction::Cancel => {
@@ -3342,6 +3390,15 @@ async fn handle_directory_operation_confirmation_key_with_runtime(
         }
     }
     Some(None)
+}
+
+fn merge_confirmation_shutdown_reason(
+    write_post_reason: Option<ShutdownReason>,
+    pending_quit_reason: Option<ShutdownReason>,
+) -> Option<ShutdownReason> {
+    let mut reason = write_post_reason;
+    merge_shutdown_reason(&mut reason, pending_quit_reason);
+    reason
 }
 
 fn refresh_directory_buffer_after_confirmed_save(
@@ -3381,6 +3438,7 @@ fn handle_directory_buffer_vfs_save_request(
     session_state: &mut saya::app::session::EditorSessionState,
     request: CoreVfsRequest,
     transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
 ) -> Option<SaveSnapshotOutcome> {
     let CoreVfsRequest::Save {
         request_id,
@@ -3409,6 +3467,7 @@ fn handle_directory_buffer_vfs_save_request(
     let save_outcome =
         save_snapshot_result_with_confirmation(&text, session_state, path_override, force, None);
     *transient_msg = save_outcome.transient_message.clone();
+    clear_stale_quit_warning_after_write_attempt(system_warning, transient_msg.as_deref());
     let response = if save_outcome.wrote {
         CoreVfsResponse::Saved {
             request_id,
@@ -3529,6 +3588,7 @@ fn paths_refer_to_same_location_main(left: &std::path::Path, right: &std::path::
 struct SaveSnapshotOutcome {
     transient_message: Option<String>,
     wrote: bool,
+    pending_directory_confirmation: bool,
 }
 
 fn save_snapshot_result(
@@ -3577,6 +3637,7 @@ fn save_snapshot_result_with_confirmation(
                                 "Directory operations applied: {applied_count} operation(s)"
                             )),
                             wrote: true,
+                            pending_directory_confirmation: false,
                         }
                     }
                     Err(error) => {
@@ -3591,6 +3652,7 @@ fn save_snapshot_result_with_confirmation(
                                 "Directory operation apply failed: {error:?}. Recovery: directory metadata was refreshed from the filesystem; inspect the listing before retrying."
                             )),
                             wrote: false,
+                            pending_directory_confirmation: false,
                         }
                     }
                 },
@@ -3600,6 +3662,7 @@ fn save_snapshot_result_with_confirmation(
                             "Directory operation preview is required before :write!".to_string(),
                         ),
                         wrote: false,
+                        pending_directory_confirmation: false,
                     }
                 }
                 Err(DirectoryBufferPreviewConfirmationError::StalePreview { .. }) => {
@@ -3609,6 +3672,7 @@ fn save_snapshot_result_with_confirmation(
                                 .to_string(),
                         ),
                         wrote: false,
+                        pending_directory_confirmation: false,
                     }
                 }
                 Err(DirectoryBufferPreviewConfirmationError::Validation(errors)) => {
@@ -3622,6 +3686,7 @@ fn save_snapshot_result_with_confirmation(
                             errors.len()
                         )),
                         wrote: false,
+                        pending_directory_confirmation: false,
                     }
                 }
             };
@@ -3647,6 +3712,7 @@ fn save_snapshot_result_with_confirmation(
                         |prompt| prompt.status_line,
                     )),
                     wrote: false,
+                    pending_directory_confirmation: true,
                 }
             }
             Err(errors) => {
@@ -3660,6 +3726,7 @@ fn save_snapshot_result_with_confirmation(
                         errors.len()
                     )),
                     wrote: false,
+                    pending_directory_confirmation: false,
                 }
             }
         };
@@ -3672,6 +3739,7 @@ fn save_snapshot_result_with_confirmation(
                 SaveSnapshotOutcome {
                     transient_message: Some("Saved successfully".to_string()),
                     wrote: true,
+                    pending_directory_confirmation: false,
                 }
             }
             SaveResult::Failed { message } => {
@@ -3682,12 +3750,14 @@ fn save_snapshot_result_with_confirmation(
                         session_state.last_save_error().unwrap_or("")
                     )),
                     wrote: false,
+                    pending_directory_confirmation: false,
                 }
             }
         },
         Err(error) => SaveSnapshotOutcome {
             transient_message: Some(save_error_message(&error)),
             wrote: false,
+            pending_directory_confirmation: false,
         },
     }
 }
@@ -4460,6 +4530,36 @@ fn merge_shutdown_reason(current: &mut Option<ShutdownReason>, next: Option<Shut
     }
 }
 
+fn defer_directory_save_then_quit_if_confirmation_pending(
+    session_state: &mut saya::app::session::EditorSessionState,
+    force: bool,
+    pending_directory_confirmation: bool,
+) -> bool {
+    if pending_directory_confirmation
+        && session_state.directory_operation_confirmation_dialog_active()
+    {
+        session_state.defer_directory_save_then_quit(force);
+        true
+    } else {
+        false
+    }
+}
+
+fn take_pending_directory_save_then_quit_shutdown(
+    session_state: &mut saya::app::session::EditorSessionState,
+) -> Option<ShutdownReason> {
+    match session_state.take_pending_directory_save_then_quit_decision()? {
+        QuitDecision::Allow => Some(ShutdownReason::UserQuit),
+        QuitDecision::ForceQuit => Some(ShutdownReason::UserForceQuit),
+        QuitDecision::WarnUnsaved => {
+            log::debug!(
+                "[main][dired][writable] deferred save-then-quit still rejected after confirmation"
+            );
+            None
+        }
+    }
+}
+
 fn execute_runtime_host_command_through_core(
     ex_command: &str,
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
@@ -4508,6 +4608,7 @@ fn execute_runtime_host_command_through_core(
             break;
         }
 
+        let mut last_write_pending_directory_confirmation = false;
         for directive in directives {
             match directive {
                 NormalizedHostDirective::Write { path, force, .. } => {
@@ -4533,8 +4634,19 @@ fn execute_runtime_host_command_through_core(
                                 host_session.current_buffer_snapshot(),
                             ));
                     }
+                    last_write_pending_directory_confirmation =
+                        save_outcome.pending_directory_confirmation;
                 }
                 NormalizedHostDirective::Quit { force, .. } => {
+                    if defer_directory_save_then_quit_if_confirmation_pending(
+                        session_state,
+                        force,
+                        last_write_pending_directory_confirmation,
+                    ) {
+                        last_write_pending_directory_confirmation = false;
+                        continue;
+                    }
+                    last_write_pending_directory_confirmation = false;
                     let decision = session_state.evaluate_quit(force);
                     merge_runtime_shutdown_intent(
                         &mut effect.shutdown_intent,
@@ -4553,11 +4665,13 @@ fn execute_runtime_host_command_through_core(
                         trace.sequence,
                         request
                     );
+                    let mut ignored_system_warning = None;
                     if let Some(save_outcome) = handle_directory_buffer_vfs_save_request(
                         outcome,
                         session_state,
                         request.clone(),
                         &mut effect.transient_message,
+                        &mut ignored_system_warning,
                     ) {
                         if save_outcome.wrote {
                             let mut host_session =
@@ -8250,6 +8364,15 @@ fn normal_quit_warning_message() -> &'static str {
     "No write since last change (add ! to override)"
 }
 
+fn clear_stale_quit_warning_after_write_attempt(
+    system_warning: &mut Option<String>,
+    write_message: Option<&str>,
+) {
+    if write_message.is_some() && system_warning.as_deref() == Some(normal_quit_warning_message()) {
+        *system_warning = None;
+    }
+}
+
 fn current_terminal_size() -> (u16, u16) {
     crossterm::terminal::size().unwrap_or((80, 24))
 }
@@ -10962,6 +11085,89 @@ mod tests {
     }
 
     #[test]
+    fn write_host_action_creates_missing_named_file_without_quit_warning() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("write-missing-named-file.md");
+        assert!(
+            !target_path.exists(),
+            "test starts with a nonexistent target"
+        );
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        outcome.core_bridge.dispatch_key("i").unwrap();
+        outcome.core_bridge.dispatch_key("hello").unwrap();
+        outcome.core_bridge.dispatch_key("\x1b").unwrap();
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
+
+        let mut outcome_accumulator = MainOutcomeAccumulator::default();
+        let mut transient_msg = None;
+        let mut system_warning = None;
+        let mut need_redraw = false;
+        let mut host_action_runtime = HostActionRuntime::default();
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":q")
+            .expect(":q command should succeed");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        let quit_shutdown = process_pending_host_actions_without_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+        );
+        assert_eq!(quit_shutdown, None);
+        assert_eq!(
+            system_warning,
+            Some(normal_quit_warning_message().to_string())
+        );
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":w")
+            .expect(":w command should succeed");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        let write_shutdown = process_pending_host_actions_without_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+        );
+
+        assert_eq!(write_shutdown, None);
+        assert_eq!(system_warning, None);
+        assert_eq!(transient_msg, Some("Saved successfully".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(&target_path).expect("missing target should be created"),
+            outcome.core_bridge.snapshot().text
+        );
+        assert!(!session_state.is_dirty());
+
+        std::fs::remove_file(&target_path).expect("cleanup");
+    }
+
+    #[test]
     fn directory_buffer_write_prepares_operation_preview_without_filesystem_mutation() {
         let _lock = saya::app::bootstrap::launch_test_lock()
             .lock()
@@ -10989,6 +11195,7 @@ mod tests {
                     preview.id
                 )),
                 wrote: false,
+                pending_directory_confirmation: true,
             }
         );
         assert!(alpha_path.exists(), "rename must not be applied in phase 7");
@@ -11020,6 +11227,7 @@ mod tests {
                     "Directory operation plan failed validation: 4 error(s)".to_string()
                 ),
                 wrote: false,
+                pending_directory_confirmation: false,
             }
         );
         assert!(
@@ -11121,7 +11329,11 @@ mod tests {
             &mut need_redraw,
         );
 
-        assert!(applied, "y should confirm the pending directory write");
+        assert_eq!(
+            applied,
+            Some(None),
+            "y should confirm the pending directory write without requesting shutdown"
+        );
         assert_eq!(
             transient_msg,
             Some("Directory operations applied: 1 operation(s)".to_string())
@@ -11179,7 +11391,11 @@ mod tests {
             &mut need_redraw,
         );
 
-        assert!(cancelled, "Esc should cancel the pending directory write");
+        assert_eq!(
+            cancelled,
+            Some(None),
+            "Esc should cancel the pending directory write without requesting shutdown"
+        );
         assert_eq!(
             transient_msg,
             Some("Directory operation cancelled; no filesystem changes were applied".to_string())
@@ -11430,6 +11646,103 @@ mod tests {
                 .is_none(),
             "confirmed apply should clear the pending preview"
         );
+
+        std::fs::remove_dir_all(root_path).expect("cleanup directory");
+    }
+
+    #[test]
+    fn directory_buffer_wq_waits_for_preview_confirmation_then_quits() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root_path = unique_path("directory-wq-delete");
+        let alpha_path = root_path.join("alpha.md");
+        let beta_path = root_path.join("beta.md");
+        std::fs::create_dir_all(&root_path).expect("test directory");
+        std::fs::write(&alpha_path, "alpha\n").expect("alpha file");
+        std::fs::write(&beta_path, "beta\n").expect("beta file");
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open directory listing");
+
+        outcome
+            .core_bridge
+            .dispatch_key("dd")
+            .expect("delete current listing line");
+        let mut outcome_accumulator = MainOutcomeAccumulator::default();
+        let mut transient_msg = None;
+        let mut system_warning = None;
+        let mut need_redraw = false;
+        let mut host_action_runtime = HostActionRuntime::default();
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
+
+        outcome
+            .core_bridge
+            .apply_ex_command(":wq")
+            .expect(":wq should produce write then quit host actions");
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        let preview_shutdown = process_pending_host_actions_without_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+        );
+
+        assert_eq!(
+            preview_shutdown, None,
+            ":wq should wait for directory operation confirmation"
+        );
+        assert!(
+            alpha_path.exists(),
+            "unconfirmed preview must not delete files"
+        );
+        assert!(
+            session_state
+                .pending_directory_operation_preview()
+                .is_some(),
+            ":wq should keep a pending dired preview"
+        );
+
+        let handled = handle_directory_operation_confirmation_key_without_runtime(
+            &KeyInput::Enter,
+            &mut outcome,
+            &mut session_state,
+            &mut transient_msg,
+            &mut need_redraw,
+        );
+
+        assert_eq!(
+            handled,
+            Some(Some(ShutdownReason::UserQuit)),
+            "confirmation key should apply and resume the pending quit"
+        );
+        assert!(
+            !alpha_path.exists(),
+            "confirmed :wq should apply the dired operation"
+        );
+        assert!(beta_path.exists());
+        assert_eq!(outcome.core_bridge.snapshot().text, "beta.md\n");
 
         std::fs::remove_dir_all(root_path).expect("cleanup directory");
     }
@@ -16452,6 +16765,7 @@ mod tests {
             SaveSnapshotOutcome {
                 transient_message: Some("Saved successfully".to_string()),
                 wrote: true,
+                pending_directory_confirmation: false,
             }
         );
         assert_eq!(
