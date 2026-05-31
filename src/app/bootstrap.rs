@@ -187,6 +187,7 @@ struct InitialBuffer {
 enum InitialBufferSource {
     Empty,
     File,
+    NewFile,
     Directory,
     Stdin,
 }
@@ -405,10 +406,31 @@ fn load_path_initial_buffer(target_path: &Path) -> Result<InitialBuffer, Bootstr
         "[bootstrap] inspecting target path before terminal enter: {}",
         target_path.display()
     );
-    let metadata = fs::metadata(target_path).map_err(|error| BootstrapError::TargetReadFailed {
-        path: target_path.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let metadata = match fs::metadata(target_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            log::debug!(
+                "[bootstrap] target path does not exist; opening a named empty buffer: {}",
+                target_path.display()
+            );
+            return Ok(InitialBuffer {
+                target_path: Some(target_path.to_path_buf()),
+                text: String::new(),
+                source: InitialBufferSource::NewFile,
+            });
+        }
+        Err(error) => {
+            log::debug!(
+                "[bootstrap] target path metadata read failed before terminal enter: path={}, error={}",
+                target_path.display(),
+                error
+            );
+            return Err(BootstrapError::TargetReadFailed {
+                path: target_path.to_path_buf(),
+                message: error.to_string(),
+            });
+        }
+    };
 
     if metadata.is_dir() {
         log::debug!(
@@ -1332,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_fatal_error_for_unreadable_target_path() {
+    fn opens_nonexistent_target_as_named_empty_buffer() {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1344,39 +1366,17 @@ mod tests {
             ..default_request()
         });
 
-        assert!(matches!(
-            result,
-            Err(BootstrapError::TargetReadFailed { path, .. }) if path == missing_path
-        ));
-    }
-
-    #[test]
-    fn returns_fatal_error_with_readable_message_for_nonexistent_target() {
-        let _lock = session_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let missing_path = unique_path("nonexistent-readable-msg");
-
-        let result = prepare_launch(LaunchRequest {
-            input_source: InputSource::File(missing_path.clone()),
-            config_source: ConfigSource::Default,
-            ..default_request()
-        });
-
-        match result {
-            Err(BootstrapError::TargetReadFailed { path, message }) => {
-                assert_eq!(path, missing_path);
-                assert!(!message.is_empty(), "失敗メッセージは空でない必要がある");
-                log::debug!(
-                    "[test] nonexistent target error message for display: {}",
-                    message
-                );
-            }
-            other => panic!(
-                "nonexistent target should return TargetReadFailed, got: {:?}",
-                other
-            ),
-        }
+        let outcome = result.expect("nonexistent target should open as a new named buffer");
+        assert_eq!(outcome.target_path, Some(missing_path.clone()));
+        assert_eq!(outcome.initial_snapshot.text, "\n");
+        assert!(
+            !outcome.initial_snapshot.dirty,
+            "opening a new named buffer must start clean until the user edits it"
+        );
+        assert!(
+            !missing_path.exists(),
+            "startup must not create the file until the user writes the buffer"
+        );
     }
 
     #[test]
@@ -1555,14 +1555,29 @@ mod tests {
         let _lock = session_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let missing_path = unique_path("missing-target");
+        let restricted_path = unique_path("guard-release-permission-denied-target");
+        std::fs::write(&restricted_path, "restricted content").expect("create restricted file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&restricted_path, std::fs::Permissions::from_mode(0o000))
+                .expect("restrict permissions");
+        }
 
         let result = prepare_launch(LaunchRequest {
-            input_source: InputSource::File(missing_path),
+            input_source: InputSource::File(restricted_path.clone()),
             config_source: ConfigSource::Default,
             ..default_request()
         });
         assert!(result.is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&restricted_path, std::fs::Permissions::from_mode(0o644))
+                .expect("restore permissions");
+        }
+        std::fs::remove_file(&restricted_path).expect("cleanup restricted file");
 
         let reacquired = SessionGuard::acquire();
         assert!(

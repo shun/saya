@@ -37,6 +37,25 @@ fn unique_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("saya-integ-startup-{name}-{nanos}"))
 }
 
+#[cfg(unix)]
+fn create_unreadable_file(name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = unique_path(name);
+    std::fs::write(&path, "restricted").expect("読み込み不能テストファイルの作成");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+        .expect("読み込み不能テストファイルの権限変更");
+    path
+}
+
+#[cfg(unix)]
+fn remove_unreadable_file(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+    let _ = std::fs::remove_file(path);
+}
+
 fn default_request() -> LaunchRequest {
     LaunchRequest::default()
 }
@@ -276,45 +295,48 @@ fn new_buffer_startup_flow_without_target_path() {
 
 // ---- 9.1.3: 読込失敗の統合フロー ----
 
-/// 存在しないファイルを指定した場合、起動失敗として BootstrapError を返す。
+/// 読み込み不能ファイルを指定した場合、起動失敗として BootstrapError を返す。
+#[cfg(unix)]
 #[test]
 fn read_failure_startup_flow_returns_fatal_error() {
     let _lock = test_lock();
-    let missing_path = unique_path("nonexistent");
+    #[cfg(unix)]
+    let restricted_path = create_unreadable_file("read-failure");
 
     // 1. CLI 引数パース
-    let request = parse_launch_request([missing_path.to_str().unwrap()])
+    #[cfg(unix)]
+    let request = parse_launch_request([restricted_path.to_str().unwrap()])
         .expect("CLI 引数のパースが成功すること");
 
     // 2. 起動準備は失敗する
+    #[cfg(unix)]
     let result = prepare_launch(request);
 
+    #[cfg(unix)]
     match result {
         Err(BootstrapError::TargetReadFailed { path, message }) => {
-            assert_eq!(path, missing_path);
+            assert_eq!(path, restricted_path);
             assert!(!message.is_empty(), "エラーメッセージは空でないこと");
         }
         other => panic!(
-            "存在しないファイルは TargetReadFailed を返すこと, got: {:?}",
+            "読み込み不能ファイルは TargetReadFailed を返すこと, got: {:?}",
             other
         ),
     }
+
+    #[cfg(unix)]
+    remove_unreadable_file(&restricted_path);
 }
 
 /// 読み込み不能ファイル（権限不足）で起動失敗となる。
+#[cfg(unix)]
 #[test]
 fn read_failure_startup_flow_for_permission_denied() {
     let _lock = test_lock();
-    let restricted_path = unique_path("permission-denied");
-    std::fs::write(&restricted_path, "restricted").expect("テストファイルの作成");
+    #[cfg(unix)]
+    let restricted_path = create_unreadable_file("permission-denied");
 
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&restricted_path, std::fs::Permissions::from_mode(0o000))
-            .expect("権限の変更");
-    }
-
     let request = parse_launch_request([restricted_path.to_str().unwrap()])
         .expect("CLI 引数のパースが成功すること");
 
@@ -329,22 +351,23 @@ fn read_failure_startup_flow_for_permission_denied() {
 
     // クリーンアップ
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&restricted_path, std::fs::Permissions::from_mode(0o644));
-    }
-    let _ = std::fs::remove_file(&restricted_path);
+    remove_unreadable_file(&restricted_path);
 }
 
 // ---- 9.1.4: 起動失敗時の terminal lifecycle 未初期化確認 ----
 
 /// 起動準備が失敗した場合、terminal lifecycle backend が一切触られない。
+#[cfg(unix)]
 #[test]
 fn startup_failure_leaves_terminal_lifecycle_uninitialized() {
     let _lock = test_lock();
-    let missing_path = unique_path("terminal-uninitialized");
+    #[cfg(unix)]
+    let restricted_path = create_unreadable_file("terminal-uninitialized");
     let request = LaunchRequest {
-        input_source: InputSource::File(missing_path),
+        #[cfg(unix)]
+        input_source: InputSource::File(restricted_path.clone()),
+        #[cfg(not(unix))]
+        input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
         ..default_request()
     };
@@ -358,23 +381,32 @@ fn startup_failure_leaves_terminal_lifecycle_uninitialized() {
         backend.calls.is_empty(),
         "bootstrap failure 時に terminal backend が一切呼ばれないこと"
     );
+    #[cfg(unix)]
+    remove_unreadable_file(&restricted_path);
 }
 
 // ---- 9.1.4: 起動失敗時のセッション残留なし ----
 
 /// 起動失敗後にセッションガードが解放され、再度起動可能であることを確認する。
+#[cfg(unix)]
 #[test]
 fn session_guard_released_after_startup_failure() {
     let _lock = test_lock();
-    let missing_path = unique_path("session-cleanup");
+    #[cfg(unix)]
+    let restricted_path = create_unreadable_file("session-cleanup");
 
     // 1. 最初の起動試行（失敗する）
     let result = prepare_launch(LaunchRequest {
-        input_source: InputSource::File(missing_path),
+        #[cfg(unix)]
+        input_source: InputSource::File(restricted_path.clone()),
+        #[cfg(not(unix))]
+        input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
         ..default_request()
     });
     assert!(result.is_err(), "起動は失敗すること");
+    #[cfg(unix)]
+    remove_unreadable_file(&restricted_path);
 
     // 2. セッションガードが解放されているので、再度起動可能
     let outcome = prepare_launch(LaunchRequest {
@@ -415,18 +447,21 @@ fn session_guard_released_after_successful_startup_outcome_dropped() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
     let _lock = launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let success_path = unique_path("repeat-success");
-    let failure_path = unique_path("repeat-failure");
+    #[cfg(unix)]
+    let failure_path = create_unreadable_file("repeat-failure");
 
     std::fs::write(&success_path, "line1\nline2\n").expect("成功用のテストファイルの作成");
 
     let success_request = parse_launch_request(["-R", "+2", success_path.to_str().unwrap()])
         .expect("成功サイクル用 CLI 引数のパースが成功すること");
+    #[cfg(unix)]
     let failure_request = parse_launch_request(["-R", "+2", failure_path.to_str().unwrap()])
         .expect("失敗サイクル用 CLI 引数のパースが成功すること");
 
@@ -435,7 +470,9 @@ fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
         success_request.initial_cursor,
         InitialCursorPosition::Line(2)
     );
+    #[cfg(unix)]
     assert!(failure_request.read_only);
+    #[cfg(unix)]
     assert_eq!(
         failure_request.initial_cursor,
         InitialCursorPosition::Line(2)
@@ -456,16 +493,20 @@ fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
     drop(first_outcome);
 
     log::debug!("[test] cycle 2: expected bootstrap failure");
+    #[cfg(unix)]
     let failure = prepare_launch(failure_request.clone());
+    #[cfg(unix)]
     match failure {
         Err(BootstrapError::TargetReadFailed { path, .. }) => {
-            assert_eq!(path, failure_path);
+            assert_eq!(path, failure_path.clone());
         }
         other => panic!(
-            "存在しないファイルは TargetReadFailed を返すこと, got: {:?}",
+            "読み込み不能ファイルは TargetReadFailed を返すこと, got: {:?}",
             other
         ),
     }
+    #[cfg(unix)]
+    remove_unreadable_file(&failure_path);
 
     log::debug!("[test] cycle 3: successful relaunch after failure");
     let second_outcome =

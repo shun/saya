@@ -2123,6 +2123,43 @@ async fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Resu
         return Ok(());
     }
 
+    if std::env::var_os("SAYA_BINARY_SMOKE_QUIT_WITHOUT_EDIT").is_some() {
+        eprintln!("[main][smoke] quitting without edit or write as requested");
+        outcome
+            .core_bridge
+            .apply_ex_command(":q")
+            .map_err(|error| format!("quit-without-edit smoke :q failed: {:?}", error))?;
+        consume_core_outcomes_from_core(
+            &mut outcome.core_bridge,
+            &mut outcome_accumulator,
+            &mut need_redraw,
+        );
+        sync_session_dirty_from_core(&mut session_state, &outcome.core_bridge);
+        let reason = process_pending_host_actions_without_runtime(
+            &mut outcome,
+            &mut outcome_accumulator,
+            &mut session_state,
+            &mut transient_msg,
+            &mut system_warning,
+            &mut host_action_runtime,
+        )
+        .ok_or_else(|| {
+            format!(
+                "quit-without-edit smoke did not complete: dirty={}, last_save_error={:?}",
+                session_state.is_dirty(),
+                session_state.last_save_error()
+            )
+        })?;
+        if reason != ShutdownReason::UserQuit {
+            return Err(format!(
+                "quit-without-edit smoke returned unexpected shutdown reason: {:?}",
+                reason
+            ));
+        }
+        eprintln!("[main][smoke] completed with shutdown reason: {:?}", reason);
+        return Ok(());
+    }
+
     eprintln!("[main][smoke] dispatching a single edit");
     outcome
         .core_bridge

@@ -145,6 +145,74 @@ fn opening_editing_once_and_quitting_cleanly_works_through_the_sy_binary() {
 }
 
 #[test]
+fn opening_missing_file_then_writing_creates_the_file_through_the_sy_binary() {
+    let target_path = unique_path("open-missing-write.txt");
+    let swap_path = swapfile_path_for_target(&target_path);
+    assert!(
+        !target_path.exists(),
+        "test starts with a nonexistent target file"
+    );
+
+    let target_path_arg = target_path
+        .to_str()
+        .expect("target path should be valid UTF-8");
+    let output = run_sy_headless_smoke(&[target_path_arg]);
+
+    assert!(
+        output.status.success(),
+        "sy binary should open, edit, write, and quit a missing target cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target_path).expect("missing target should be created on write"),
+        "X\n"
+    );
+    assert!(
+        !swap_path.exists(),
+        "normal quit should remove the swapfile for the newly-created file: {:?}",
+        swap_path
+    );
+
+    std::fs::remove_file(&target_path).expect("cleanup target");
+}
+
+#[test]
+fn opening_missing_file_then_quitting_without_write_does_not_create_the_file() {
+    let target_path = unique_path("open-missing-quit.txt");
+    assert!(
+        !target_path.exists(),
+        "test starts with a nonexistent target file"
+    );
+
+    let output = run_sy_headless_smoke_with_env(
+        &[target_path
+            .to_str()
+            .expect("target path should be valid UTF-8")],
+        &[("SAYA_BINARY_SMOKE_QUIT_WITHOUT_EDIT", "1")],
+    );
+
+    assert!(
+        output.status.success(),
+        "sy binary should open and quit a missing target cleanly without writing: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !target_path.exists(),
+        "quitting without a write must not create the target file"
+    );
+    let startup_state = smoke_state(&output.stderr, "startup");
+    assert_eq!(
+        startup_state["fileName"],
+        target_path.to_string_lossy().as_ref()
+    );
+    assert_eq!(startup_state["dirty"], false);
+}
+
+#[test]
 fn starting_with_directory_opens_dired_listing_through_the_sy_binary() {
     let root_path = unique_path("dired-startup-root");
     let nested_path = root_path.join("src");
