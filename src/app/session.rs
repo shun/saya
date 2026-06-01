@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::app::host_io::SaveRequest;
 use crate::input::router::KeyInput;
 use crate::presentation::theme::ResolvedTheme;
+use crate::runtime::config::{StatusLineConfig, StatusLineSegment};
 use crate::runtime::options::{SayaOptionName, SayaOptionValue};
 use vim_core_rs::CorePagerPromptKind;
 
@@ -296,6 +297,8 @@ pub struct EditorSessionState {
     foldmethod: String,
     foldlevel: u16,
     resolved_theme: ResolvedTheme,
+    filetype: Option<String>,
+    status_line_config: StatusLineConfig,
     /// read-only 起動かどうか
     read_only: bool,
     /// 現在 dirty 状態かどうか
@@ -388,6 +391,8 @@ impl EditorSessionState {
             foldmethod: "manual".to_string(),
             foldlevel: 0,
             resolved_theme: ResolvedTheme::default(),
+            filetype: None,
+            status_line_config: StatusLineConfig::default(),
             read_only,
             dirty: false,
             last_clean_core_revision: None,
@@ -1245,6 +1250,54 @@ impl EditorSessionState {
     pub fn set_resolved_theme(&mut self, resolved_theme: ResolvedTheme) {
         log::debug!("[editor_session] resolved theme updated for session");
         self.resolved_theme = resolved_theme;
+    }
+
+    pub fn filetype(&self) -> Option<&str> {
+        self.filetype.as_deref()
+    }
+
+    pub fn set_filetype(&mut self, filetype: Option<String>) {
+        log::debug!(
+            "[editor_session] filetype updated for session statusline: {:?}",
+            filetype
+        );
+        self.filetype = filetype;
+    }
+
+    pub fn set_status_line_config(&mut self, config: StatusLineConfig) {
+        log::debug!(
+            "[editor_session] statusline config updated: left_segments={}, right_segments={}",
+            config.left.len(),
+            config.right.len()
+        );
+        self.status_line_config = config;
+    }
+
+    pub fn render_status_line(&self, file_name: &str, mode_label: &str, dirty: bool) -> String {
+        let render_side = |segments: &[StatusLineSegment]| {
+            segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    StatusLineSegment::FileName => Some(file_name.to_string()),
+                    StatusLineSegment::Mode => Some(mode_label.to_string()),
+                    StatusLineSegment::FileType => self
+                        .filetype()
+                        .filter(|filetype| !filetype.trim().is_empty())
+                        .map(ToString::to_string),
+                    StatusLineSegment::Modified => dirty.then(|| "[+]!".to_string()),
+                })
+                .filter(|component| !component.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let left = render_side(&self.status_line_config.left);
+        let right = render_side(&self.status_line_config.right);
+        match (left.is_empty(), right.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => left,
+            (true, false) => right,
+            (false, false) => format!("{left} || {right}"),
+        }
     }
 
     /// 行番号表示の有効/無効を更新する。

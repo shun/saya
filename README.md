@@ -134,7 +134,22 @@ declare event handlers before the editor session begins.
 
 ```ts
 saya.options.tabstop = 4;
+saya.options.shiftwidth = 4;
+saya.options.expandtab = true;
+saya.options.smartindent = true;
 saya.options.number = true;
+saya.statusline.set({
+  left: ["fileName", "mode"],
+  right: ["filetype", "modified"],
+});
+saya.ftplugin.set("go", {
+  extensions: ["go"],
+  options: {
+    expandtab: false,
+    softtabstop: 0,
+    shiftwidth: 0,
+  },
+});
 
 saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
 
@@ -195,9 +210,24 @@ setupSayaDired({
 > [`docs/api/dired-api-v1.md`](docs/api/dired-api-v1.md), including migration
 > notes and plugin author anti-patterns.
 
-At the moment, `tabstop` and `number` are the most visible startup settings in
-the TUI. Command and event registration are implemented, tested headlessly, and
-wired into the current live runtime paths.
+At the moment, `tabstop`, `number`, and indentation options such as
+`smartindent` are the most visible startup settings. You can also use Vim-style
+option aliases such as `si` for `smartindent`, `sw` for `shiftwidth`, and `et`
+for `expandtab`. Command and event registration are implemented, tested
+headlessly, and wired into the current live runtime paths.
+
+Startup also applies a small ftplugin layer after user options. Go files use
+the Vim Go defaults, so `*.go` buffers get `noexpandtab`, `softtabstop=0`, and
+`shiftwidth=0` even when global startup options prefer spaces.
+The ftplugin layer is data-driven: startup config and plugins can disable it
+with `saya.ftplugin.enabled = false`, disable one filetype with
+`saya.ftplugin.disable("go")`, or replace/add a filetype definition with
+`saya.ftplugin.set(filetype, { extensions, options })`.
+
+Plugins and startup config can customize the status line with
+`saya.statusline.set({ left, right })`. The initial segment set includes
+`fileName`, `mode`, `filetype`, and `modified`, which gives Go buffers a visible
+`go` filetype after the ftplugin layer resolves.
 
 ## Current scope
 

@@ -72,7 +72,14 @@ fn public_surface_suite_scope_statement_stays_pinned_to_boundary_ownership() {
 fn startup_surface_excludes_compatibility_string_apis() {
     let surface = startup_public_surface_paths();
 
-    for expected in ["saya.plugins.use", "saya.plugins.lazy"] {
+    for expected in [
+        "saya.ftplugin.enabled",
+        "saya.ftplugin.set",
+        "saya.ftplugin.disable",
+        "saya.statusline.set",
+        "saya.plugins.use",
+        "saya.plugins.lazy",
+    ] {
         assert!(
             surface.contains(&expected),
             "startup surface should expose typed plugin declaration API: {expected}"

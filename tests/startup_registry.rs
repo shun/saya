@@ -3,8 +3,9 @@ use saya::presentation::theme::{
     ThemeTextStyleDeclaration, UiStyleKey,
 };
 use saya::runtime::startup::{
-    SayaKeyMode, SayaKeymapAction, StartupOptionName, StartupOptionValue, StartupPluginSource,
-    StartupRegistryEntry, collect_startup_registry, evaluate_startup_module,
+    FtPluginDefinition, FtPluginOption, FtPluginStartupAction, SayaKeyMode, SayaKeymapAction,
+    StartupOptionName, StartupOptionValue, StartupPluginSource, StartupRegistryEntry,
+    StatusLineConfig, StatusLineSegment, collect_startup_registry, evaluate_startup_module,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -117,6 +118,85 @@ async fn startup_plugins_rejects_ambiguous_source_declaration() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_statusline_segments_are_collected_for_plugin_customization() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.statusline.set({
+                left: ["mode", "fileName"],
+                right: ["filetype", "modified"],
+            });
+        "#,
+    )
+    .await
+    .expect("startup statusline config");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::StatusLine {
+            config: StatusLineConfig {
+                left: vec![StatusLineSegment::Mode, StatusLineSegment::FileName],
+                right: vec![StatusLineSegment::FileType, StatusLineSegment::Modified],
+            },
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_ftplugin_controls_are_collected_for_plugin_customization() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.ftplugin.enabled = false;
+            saya.ftplugin.set("go", {
+                extensions: ["go", ".mod"],
+                options: {
+                    expandtab: false,
+                    softtabstop: 0,
+                    shiftwidth: 0,
+                },
+            });
+            saya.ftplugin.disable("python");
+        "#,
+    )
+    .await
+    .expect("startup ftplugin config");
+
+    assert_eq!(
+        registry.entries(),
+        &[
+            StartupRegistryEntry::FtPlugin {
+                action: FtPluginStartupAction::SetEnabled(false),
+            },
+            StartupRegistryEntry::FtPlugin {
+                action: FtPluginStartupAction::SetDefinition(FtPluginDefinition {
+                    filetype: "go".to_string(),
+                    extensions: vec!["go".to_string(), "mod".to_string()],
+                    options: vec![
+                        FtPluginOption {
+                            name: StartupOptionName::ExpandTab,
+                            value: StartupOptionValue::Boolean(false),
+                        },
+                        FtPluginOption {
+                            name: StartupOptionName::SoftTabStop,
+                            value: StartupOptionValue::Number(0),
+                        },
+                        FtPluginOption {
+                            name: StartupOptionName::ShiftWidth,
+                            value: StartupOptionValue::Number(0),
+                        },
+                    ],
+                    enabled: true,
+                }),
+            },
+            StartupRegistryEntry::FtPlugin {
+                action: FtPluginStartupAction::DisableFileType {
+                    filetype: "python".to_string(),
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_saya_namespace_exposes_command_reference_helper_without_runtime_capabilities() {
     let result = evaluate_startup_module(
         r#"
@@ -155,6 +235,12 @@ async fn startup_surface_is_frozen_and_does_not_expose_runtime_api() {
             }
             if (!Object.isFrozen(saya.events)) {
                 throw new Error("startup event surface should be frozen");
+            }
+            if (!Object.isFrozen(saya.statusline)) {
+                throw new Error("startup statusline surface should be frozen");
+            }
+            if (!Object.isFrozen(saya.ftplugin)) {
+                throw new Error("startup ftplugin surface should be frozen");
             }
             if (!Object.isFrozen(saya.theme)) {
                 throw new Error("startup theme surface should be frozen");
@@ -442,6 +528,32 @@ async fn startup_syntax_is_collected() {
             name: StartupOptionName::Syntax,
             value: StartupOptionValue::Boolean(true),
         }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_smartindent_and_alias_are_collected_as_vim_style_boolean_options() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.smartindent = true;
+            saya.options.si = false;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[
+            StartupRegistryEntry::Option {
+                name: StartupOptionName::SmartIndent,
+                value: StartupOptionValue::Boolean(true),
+            },
+            StartupRegistryEntry::Option {
+                name: StartupOptionName::SmartIndent,
+                value: StartupOptionValue::Boolean(false),
+            },
+        ]
     );
 }
 

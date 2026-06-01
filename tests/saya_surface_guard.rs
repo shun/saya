@@ -299,7 +299,15 @@ fn startup_surface_excludes_filesystem_and_network_capabilities() {
     assert_eq!(
         surface,
         &[
-            "options", "keymap", "commands", "events", "theme", "log", "plugins"
+            "options",
+            "keymap",
+            "commands",
+            "events",
+            "ftplugin",
+            "statusline",
+            "theme",
+            "log",
+            "plugins"
         ]
     );
     assert_eq!(

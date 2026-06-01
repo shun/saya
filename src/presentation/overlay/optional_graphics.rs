@@ -251,6 +251,7 @@ mod tests {
                 },
                 file_name: "sample".to_string(),
                 mode_label: "NORMAL".to_string(),
+                status_line: "sample | NORMAL".to_string(),
                 cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string()],

@@ -898,12 +898,7 @@ fn ui_style(theme: &ResolvedTheme, key: UiStyleKey, text_mode: RenderTextMode) -
 }
 
 fn render_status_line(model: &ScreenModel) -> String {
-    let status = format!("{} | {}", model.file_name, model.mode_label);
-    if model.dirty {
-        format!("{status} [+]!")
-    } else {
-        status
-    }
+    model.status_line.clone()
 }
 
 #[cfg(test)]
@@ -1703,6 +1698,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL | [+]!".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: true,
             lines: vec!["hello".to_string()],
@@ -1815,7 +1811,7 @@ mod tests {
     fn status_line_does_not_embed_message_line() {
         let model = screen_model_with_message(Some("保存しました"));
 
-        assert_eq!(render_status_line(&model), "test.txt | NORMAL [+]!");
+        assert_eq!(render_status_line(&model), "test.txt | NORMAL | [+]!");
     }
 
     #[test]
@@ -1972,6 +1968,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["abcdef".to_string()],
@@ -3463,6 +3460,7 @@ mod tests {
             },
             file_name: "test.rs".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["let value".to_string()],
@@ -3521,6 +3519,7 @@ mod tests {
             },
             file_name: "test.rs".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["fn value".to_string()],
@@ -3577,6 +3576,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "VISUAL".to_string(),
+            status_line: "test.txt | VISUAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["abcdef".to_string()],
@@ -3639,6 +3639,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["xあx".to_string()],
@@ -3691,6 +3692,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "V-LINE".to_string(),
+            status_line: "test.txt | V-LINE".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec![" 1 alpha".to_string(), " 2 beta".to_string()],
@@ -3858,6 +3860,7 @@ mod tests {
                     },
                     file_name: "left.txt".to_string(),
                     mode_label: "NORMAL".to_string(),
+                    status_line: "test.txt | NORMAL".to_string(),
                     cursor_style: ScreenCursorStyle::Block,
                     dirty: false,
                     lines: vec!["left".to_string()],
@@ -3885,6 +3888,7 @@ mod tests {
                     },
                     file_name: "right.txt".to_string(),
                     mode_label: "NORMAL".to_string(),
+                    status_line: "test.txt | NORMAL".to_string(),
                     cursor_style: ScreenCursorStyle::Block,
                     dirty: false,
                     lines: vec!["right".to_string()],
@@ -4187,6 +4191,7 @@ mod tests {
                 },
                 file_name: "alpha.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                status_line: "alpha.txt | NORMAL".to_string(),
                 cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
@@ -4293,6 +4298,7 @@ mod tests {
                 },
                 file_name: "alpha.txt".to_string(),
                 mode_label: "NORMAL".to_string(),
+                status_line: "alpha.txt | NORMAL".to_string(),
                 cursor_style: ScreenCursorStyle::Block,
                 dirty: false,
                 lines: vec!["alpha".to_string(), "beta".to_string()],

@@ -137,7 +137,22 @@ cargo run --bin sy -- --help
 
 ```ts
 saya.options.tabstop = 4;
+saya.options.shiftwidth = 4;
+saya.options.expandtab = true;
+saya.options.smartindent = true;
 saya.options.number = true;
+saya.statusline.set({
+  left: ["fileName", "mode"],
+  right: ["filetype", "modified"],
+});
+saya.ftplugin.set("go", {
+  extensions: ["go"],
+  options: {
+    expandtab: false,
+    softtabstop: 0,
+    shiftwidth: 0,
+  },
+});
 
 saya.keymap.set("normal", "<leader>w", saya.commands.execute("writeCurrent"));
 
@@ -150,9 +165,26 @@ saya.events.on("bufferOpen", (payload) => {
 });
 ```
 
-現時点で TUI 上で最も確認しやすい設定は `tabstop` と `number` です。
-command と event の登録は実装済みで headless テストもあり、現在の live
-runtime 経路にも接続されています。
+現時点で確認しやすい startup 設定は `tabstop`、`number`、および
+`smartindent` などのインデント系 option です。`smartindent` には `si`、
+`shiftwidth` には `sw`、`expandtab` には `et` のような Vim 風 alias も
+使えます。command と event の登録は実装済みで headless テストもあり、
+現在の live runtime 経路にも接続されています。
+
+startup は user option の後に小さな ftplugin レイヤーも適用します。Go
+ファイルでは Vim の Go 既定値に合わせ、global startup option が space
+インデント寄りでも `*.go` buffer に `noexpandtab`、`softtabstop=0`、
+`shiftwidth=0` を適用します。
+ftplugin レイヤーは data-driven で、startup config や plugin から
+`saya.ftplugin.enabled = false` で全体を無効化し、
+`saya.ftplugin.disable("go")` で filetype 単位に無効化し、
+`saya.ftplugin.set(filetype, { extensions, options })` で定義を差し替え・追加
+できます。
+
+plugin と startup config は `saya.statusline.set({ left, right })` で status
+line をカスタマイズできます。初期 segment には `fileName`、`mode`、
+`filetype`、`modified` があり、ftplugin で解決した Go buffer は `go`
+filetype を status line に表示できます。
 
 ## 現在のスコープ
 

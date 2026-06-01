@@ -64,6 +64,31 @@ declare global {
         ): void;
     }
 
+    type SayaFtPluginOptions = Partial<SayaStartupOptionsSurface>;
+
+    interface SayaFtPluginDefinition {
+        extensions?: string[];
+        options?: SayaFtPluginOptions;
+        enabled?: boolean;
+    }
+
+    interface SayaStartupFtPluginSurface {
+        enabled: boolean;
+        set(filetype: string, definition: SayaFtPluginDefinition): void;
+        disable(filetype: string): void;
+    }
+
+    type SayaStatusLineSegment = "fileName" | "mode" | "filetype" | "modified";
+
+    interface SayaStatusLineConfig {
+        left?: SayaStatusLineSegment[];
+        right?: SayaStatusLineSegment[];
+    }
+
+    interface SayaStartupStatusLineSurface {
+        set(config: SayaStatusLineConfig): void;
+    }
+
     interface SayaTextStyle {
         fg?: string;
         bg?: string;
@@ -160,6 +185,8 @@ declare global {
         keymap: SayaStartupKeymapSurface;
         commands: SayaStartupCommandsSurface;
         events: SayaStartupEventsSurface;
+        ftplugin: SayaStartupFtPluginSurface;
+        statusline: SayaStartupStatusLineSurface;
         theme: SayaStartupThemeSurface;
         log: SayaStartupLogSurface;
         plugins: SayaStartupPluginsSurface;

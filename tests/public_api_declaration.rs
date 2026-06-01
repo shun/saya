@@ -58,6 +58,9 @@ fn startup_public_api_type_declaration_covers_formal_configuration_surface() {
     }
     assert!(declaration.contains("syntax"));
     assert!(declaration.contains("keymap"));
+    assert!(declaration.contains("ftplugin"));
+    assert!(declaration.contains("statusline"));
+    assert!(declaration.contains("filetype"));
     assert!(declaration.contains("commands"));
     assert!(declaration.contains("events"));
     assert!(declaration.contains("theme"));

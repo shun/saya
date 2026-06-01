@@ -476,29 +476,39 @@ impl CoreBridge {
         name: SayaOptionName,
         value: SayaOptionValue,
     ) -> Result<(), CoreSessionError> {
+        self.set_core_option_with_scope(name, value, CoreOptionScope::Default)
+    }
+
+    pub fn set_core_option_with_scope(
+        &mut self,
+        name: SayaOptionName,
+        value: SayaOptionValue,
+        scope: CoreOptionScope,
+    ) -> Result<(), CoreSessionError> {
         log::debug!(
-            "[core_bridge] setting core-owned option through typed API: name={}, value={:?}",
+            "[core_bridge] setting core-owned option through typed API: name={}, value={:?}, scope={:?}",
             name,
-            value
+            value,
+            scope
         );
         let result = match value {
             SayaOptionValue::Boolean(value) => {
-                self.session
-                    .set_option_bool(name.canonical(), value, CoreOptionScope::Default)
+                self.session.set_option_bool(name.canonical(), value, scope)
             }
             SayaOptionValue::Number(value) => {
                 self.session
-                    .set_option_number(name.canonical(), value, CoreOptionScope::Default)
+                    .set_option_number(name.canonical(), value, scope)
             }
             SayaOptionValue::String(value) => {
                 self.session
-                    .set_option_string(name.canonical(), &value, CoreOptionScope::Default)
+                    .set_option_string(name.canonical(), &value, scope)
             }
         };
         result.map_err(|error| {
             log::debug!(
-                "[core_bridge] core option update failed: name={}, error={:?}",
+                "[core_bridge] core option update failed: name={}, scope={:?}, error={:?}",
                 name,
+                scope,
                 error
             );
             CoreSessionError::CommandFailed(vim_core_rs::CoreCommandError::OperationFailed {

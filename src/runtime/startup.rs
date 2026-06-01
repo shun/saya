@@ -12,12 +12,14 @@ use crate::presentation::theme::{
     ThemeTextStyleDeclaration, UiStyleKey,
 };
 pub use crate::runtime::config::{
-    SayaKeyMode, SayaKeymapAction, SayaOptionName, SayaOptionValue, StartupPluginDeclaration,
-    StartupPluginSource, StartupRegistry, StartupRegistryEntry,
+    FtPluginDefinition, FtPluginOption, FtPluginStartupAction, SayaKeyMode, SayaKeymapAction,
+    SayaOptionName, SayaOptionValue, StartupPluginDeclaration, StartupPluginSource,
+    StartupRegistry, StartupRegistryEntry, StatusLineConfig, StatusLineSegment,
 };
 pub use crate::runtime::config::{
     SayaOptionName as StartupOptionName, SayaOptionValue as StartupOptionValue,
 };
+use crate::runtime::options::{SayaOptionRegistry, SayaOptionType};
 
 const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.tabstop",
@@ -46,6 +48,10 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.commands.register",
     "saya.commands.execute",
     "saya.events.on",
+    "saya.ftplugin.enabled",
+    "saya.ftplugin.set",
+    "saya.ftplugin.disable",
+    "saya.statusline.set",
     "saya.theme.palette",
     "saya.theme.ui",
     "saya.theme.syntax",
@@ -76,6 +82,10 @@ const {
     op_collect_startup_keymap,
     op_collect_startup_command,
     op_collect_startup_event,
+    op_collect_startup_ftplugin_enabled,
+    op_collect_startup_ftplugin_definition,
+    op_collect_startup_ftplugin_disable,
+    op_collect_startup_statusline,
     op_collect_startup_theme_palette,
     op_collect_startup_theme_ui,
     op_collect_startup_theme_syntax,
@@ -151,6 +161,31 @@ globalThis.saya = {
                 throw new TypeError("event callback must be a function");
             }
             op_collect_startup_event(name, callback.toString());
+        },
+    },
+    statusline: {
+        set(config) {
+            if (config === null || typeof config !== "object" || Array.isArray(config)) {
+                throw new TypeError("statusline config must be an object");
+            }
+            op_collect_startup_statusline(JSON.stringify(config));
+        },
+    },
+    ftplugin: {
+        set(filetype, definition) {
+            if (typeof filetype !== "string" || filetype.trim().length === 0) {
+                throw new TypeError("ftplugin filetype must be a non-empty string");
+            }
+            if (definition === null || typeof definition !== "object" || Array.isArray(definition)) {
+                throw new TypeError("ftplugin definition must be an object");
+            }
+            op_collect_startup_ftplugin_definition(filetype, JSON.stringify(definition));
+        },
+        disable(filetype) {
+            if (typeof filetype !== "string" || filetype.trim().length === 0) {
+                throw new TypeError("ftplugin filetype must be a non-empty string");
+            }
+            op_collect_startup_ftplugin_disable(filetype);
         },
     },
     theme: {},
@@ -460,6 +495,20 @@ defineStringOption("fdm", "foldmethod", "manual");
 defineNumberOption("foldlevel", "foldlevel", 0);
 defineNumberOption("fdl", "foldlevel", 0);
 
+Object.defineProperty(globalThis.saya.ftplugin, "enabled", {
+    configurable: true,
+    enumerable: true,
+    get() {
+        return true;
+    },
+    set(value) {
+        if (typeof value !== "boolean") {
+            throw new TypeError("ftplugin.enabled must be a boolean");
+        }
+        op_collect_startup_ftplugin_enabled(value);
+    },
+});
+
 globalThis.saya.options = new Proxy(globalThis.saya.options, {
     set(target, propertyName, value, receiver) {
         if (typeof propertyName === "string" && Reflect.has(target, propertyName)) {
@@ -473,6 +522,8 @@ globalThis.saya.options = new Proxy(globalThis.saya.options, {
 Object.freeze(globalThis.saya.keymap);
 Object.freeze(globalThis.saya.commands);
 Object.freeze(globalThis.saya.events);
+Object.freeze(globalThis.saya.statusline);
+Object.freeze(globalThis.saya.ftplugin);
 Object.freeze(globalThis.saya.theme);
 Object.freeze(globalThis.saya.log);
 Object.freeze(globalThis.saya.plugins);
@@ -480,7 +531,15 @@ Object.freeze(globalThis.saya);
 "#;
 
 const STARTUP_PUBLIC_SURFACE_NAMES: &[&str] = &[
-    "options", "keymap", "commands", "events", "theme", "log", "plugins",
+    "options",
+    "keymap",
+    "commands",
+    "events",
+    "ftplugin",
+    "statusline",
+    "theme",
+    "log",
+    "plugins",
 ];
 const STARTUP_FORBIDDEN_SURFACE_NAMES: &[&str] = &["filesystem", "network"];
 
@@ -547,6 +606,31 @@ declare global {
             name: "bufferOpen" | "bufferChanged" | "bufferWritePost" | "bufferClosed",
             callback: (payload: SayaBufferEventPayload) => unknown,
         ): void;
+    }
+
+    type SayaFtPluginOptions = Partial<SayaStartupOptionsSurface>;
+
+    interface SayaFtPluginDefinition {
+        extensions?: string[];
+        options?: SayaFtPluginOptions;
+        enabled?: boolean;
+    }
+
+    interface SayaStartupFtPluginSurface {
+        enabled: boolean;
+        set(filetype: string, definition: SayaFtPluginDefinition): void;
+        disable(filetype: string): void;
+    }
+
+    type SayaStatusLineSegment = "fileName" | "mode" | "filetype" | "modified";
+
+    interface SayaStatusLineConfig {
+        left?: SayaStatusLineSegment[];
+        right?: SayaStatusLineSegment[];
+    }
+
+    interface SayaStartupStatusLineSurface {
+        set(config: SayaStatusLineConfig): void;
     }
 
     interface SayaTextStyle {
@@ -645,6 +729,8 @@ declare global {
         keymap: SayaStartupKeymapSurface;
         commands: SayaStartupCommandsSurface;
         events: SayaStartupEventsSurface;
+        ftplugin: SayaStartupFtPluginSurface;
+        statusline: SayaStartupStatusLineSurface;
         theme: SayaStartupThemeSurface;
         log: SayaStartupLogSurface;
         plugins: SayaStartupPluginsSurface;
@@ -859,6 +945,93 @@ fn op_collect_startup_event(
             callback_source,
         });
 
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_ftplugin_enabled(
+    state: &mut OpState,
+    enabled: bool,
+) -> Result<(), JsErrorBox> {
+    log::debug!(
+        "[startup_runtime] collect startup ftplugin enabled flag: enabled={}",
+        enabled
+    );
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::FtPlugin {
+            action: FtPluginStartupAction::SetEnabled(enabled),
+        });
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_ftplugin_definition(
+    state: &mut OpState,
+    #[string] filetype: String,
+    #[string] definition_json: String,
+) -> Result<(), JsErrorBox> {
+    let filetype = normalize_ftplugin_filetype(&filetype)?;
+    let wire: StartupFtPluginDefinitionWire = serde_json::from_str(&definition_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid ftplugin definition: {error}")))?;
+    let definition = FtPluginDefinition {
+        filetype: filetype.clone(),
+        extensions: normalize_ftplugin_extensions(&filetype, wire.extensions)?,
+        options: parse_ftplugin_options(wire.options)?,
+        enabled: wire.enabled.unwrap_or(true),
+    };
+    log::debug!(
+        "[startup_runtime] collect startup ftplugin definition: filetype={}, extensions={}, options={}, enabled={}",
+        definition.filetype,
+        definition.extensions.len(),
+        definition.options.len(),
+        definition.enabled
+    );
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::FtPlugin {
+            action: FtPluginStartupAction::SetDefinition(definition),
+        });
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_ftplugin_disable(
+    state: &mut OpState,
+    #[string] filetype: String,
+) -> Result<(), JsErrorBox> {
+    let filetype = normalize_ftplugin_filetype(&filetype)?;
+    log::debug!(
+        "[startup_runtime] collect startup ftplugin filetype disable: filetype={}",
+        filetype
+    );
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::FtPlugin {
+            action: FtPluginStartupAction::DisableFileType { filetype },
+        });
+    Ok(())
+}
+
+#[op2(fast)]
+fn op_collect_startup_statusline(
+    state: &mut OpState,
+    #[string] config_json: String,
+) -> Result<(), JsErrorBox> {
+    let wire: StartupStatusLineConfigWire = serde_json::from_str(&config_json)
+        .map_err(|error| JsErrorBox::generic(format!("invalid statusline config: {error}")))?;
+    let config = StatusLineConfig {
+        left: parse_statusline_segments("left", wire.left)?,
+        right: parse_statusline_segments("right", wire.right)?,
+    };
+    log::debug!(
+        "[startup_runtime] collect startup statusline: left_segments={}, right_segments={}",
+        config.left.len(),
+        config.right.len()
+    );
+    state
+        .borrow_mut::<StartupRegistry>()
+        .push(StartupRegistryEntry::StatusLine { config });
     Ok(())
 }
 
@@ -1088,6 +1261,98 @@ fn op_collect_startup_warning(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StartupFtPluginDefinitionWire {
+    extensions: Option<Vec<String>>,
+    options: Option<serde_json::Map<String, serde_json::Value>>,
+    enabled: Option<bool>,
+}
+
+fn normalize_ftplugin_filetype(filetype: &str) -> Result<String, JsErrorBox> {
+    let filetype = filetype.trim().to_ascii_lowercase();
+    if filetype.is_empty() {
+        return Err(JsErrorBox::generic(
+            "ftplugin filetype must be a non-empty string",
+        ));
+    }
+    Ok(filetype)
+}
+
+fn normalize_ftplugin_extensions(
+    filetype: &str,
+    extensions: Option<Vec<String>>,
+) -> Result<Vec<String>, JsErrorBox> {
+    let mut normalized = extensions.unwrap_or_else(|| vec![filetype.to_string()]);
+    for extension in &mut normalized {
+        *extension = extension
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        if extension.is_empty() {
+            return Err(JsErrorBox::generic(
+                "ftplugin extension must be a non-empty string",
+            ));
+        }
+    }
+    Ok(normalized)
+}
+
+fn parse_ftplugin_options(
+    options: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Vec<FtPluginOption>, JsErrorBox> {
+    let mut parsed = Vec::new();
+    for (name, value) in options.unwrap_or_default() {
+        let definition = SayaOptionRegistry::resolve(&name)
+            .filter(|definition| definition.startup_public)
+            .ok_or_else(|| JsErrorBox::generic(format!("unsupported ftplugin option: {name}")))?;
+        let value = match definition.value_type {
+            SayaOptionType::Boolean => value.as_bool().map(SayaOptionValue::Boolean),
+            SayaOptionType::Number => value.as_i64().map(SayaOptionValue::Number),
+            SayaOptionType::String => value
+                .as_str()
+                .map(|value| SayaOptionValue::String(value.to_string())),
+        }
+        .ok_or_else(|| {
+            JsErrorBox::generic(format!(
+                "ftplugin option type mismatch: option={}, expected={:?}",
+                definition.name, definition.value_type
+            ))
+        })?;
+        parsed.push(FtPluginOption {
+            name: definition.name,
+            value,
+        });
+    }
+    Ok(parsed)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartupStatusLineConfigWire {
+    left: Option<Vec<String>>,
+    right: Option<Vec<String>>,
+}
+
+fn parse_statusline_segments(
+    side: &str,
+    segments: Option<Vec<String>>,
+) -> Result<Vec<StatusLineSegment>, JsErrorBox> {
+    segments
+        .unwrap_or_default()
+        .into_iter()
+        .map(|segment| match segment.as_str() {
+            "fileName" => Ok(StatusLineSegment::FileName),
+            "mode" => Ok(StatusLineSegment::Mode),
+            "filetype" => Ok(StatusLineSegment::FileType),
+            "modified" => Ok(StatusLineSegment::Modified),
+            other => Err(JsErrorBox::generic(format!(
+                "unsupported statusline segment in {side}: {other}"
+            ))),
+        })
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StartupPluginDeclarationWire {
     name: String,
     source: StartupPluginSourceWire,
@@ -1266,6 +1531,10 @@ deno_core::extension!(
         op_collect_startup_keymap,
         op_collect_startup_command,
         op_collect_startup_event,
+        op_collect_startup_ftplugin_enabled,
+        op_collect_startup_ftplugin_definition,
+        op_collect_startup_ftplugin_disable,
+        op_collect_startup_statusline,
         op_collect_startup_theme_palette,
         op_collect_startup_theme_ui,
         op_collect_startup_theme_syntax,

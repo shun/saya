@@ -47,6 +47,8 @@ pub struct ScreenModel {
     pub file_name: String,
     /// 現在のモードラベル（例: "NORMAL", "INSERT"）
     pub mode_label: String,
+    /// Renderer-ready status line text for this pane.
+    pub status_line: String,
     /// 表示用カーソル形状。
     pub cursor_style: ScreenCursorStyle,
     /// バッファが変更済みかどうか
@@ -660,6 +662,9 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
     let mode_label = mode_to_label(input.snapshot.mode);
     let cursor_style = mode_to_cursor_style(input.snapshot.mode);
     let dirty = input.dirty_override.unwrap_or(input.snapshot.dirty);
+    let status_line = input
+        .session_state
+        .render_status_line(&file_name, &mode_label, dirty);
     let markdown_display = project_markdown_display_lines(input);
     let lines = markdown_display.lines;
     let line_projections = markdown_display.line_projections;
@@ -713,6 +718,7 @@ pub fn project(input: &ProjectionInput<'_>) -> ScreenModel {
         rect: input.rect,
         file_name,
         mode_label,
+        status_line,
         cursor_style,
         dirty,
         lines,
@@ -3529,6 +3535,7 @@ mod tests {
             },
             file_name: "sample.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["alpha".to_string()],
@@ -5662,6 +5669,7 @@ mod tests {
             },
             file_name: "test.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["hello".to_string()],
@@ -6545,6 +6553,7 @@ mod tests {
             },
             file_name: "summary.txt".to_string(),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec!["alpha".to_string()],

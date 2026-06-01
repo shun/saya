@@ -6,6 +6,9 @@ use std::time::Instant;
 use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 
 use crate::app::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
+use crate::app::ftplugin::{
+    apply_ftplugin_startup_action, default_ftplugin_config, resolve_ftplugin_for_path,
+};
 use crate::app::session::{
     DirectoryBufferListingOptions, EditorSessionState, read_directory_buffer_state_with_options,
 };
@@ -14,8 +17,8 @@ use crate::presentation::theme::{ResolvedTheme, ThemeRegistry};
 use crate::runtime::callback_registry_seed::CallbackRegistrySeed;
 use crate::runtime::config::{
     AppliedKeyMapping, CapabilityLoadResult, ConfigApplyState, ConfigKeyMode, ConfigSourceResult,
-    SayaKeyMode, SayaKeymapAction, StartupRegistry, StartupRegistryEntry, apply_config_commands,
-    evaluate_capability_source,
+    FtPluginConfig, SayaKeyMode, SayaKeymapAction, StartupRegistry, StartupRegistryEntry,
+    StatusLineConfig, apply_config_commands, evaluate_capability_source,
 };
 use crate::runtime::options::{SayaOptionName, SayaOptionValue};
 use crate::runtime::plugin::{PluginHost, StartupPlanValidation};
@@ -112,6 +115,8 @@ pub enum BootstrapError {
 pub struct StartupRegistrySnapshot {
     pub options: StartupOptionsSnapshot,
     pub keymaps: Vec<StartupKeymapSnapshot>,
+    pub ftplugin: FtPluginConfig,
+    pub status_line: StatusLineConfig,
     pub log: StartupLogSnapshot,
 }
 
@@ -232,6 +237,8 @@ impl StartupRegistrySnapshot {
                 .cloned()
                 .map(startup_keymap_from_applied_mapping)
                 .collect(),
+            ftplugin: default_ftplugin_config(),
+            status_line: StatusLineConfig::default(),
             log: StartupLogSnapshot::default(),
         }
     }
@@ -254,6 +261,12 @@ impl BootstrapOutcome {
         );
         apply_startup_presentation_to_session_state(&mut state, &self.startup_registry.options);
         state.set_resolved_theme(self.resolved_theme.clone());
+        state.set_status_line_config(self.startup_registry.status_line.clone());
+        if let Some(ftplugin) =
+            resolve_ftplugin_for_path(self.target_path.as_deref(), &self.startup_registry.ftplugin)
+        {
+            state.set_filetype(Some(ftplugin.filetype.to_string()));
+        }
         state
     }
 }
@@ -322,6 +335,11 @@ fn prepare_launch_with_guard<R: Read>(
     let bootstrap_state = resolve_bootstrap_state(&loaded_config);
     warnings.extend(bootstrap_state.warnings.clone());
     apply_startup_core_options(&mut core_bridge, &bootstrap_state.startup_registry.options);
+    apply_startup_ftplugin_options(
+        &mut core_bridge,
+        target_path.as_deref(),
+        &bootstrap_state.startup_registry.ftplugin,
+    );
     log::debug!(
         "[PERF][bootstrap] config resolved and core options applied: elapsed_ms={}",
         config_started_at.elapsed().as_millis()
@@ -968,6 +986,8 @@ fn config_commands_from_registry(
             },
             StartupRegistryEntry::Command { .. }
             | StartupRegistryEntry::Event { .. }
+            | StartupRegistryEntry::FtPlugin { .. }
+            | StartupRegistryEntry::StatusLine { .. }
             | StartupRegistryEntry::ThemePalette { .. }
             | StartupRegistryEntry::ThemeMarkdownStyle { .. }
             | StartupRegistryEntry::ThemeUiStyle { .. }
@@ -1015,6 +1035,16 @@ fn startup_registry_from_registry(
         })
         .collect();
     let log = startup_log_from_registry(registry);
+    let ftplugin = ftplugin_config_from_registry(registry);
+    let status_line = registry
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            StartupRegistryEntry::StatusLine { config } => Some(config.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
 
     StartupRegistrySnapshot {
         options: StartupOptionsSnapshot {
@@ -1042,8 +1072,20 @@ fn startup_registry_from_registry(
             foldlevel: normalize_u16(state.foldlevel),
         },
         keymaps,
+        ftplugin,
+        status_line,
         log,
     }
+}
+
+fn ftplugin_config_from_registry(registry: &StartupRegistry) -> FtPluginConfig {
+    let mut config = default_ftplugin_config();
+    for entry in registry.entries() {
+        if let StartupRegistryEntry::FtPlugin { action } = entry {
+            apply_ftplugin_startup_action(&mut config, action);
+        }
+    }
+    config
 }
 
 fn startup_log_from_registry(registry: &StartupRegistry) -> StartupLogSnapshot {
@@ -1251,6 +1293,37 @@ fn apply_startup_core_options(core_bridge: &mut CoreBridge, options: &StartupOpt
             syntax_command,
             error
         );
+    }
+}
+
+fn apply_startup_ftplugin_options(
+    core_bridge: &mut CoreBridge,
+    target_path: Option<&Path>,
+    config: &FtPluginConfig,
+) {
+    let Some(ftplugin) = resolve_ftplugin_for_path(target_path, config) else {
+        log::debug!(
+            "[bootstrap][ftplugin] no startup ftplugin matched: target_path={:?}",
+            target_path
+        );
+        return;
+    };
+
+    log::debug!(
+        "[bootstrap][ftplugin] applying startup ftplugin: filetype={}, option_count={}, target_path={:?}",
+        ftplugin.filetype,
+        ftplugin.options.len(),
+        target_path
+    );
+    for option in ftplugin.options {
+        if let Err(error) = core_bridge.set_core_option(option.name, option.value) {
+            log::debug!(
+                "[bootstrap][ftplugin] ftplugin core option application failed and was ignored: filetype={}, name={}, error={:?}",
+                ftplugin.filetype,
+                option.name,
+                error
+            );
+        }
     }
 }
 

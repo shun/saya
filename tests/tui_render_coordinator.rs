@@ -50,6 +50,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
             },
             file_name: format!("buffer-{buffer_id}.txt"),
             mode_label: "NORMAL".to_string(),
+            status_line: "test.txt | NORMAL".to_string(),
             cursor_style: ScreenCursorStyle::Block,
             dirty: false,
             lines: vec![line.to_string()],

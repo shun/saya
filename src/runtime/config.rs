@@ -155,6 +155,12 @@ pub enum StartupRegistryEntry {
         name: String,
         callback_source: String,
     },
+    FtPlugin {
+        action: FtPluginStartupAction,
+    },
+    StatusLine {
+        config: StatusLineConfig,
+    },
     ThemePalette {
         name: String,
         value: String,
@@ -195,6 +201,70 @@ pub enum StartupRegistryEntry {
     Warning {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FtPluginStartupAction {
+    SetEnabled(bool),
+    SetDefinition(FtPluginDefinition),
+    DisableFileType { filetype: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtPluginConfig {
+    pub enabled: bool,
+    pub definitions: Vec<FtPluginDefinition>,
+}
+
+impl Default for FtPluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            definitions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtPluginDefinition {
+    pub filetype: String,
+    pub extensions: Vec<String>,
+    pub options: Vec<FtPluginOption>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtPluginOption {
+    pub name: SayaOptionName,
+    pub value: SayaOptionValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusLineConfig {
+    pub left: Vec<StatusLineSegment>,
+    pub right: Vec<StatusLineSegment>,
+}
+
+impl Default for StatusLineConfig {
+    fn default() -> Self {
+        Self {
+            left: vec![
+                StatusLineSegment::FileName,
+                StatusLineSegment::Mode,
+                StatusLineSegment::FileType,
+                StatusLineSegment::Modified,
+            ],
+            right: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusLineSegment {
+    FileName,
+    Mode,
+    FileType,
+    Modified,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
