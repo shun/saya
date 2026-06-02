@@ -259,7 +259,7 @@ fn draw_workspace_frame<B: Backend>(
     model: &WorkspaceScreenModel,
     force_full_clear: bool,
     text_mode: RenderTextMode,
-) -> io::Result<()> {
+) -> Result<(), B::Error> {
     let _color_output_guard = CrosstermColorOutputGuard::for_text_mode(text_mode);
     if force_full_clear {
         trace_redraw_diagnostic(format_args!(
@@ -276,14 +276,17 @@ fn draw_workspace_frame<B: Backend>(
 }
 
 struct CrosstermColorOutputGuard {
-    restore_no_color: bool,
+    previous_no_color: Option<std::ffi::OsString>,
 }
 
 impl CrosstermColorOutputGuard {
     fn for_text_mode(text_mode: RenderTextMode) -> Self {
-        let restore_no_color = colors_enabled(text_mode)
-            && std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
-        if restore_no_color {
+        let previous_no_color = std::env::var_os("NO_COLOR");
+        let should_force_color = colors_enabled(text_mode)
+            && previous_no_color
+                .as_ref()
+                .is_some_and(|value| !value.is_empty());
+        if should_force_color {
             log::debug!(
                 "[tui_renderer] forcing crossterm color output for highlighted frame: text_mode={text_mode:?}, no_color_present=true"
             );
@@ -291,19 +294,30 @@ impl CrosstermColorOutputGuard {
                 "[saya-trace][renderer][color] force_color_output=true text_mode={text_mode:?} no_color_present=true"
             );
             style::force_color_output(true);
+            unsafe {
+                std::env::remove_var("NO_COLOR");
+            }
         } else {
             log::debug!(
                 "[tui_renderer] using crossterm color output default for frame: text_mode={text_mode:?}, no_color_present={}",
-                std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+                previous_no_color
+                    .as_ref()
+                    .is_some_and(|value| !value.is_empty())
             );
         }
-        Self { restore_no_color }
+        Self {
+            previous_no_color: if should_force_color {
+                previous_no_color
+            } else {
+                None
+            },
+        }
     }
 }
 
 impl Drop for CrosstermColorOutputGuard {
     fn drop(&mut self) {
-        if self.restore_no_color {
+        if let Some(previous_no_color) = self.previous_no_color.as_ref() {
             log::debug!(
                 "[tui_renderer] restoring crossterm NO_COLOR color suppression after frame"
             );
@@ -311,6 +325,9 @@ impl Drop for CrosstermColorOutputGuard {
                 "[saya-trace][renderer][color] force_color_output=false restore_no_color=true"
             );
             style::force_color_output(false);
+            unsafe {
+                std::env::set_var("NO_COLOR", previous_no_color);
+            }
         }
     }
 }
@@ -916,7 +933,7 @@ fn draw_editor_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     model: &ScreenModel,
     force_full_clear: bool,
-) -> io::Result<()> {
+) -> Result<(), B::Error> {
     draw_workspace_frame(
         terminal,
         &WorkspaceScreenModel {

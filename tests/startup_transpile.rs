@@ -18,6 +18,34 @@ fn unique_path(name: &str) -> PathBuf {
     support::temp::unique_temp_path("startup-runtime", name)
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.as_ref() {
+            Some(value) => unsafe {
+                std::env::set_var(self.key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(self.key);
+            },
+        }
+    }
+}
+
 struct NoopHostBridge;
 
 impl HostCapabilityBridge for NoopHostBridge {
@@ -127,6 +155,112 @@ fn init_ts_module_transpiles_into_executable_javascript() {
         }
         other => panic!("Success を返すこと, got: {:?}", other),
     }
+}
+
+#[test]
+fn init_ts_module_transpile_rejects_unsupported_import_specifiers() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(
+        &config_path,
+        r#"
+            import { setup } from "npm:some-package";
+            setup();
+        "#,
+    )
+    .expect("config file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::TranspileFailed { path, message } => {
+            assert_eq!(path, config_path);
+            assert!(message.contains("unsupported startup import specifier"));
+        }
+        other => panic!("unsupported import should fail structurally, got: {other:?}"),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_rejects_import_cycles() {
+    let current_dir = unique_path("cwd");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    let config_path = current_dir.join("init.ts");
+    let a_path = current_dir.join("a.ts");
+    std::fs::write(&config_path, r#"import "./a.ts";"#).expect("config file");
+    std::fs::write(&a_path, r#"import "./init.ts";"#).expect("a file");
+
+    let result = prepare_init_module(&config_path, &current_dir);
+
+    match result {
+        StartupModulePrepareResult::TranspileFailed { path, message } => {
+            assert_eq!(path, config_path);
+            assert!(message.contains("startup module import cycle detected"));
+        }
+        other => panic!("import cycle should fail structurally, got: {other:?}"),
+    }
+}
+
+#[test]
+fn init_ts_module_transpile_uses_warm_cache_for_matching_sources() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current_dir = unique_path("cwd");
+    let cache_home = unique_path("cache-home");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    std::fs::create_dir_all(&cache_home).expect("cache dir");
+    let _cache_guard = EnvVarGuard::set("XDG_CACHE_HOME", &cache_home);
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(&config_path, "saya.options.tabstop = 4;").expect("config file");
+
+    let first = prepare_init_module(&config_path, &current_dir);
+    let StartupModulePrepareResult::Success(first_module) = first else {
+        panic!("first prepare should succeed, got: {first:?}");
+    };
+    let cache_dir = cache_home.join("saya").join("startup-transpile");
+    let js_path = std::fs::read_dir(&cache_dir)
+        .expect("cache dir should exist")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.extension().is_some_and(|extension| extension == "js"))
+        .expect("transpiled js cache file");
+    std::fs::write(&js_path, "saya.options.tabstop = 9;\n").expect("cache override");
+
+    let second = prepare_init_module(&config_path, &current_dir);
+
+    let StartupModulePrepareResult::Success(second_module) = second else {
+        panic!("second prepare should succeed, got: {second:?}");
+    };
+    assert!(first_module.executable_source_text.contains("tabstop = 4"));
+    assert_eq!(
+        second_module.executable_source_text,
+        "saya.options.tabstop = 9;\n"
+    );
+}
+
+#[test]
+fn init_ts_module_transpile_cache_invalidates_when_source_changes() {
+    let _lock = saya::app::bootstrap::launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current_dir = unique_path("cwd");
+    let cache_home = unique_path("cache-home");
+    std::fs::create_dir_all(&current_dir).expect("current dir");
+    std::fs::create_dir_all(&cache_home).expect("cache dir");
+    let _cache_guard = EnvVarGuard::set("XDG_CACHE_HOME", &cache_home);
+    let config_path = current_dir.join("init.ts");
+    std::fs::write(&config_path, "saya.options.tabstop = 4;").expect("config file");
+    let first = prepare_init_module(&config_path, &current_dir);
+    assert!(matches!(first, StartupModulePrepareResult::Success(_)));
+    std::fs::write(&config_path, "saya.options.tabstop = 8;").expect("config update");
+
+    let second = prepare_init_module(&config_path, &current_dir);
+
+    let StartupModulePrepareResult::Success(second_module) = second else {
+        panic!("second prepare should succeed, got: {second:?}");
+    };
+    assert!(second_module.executable_source_text.contains("tabstop = 8"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -939,9 +1073,9 @@ fn init_ts_module_transpile_keeps_theme_object_literals_executable() {
                     .contains("const accent = \"#7aa2f7\";")
             );
             assert!(
-                module
-                    .executable_source_text
-                    .contains("heading: { fg: \"accent\", bold: true }"),
+                module.executable_source_text.contains("heading:")
+                    && module.executable_source_text.contains("fg: \"accent\"")
+                    && module.executable_source_text.contains("bold: true"),
                 "object literal values must not be stripped as type annotations"
             );
         }
@@ -1085,7 +1219,7 @@ fn init_ts_module_transpile_preserves_multiline_ternary_expressions() {
             assert!(
                 module
                     .executable_source_text
-                    .contains("? currentPath.slice(0, -1)\n                : currentPath.replace"),
+                    .contains("? currentPath.slice(0, -1) : currentPath.replace"),
                 "ternary separator must not be stripped as a type annotation: {}",
                 module.executable_source_text
             );
@@ -1259,14 +1393,14 @@ fn init_ts_module_transpile_strips_object_return_type_annotations() {
             assert!(
                 module
                     .executable_source_text
-                    .contains("function currentState(){"),
+                    .contains("function currentState() {"),
                 "object return type annotations should be stripped: {}",
                 module.executable_source_text
             );
             assert!(
-                module
-                    .executable_source_text
-                    .contains("return { enabled: true, label: \"ready\" };")
+                module.executable_source_text.contains("return {")
+                    && module.executable_source_text.contains("enabled: true")
+                    && module.executable_source_text.contains("label: \"ready\"")
             );
         }
         other => panic!("Success を返すこと, got: {:?}", other),

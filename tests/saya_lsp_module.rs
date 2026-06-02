@@ -257,9 +257,6 @@ async fn utf8_decode_rejects_non_uint8array_with_type_error() {
 /// 表明として書く。
 #[tokio::test(flavor = "current_thread")]
 async fn platform_records_available_web_apis_for_lsp_design() {
-    // 注: `strip_type_annotations` が `key: callExpr(...)` を型注釈と
-    // 誤判定して値を削ってしまうため、object literal で初期化せず
-    // `Map` 風に逐次代入する。
     let source = r#"
         function probeGlobal(name) {
             try {
@@ -269,13 +266,14 @@ async fn platform_records_available_web_apis_for_lsp_design() {
                 return "throws:" + ((err && err.message) ? err.message : String(err));
             }
         }
-        const observed = {};
-        observed.AbortController = probeGlobal("AbortController");
-        observed.AbortSignal = probeGlobal("AbortSignal");
-        observed.setTimeout = probeGlobal("setTimeout");
-        observed.clearTimeout = probeGlobal("clearTimeout");
-        observed.Promise = probeGlobal("Promise");
-        observed.queueMicrotask = probeGlobal("queueMicrotask");
+        const observed = {
+            AbortController: probeGlobal("AbortController"),
+            AbortSignal: probeGlobal("AbortSignal"),
+            setTimeout: probeGlobal("setTimeout"),
+            clearTimeout: probeGlobal("clearTimeout"),
+            Promise: probeGlobal("Promise"),
+            queueMicrotask: probeGlobal("queueMicrotask"),
+        };
         if (observed.AbortController !== "undefined") {
             throw new Error("AbortController is unexpectedly available (re-evaluate cancel design): " + observed.AbortController);
         }
@@ -591,11 +589,10 @@ async fn jsonrpc_client_routes_inbound_notifications_to_handler() {
         }
         const observedNotifications = [];
         const transport = createFakeTransport();
-        // transpiler が `key: function` を型注釈と誤判定するため
-        // option は property assignment で組み立てる。
-        const clientOptions = {};
-        clientOptions.onNotification = function (message) {
-            observedNotifications.push(message);
+        const clientOptions = {
+            onNotification: function (message) {
+                observedNotifications.push(message);
+            },
         };
         const client = __lspJsonRpc.createClient(transport, clientOptions);
         const notification = {
@@ -679,10 +676,7 @@ async fn jsonrpc_client_cancel_token_emits_cancel_request_notification() {
         const transport = createFakeTransport();
         const client = __lspJsonRpc.createClient(transport);
         const token = __lspJsonRpc.createCancelToken();
-        // `{ signal: token.signal }` リテラルは `strip_type_annotations`
-        // に消されるため property assignment で組み立てる。
-        const requestOptions = {};
-        requestOptions.signal = token.signal;
+        const requestOptions = { signal: token.signal };
         const pending = client.request("textDocument/hover", null, requestOptions);
         token.cancel(new Error("user cancelled"));
         let caught = null;
@@ -857,10 +851,7 @@ async fn transport_client_server_round_trip_via_in_memory_pair() {
         // server 側 parser を立てて、id を保持した上で固定 result を返す
         const parser = __lspJsonRpc.createBytesParser(function (message) {
             if (typeof message.method === "string" && message.id !== undefined) {
-                // `{ ok: true, echoedMethod: message.method }` リテラルは
-                // transpiler が壊すため property assignment で組み立てる
-                const resultPayload = { ok: true };
-                resultPayload.echoedMethod = message.method;
+                const resultPayload = { ok: true, echoedMethod: message.method };
                 const response = __lspJsonRpc.buildSuccessResponseMessage(
                     message.id,
                     resultPayload,

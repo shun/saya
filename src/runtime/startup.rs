@@ -1,12 +1,20 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use deno_ast::{
+    EmitOptions, MediaType, ParseParams, SourceMapOption, TranspileModuleOptions, TranspileOptions,
+    parse_module,
+};
 use deno_core::{OpState, RuntimeOptions, op2};
 use deno_error::JsErrorBox;
 use log::LevelFilter;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::presentation::theme::{
     FilerSemanticStyleKey, MarkdownSemanticStyleKey, SyntaxSemanticStyleKey,
@@ -21,6 +29,7 @@ pub use crate::runtime::config::{
     SayaOptionName as StartupOptionName, SayaOptionValue as StartupOptionValue,
 };
 use crate::runtime::options::{SayaOptionRegistry, SayaOptionType};
+use crate::support::paths;
 
 const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.tabstop",
@@ -66,6 +75,9 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
 ];
 
 const STARTUP_COMMAND_REFERENCE_PREFIX: &str = "__SAYA_STARTUP_COMMAND_REF__:";
+const STARTUP_TRANSPILE_CACHE_SCHEMA_VERSION: u32 = 1;
+const STARTUP_TRANSPILE_CACHE_DIR_NAME: &str = "startup-transpile";
+const STARTUP_TRANSPILE_OPTION_VERSION: &str = "deno_ast=0.53.2,module=EsmBundled,source_map=None";
 
 /// Formal startup surface は TypeScript API に限定し、文字列 DSL は含めない。
 pub fn startup_public_surface_paths() -> &'static [&'static str] {
@@ -1666,6 +1678,7 @@ pub fn prepare_init_module(path: &Path, current_dir: &Path) -> StartupModulePrep
         path.display(),
         current_dir.display()
     );
+    let prepare_started = Instant::now();
 
     let loaded = match load_init_module(path, current_dir) {
         StartupModuleLoadResult::Success(module) => module,
@@ -1674,7 +1687,7 @@ pub fn prepare_init_module(path: &Path, current_dir: &Path) -> StartupModulePrep
         }
     };
 
-    match transpile_typescript_module(&loaded) {
+    match transpile_typescript_module(&loaded, prepare_started) {
         Ok(executable_source_text) => {
             log::debug!(
                 "[startup_runtime] init module transpile success: path={}, output_len={}",
@@ -1702,83 +1715,139 @@ pub fn prepare_init_module(path: &Path, current_dir: &Path) -> StartupModulePrep
     }
 }
 
-fn transpile_typescript_module(module: &StartupModuleSource) -> Result<String, String> {
+#[derive(Debug, Clone)]
+struct StartupModuleGraph {
+    entry_id: String,
+    modules: Vec<StartupGraphModule>,
+    input_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct StartupGraphModule {
+    id: String,
+    path: PathBuf,
+    source_text: String,
+    source_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StartupTranspileCacheMetadata {
+    schema_version: u32,
+    cache_key: String,
+    entry_init_path: String,
+    files: Vec<StartupTranspileCacheFile>,
+    transpile_option_version: String,
+    created_at_unix_ms: u128,
+    input_bytes: usize,
+    output_bytes: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StartupTranspileCacheFile {
+    path: String,
+    hash: String,
+}
+
+fn transpile_typescript_module(
+    module: &StartupModuleSource,
+    prepare_started: Instant,
+) -> Result<String, String> {
     log::debug!(
         "[startup_runtime] transpile init module source: path={}, len={}",
         module.path.display(),
         module.source_text.len()
     );
-    let expanded_source_text = expand_local_startup_imports(module)?;
-    let without_type_declarations = strip_type_declarations(&expanded_source_text);
-    let without_export_modifiers = strip_export_modifiers(&without_type_declarations);
-    let executable_source_text =
-        normalize_assignment_spacing(&strip_type_annotations(&without_export_modifiers));
+    let graph_started = Instant::now();
+    let graph = collect_startup_module_graph(module)?;
+    let graph_ms = graph_started.elapsed().as_millis();
+    let cache_key = startup_transpile_cache_key(&graph);
+
+    let cache_read_started = Instant::now();
+    if let Some(executable_source_text) = read_startup_transpile_cache(&cache_key, &graph) {
+        log::debug!(
+            "[startup_runtime] startup transpile cache hit: key={}, modules={}, cache_read_ms={}, total_prepare_ms={}, input_bytes={}, output_bytes={}",
+            cache_key,
+            graph.modules.len(),
+            cache_read_started.elapsed().as_millis(),
+            prepare_started.elapsed().as_millis(),
+            graph.input_bytes,
+            executable_source_text.len()
+        );
+        return Ok(executable_source_text);
+    }
+    let cache_read_ms = cache_read_started.elapsed().as_millis();
+
+    let transpile_started = Instant::now();
+    let executable_source_text = transpile_startup_module_graph(&graph)?;
     validate_executable_module(&module.path, &executable_source_text)?;
+    let transpile_ms = transpile_started.elapsed().as_millis();
+
+    let cache_write_started = Instant::now();
+    write_startup_transpile_cache(&cache_key, &graph, &executable_source_text);
+    let cache_write_ms = cache_write_started.elapsed().as_millis();
+
+    log::debug!(
+        "[startup_runtime] startup transpile cache miss: key={}, modules={}, graph_ms={}, transpile_ms={}, cache_read_ms={}, cache_write_ms={}, total_prepare_ms={}, input_bytes={}, output_bytes={}",
+        cache_key,
+        graph.modules.len(),
+        graph_ms,
+        transpile_ms,
+        cache_read_ms,
+        cache_write_ms,
+        prepare_started.elapsed().as_millis(),
+        graph.input_bytes,
+        executable_source_text.len()
+    );
     Ok(executable_source_text)
 }
 
-fn expand_local_startup_imports(module: &StartupModuleSource) -> Result<String, String> {
+fn collect_startup_module_graph(
+    module: &StartupModuleSource,
+) -> Result<StartupModuleGraph, String> {
+    let mut modules = Vec::new();
+    let mut visited = HashSet::new();
     let mut stack = Vec::new();
-    let mut expanded_imports = HashSet::new();
-    expand_local_startup_imports_from_path(
+    collect_startup_module_graph_from_source(
         &module.path,
         &module.source_text,
+        &mut modules,
+        &mut visited,
         &mut stack,
-        &mut expanded_imports,
-    )
+    )?;
+    let entry_id = canonical_startup_module_id(&module.path);
+    let input_bytes = modules
+        .iter()
+        .map(|module| module.source_text.len())
+        .sum::<usize>();
+    Ok(StartupModuleGraph {
+        entry_id,
+        modules,
+        input_bytes,
+    })
 }
 
-fn expand_local_startup_imports_from_path(
+fn collect_startup_module_graph_from_source(
     path: &Path,
     source_text: &str,
-    stack: &mut Vec<PathBuf>,
-    expanded_imports: &mut HashSet<PathBuf>,
-) -> Result<String, String> {
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if stack.contains(&canonical_path) {
+    modules: &mut Vec<StartupGraphModule>,
+    visited: &mut HashSet<String>,
+    stack: &mut Vec<String>,
+) -> Result<(), String> {
+    let module_id = canonical_startup_module_id(path);
+    if stack.contains(&module_id) {
         return Err(format!(
             "startup module import cycle detected: {}",
-            canonical_path.display()
+            path.display()
         ));
     }
-    stack.push(canonical_path);
+    if visited.contains(&module_id) {
+        return Ok(());
+    }
 
-    let mut output = String::with_capacity(source_text.len());
-    let lines: Vec<&str> = source_text.lines().collect();
-    let mut index = 0usize;
-    while index < lines.len() {
-        let line = lines[index];
-        let (statement, consumed_lines) = collect_static_import_statement(&lines, index);
-        let Some(specifier) = parse_static_import_specifier(&statement)
-            .or_else(|| parse_static_re_export_specifier(&statement))
-        else {
-            output.push_str(line);
-            output.push('\n');
-            index += 1;
-            continue;
-        };
-
-        let imported_path = resolve_local_startup_import(path, specifier)?;
-        let canonical_imported_path = imported_path
-            .canonicalize()
-            .unwrap_or_else(|_| imported_path.clone());
-        if expanded_imports.contains(&canonical_imported_path) {
-            log::debug!(
-                "[startup_runtime] skip duplicate local startup import: importer={}, specifier={}, resolved={}",
-                path.display(),
-                specifier,
-                imported_path.display()
-            );
-            index += consumed_lines;
-            continue;
-        }
-        expanded_imports.insert(canonical_imported_path);
-        log::debug!(
-            "[startup_runtime] inline local startup import: importer={}, specifier={}, resolved={}",
-            path.display(),
-            specifier,
-            imported_path.display()
-        );
+    stack.push(module_id.clone());
+    let import_specifiers = startup_static_import_specifiers(source_text);
+    for specifier in import_specifiers {
+        let imported_path = resolve_local_startup_import(path, &specifier)?;
         let imported_source = fs::read_to_string(&imported_path).map_err(|error| {
             format!(
                 "failed to read startup import {} from {}: {}",
@@ -1787,19 +1856,260 @@ fn expand_local_startup_imports_from_path(
                 error
             )
         })?;
-        let expanded_import = expand_local_startup_imports_from_path(
+        collect_startup_module_graph_from_source(
             &imported_path,
             &imported_source,
+            modules,
+            visited,
             stack,
-            expanded_imports,
         )?;
-        output.push_str(&expanded_import);
-        output.push('\n');
+    }
+    stack.pop();
+
+    let source_hash = sha256_hex(source_text.as_bytes());
+    modules.push(StartupGraphModule {
+        id: module_id.clone(),
+        path: path.to_path_buf(),
+        source_text: source_text.to_string(),
+        source_hash,
+    });
+    visited.insert(module_id);
+    Ok(())
+}
+
+fn startup_static_import_specifiers(source_text: &str) -> Vec<String> {
+    let mut specifiers = Vec::new();
+    let lines: Vec<&str> = source_text.lines().collect();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let (statement, consumed_lines) = collect_static_import_statement(&lines, index);
+        if let Some(specifier) = parse_static_import_specifier(&statement)
+            .or_else(|| parse_static_re_export_specifier(&statement))
+        {
+            specifiers.push(specifier.to_string());
+        }
         index += consumed_lines;
     }
+    specifiers
+}
 
-    stack.pop();
+fn transpile_startup_module_graph(graph: &StartupModuleGraph) -> Result<String, String> {
+    let mut output = String::new();
+    for module in &graph.modules {
+        let transpiled = transpile_startup_module_to_js(module)?;
+        output.push_str(&strip_es_module_syntax_from_transpiled_js(&transpiled));
+        output.push('\n');
+    }
     Ok(output)
+}
+
+fn transpile_startup_module_to_js(module: &StartupGraphModule) -> Result<String, String> {
+    let media_type = MediaType::from_path(&module.path);
+    let specifier = deno_core::resolve_url_or_path(&module.path.to_string_lossy(), Path::new("."))
+        .map_err(|error| error.to_string())?;
+    let parsed = parse_module(ParseParams {
+        specifier,
+        text: Arc::from(module.source_text.as_str()),
+        media_type,
+        capture_tokens: false,
+        scope_analysis: true,
+        maybe_syntax: None,
+    })
+    .map_err(|error| error.to_string())?;
+    let emitted = parsed
+        .transpile(
+            &TranspileOptions::default(),
+            &TranspileModuleOptions::default(),
+            &EmitOptions {
+                source_map: SourceMapOption::None,
+                source_map_base: None,
+                source_map_file: None,
+                inline_sources: false,
+                remove_comments: false,
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .into_source();
+    Ok(emitted.text)
+}
+
+fn strip_es_module_syntax_from_transpiled_js(source_text: &str) -> String {
+    let mut output = String::with_capacity(source_text.len());
+    let lines: Vec<&str> = source_text.lines().collect();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        let (statement, consumed_lines) = collect_static_import_statement(&lines, index);
+        if parse_static_import_specifier(&statement).is_some()
+            || parse_static_re_export_specifier(&statement).is_some()
+        {
+            index += consumed_lines;
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        if trimmed.starts_with("export async function ")
+            || trimmed.starts_with("export function ")
+            || trimmed.starts_with("export const ")
+            || trimmed.starts_with("export let ")
+            || trimmed.starts_with("export class ")
+        {
+            output.push_str(&line[..indent_len]);
+            output.push_str(&trimmed["export ".len()..]);
+            output.push('\n');
+        } else if trimmed == "export {};"
+            || (trimmed.starts_with("export {") && trimmed.ends_with(';'))
+        {
+            output.push('\n');
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+        index += 1;
+    }
+    output
+}
+
+fn startup_transpile_cache_key(graph: &StartupModuleGraph) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(
+        STARTUP_TRANSPILE_CACHE_SCHEMA_VERSION
+            .to_string()
+            .as_bytes(),
+    );
+    hasher.update([0]);
+    hasher.update(STARTUP_TRANSPILE_OPTION_VERSION.as_bytes());
+    hasher.update([0]);
+    hasher.update(graph.entry_id.as_bytes());
+    for module in &graph.modules {
+        hasher.update([0]);
+        hasher.update(module.id.as_bytes());
+        hasher.update([0]);
+        hasher.update(module.source_hash.as_bytes());
+    }
+    bytes_to_hex(&hasher.finalize())
+}
+
+fn read_startup_transpile_cache(cache_key: &str, graph: &StartupModuleGraph) -> Option<String> {
+    let cache_dir = startup_transpile_cache_dir()?;
+    let js_path = cache_dir.join(format!("{cache_key}.js"));
+    let metadata_path = cache_dir.join(format!("{cache_key}.json"));
+    let metadata_text = fs::read_to_string(&metadata_path).ok()?;
+    let metadata: StartupTranspileCacheMetadata = serde_json::from_str(&metadata_text).ok()?;
+    if !startup_transpile_cache_metadata_matches(&metadata, cache_key, graph) {
+        log::debug!(
+            "[startup_runtime] startup transpile cache metadata mismatch: key={}",
+            cache_key
+        );
+        return None;
+    }
+    fs::read_to_string(&js_path).ok()
+}
+
+fn write_startup_transpile_cache(
+    cache_key: &str,
+    graph: &StartupModuleGraph,
+    executable_source_text: &str,
+) {
+    let Some(cache_dir) = startup_transpile_cache_dir() else {
+        log::debug!("[startup_runtime] startup transpile cache unavailable: cache_dir missing");
+        return;
+    };
+    if let Err(error) = fs::create_dir_all(&cache_dir) {
+        log::debug!(
+            "[startup_runtime] startup transpile cache directory create failed: path={}, error={}",
+            cache_dir.display(),
+            error
+        );
+        return;
+    }
+
+    let metadata = StartupTranspileCacheMetadata {
+        schema_version: STARTUP_TRANSPILE_CACHE_SCHEMA_VERSION,
+        cache_key: cache_key.to_string(),
+        entry_init_path: graph.entry_id.clone(),
+        files: graph
+            .modules
+            .iter()
+            .map(|module| StartupTranspileCacheFile {
+                path: module.id.clone(),
+                hash: module.source_hash.clone(),
+            })
+            .collect(),
+        transpile_option_version: STARTUP_TRANSPILE_OPTION_VERSION.to_string(),
+        created_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default(),
+        input_bytes: graph.input_bytes,
+        output_bytes: executable_source_text.len(),
+    };
+    let js_path = cache_dir.join(format!("{cache_key}.js"));
+    let metadata_path = cache_dir.join(format!("{cache_key}.json"));
+    if let Err(error) = fs::write(&js_path, executable_source_text) {
+        log::debug!(
+            "[startup_runtime] startup transpile cache write failed: path={}, error={}",
+            js_path.display(),
+            error
+        );
+        return;
+    }
+    let Ok(metadata_text) = serde_json::to_string_pretty(&metadata) else {
+        log::debug!(
+            "[startup_runtime] startup transpile cache metadata serialization failed: key={}",
+            cache_key
+        );
+        return;
+    };
+    if let Err(error) = fs::write(&metadata_path, metadata_text) {
+        log::debug!(
+            "[startup_runtime] startup transpile cache metadata write failed: path={}, error={}",
+            metadata_path.display(),
+            error
+        );
+    }
+}
+
+fn startup_transpile_cache_metadata_matches(
+    metadata: &StartupTranspileCacheMetadata,
+    cache_key: &str,
+    graph: &StartupModuleGraph,
+) -> bool {
+    metadata.schema_version == STARTUP_TRANSPILE_CACHE_SCHEMA_VERSION
+        && metadata.cache_key == cache_key
+        && metadata.entry_init_path == graph.entry_id
+        && metadata.transpile_option_version == STARTUP_TRANSPILE_OPTION_VERSION
+        && metadata.input_bytes == graph.input_bytes
+        && metadata.files.len() == graph.modules.len()
+        && metadata
+            .files
+            .iter()
+            .zip(graph.modules.iter())
+            .all(|(file, module)| file.path == module.id && file.hash == module.source_hash)
+}
+
+fn startup_transpile_cache_dir() -> Option<PathBuf> {
+    paths::cache_dir().map(|dir| dir.join(STARTUP_TRANSPILE_CACHE_DIR_NAME))
+}
+
+fn canonical_startup_module_id(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    bytes_to_hex(&Sha256::digest(bytes))
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 fn collect_static_import_statement(lines: &[&str], start_index: usize) -> (String, usize) {
@@ -2028,413 +2338,6 @@ mod startup_import_path_tests {
     }
 }
 
-fn strip_type_declarations(source_text: &str) -> String {
-    let mut output = String::with_capacity(source_text.len());
-    let mut skipping_type_block = false;
-    let mut skipping_type_alias = false;
-    let mut brace_depth = 0isize;
-
-    for line in source_text.lines() {
-        let trimmed = line.trim_start();
-        if skipping_type_alias {
-            if line.contains(';') {
-                skipping_type_alias = false;
-            }
-            continue;
-        }
-        if !skipping_type_block && trimmed.starts_with("declare ") {
-            continue;
-        }
-        if !skipping_type_block
-            && (trimmed.starts_with("type ") || trimmed.starts_with("export type "))
-        {
-            if !line.contains(';') {
-                skipping_type_alias = true;
-            }
-            continue;
-        }
-        if !skipping_type_block
-            && (trimmed.starts_with("interface ") || trimmed.starts_with("export interface "))
-        {
-            skipping_type_block = true;
-            brace_depth += line.matches('{').count() as isize;
-            brace_depth -= line.matches('}').count() as isize;
-            if brace_depth <= 0 && line.contains('}') {
-                skipping_type_block = false;
-                brace_depth = 0;
-            }
-            continue;
-        }
-
-        if skipping_type_block {
-            brace_depth += line.matches('{').count() as isize;
-            brace_depth -= line.matches('}').count() as isize;
-            if brace_depth <= 0 {
-                skipping_type_block = false;
-                brace_depth = 0;
-            }
-            continue;
-        }
-
-        output.push_str(line);
-        output.push('\n');
-    }
-
-    output
-}
-
-fn strip_export_modifiers(source_text: &str) -> String {
-    let mut output = String::with_capacity(source_text.len());
-    for line in source_text.lines() {
-        let trimmed = line.trim_start();
-        let indent_len = line.len() - trimmed.len();
-        let replacement = if trimmed.starts_with("export async function ")
-            || trimmed.starts_with("export function ")
-            || trimmed.starts_with("export const ")
-            || trimmed.starts_with("export let ")
-            || trimmed.starts_with("export class ")
-        {
-            Some(format!(
-                "{}{}",
-                &line[..indent_len],
-                &trimmed["export ".len()..]
-            ))
-        } else if trimmed == "export {};" {
-            Some(String::new())
-        } else if trimmed.starts_with("export {") && trimmed.ends_with(';') {
-            Some(String::new())
-        } else {
-            None
-        };
-
-        match replacement {
-            Some(line) => output.push_str(&line),
-            None => output.push_str(line),
-        }
-        output.push('\n');
-    }
-    output
-}
-
-fn strip_type_annotations(source_text: &str) -> String {
-    let mut output = String::with_capacity(source_text.len());
-    let chars: Vec<char> = source_text.chars().collect();
-    let mut index = 0usize;
-    let mut in_string: Option<char> = None;
-    let mut escape = false;
-
-    while index < chars.len() {
-        let ch = chars[index];
-
-        if let Some(quote) = in_string {
-            output.push(ch);
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == quote {
-                in_string = None;
-            }
-            index += 1;
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = Some(ch);
-                output.push(ch);
-                index += 1;
-            }
-            ':' => {
-                if looks_like_ternary_separator(&chars, index) {
-                    output.push(ch);
-                    index += 1;
-                    continue;
-                }
-                if previous_non_whitespace(&chars, index) == Some(')') {
-                    let mut lookahead = index + 1;
-                    while lookahead < chars.len() && chars[lookahead].is_whitespace() {
-                        lookahead += 1;
-                    }
-                    if chars.get(lookahead) == Some(&'{') {
-                        let mut brace_depth = 0isize;
-                        while lookahead < chars.len() {
-                            match chars[lookahead] {
-                                '{' => brace_depth += 1,
-                                '}' if brace_depth > 0 => {
-                                    brace_depth -= 1;
-                                    lookahead += 1;
-                                    if brace_depth == 0 {
-                                        break;
-                                    }
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                            lookahead += 1;
-                        }
-                        while lookahead < chars.len() && chars[lookahead].is_whitespace() {
-                            lookahead += 1;
-                        }
-                        index = lookahead;
-                        continue;
-                    }
-                }
-                let mut lookahead = index + 1;
-                while lookahead < chars.len() && chars[lookahead].is_whitespace() {
-                    lookahead += 1;
-                }
-                if colon_looks_like_object_property(&chars, index)
-                    || looks_like_object_literal_value(&chars, lookahead)
-                {
-                    output.push(ch);
-                    index += 1;
-                    continue;
-                }
-                let mut angle_depth = 0isize;
-                while lookahead < chars.len() {
-                    let next = chars[lookahead];
-                    if next == '<' {
-                        angle_depth += 1;
-                        lookahead += 1;
-                        continue;
-                    }
-                    if next == '>' && angle_depth > 0 {
-                        angle_depth -= 1;
-                        lookahead += 1;
-                        continue;
-                    }
-                    if angle_depth == 0
-                        && (next == '='
-                            || next == ','
-                            || next == ')'
-                            || next == ';'
-                            || next == '{'
-                            || next == '\n')
-                    {
-                        break;
-                    }
-                    lookahead += 1;
-                }
-                index = lookahead;
-            }
-            _ => {
-                output.push(ch);
-                index += 1;
-            }
-        }
-    }
-
-    output
-}
-
-fn looks_like_ternary_separator(chars: &[char], colon_index: usize) -> bool {
-    if previous_non_whitespace(chars, colon_index) == Some('?') {
-        return false;
-    }
-
-    let mut unresolved_questions = 0usize;
-    let mut index = 0usize;
-    let mut in_string: Option<char> = None;
-    let mut escape = false;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-
-    while index < colon_index {
-        let ch = chars[index];
-        let next = chars.get(index + 1).copied();
-
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-            }
-            index += 1;
-            continue;
-        }
-
-        if in_block_comment {
-            if ch == '*' && next == Some('/') {
-                in_block_comment = false;
-                index += 2;
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-
-        if let Some(quote) = in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == quote {
-                in_string = None;
-            }
-            index += 1;
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => in_string = Some(ch),
-            '/' if next == Some('/') => {
-                in_line_comment = true;
-                index += 1;
-            }
-            '/' if next == Some('*') => {
-                in_block_comment = true;
-                index += 1;
-            }
-            ';' | '{' | '}' => unresolved_questions = 0,
-            '?' if next != Some('?') && next != Some('.') => unresolved_questions += 1,
-            ':' if unresolved_questions > 0 => unresolved_questions -= 1,
-            _ => {}
-        }
-
-        index += 1;
-    }
-
-    unresolved_questions > 0
-}
-
-fn previous_non_whitespace(chars: &[char], index: usize) -> Option<char> {
-    chars
-        .get(..index)?
-        .iter()
-        .rev()
-        .find(|ch| !ch.is_whitespace())
-        .copied()
-}
-
-fn looks_like_object_literal_value(chars: &[char], index: usize) -> bool {
-    let Some(ch) = chars.get(index).copied() else {
-        return false;
-    };
-    if matches!(ch, '"' | '\'' | '`' | '{' | '[' | '-' | '0'..='9') {
-        return true;
-    }
-    let tail = chars[index..].iter().collect::<String>();
-    tail.starts_with("true")
-        || tail.starts_with("false")
-        || tail.starts_with("null")
-        || tail.starts_with("undefined")
-}
-
-fn colon_looks_like_object_property(chars: &[char], colon_index: usize) -> bool {
-    if !colon_is_inside_brace_context(chars, colon_index) {
-        return false;
-    }
-
-    let mut cursor = colon_index;
-    while cursor > 0 && chars[cursor - 1].is_whitespace() {
-        cursor -= 1;
-    }
-    if cursor == 0 {
-        return false;
-    }
-
-    if matches!(chars[cursor - 1], '"' | '\'' | '`') {
-        let quote = chars[cursor - 1];
-        cursor -= 1;
-        while cursor > 0 {
-            cursor -= 1;
-            if chars[cursor] == quote {
-                break;
-            }
-        }
-    } else {
-        while cursor > 0 {
-            let ch = chars[cursor - 1];
-            if matches!(ch, '_' | '$' | 'a'..='z' | 'A'..='Z' | '0'..='9') {
-                cursor -= 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    while cursor > 0 && chars[cursor - 1].is_whitespace() {
-        cursor -= 1;
-    }
-    matches!(chars.get(cursor.wrapping_sub(1)), Some('{' | ','))
-}
-
-fn colon_is_inside_brace_context(chars: &[char], colon_index: usize) -> bool {
-    let mut stack = Vec::new();
-    let mut index = 0usize;
-    let mut in_string: Option<char> = None;
-    let mut escape = false;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-
-    while index < colon_index {
-        let ch = chars[index];
-        let next = chars.get(index + 1).copied();
-
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-            }
-            index += 1;
-            continue;
-        }
-
-        if in_block_comment {
-            if ch == '*' && next == Some('/') {
-                in_block_comment = false;
-                index += 2;
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-
-        if let Some(quote) = in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == quote {
-                in_string = None;
-            }
-            index += 1;
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => in_string = Some(ch),
-            '/' if next == Some('/') => {
-                in_line_comment = true;
-                index += 1;
-            }
-            '/' if next == Some('*') => {
-                in_block_comment = true;
-                index += 1;
-            }
-            '{' | '(' | '[' => stack.push(ch),
-            '}' => {
-                if stack.last() == Some(&'{') {
-                    stack.pop();
-                }
-            }
-            ')' => {
-                if stack.last() == Some(&'(') {
-                    stack.pop();
-                }
-            }
-            ']' => {
-                if stack.last() == Some(&'[') {
-                    stack.pop();
-                }
-            }
-            _ => {}
-        }
-
-        index += 1;
-    }
-
-    stack.last() == Some(&'{')
-}
-
 fn validate_executable_module(path: &Path, executable_source_text: &str) -> Result<(), String> {
     let normalized = executable_source_text
         .lines()
@@ -2450,70 +2353,6 @@ fn validate_executable_module(path: &Path, executable_source_text: &str) -> Resu
     }
 
     Ok(())
-}
-
-fn normalize_assignment_spacing(source_text: &str) -> String {
-    let mut output = String::with_capacity(source_text.len());
-    let chars: Vec<char> = source_text.chars().collect();
-    let mut index = 0usize;
-    let mut in_string: Option<char> = None;
-    let mut escape = false;
-
-    while index < chars.len() {
-        let ch = chars[index];
-
-        if let Some(quote) = in_string {
-            output.push(ch);
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == quote {
-                in_string = None;
-            }
-            index += 1;
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => {
-                in_string = Some(ch);
-                output.push(ch);
-            }
-            '=' => {
-                let prev_is_operator = output.ends_with('=')
-                    || output.ends_with('!')
-                    || output.ends_with('<')
-                    || output.ends_with('>')
-                    || output.ends_with('+')
-                    || output.ends_with('-')
-                    || output.ends_with('*')
-                    || output.ends_with('/')
-                    || output.ends_with('%')
-                    || output.ends_with('&')
-                    || output.ends_with('|');
-                let next = chars.get(index + 1).copied();
-                let next_is_operator = matches!(next, Some('=') | Some('>'));
-
-                if prev_is_operator || next_is_operator {
-                    output.push('=');
-                } else {
-                    if !output.ends_with(' ') && !output.ends_with('\n') {
-                        output.push(' ');
-                    }
-                    output.push('=');
-                    if !matches!(next, Some(' ') | Some('\n')) {
-                        output.push(' ');
-                    }
-                }
-            }
-            _ => output.push(ch),
-        }
-
-        index += 1;
-    }
-
-    output
 }
 
 /// startup-only `saya` namespace を注入した `deno_core` runtime を生成する。
