@@ -1,3 +1,5 @@
+![saya CLI エディタのバナー](images/saya-banner.png)
+
 # saya
 
 `saya` は `vim-core-rs` を土台にした Markdown-first な CLI
@@ -5,8 +7,6 @@
 Vim 由来の編集セマンティクスを組み込み、Rust でオーケストレーションと
 TUI を構築し、設定と拡張の公開面を Vim script ではなく TypeScript で
 再設計しています。
-
-![saya CLI エディタのバナー](images/saya-banner.png)
 
 この README は、プロジェクトの入口として、概要、ビルド方法、起動方法、
 恒久ドキュメントへの導線だけをまとめています。長期的に参照する情報は
