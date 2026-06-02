@@ -6,6 +6,8 @@ in the application layer, uses Rust for orchestration and terminal UI, and
 rebuilds configuration and extension surfaces around TypeScript instead of Vim
 script.
 
+![saya CLI editor banner](images/saya-banner.png)
+
 This README gives you the shortest path to understand the project, build it,
 run it, and find the permanent documentation under `docs/`.
 
