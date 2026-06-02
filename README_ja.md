@@ -165,6 +165,18 @@ saya.events.on("bufferOpen", (payload) => {
 });
 ```
 
+`init.ts` から local TypeScript plugin を import できます。static local
+import は startup 評価の前に解決されます。import 元のファイルからの相対
+path には `./` または `../`、home directory からの相対 path には `~/`、
+環境変数からの相対 path には `$SAYA_HOME/` や `${SAYA_HOME}/` のような
+先頭の環境変数を使えます。
+
+```ts
+import { setupSayaDired } from "./plugins/bundled/dired/index.ts";
+
+setupSayaDired();
+```
+
 現時点で確認しやすい startup 設定は `tabstop`、`number`、および
 `smartindent` などのインデント系 option です。`smartindent` には `si`、
 `shiftwidth` には `sw`、`expandtab` には `et` のような Vim 風 alias も

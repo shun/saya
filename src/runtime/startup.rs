@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1857,6 +1858,10 @@ fn resolve_local_startup_import(importer: &Path, specifier: &str) -> Result<Path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(specifier)
+    } else if let Some(path) = specifier.strip_prefix("~/") {
+        resolve_home_relative_startup_import(specifier, path, std::env::var_os("HOME"))?
+    } else if let Some((name, path)) = parse_env_relative_startup_import(specifier) {
+        resolve_env_relative_startup_import(specifier, name, path, std::env::var_os(name))?
     } else if specifier.starts_with('/') {
         PathBuf::from(specifier)
     } else {
@@ -1867,6 +1872,160 @@ fn resolve_local_startup_import(importer: &Path, specifier: &str) -> Result<Path
     };
 
     Ok(path)
+}
+
+fn resolve_home_relative_startup_import(
+    specifier: &str,
+    path: &str,
+    home: Option<OsString>,
+) -> Result<PathBuf, String> {
+    let home = home.filter(|value| !value.is_empty()).ok_or_else(|| {
+        format!("unsupported startup import specifier: {specifier} (HOME is not set)")
+    })?;
+    Ok(PathBuf::from(home).join(path))
+}
+
+fn parse_env_relative_startup_import(specifier: &str) -> Option<(&str, &str)> {
+    let rest = specifier.strip_prefix('$')?;
+    if let Some(rest) = rest.strip_prefix('{') {
+        let (name, path) = rest.split_once("}/")?;
+        if is_valid_env_startup_import_name(name) {
+            return Some((name, path));
+        }
+        return None;
+    }
+
+    let (name, path) = rest.split_once('/')?;
+    if is_valid_env_startup_import_name(name) {
+        Some((name, path))
+    } else {
+        None
+    }
+}
+
+fn is_valid_env_startup_import_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if first != '_' && !first.is_ascii_alphabetic() {
+        return false;
+    }
+    chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn resolve_env_relative_startup_import(
+    specifier: &str,
+    name: &str,
+    path: &str,
+    value: Option<OsString>,
+) -> Result<PathBuf, String> {
+    let value = value.filter(|value| !value.is_empty()).ok_or_else(|| {
+        format!("unsupported startup import specifier: {specifier} ({name} is not set)")
+    })?;
+    Ok(PathBuf::from(value).join(path))
+}
+
+#[cfg(test)]
+mod startup_import_path_tests {
+    use super::*;
+
+    #[test]
+    fn home_relative_startup_import_resolves_against_home_directory() {
+        let path = resolve_home_relative_startup_import(
+            "~/saya-plugins/number.ts",
+            "saya-plugins/number.ts",
+            Some(OsString::from("/tmp/saya-home")),
+        )
+        .expect("home-relative import");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/saya-home")
+                .join("saya-plugins")
+                .join("number.ts")
+        );
+    }
+
+    #[test]
+    fn home_relative_startup_import_requires_home_directory() {
+        let result = resolve_home_relative_startup_import(
+            "~/saya-plugins/number.ts",
+            "saya-plugins/number.ts",
+            None,
+        );
+
+        assert_eq!(
+            result,
+            Err(
+                "unsupported startup import specifier: ~/saya-plugins/number.ts (HOME is not set)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn env_relative_startup_import_parses_plain_environment_prefix() {
+        assert_eq!(
+            parse_env_relative_startup_import("$SAYA_HOME/runtime/plugins/dired/index.ts"),
+            Some(("SAYA_HOME", "runtime/plugins/dired/index.ts"))
+        );
+    }
+
+    #[test]
+    fn env_relative_startup_import_parses_braced_environment_prefix() {
+        assert_eq!(
+            parse_env_relative_startup_import("${SAYA_HOME}/runtime/plugins/dired/index.ts"),
+            Some(("SAYA_HOME", "runtime/plugins/dired/index.ts"))
+        );
+    }
+
+    #[test]
+    fn env_relative_startup_import_rejects_invalid_environment_prefix() {
+        assert_eq!(parse_env_relative_startup_import("$1_BAD/plugin.ts"), None);
+        assert_eq!(
+            parse_env_relative_startup_import("${SAYA_HOME/plugin.ts"),
+            None
+        );
+    }
+
+    #[test]
+    fn env_relative_startup_import_resolves_against_environment_value() {
+        let path = resolve_env_relative_startup_import(
+            "$SAYA_HOME/runtime/plugins/dired/index.ts",
+            "SAYA_HOME",
+            "runtime/plugins/dired/index.ts",
+            Some(OsString::from("/tmp/saya-home")),
+        )
+        .expect("env-relative import");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/saya-home")
+                .join("runtime")
+                .join("plugins")
+                .join("dired")
+                .join("index.ts")
+        );
+    }
+
+    #[test]
+    fn env_relative_startup_import_requires_environment_value() {
+        let result = resolve_env_relative_startup_import(
+            "$SAYA_HOME/runtime/plugins/dired/index.ts",
+            "SAYA_HOME",
+            "runtime/plugins/dired/index.ts",
+            None,
+        );
+
+        assert_eq!(
+            result,
+            Err(
+                "unsupported startup import specifier: $SAYA_HOME/runtime/plugins/dired/index.ts (SAYA_HOME is not set)"
+                    .to_string()
+            )
+        );
+    }
 }
 
 fn strip_type_declarations(source_text: &str) -> String {

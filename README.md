@@ -163,7 +163,9 @@ saya.events.on("bufferOpen", (payload) => {
 ```
 
 You can import local TypeScript plugins from `init.ts`. Static local imports
-are resolved before startup evaluation.
+are resolved before startup evaluation. Use `./` or `../` for paths relative
+to the importing file, `~/` for paths relative to your home directory, or a
+leading environment variable such as `$SAYA_HOME/` or `${SAYA_HOME}/`.
 
 ```ts
 import { setupSayaDired } from "./plugins/bundled/dired/index.ts";
