@@ -7,7 +7,7 @@ use saya::app::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::app::session::{
     DirectoryBufferListingOptions, DirectoryBufferPlannedOperation,
     DirectoryBufferPreviewConfirmationError, DirectoryBufferSortKey, EditorSessionState,
-    QuitDecision, SaveRequestError,
+    MermaidPreviewZoom, QuitDecision, SaveRequestError,
 };
 use saya::app::startup::{
     LaunchStartError, PreparedTuiStartup, TuiStartupContextError, prepare_tui_startup_context,
@@ -55,12 +55,13 @@ use saya::input::ex_command::{ExCommandRoute, apply_local_ex_command, route_ex_c
 use saya::input::router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
 use saya::presentation::floating_window::{
     FloatingAnchor, FloatingBorder, FloatingChrome, FloatingContentRef, FloatingCursor,
-    FloatingFit, FloatingInputOutcome, FloatingLifecycle, FloatingLifecycleEvent,
-    FloatingMouseOutcome, FloatingPlacement, FloatingRelativeTo, FloatingSize, FloatingWindowId,
-    FloatingWindowManager, FloatingZIndex,
+    FloatingFit, FloatingImage, FloatingImageSource, FloatingImageView, FloatingInputOutcome,
+    FloatingLifecycle, FloatingLifecycleEvent, FloatingMouseOutcome, FloatingPlacement,
+    FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager, FloatingZIndex,
 };
 use saya::presentation::markdown::structure::{
-    MarkdownCacheStatus, MarkdownDocumentMap, MarkdownMetadataCache, MarkdownMetadataKey,
+    MarkdownBlockKind, MarkdownCacheStatus, MarkdownDocumentMap, MarkdownMetadataCache,
+    MarkdownMetadataKey,
 };
 use saya::presentation::overlay::asset_store::OverlayAssetStore;
 use saya::presentation::overlay::effect::RuntimePresentationIntent;
@@ -265,6 +266,16 @@ async fn main() {
     let mut terminal_float_manager = TerminalFloatManager::default();
     let (mut coordinator, sender) = EventLoopCoordinator::new();
     terminal_float_manager.set_redraw_sender(sender.clone());
+    let mermaid_redraw_sender = sender.clone();
+    render_coordinator.set_mermaid_redraw_callback(move || {
+        if let Err(error) = mermaid_redraw_sender.try_send(UiEvent::Redraw) {
+            log::debug!(
+                "[main][markdown_preview] failed to queue redraw after async Mermaid render: error={error}"
+            );
+        } else {
+            log::debug!("[main][markdown_preview] queued redraw after async Mermaid render");
+        }
+    });
     let mut last_synced_terminal_size: Option<TerminalSize> = None;
     let mut terminal_display_redraw_plan: Option<RedrawPlan> = None;
     let mut workspace_projection_dirty = false;
@@ -1164,6 +1175,25 @@ async fn main() {
                         }
 
                         if !handled {
+                            if let Some(effect) =
+                                handle_mermaid_preview_key(&mut session_state, &key)
+                            {
+                                handled = true;
+                                need_redraw = true;
+                                workspace_projection_dirty = true;
+                                match effect {
+                                    FloatingWindowKeyHandling::Consumed => {}
+                                    FloatingWindowKeyHandling::Closed { id } => {
+                                        log::debug!(
+                                            "[main][markdown_preview] Mermaid preview closed from focused input: id={}",
+                                            id.0
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !handled {
                             let active_window_id = input_snapshot
                                 .active_window_id()
                                 .or_else(|| {
@@ -1603,14 +1633,27 @@ async fn main() {
                             row
                         );
                         let (terminal_width, terminal_height) = current_terminal_size();
-                        let mouse_focus = focus_floating_window_from_mouse_click(
-                            &mut floating_window_manager,
+                        let mermaid_preview_focused = focus_mermaid_preview_from_mouse_click(
+                            &mut session_state,
                             last_workspace_model.as_ref(),
                             column,
                             row,
-                            terminal_width,
-                            terminal_height,
                         );
+                        let mouse_focus = if mermaid_preview_focused {
+                            FloatingMouseOutcome::Focused {
+                                id: active_mermaid_preview_float_id(last_workspace_model.as_ref())
+                                    .unwrap_or(FloatingWindowId(0)),
+                            }
+                        } else {
+                            focus_floating_window_from_mouse_click(
+                                &mut floating_window_manager,
+                                last_workspace_model.as_ref(),
+                                column,
+                                row,
+                                terminal_width,
+                                terminal_height,
+                            )
+                        };
                         if matches!(mouse_focus, FloatingMouseOutcome::Focused { .. }) {
                             workspace_projection_dirty = true;
                         } else if let Some(sequence) =
@@ -1655,6 +1698,31 @@ async fn main() {
                             );
                         }
                         need_redraw = true;
+                    }
+                    UiEvent::MouseWheel {
+                        column,
+                        row,
+                        delta_x,
+                        delta_y,
+                    } => {
+                        log::debug!(
+                            "[main] processing mouse wheel event: column={}, row={}, delta=({}, {})",
+                            column,
+                            row,
+                            delta_x,
+                            delta_y
+                        );
+                        if handle_mermaid_preview_mouse_wheel(
+                            &mut session_state,
+                            last_workspace_model.as_ref(),
+                            column,
+                            row,
+                            delta_x,
+                            delta_y,
+                        ) {
+                            need_redraw = true;
+                            workspace_projection_dirty = true;
+                        }
                     }
                     UiEvent::PastedText(text) => {
                         log::debug!(
@@ -2052,11 +2120,13 @@ async fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Resu
     )
     .map_err(|error| error.to_string())?;
     let mut session_state = outcome.editor_session_state();
-    let startup_model = project(&ProjectionInput::new(
-        &outcome.initial_snapshot,
-        &session_state,
-        None,
-    ));
+    let startup_markdown_map = session_state
+        .markdown_render()
+        .then(|| MarkdownDocumentMap::parse(&outcome.initial_snapshot.text));
+    let startup_model = project(
+        &ProjectionInput::new(&outcome.initial_snapshot, &session_state, None)
+            .with_markdown_document_map(startup_markdown_map.as_ref()),
+    );
     let mut transient_msg: Option<String> = None;
     let mut system_warning: Option<String> = None;
     let mut need_redraw = false;
@@ -2077,6 +2147,7 @@ async fn run_binary_smoke(launch_request: saya::app::cli::LaunchRequest) -> Resu
         "startup",
         serde_json::json!({
             "firstLine": startup_model.lines.first(),
+            "lines": startup_model.lines,
             "messageLine": startup_model.message_line,
             "fileName": startup_model.file_name,
             "mode": startup_model.mode_label,
@@ -4300,6 +4371,7 @@ enum MainHostCommand {
     BufferWindowFloat(String),
     TerminalFloat(String),
     TerminalCloseFloat(String),
+    MarkdownPreviewMermaid,
     LspHoverFloat(String),
     LspDiagnosticFloat(String),
     LspLocationListFloat(String),
@@ -4328,6 +4400,9 @@ fn parse_main_host_command(command: &str) -> Option<MainHostCommand> {
         "w" | "write" => Some(MainHostCommand::Save),
         "wq" | "x" | "xit" | "exit" => Some(MainHostCommand::SaveThenQuit),
         "dired-cancel" | "diredcancel" => Some(MainHostCommand::CancelDirectoryPreview),
+        "markdown.previewMermaid" | "markdown.previewmermaid" => {
+            Some(MainHostCommand::MarkdownPreviewMermaid)
+        }
         _ => parse_runtime_edit_command(&normalized).map(MainHostCommand::Edit),
     }
 }
@@ -4906,6 +4981,16 @@ fn execute_runtime_host_command_with_floats(
                 floating_window_manager,
                 terminal_float_manager,
             )
+        }
+        Some(MainHostCommand::MarkdownPreviewMermaid) => {
+            session_state.request_mermaid_preview();
+            log::debug!(
+                "[main][markdown_preview] manual Mermaid preview requested by host command"
+            );
+            Ok(RuntimeCommandEffect {
+                transient_message: Some("Mermaid preview requested".to_string()),
+                ..RuntimeCommandEffect::default()
+            })
         }
         Some(MainHostCommand::LspHoverFloat(payload)) => execute_lsp_hover_float_host_command(
             &payload,
@@ -8629,6 +8714,13 @@ fn build_workspace_render_output(
         })
         .unwrap_or_default();
     let buffer_line_counts = collect_workspace_buffer_line_counts(&outcome.core_bridge, &snapshot);
+    let active_markdown_preview_source = snapshot.active_window().and_then(|window| {
+        let line_count = buffer_line_counts.get(&window.buf_id).copied().unwrap_or(0);
+        outcome
+            .core_bridge
+            .buffer_line_range(window.buf_id, 0, line_count)
+            .map(|range| range.lines.join("\n"))
+    });
     let viewport_summary = viewport_store.sync_from_windows_for_render(
         &snapshot.windows,
         &invalidated_windows,
@@ -8835,6 +8927,17 @@ fn build_workspace_render_output(
                 );
             }
         }
+        append_active_mermaid_preview_float(
+            workspace,
+            &snapshot,
+            active_markdown_preview_source
+                .as_deref()
+                .unwrap_or_default(),
+            &markdown_document_maps,
+            terminal_width,
+            terminal_height,
+            session_state,
+        );
     }
 
     match projection_result {
@@ -8884,6 +8987,249 @@ fn build_workspace_render_output(
             Err(WorkspaceRedrawError::from(error))
         }
     }
+}
+
+fn append_active_mermaid_preview_float(
+    workspace: &mut WorkspaceScreenModel,
+    snapshot: &CoreSnapshot,
+    source_text: &str,
+    markdown_document_maps: &BTreeMap<i32, Arc<MarkdownDocumentMap>>,
+    terminal_width: u16,
+    terminal_height: u16,
+    session_state: &mut EditorSessionState,
+) {
+    let auto_enabled = session_state.mermaid_preview_auto();
+    let manual_active = session_state.mermaid_preview_manual_active();
+    let preview_closed = session_state.mermaid_preview_closed();
+    if !auto_enabled && !manual_active {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because auto preview is disabled and no manual request is pending"
+        );
+        return;
+    }
+    if snapshot.mode != CoreMode::Normal {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because mode is not Normal: mode={:?}, auto_enabled={}, manual_active={}",
+            snapshot.mode,
+            auto_enabled,
+            manual_active
+        );
+        if manual_active {
+            session_state.clear_mermaid_preview_manual("mode_not_normal");
+        }
+        return;
+    }
+    let Some(active_window) = snapshot.active_window() else {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because active window is absent"
+        );
+        if manual_active {
+            session_state.clear_mermaid_preview_manual("active_window_absent");
+        }
+        return;
+    };
+    let Some(map) = markdown_document_maps.get(&active_window.id) else {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because markdown map is absent: window_id={}",
+            active_window.id
+        );
+        if manual_active {
+            session_state.clear_mermaid_preview_manual("markdown_map_absent");
+        }
+        return;
+    };
+    let Some(block) = map.blocks.iter().find(|block| {
+        matches!(
+            block.kind,
+            MarkdownBlockKind::FencedCodeBlock { ref info, .. }
+                if info
+                    .as_deref()
+                    .and_then(|info| info.split_whitespace().next())
+                    .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"))
+        ) && (block.range.start.line..=block.range.end.line).contains(&active_window.cursor_row)
+    }) else {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because cursor is outside Mermaid blocks: window_id={}, cursor_row={}",
+            active_window.id,
+            active_window.cursor_row
+        );
+        session_state.reopen_mermaid_preview_if_closed("cursor_outside_mermaid_block");
+        if manual_active {
+            session_state.clear_mermaid_preview_manual("cursor_outside_mermaid_block");
+        }
+        return;
+    };
+    if preview_closed && !manual_active {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because preview was closed for current block: window_id={}, cursor_row={}",
+            active_window.id,
+            active_window.cursor_row
+        );
+        return;
+    }
+    let source_lines = source_text.lines().collect::<Vec<_>>();
+    if source_lines.get(block.range.end.line).is_none() {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because block source is partial: window_id={}, start_row={}, end_row={}, available_lines={}",
+            active_window.id,
+            block.range.start.line,
+            block.range.end.line,
+            source_lines.len()
+        );
+        if manual_active {
+            session_state.clear_mermaid_preview_manual("partial_block_source");
+        }
+        return;
+    }
+    let body = source_lines
+        .iter()
+        .take(block.range.end.line)
+        .skip(block.range.start.line + 1)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.trim().is_empty() {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because body is empty: window_id={}, start_row={}",
+            active_window.id,
+            block.range.start.line
+        );
+        if manual_active {
+            session_state.clear_mermaid_preview_manual("empty_mermaid_body");
+        }
+        return;
+    }
+    let Some(active_pane) = workspace
+        .panes
+        .iter()
+        .find(|pane| pane.window_id == active_window.id)
+    else {
+        log::debug!(
+            "[main][markdown_preview] skip Mermaid preview because active pane is absent: window_id={}",
+            active_window.id
+        );
+        if manual_active {
+            session_state.clear_mermaid_preview_manual("active_pane_absent");
+        }
+        return;
+    };
+    let width = mermaid_preview_float_dimension(
+        terminal_width,
+        session_state.mermaid_preview_width_percent(),
+        100,
+        40,
+        u16::MAX,
+        2,
+    );
+    let height = mermaid_preview_float_dimension(
+        terminal_height,
+        session_state.mermaid_preview_height_percent(),
+        100,
+        12,
+        u16::MAX,
+        2,
+    );
+    let x = terminal_width.saturating_sub(width).saturating_sub(1);
+    let y = active_pane
+        .rect
+        .y
+        .saturating_add(1)
+        .min(terminal_height.saturating_sub(height).saturating_sub(1));
+    let content_width = width.saturating_sub(2).max(1);
+    let content_height = height.saturating_sub(2).max(1);
+    let float_id = FloatingWindowId(9_000_000_000u64.saturating_add(active_window.id as u64));
+    let preview_view = session_state.mermaid_preview_view();
+    let image_view = match preview_view.zoom {
+        MermaidPreviewZoom::Fit => FloatingImageView::fit(),
+        MermaidPreviewZoom::Percent(percent) => FloatingImageView {
+            zoom_percent: Some(percent),
+            pan_x_px: preview_view.pan_x_px,
+            pan_y_px: preview_view.pan_y_px,
+        },
+    };
+    let zoom_label = match preview_view.zoom {
+        MermaidPreviewZoom::Fit => "fit".to_string(),
+        MermaidPreviewZoom::Percent(percent) => format!("{percent}%"),
+    };
+    workspace
+        .floats
+        .push(saya::presentation::floating_window::FloatingScreenModel {
+            id: float_id,
+            content: FloatingContentRef::StaticLines {
+                content_id: float_id.0,
+            },
+            rect: saya::presentation::screen_model::PaneRect {
+                x,
+                y,
+                width,
+                height,
+            },
+            lines: vec![
+                format!("Mermaid preview [{zoom_label}]"),
+                " ".repeat(usize::from(content_width)),
+            ],
+            inline_styles: Vec::new(),
+            images: vec![FloatingImage {
+                line: 1,
+                column: 0,
+                max_width: content_width,
+                max_height: content_height.saturating_sub(1).max(1),
+                view: image_view,
+                source: FloatingImageSource::Mermaid {
+                    buffer_id: active_window.buf_id,
+                    row: block.range.start.line,
+                    alt_text: "mermaid diagram".to_string(),
+                    background: session_state.mermaid_preview_background().to_string(),
+                    source: body,
+                },
+            }],
+            cursor: None,
+            focusable: preview_view.focused,
+            mouse: true,
+            chrome: FloatingChrome {
+                border: FloatingBorder::Single,
+            },
+            zindex: FloatingZIndex::Hover.value(),
+            creation_order: u64::MAX,
+        });
+    log::debug!(
+        "[main][markdown_preview] appended Mermaid preview float: trigger={}, window_id={}, buffer_id={}, start_row={}, end_row={}, float_id={}, rect=({},{},{},{}), body_bytes={}",
+        if manual_active { "manual" } else { "auto" },
+        active_window.id,
+        active_window.buf_id,
+        block.range.start.line,
+        block.range.end.line,
+        float_id.0,
+        x,
+        y,
+        width,
+        height,
+        workspace
+            .floats
+            .last()
+            .and_then(|float| float.images.first())
+            .map(|image| match &image.source {
+                FloatingImageSource::Mermaid { source, .. } => source.len(),
+            })
+            .unwrap_or(0)
+    );
+}
+
+fn mermaid_preview_float_dimension(
+    terminal_extent: u16,
+    numerator: u16,
+    denominator: u16,
+    min: u16,
+    max: u16,
+    reserved: u16,
+) -> u16 {
+    let available = terminal_extent.saturating_sub(reserved).max(1);
+    let denominator = u32::from(denominator.max(1));
+    let preferred = u32::from(terminal_extent)
+        .saturating_mul(u32::from(numerator))
+        .div_ceil(denominator)
+        .min(u32::from(u16::MAX)) as u16;
+    preferred.max(min).min(max).min(available).max(1)
 }
 
 fn apply_workspace_floating_window_models(
@@ -9215,6 +9561,152 @@ fn handle_floating_window_key(
         FloatingInputOutcome::Closed { id } => Some(FloatingWindowKeyHandling::Closed { id }),
         FloatingInputOutcome::Ignored => None,
     }
+}
+
+fn handle_mermaid_preview_key(
+    session_state: &mut EditorSessionState,
+    key: &KeyInput,
+) -> Option<FloatingWindowKeyHandling> {
+    if !session_state.mermaid_preview_focused() {
+        return None;
+    }
+    let float_id = FloatingWindowId(9_000_000_000);
+    let outcome = match key {
+        KeyInput::Escape | KeyInput::Ctrl('[') | KeyInput::Char('q') => {
+            session_state.close_mermaid_preview("focused_key_close");
+            FloatingWindowKeyHandling::Closed { id: float_id }
+        }
+        KeyInput::Char('+') | KeyInput::Char('=') => {
+            session_state.zoom_mermaid_preview_in();
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('-') => {
+            session_state.zoom_mermaid_preview_out();
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('0') => {
+            session_state.zoom_mermaid_preview_fit();
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('1') => {
+            session_state.zoom_mermaid_preview_actual_size();
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('h') | KeyInput::Left => {
+            session_state.pan_mermaid_preview(-64, 0);
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('l') | KeyInput::Right => {
+            session_state.pan_mermaid_preview(64, 0);
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('k') | KeyInput::Up => {
+            session_state.pan_mermaid_preview(0, -64);
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('j') | KeyInput::Down => {
+            session_state.pan_mermaid_preview(0, 64);
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Ctrl('b') | KeyInput::Ctrl('B') | KeyInput::PageUp => {
+            session_state.pan_mermaid_preview(0, -256);
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Ctrl('f') | KeyInput::Ctrl('F') | KeyInput::PageDown => {
+            session_state.pan_mermaid_preview(0, 256);
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('H') | KeyInput::ShiftedNav(NavigationKey::Left) => {
+            session_state.pan_mermaid_preview(-256, 0);
+            FloatingWindowKeyHandling::Consumed
+        }
+        KeyInput::Char('L') | KeyInput::ShiftedNav(NavigationKey::Right) => {
+            session_state.pan_mermaid_preview(256, 0);
+            FloatingWindowKeyHandling::Consumed
+        }
+        _ => {
+            log::debug!(
+                "[main][markdown_preview] focused Mermaid preview ignored key: key={:?}",
+                key
+            );
+            return None;
+        }
+    };
+    log::debug!(
+        "[main][markdown_preview] focused Mermaid preview handled key: key={:?}, outcome={:?}",
+        key,
+        outcome
+    );
+    Some(outcome)
+}
+
+fn active_mermaid_preview_float_id(
+    workspace: Option<&WorkspaceScreenModel>,
+) -> Option<FloatingWindowId> {
+    workspace?
+        .floats
+        .iter()
+        .find(|float| !float.images.is_empty())
+        .map(|float| float.id)
+}
+
+fn focus_mermaid_preview_from_mouse_click(
+    session_state: &mut EditorSessionState,
+    workspace: Option<&WorkspaceScreenModel>,
+    column: u16,
+    row: u16,
+) -> bool {
+    if !mouse_cell_hits_mermaid_preview(workspace, column, row) {
+        return false;
+    }
+    session_state.focus_mermaid_preview();
+    log::debug!(
+        "[main][markdown_preview] Mermaid preview focused by mouse click: column={}, row={}",
+        column,
+        row
+    );
+    true
+}
+
+fn handle_mermaid_preview_mouse_wheel(
+    session_state: &mut EditorSessionState,
+    workspace: Option<&WorkspaceScreenModel>,
+    column: u16,
+    row: u16,
+    delta_x: i16,
+    delta_y: i16,
+) -> bool {
+    if !session_state.mermaid_preview_focused()
+        || !mouse_cell_hits_mermaid_preview(workspace, column, row)
+    {
+        return false;
+    }
+    session_state.pan_mermaid_preview(i32::from(delta_x) * 96, i32::from(delta_y) * 96);
+    log::debug!(
+        "[main][markdown_preview] Mermaid preview handled mouse wheel: column={}, row={}, delta=({}, {})",
+        column,
+        row,
+        delta_x,
+        delta_y
+    );
+    true
+}
+
+fn mouse_cell_hits_mermaid_preview(
+    workspace: Option<&WorkspaceScreenModel>,
+    column: u16,
+    row: u16,
+) -> bool {
+    workspace
+        .into_iter()
+        .flat_map(|workspace| workspace.floats.iter())
+        .filter(|float| !float.images.is_empty())
+        .any(|float| {
+            column >= float.rect.x
+                && column < float.rect.x.saturating_add(float.rect.width)
+                && row >= float.rect.y
+                && row < float.rect.y.saturating_add(float.rect.height)
+        })
 }
 
 fn handle_terminal_panel_key(
@@ -10433,6 +10925,7 @@ fn render_version_text() -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -10525,6 +11018,507 @@ mod tests {
             bell: None,
             command_line: None,
         }
+    }
+
+    #[test]
+    fn active_mermaid_block_appends_preview_float_without_changing_body_lines() {
+        let source = "# Test\n```mermaid\ngraph TD\n  A-->B\n```\nafter\n";
+        let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 2;
+        snapshot.windows[0].cursor_row = 2;
+        snapshot.buffers[0].name = "diagram.md".to_string();
+        let mut workspace = main_test_workspace();
+        workspace.active_window_id = snapshot.windows[0].id;
+        workspace.panes[0].window_id = snapshot.windows[0].id;
+        workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        workspace.panes[0].file_name = "diagram.md".to_string();
+        workspace.panes[0].lines = vec![
+            "# Test".to_string(),
+            "```mermaid".to_string(),
+            "graph TD".to_string(),
+            "  A-->B".to_string(),
+            "```".to_string(),
+            "after".to_string(),
+        ];
+        let mut maps = BTreeMap::new();
+        maps.insert(
+            snapshot.windows[0].id,
+            Arc::new(MarkdownDocumentMap::parse(source)),
+        );
+        let mut session_state = EditorSessionState::new(None);
+
+        append_active_mermaid_preview_float(
+            &mut workspace,
+            &snapshot,
+            source,
+            &maps,
+            80,
+            24,
+            &mut session_state,
+        );
+
+        assert_eq!(
+            workspace.panes[0].lines,
+            vec![
+                "# Test",
+                "```mermaid",
+                "graph TD",
+                "  A-->B",
+                "```",
+                "after"
+            ],
+            "preview must not collapse or reserve rows in the markdown body"
+        );
+        let preview = workspace
+            .floats
+            .iter()
+            .find(|float| !float.images.is_empty())
+            .expect("active Mermaid block should append an image preview float");
+        let FloatingImageSource::Mermaid { source, row, .. } = &preview.images[0].source;
+        assert_eq!(*row, 1);
+        assert_eq!(source, "graph TD\n  A-->B");
+    }
+
+    #[test]
+    fn mermaid_preview_float_uses_roomy_terminal_relative_size() {
+        let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
+        let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 1;
+        snapshot.windows[0].cursor_row = 1;
+        snapshot.buffers[0].name = "diagram.md".to_string();
+        let mut workspace = main_test_workspace();
+        workspace.active_window_id = snapshot.windows[0].id;
+        workspace.panes[0].window_id = snapshot.windows[0].id;
+        workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        let mut maps = BTreeMap::new();
+        maps.insert(
+            snapshot.windows[0].id,
+            Arc::new(MarkdownDocumentMap::parse(source)),
+        );
+        let mut session_state = EditorSessionState::new(None);
+
+        append_active_mermaid_preview_float(
+            &mut workspace,
+            &snapshot,
+            source,
+            &maps,
+            200,
+            80,
+            &mut session_state,
+        );
+
+        let preview = workspace
+            .floats
+            .iter()
+            .find(|float| !float.images.is_empty())
+            .expect("active Mermaid block should append an image preview float");
+        assert!(
+            preview.rect.width >= 60,
+            "Mermaid preview should use more than the old narrow 46-column cap"
+        );
+        assert!(
+            preview.rect.height >= 20,
+            "Mermaid preview should use more than the old short 16-row cap"
+        );
+        assert_eq!(preview.images[0].max_width, preview.rect.width - 2);
+    }
+
+    #[test]
+    fn mermaid_preview_float_size_uses_configured_window_percentages() {
+        let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
+        let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 1;
+        snapshot.windows[0].cursor_row = 1;
+        snapshot.buffers[0].name = "diagram.md".to_string();
+        let mut workspace = main_test_workspace();
+        workspace.active_window_id = snapshot.windows[0].id;
+        workspace.panes[0].window_id = snapshot.windows[0].id;
+        workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        let mut maps = BTreeMap::new();
+        maps.insert(
+            snapshot.windows[0].id,
+            Arc::new(MarkdownDocumentMap::parse(source)),
+        );
+        let mut session_state = EditorSessionState::new(None);
+        session_state
+            .apply_presentation_option(
+                saya::runtime::options::SayaOptionName::MermaidPreviewWidth,
+                saya::runtime::options::SayaOptionValue::Number(70),
+            )
+            .expect("width percent should apply");
+        session_state
+            .apply_presentation_option(
+                saya::runtime::options::SayaOptionName::MermaidPreviewHeight,
+                saya::runtime::options::SayaOptionValue::Number(60),
+            )
+            .expect("height percent should apply");
+
+        append_active_mermaid_preview_float(
+            &mut workspace,
+            &snapshot,
+            source,
+            &maps,
+            200,
+            80,
+            &mut session_state,
+        );
+
+        let preview = workspace
+            .floats
+            .iter()
+            .find(|float| !float.images.is_empty())
+            .expect("active Mermaid block should append an image preview float");
+        assert_eq!(preview.rect.width, 140);
+        assert_eq!(preview.rect.height, 48);
+    }
+
+    #[test]
+    fn mermaid_preview_float_source_includes_configured_background() {
+        let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
+        let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 1;
+        snapshot.windows[0].cursor_row = 1;
+        snapshot.buffers[0].name = "diagram.md".to_string();
+        let mut workspace = main_test_workspace();
+        workspace.active_window_id = snapshot.windows[0].id;
+        workspace.panes[0].window_id = snapshot.windows[0].id;
+        workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        let mut maps = BTreeMap::new();
+        maps.insert(
+            snapshot.windows[0].id,
+            Arc::new(MarkdownDocumentMap::parse(source)),
+        );
+        let mut session_state = EditorSessionState::new(None);
+        session_state
+            .apply_presentation_option(
+                saya::runtime::options::SayaOptionName::MermaidPreviewBackground,
+                saya::runtime::options::SayaOptionValue::String("#ffffff".to_string()),
+            )
+            .expect("background should apply");
+
+        append_active_mermaid_preview_float(
+            &mut workspace,
+            &snapshot,
+            source,
+            &maps,
+            120,
+            40,
+            &mut session_state,
+        );
+
+        let preview = workspace
+            .floats
+            .iter()
+            .find(|float| !float.images.is_empty())
+            .expect("active Mermaid block should append an image preview float");
+        let FloatingImageSource::Mermaid { background, .. } = &preview.images[0].source;
+        assert_eq!(background, "#ffffff");
+    }
+
+    #[test]
+    fn insert_mode_does_not_append_mermaid_preview_float() {
+        let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
+        let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.mode = CoreMode::Insert;
+        snapshot.cursor_row = 1;
+        snapshot.windows[0].cursor_row = 1;
+        snapshot.buffers[0].name = "diagram.md".to_string();
+        let mut workspace = main_test_workspace();
+        workspace.active_window_id = snapshot.windows[0].id;
+        workspace.panes[0].window_id = snapshot.windows[0].id;
+        workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        let mut maps = BTreeMap::new();
+        maps.insert(
+            snapshot.windows[0].id,
+            Arc::new(MarkdownDocumentMap::parse(source)),
+        );
+        let mut session_state = EditorSessionState::new(None);
+
+        append_active_mermaid_preview_float(
+            &mut workspace,
+            &snapshot,
+            source,
+            &maps,
+            80,
+            24,
+            &mut session_state,
+        );
+
+        assert!(
+            workspace.floats.is_empty(),
+            "Insert mode should keep editing responsive and avoid image preview rendering"
+        );
+    }
+
+    #[test]
+    fn mermaid_preview_auto_off_skips_float_but_manual_request_appends_once() {
+        let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
+        let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 1;
+        snapshot.windows[0].cursor_row = 1;
+        snapshot.buffers[0].name = "diagram.md".to_string();
+        let mut maps = BTreeMap::new();
+        maps.insert(
+            snapshot.windows[0].id,
+            Arc::new(MarkdownDocumentMap::parse(source)),
+        );
+
+        let mut auto_workspace = main_test_workspace();
+        auto_workspace.active_window_id = snapshot.windows[0].id;
+        auto_workspace.panes[0].window_id = snapshot.windows[0].id;
+        auto_workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        let mut auto_session_state = EditorSessionState::new(None);
+        auto_session_state
+            .apply_presentation_option(
+                saya::runtime::options::SayaOptionName::MermaidPreview,
+                saya::runtime::options::SayaOptionValue::Boolean(false),
+            )
+            .expect("mermaidpreview off should apply");
+        append_active_mermaid_preview_float(
+            &mut auto_workspace,
+            &snapshot,
+            source,
+            &maps,
+            80,
+            24,
+            &mut auto_session_state,
+        );
+        assert!(auto_workspace.floats.is_empty());
+
+        let mut manual_workspace = main_test_workspace();
+        manual_workspace.active_window_id = snapshot.windows[0].id;
+        manual_workspace.panes[0].window_id = snapshot.windows[0].id;
+        manual_workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        let mut manual_session_state = EditorSessionState::new(None);
+        manual_session_state
+            .apply_presentation_option(
+                saya::runtime::options::SayaOptionName::MermaidPreview,
+                saya::runtime::options::SayaOptionValue::Boolean(false),
+            )
+            .expect("mermaidpreview off should apply");
+        manual_session_state.request_mermaid_preview();
+        append_active_mermaid_preview_float(
+            &mut manual_workspace,
+            &snapshot,
+            source,
+            &maps,
+            80,
+            24,
+            &mut manual_session_state,
+        );
+        assert_eq!(manual_workspace.floats.len(), 1);
+
+        let mut next_frame_workspace = main_test_workspace();
+        next_frame_workspace.active_window_id = snapshot.windows[0].id;
+        next_frame_workspace.panes[0].window_id = snapshot.windows[0].id;
+        next_frame_workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        append_active_mermaid_preview_float(
+            &mut next_frame_workspace,
+            &snapshot,
+            source,
+            &maps,
+            80,
+            24,
+            &mut manual_session_state,
+        );
+        assert_eq!(
+            next_frame_workspace.floats.len(),
+            1,
+            "manual Mermaid preview should survive the async renderer completion redraw"
+        );
+
+        let mut outside_snapshot = snapshot.clone();
+        outside_snapshot.cursor_row = 4;
+        outside_snapshot.windows[0].cursor_row = 4;
+        let mut outside_workspace = main_test_workspace();
+        outside_workspace.active_window_id = outside_snapshot.windows[0].id;
+        outside_workspace.panes[0].window_id = outside_snapshot.windows[0].id;
+        outside_workspace.panes[0].buffer_id = outside_snapshot.windows[0].buf_id;
+        append_active_mermaid_preview_float(
+            &mut outside_workspace,
+            &outside_snapshot,
+            source,
+            &maps,
+            80,
+            24,
+            &mut manual_session_state,
+        );
+        assert!(outside_workspace.floats.is_empty());
+        assert!(!manual_session_state.mermaid_preview_manual_active());
+    }
+
+    #[test]
+    fn focused_mermaid_preview_keys_zoom_pan_and_close_without_editor_passthrough() {
+        let mut session_state = EditorSessionState::new(None);
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('j')),
+            None,
+            "non-focused preview must not steal normal j movement"
+        );
+
+        session_state.request_mermaid_preview();
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('+')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            session_state.mermaid_preview_zoom(),
+            MermaidPreviewZoom::Percent(125)
+        );
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('j')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(session_state.mermaid_preview_pan(), (0, 64));
+
+        assert!(matches!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('q')),
+            Some(FloatingWindowKeyHandling::Closed { .. })
+        ));
+        assert!(!session_state.mermaid_preview_manual_active());
+        assert!(!session_state.mermaid_preview_focused());
+    }
+
+    #[test]
+    fn focused_mermaid_preview_handles_full_zoom_and_pan_key_contract() {
+        let mut session_state = EditorSessionState::new(None);
+        session_state.request_mermaid_preview();
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('=')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            session_state.mermaid_preview_zoom(),
+            MermaidPreviewZoom::Percent(125)
+        );
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('-')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            session_state.mermaid_preview_zoom(),
+            MermaidPreviewZoom::Percent(100)
+        );
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('0')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            session_state.mermaid_preview_zoom(),
+            MermaidPreviewZoom::Fit
+        );
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('1')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(
+            session_state.mermaid_preview_zoom(),
+            MermaidPreviewZoom::Percent(100)
+        );
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Ctrl('f')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(session_state.mermaid_preview_pan(), (0, 256));
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Ctrl('b')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(session_state.mermaid_preview_pan(), (0, 0));
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('L')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(session_state.mermaid_preview_pan(), (256, 0));
+
+        assert_eq!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Char('H')),
+            Some(FloatingWindowKeyHandling::Consumed)
+        );
+        assert_eq!(session_state.mermaid_preview_pan(), (0, 0));
+
+        assert!(matches!(
+            handle_mermaid_preview_key(&mut session_state, &KeyInput::Escape),
+            Some(FloatingWindowKeyHandling::Closed { .. })
+        ));
+        assert!(!session_state.mermaid_preview_focused());
+    }
+
+    #[test]
+    fn mermaid_preview_mouse_wheel_pans_only_after_preview_focus() {
+        let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
+        let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
+        let mut snapshot = bridge.snapshot();
+        snapshot.cursor_row = 1;
+        snapshot.windows[0].cursor_row = 1;
+        snapshot.buffers[0].name = "diagram.md".to_string();
+        let mut maps = BTreeMap::new();
+        maps.insert(
+            snapshot.windows[0].id,
+            Arc::new(MarkdownDocumentMap::parse(source)),
+        );
+        let mut workspace = main_test_workspace();
+        workspace.active_window_id = snapshot.windows[0].id;
+        workspace.panes[0].window_id = snapshot.windows[0].id;
+        workspace.panes[0].buffer_id = snapshot.windows[0].buf_id;
+        let mut session_state = EditorSessionState::new(None);
+
+        append_active_mermaid_preview_float(
+            &mut workspace,
+            &snapshot,
+            source,
+            &maps,
+            80,
+            24,
+            &mut session_state,
+        );
+        let preview_rect = workspace
+            .floats
+            .iter()
+            .find(|float| !float.images.is_empty())
+            .expect("Mermaid preview float should be present")
+            .rect;
+
+        assert!(!handle_mermaid_preview_mouse_wheel(
+            &mut session_state,
+            Some(&workspace),
+            preview_rect.x.saturating_add(1),
+            preview_rect.y.saturating_add(1),
+            0,
+            1,
+        ));
+        assert_eq!(session_state.mermaid_preview_pan(), (0, 0));
+
+        assert!(focus_mermaid_preview_from_mouse_click(
+            &mut session_state,
+            Some(&workspace),
+            preview_rect.x.saturating_add(1),
+            preview_rect.y.saturating_add(1),
+        ));
+        assert!(handle_mermaid_preview_mouse_wheel(
+            &mut session_state,
+            Some(&workspace),
+            preview_rect.x.saturating_add(1),
+            preview_rect.y.saturating_add(1),
+            1,
+            2,
+        ));
+        assert_eq!(session_state.mermaid_preview_pan(), (96, 192));
     }
 
     #[test]
@@ -12231,6 +13225,10 @@ mod tests {
             )))
         );
         assert_eq!(
+            parse_main_host_command("markdown.previewMermaid"),
+            Some(MainHostCommand::MarkdownPreviewMermaid)
+        );
+        assert_eq!(
             parse_main_host_command(r#"lsp.floatHover {"result":{"contents":"hover"}}"#),
             Some(MainHostCommand::LspHoverFloat(
                 r#"{"result":{"contents":"hover"}}"#.to_string()
@@ -12283,6 +13281,84 @@ mod tests {
             None
         );
         assert_eq!(parse_main_host_command("set number"), None);
+    }
+
+    #[test]
+    fn markdown_preview_mermaid_host_command_requests_manual_preview() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+
+        let effect = execute_runtime_host_command_with_floats(
+            "markdown.previewMermaid",
+            &mut outcome,
+            &mut session_state,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("manual Mermaid preview command should be accepted");
+
+        assert_eq!(
+            effect.transient_message.as_deref(),
+            Some("Mermaid preview requested")
+        );
+        assert!(session_state.mermaid_preview_manual_active());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_keymap_builtin_mermaid_preview_command_falls_back_to_host_command() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+        let mut transient_msg = None;
+        let mut need_redraw = false;
+        let mut runtime_presentation_intents = Vec::new();
+        let mut floating_window_manager = FloatingWindowManager::default();
+        let mut completion_float_manager = CompletionFloatManager::default();
+        let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+        let mut terminal_float_manager = TerminalFloatManager::default();
+        let mut panel_manager = PanelManager::default();
+
+        let shutdown = execute_startup_keymap_registered_command(
+            Some(&mut runtime_session),
+            "markdown.previewMermaid",
+            &mut outcome,
+            &mut session_state,
+            &mut floating_window_manager,
+            &mut completion_float_manager,
+            &mut lsp_diagnostic_store,
+            &mut terminal_float_manager,
+            &mut panel_manager,
+            None,
+            &mut transient_msg,
+            &mut need_redraw,
+            &mut runtime_presentation_intents,
+            None,
+        )
+        .await;
+
+        assert_eq!(shutdown, None);
+        assert_eq!(transient_msg.as_deref(), Some("Mermaid preview requested"));
+        assert!(need_redraw);
+        assert!(session_state.mermaid_preview_manual_active());
     }
 
     #[test]

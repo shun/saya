@@ -271,6 +271,7 @@ pub fn open_lsp_hover_float(
     let RenderedFloatContent {
         lines: rendered_lines,
         inline_styles: markdown_styles,
+        ..
     } = rendered;
     let floating_styles = floating_inline_styles_from_markdown(markdown_styles);
     log::debug!(

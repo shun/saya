@@ -20,6 +20,13 @@ pub enum UiEvent {
     Shutdown(ShutdownReason),
     /// 左クリック入力
     MouseClick { column: u16, row: u16 },
+    /// mouse wheel 入力
+    MouseWheel {
+        column: u16,
+        row: u16,
+        delta_x: i16,
+        delta_y: i16,
+    },
     /// ブラケットペースト入力
     PastedText(String),
     /// job control による suspend 要求
@@ -140,6 +147,22 @@ impl EventLoopCoordinator {
                     "[event_loop] mouse click event processed: column={}, row={}",
                     column,
                     row
+                );
+                self.redraw_pending = true;
+                LoopAction::NeedRedraw
+            }
+            UiEvent::MouseWheel {
+                column,
+                row,
+                delta_x,
+                delta_y,
+            } => {
+                log::debug!(
+                    "[event_loop] mouse wheel event processed: column={}, row={}, delta=({}, {})",
+                    column,
+                    row,
+                    delta_x,
+                    delta_y
                 );
                 self.redraw_pending = true;
                 LoopAction::NeedRedraw

@@ -404,6 +404,49 @@ fn project_markdown_workspace_from_snapshot(
     })
 }
 
+#[test]
+fn markdown_workspace_keeps_mermaid_fence_as_body_text() {
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let markdown_source = "Before\n```mermaid\ngraph TD\n  A-->B\n```\nAfter\n";
+    let target_path = unique_path("markdown-mermaid-body.md");
+    std::fs::write(&target_path, markdown_source).expect("markdown fixture");
+    let outcome = prepare_launch(LaunchRequest {
+        input_source: InputSource::File(target_path),
+        config_source: ConfigSource::Default,
+        ..LaunchRequest::default()
+    })
+    .expect("launch markdown fixture");
+    let session_state = EditorSessionState::new(outcome.target_path.clone());
+
+    let workspace = project_markdown_workspace_from_snapshot(
+        &outcome.core_bridge.snapshot(),
+        &session_state,
+        markdown_source,
+    )
+    .expect("markdown workspace projection");
+
+    let visible_non_empty_lines = workspace.panes[0]
+        .lines
+        .iter()
+        .filter(|line| !line.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        visible_non_empty_lines,
+        vec![
+            "Before".to_string(),
+            "```mermaid".to_string(),
+            "graph TD".to_string(),
+            "  A-->B".to_string(),
+            "```".to_string(),
+            "After".to_string(),
+        ],
+        "Mermaid fenced block should remain body text; image preview belongs to popup/float"
+    );
+}
+
 fn collect_search_states_for_snapshot(
     outcome: &mut saya::app::bootstrap::BootstrapOutcome,
     snapshot: &vim_core_rs::CoreSnapshot,
@@ -1311,6 +1354,7 @@ async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
             UiEvent::Redraw
             | UiEvent::Shutdown(_)
             | UiEvent::MouseClick { .. }
+            | UiEvent::MouseWheel { .. }
             | UiEvent::PastedText(_)
             | UiEvent::TerminalSuspendRequested
             | UiEvent::TerminalResumed { .. } => unreachable!(),
@@ -1825,8 +1869,14 @@ async fn mouse_paste_and_terminal_lifecycle_integrate_through_ui_events() {
         vec![
             UiEvent::MouseClick { column: 2, row: 3 },
             UiEvent::PastedText("ab\nあ".to_string()),
+            UiEvent::MouseWheel {
+                column: 4,
+                row: 5,
+                delta_x: 0,
+                delta_y: 1,
+            },
         ],
-        "only left click and non-empty paste should cross the input/event-loop boundary"
+        "left click, wheel scroll, and non-empty paste should cross the input/event-loop boundary"
     );
 
     let mut dispatched_to_bridge = Vec::new();
@@ -1840,6 +1890,7 @@ async fn mouse_paste_and_terminal_lifecycle_integrate_through_ui_events() {
             UiEvent::PastedText(text) => {
                 dispatched_to_bridge.extend(text.chars().map(|ch| ch.to_string()));
             }
+            UiEvent::MouseWheel { .. } => {}
             other => panic!("unexpected event in mouse/paste integration: {:?}", other),
         }
     }

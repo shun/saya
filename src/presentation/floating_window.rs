@@ -391,6 +391,7 @@ pub struct FloatingWindow {
     pub creation_order: u64,
     pub scroll_offset: u16,
     pub lines: Vec<String>,
+    pub images: Vec<FloatingImage>,
 }
 
 fn default_close_keys() -> Vec<KeyInput> {
@@ -404,6 +405,7 @@ pub struct FloatingScreenModel {
     pub rect: PaneRect,
     pub lines: Vec<String>,
     pub inline_styles: Vec<FloatingInlineStyle>,
+    pub images: Vec<FloatingImage>,
     pub cursor: Option<FloatingCursor>,
     pub focusable: bool,
     pub mouse: bool,
@@ -416,6 +418,44 @@ pub struct FloatingScreenModel {
 pub struct FloatingCursor {
     pub line: usize,
     pub column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingImage {
+    pub line: u16,
+    pub column: u16,
+    pub max_width: u16,
+    pub max_height: u16,
+    pub view: FloatingImageView,
+    pub source: FloatingImageSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatingImageView {
+    pub zoom_percent: Option<u16>,
+    pub pan_x_px: u32,
+    pub pan_y_px: u32,
+}
+
+impl FloatingImageView {
+    pub fn fit() -> Self {
+        Self {
+            zoom_percent: None,
+            pan_x_px: 0,
+            pan_y_px: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FloatingImageSource {
+    Mermaid {
+        buffer_id: i32,
+        row: usize,
+        alt_text: String,
+        background: String,
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -652,6 +692,7 @@ impl FloatingWindowManager {
             creation_order,
             scroll_offset: 0,
             lines,
+            images: Vec::new(),
         });
         id
     }
@@ -1142,6 +1183,24 @@ impl FloatingWindowManager {
         true
     }
 
+    pub fn set_images(&mut self, id: FloatingWindowId, images: Vec<FloatingImage>) -> bool {
+        let Some(window) = self.windows.iter_mut().find(|window| window.id == id) else {
+            log::debug!(
+                "[floating_window] image update ignored for missing float: id={}",
+                id.0
+            );
+            return false;
+        };
+        log::debug!(
+            "[floating_window] images updated: id={}, old_count={}, new_count={}",
+            id.0,
+            window.images.len(),
+            images.len()
+        );
+        window.images = images;
+        true
+    }
+
     pub fn set_mouse_enabled(&mut self, id: FloatingWindowId, mouse: bool) -> bool {
         let Some(window) = self.windows.iter_mut().find(|window| window.id == id) else {
             log::debug!(
@@ -1233,6 +1292,19 @@ impl FloatingWindowManager {
                                     column_end: style.column_end,
                                 })
                             }
+                        })
+                        .collect(),
+                    images: window
+                        .images
+                        .iter()
+                        .filter_map(|image| {
+                            let scroll_offset = u16::try_from(scroll_offset).unwrap_or(u16::MAX);
+                            if image.line < scroll_offset {
+                                return None;
+                            }
+                            let mut image = image.clone();
+                            image.line = image.line.saturating_sub(scroll_offset);
+                            Some(image)
                         })
                         .collect(),
                     cursor: None,

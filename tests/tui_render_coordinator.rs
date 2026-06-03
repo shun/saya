@@ -1,12 +1,23 @@
 use std::fs;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 
 use saya::core::notification_prompt::{
     BellIndication, MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
 };
 use saya::core::outcome::{RedrawEffect, StructuralEffectSet};
+use saya::presentation::floating_window::{
+    FloatingBorder, FloatingChrome, FloatingContentRef, FloatingImage, FloatingImageSource,
+    FloatingImageView, FloatingScreenModel, FloatingWindowId,
+};
+use saya::presentation::markdown::render::MermaidDiagramRenderer;
+use saya::presentation::overlay::asset_store::OverlayAssetMedia;
 use saya::presentation::overlay::asset_store::OverlayAssetStore;
 use saya::presentation::overlay::optional_graphics::{
-    OptionalGraphicsAdapter, RecordingOverlayWriter,
+    OptionalGraphicsAdapter, OverlayRenderResult, RecordingOverlayWriter,
 };
 use saya::presentation::render::coordinator::TuiRenderCoordinator;
 use saya::presentation::render::renderer::{RenderFrameOptions, RenderTextMode};
@@ -35,6 +46,216 @@ fn capabilities_without_graphics() -> TerminalCapabilityProfile {
         InlineGraphicsProbeResult::Disabled,
     )
     .detect()
+}
+
+fn capabilities_with_kitty_graphics() -> TerminalCapabilityProfile {
+    TerminalCapabilityProbe::new(
+        TerminalCapabilityObservation {
+            session_kind: TerminalSessionKind::Local,
+            basic_terminal_control: true,
+            styled_text: true,
+            color_text: true,
+            truecolor: true,
+        },
+        InlineGraphicsProbeResult::Supported(
+            saya::terminal::capability::InlineGraphicsProtocol::Kitty,
+        ),
+    )
+    .detect()
+}
+
+#[derive(Debug)]
+struct FakeMermaidRenderer;
+
+impl MermaidDiagramRenderer for FakeMermaidRenderer {
+    fn render_png(&self, _source: &str, _background: &str) -> Result<OverlayAssetMedia, String> {
+        panic!("floating Mermaid popup must not call synchronous render_png")
+    }
+
+    fn render_png_async(
+        &self,
+        source: String,
+        background: String,
+    ) -> Option<mpsc::Receiver<Result<OverlayAssetMedia, String>>> {
+        assert_eq!(
+            source, "graph TD\n  A-->B",
+            "coordinator must pass only the mermaid fenced body to the renderer"
+        );
+        assert_eq!(background, "transparent");
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(OverlayAssetMedia::png(
+                "mermaid diagram",
+                320,
+                180,
+                b"fake-png".to_vec(),
+            )))
+            .expect("send fake mermaid render");
+        Some(receiver)
+    }
+}
+
+#[derive(Debug)]
+struct SyncOnlyMermaidRenderer;
+
+impl MermaidDiagramRenderer for SyncOnlyMermaidRenderer {
+    fn render_png(&self, _source: &str, _background: &str) -> Result<OverlayAssetMedia, String> {
+        panic!("floating Mermaid popup must not call synchronous render_png")
+    }
+}
+
+#[derive(Debug)]
+struct FailingMermaidRenderer;
+
+impl MermaidDiagramRenderer for FailingMermaidRenderer {
+    fn render_png(&self, _source: &str, _background: &str) -> Result<OverlayAssetMedia, String> {
+        panic!("floating Mermaid popup must not call synchronous render_png")
+    }
+
+    fn render_png_async(
+        &self,
+        _source: String,
+        _background: String,
+    ) -> Option<mpsc::Receiver<Result<OverlayAssetMedia, String>>> {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err(
+                "mmdc exited with exit status: 1: stderr=Error: Parse error on line 3:\n...classDef正常 fill:#d4edda\n----------------------^\nExpecting 'SPACE', got 'UNICODE_TEXT'".to_string(),
+            ))
+            .expect("send fake mermaid failure");
+        Some(receiver)
+    }
+}
+
+#[derive(Debug)]
+struct CountingMermaidRenderer {
+    calls: Arc<AtomicUsize>,
+}
+
+impl MermaidDiagramRenderer for CountingMermaidRenderer {
+    fn render_png(&self, _source: &str, _background: &str) -> Result<OverlayAssetMedia, String> {
+        panic!("floating Mermaid popup must not call synchronous render_png")
+    }
+
+    fn render_png_async(
+        &self,
+        source: String,
+        background: String,
+    ) -> Option<mpsc::Receiver<Result<OverlayAssetMedia, String>>> {
+        assert_eq!(source, "graph TD\n  A-->B");
+        assert_eq!(background, "transparent");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(OverlayAssetMedia::png(
+                "mermaid diagram",
+                320,
+                180,
+                b"fake-png".to_vec(),
+            )))
+            .expect("send counted mermaid render");
+        Some(receiver)
+    }
+}
+
+#[derive(Debug)]
+struct AsyncMermaidRenderer {
+    sender: Arc<Mutex<Option<mpsc::Sender<Result<OverlayAssetMedia, String>>>>>,
+}
+
+impl MermaidDiagramRenderer for AsyncMermaidRenderer {
+    fn render_png(&self, _source: &str, _background: &str) -> Result<OverlayAssetMedia, String> {
+        panic!("async-capable Mermaid renderer must not block through render_png")
+    }
+
+    fn render_png_async(
+        &self,
+        source: String,
+        background: String,
+    ) -> Option<mpsc::Receiver<Result<OverlayAssetMedia, String>>> {
+        assert_eq!(source, "graph TD\n  A-->B");
+        assert_eq!(background, "transparent");
+        let (sender, receiver) = mpsc::channel();
+        *self.sender.lock().expect("sender lock") = Some(sender);
+        Some(receiver)
+    }
+}
+
+#[derive(Debug)]
+struct BackgroundAssertingMermaidRenderer;
+
+impl MermaidDiagramRenderer for BackgroundAssertingMermaidRenderer {
+    fn render_png(&self, _source: &str, _background: &str) -> Result<OverlayAssetMedia, String> {
+        panic!("floating Mermaid popup must not call synchronous render_png")
+    }
+
+    fn render_png_async(
+        &self,
+        source: String,
+        background: String,
+    ) -> Option<mpsc::Receiver<Result<OverlayAssetMedia, String>>> {
+        assert_eq!(source, "graph TD\n  A-->B");
+        assert_eq!(background, "#ffffff");
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(OverlayAssetMedia::png(
+                "mermaid diagram",
+                320,
+                180,
+                b"fake-png".to_vec(),
+            )))
+            .expect("send background mermaid render");
+        Some(receiver)
+    }
+}
+
+fn markdown_mermaid_popup_workspace() -> WorkspaceScreenModel {
+    let mut workspace = workspace_without_message(1, 101, "```mermaid");
+    workspace.floats = vec![FloatingScreenModel {
+        id: FloatingWindowId(9001),
+        content: FloatingContentRef::StaticLines { content_id: 9001 },
+        rect: PaneRect {
+            x: 20,
+            y: 2,
+            width: 24,
+            height: 8,
+        },
+        lines: vec!["Mermaid preview".to_string(), "".to_string()],
+        inline_styles: Vec::new(),
+        images: vec![FloatingImage {
+            line: 1,
+            column: 0,
+            max_width: 22,
+            max_height: 6,
+            view: FloatingImageView::fit(),
+            source: FloatingImageSource::Mermaid {
+                buffer_id: 101,
+                row: 4,
+                alt_text: "mermaid diagram".to_string(),
+                background: "transparent".to_string(),
+                source: "graph TD\n  A-->B".to_string(),
+            },
+        }],
+        cursor: None,
+        focusable: false,
+        mouse: false,
+        chrome: FloatingChrome {
+            border: FloatingBorder::Single,
+        },
+        zindex: 40,
+        creation_order: 1,
+    }];
+    workspace
+}
+
+fn markdown_mermaid_zoomed_popup_workspace() -> WorkspaceScreenModel {
+    let mut workspace = markdown_mermaid_popup_workspace();
+    workspace.floats[0].images[0].view = FloatingImageView {
+        zoom_percent: Some(200),
+        pan_x_px: 32,
+        pan_y_px: 24,
+    };
+    workspace
 }
 
 fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> WorkspaceScreenModel {
@@ -131,6 +352,556 @@ fn render_workspace_prefers_command_line_cursor_style() {
         .expect("render should apply command line cursor style");
 
     assert_eq!(writer.cursor_styles, vec![ScreenCursorStyle::SteadyBar]);
+}
+
+#[test]
+fn render_workspace_registers_floating_mermaid_png_and_calls_kitty_overlay() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    let mut writer = RecordingOverlayWriter::default();
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("floating markdown mermaid overlay should render through kitty");
+
+    assert_eq!(outcome.overlay_results, vec![OverlayRenderResult::Rendered]);
+    assert_eq!(
+        outcome.rendered_workspace.panes[0].lines,
+        vec!["```mermaid".to_string()],
+        "Mermaid source text must remain in the body; popup preview must not reserve body rows"
+    );
+    assert!(
+        writer.writes.iter().any(|write| {
+            let text = String::from_utf8_lossy(write);
+            text.starts_with("\u{1b}[5;22H")
+                && text.contains(",c=20,r=6,")
+                && text.contains(";ZmFrZS1wbmc=")
+        }),
+        "kitty overlay write should target the float content cell without stretching to the full popup width: {:?}",
+        writer.writes
+    );
+    assert_eq!(
+        writer
+            .writes
+            .last()
+            .map(|write| String::from_utf8_lossy(write).into_owned()),
+        Some("\u{1b}[1;1H".to_string()),
+        "coordinator must restore the body cursor after writing popup kitty graphics"
+    );
+}
+
+#[test]
+fn render_workspace_zoomed_mermaid_popup_uses_kitty_source_rectangle() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    let mut writer = RecordingOverlayWriter::default();
+
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_zoomed_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("zoomed floating markdown mermaid overlay should render through kitty");
+
+    assert!(
+        writer.writes.iter().any(|write| {
+            let text = String::from_utf8_lossy(write);
+            text.contains(",x=32,y=24,")
+                && text.contains(",w=")
+                && text.contains(",h=")
+                && text.contains(",c=22,r=6,")
+        }),
+        "zoomed kitty overlay should crop the source image instead of stretching the whole image: {:?}",
+        writer.writes
+    );
+}
+
+#[test]
+fn render_workspace_passes_mermaid_background_to_renderer() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(BackgroundAssertingMermaidRenderer));
+    let mut writer = RecordingOverlayWriter::default();
+    let mut workspace = markdown_mermaid_popup_workspace();
+    let FloatingImageSource::Mermaid { background, .. } = &mut workspace.floats[0].images[0].source;
+    *background = "#ffffff".to_string();
+
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("floating markdown mermaid overlay should render with configured background");
+
+    assert!(
+        writer.writes.iter().any(|write| !write.is_empty()),
+        "renderer success should reach kitty overlay"
+    );
+}
+
+#[test]
+fn render_workspace_does_not_block_on_async_mermaid_cache_miss() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let sender = Arc::new(Mutex::new(None));
+    let redraws = Arc::new(AtomicUsize::new(0));
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(AsyncMermaidRenderer {
+        sender: sender.clone(),
+    }));
+    {
+        let redraws = redraws.clone();
+        coordinator.set_mermaid_redraw_callback(move || {
+            redraws.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+    let mut first_writer = RecordingOverlayWriter::default();
+    let mut second_writer = RecordingOverlayWriter::default();
+
+    let first = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut first_writer),
+        )
+        .expect("first frame should not block on Mermaid conversion");
+
+    assert_eq!(
+        first.overlay_results,
+        vec![OverlayRenderResult::FallbackToText]
+    );
+    assert!(
+        first.rendered_workspace.floats[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("Rendering Mermaid")),
+        "async cache miss frame should show a non-empty pending message in the popup"
+    );
+    assert!(
+        first_writer
+            .writes
+            .iter()
+            .all(|write| !String::from_utf8_lossy(write).contains(";ZmFrZS1wbmc=")),
+        "cache miss frame must not wait for or write a PNG payload"
+    );
+
+    sender
+        .lock()
+        .expect("sender lock")
+        .take()
+        .expect("async renderer should expose sender")
+        .send(Ok(OverlayAssetMedia::png(
+            "mermaid diagram",
+            320,
+            180,
+            b"fake-png".to_vec(),
+        )))
+        .expect("send async render result");
+    for _ in 0..50 {
+        if redraws.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        redraws.load(Ordering::SeqCst),
+        1,
+        "async Mermaid completion should request one redraw"
+    );
+
+    let second = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut second_writer),
+        )
+        .expect("second frame should consume async Mermaid result");
+
+    assert_eq!(second.overlay_results, vec![OverlayRenderResult::Rendered]);
+    assert_eq!(
+        second.rendered_workspace.floats[0].lines[1],
+        " ".repeat(22),
+        "completed image frames should clear fallback text behind transparent PNGs"
+    );
+    assert!(
+        second_writer
+            .writes
+            .iter()
+            .any(|write| String::from_utf8_lossy(write).contains(";ZmFrZS1wbmc=")),
+        "completed async render should be emitted on the next frame"
+    );
+}
+
+#[test]
+fn render_workspace_never_uses_synchronous_mermaid_renderer_for_popup() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(SyncOnlyMermaidRenderer));
+    let mut writer = RecordingOverlayWriter::default();
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("sync-only Mermaid renderer should fall back without blocking");
+
+    assert_eq!(
+        outcome.overlay_results,
+        vec![OverlayRenderResult::FallbackToText]
+    );
+    assert!(
+        writer
+            .writes
+            .iter()
+            .all(|write| !String::from_utf8_lossy(write).contains(";ZmFrZS1wbmc=")),
+        "sync-only renderer must not emit a PNG payload"
+    );
+}
+
+#[test]
+fn render_workspace_reuses_cached_mermaid_png_across_repeated_frames() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(CountingMermaidRenderer {
+        calls: calls.clone(),
+    }));
+    let mut first_writer = RecordingOverlayWriter::default();
+    let mut second_writer = RecordingOverlayWriter::default();
+
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut first_writer),
+        )
+        .expect("first markdown mermaid frame should render");
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut second_writer),
+        )
+        .expect("second markdown mermaid frame should reuse cached PNG");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "scroll/cursor redraws must not invoke Mermaid conversion again for unchanged source"
+    );
+    assert!(
+        second_writer
+            .writes
+            .iter()
+            .any(|write| String::from_utf8_lossy(write).contains(";ZmFrZS1wbmc=")),
+        "cached PNG should still be emitted as a kitty overlay on the second frame"
+    );
+}
+
+#[test]
+fn render_workspace_clears_stale_kitty_image_when_next_frame_has_no_overlay() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    let mut first_writer = RecordingOverlayWriter::default();
+    let mut second_writer = RecordingOverlayWriter::default();
+
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut first_writer),
+        )
+        .expect("first frame should render kitty image");
+    coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace_without_message(1, 101, "plain text after scroll")),
+            &capabilities,
+            &[],
+            Some(&mut second_writer),
+        )
+        .expect("next frame should clear stale kitty image");
+
+    assert!(
+        second_writer
+            .writes
+            .iter()
+            .any(|write| write == b"\x1b_Ga=d\x1b\\"),
+        "frame without overlays must delete visible kitty images from prior frames: {:?}",
+        second_writer.writes
+    );
+}
+
+#[test]
+fn render_workspace_restores_mermaid_text_when_kitty_graphics_are_disabled() {
+    let capabilities = capabilities_without_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    let mut writer = RecordingOverlayWriter::default();
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("markdown mermaid popup should skip graphics on unsupported terminals");
+
+    assert!(outcome.overlay_results.is_empty());
+    assert_eq!(
+        outcome.rendered_workspace.panes[0].lines,
+        vec!["```mermaid".to_string()],
+        "non-graphics terminals should keep the raw markdown body unchanged"
+    );
+    assert!(
+        outcome.rendered_workspace.floats[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("graph TD")),
+        "non-graphics terminals should show Mermaid source inside the popup instead of an empty body"
+    );
+    assert!(
+        writer.writes.is_empty(),
+        "graphics-disabled fallback must not write kitty payloads"
+    );
+}
+
+#[test]
+fn render_workspace_restores_mermaid_text_when_png_conversion_fails() {
+    let capabilities = capabilities_with_kitty_graphics();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(FailingMermaidRenderer));
+    let mut writer = RecordingOverlayWriter::default();
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(markdown_mermaid_popup_workspace()),
+            &capabilities,
+            &[],
+            Some(&mut writer),
+        )
+        .expect("markdown mermaid conversion failure should fall back to text");
+
+    assert_eq!(
+        outcome.overlay_results,
+        vec![OverlayRenderResult::FallbackToText]
+    );
+    assert_eq!(
+        outcome.rendered_workspace.panes[0].lines,
+        vec!["```mermaid".to_string()],
+        "conversion failure must not rewrite markdown body lines"
+    );
+    assert!(
+        outcome.rendered_workspace.floats[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("Mermaid render failed")),
+        "conversion failure should show the reason inside the popup instead of only source text"
+    );
+    assert!(
+        outcome.rendered_workspace.floats[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("Mermaid line 3")),
+        "conversion failure should expose the mmdc Mermaid body line in the popup"
+    );
+    assert_eq!(
+        outcome.rendered_workspace.message_line.visible_text(),
+        Some("Mermaid render failed: Error: Parse error on line 3:"),
+        "conversion failure should be visible without checking logs"
+    );
+    assert!(writer.writes.is_empty());
+}
+
+#[test]
+fn render_workspace_mermaid_parse_error_points_to_source_line_and_hint() {
+    #[derive(Debug)]
+    struct StyleSeparatorFailure;
+
+    impl MermaidDiagramRenderer for StyleSeparatorFailure {
+        fn render_png(
+            &self,
+            _source: &str,
+            _background: &str,
+        ) -> Result<OverlayAssetMedia, String> {
+            panic!("floating Mermaid popup must not call synchronous render_png")
+        }
+
+        fn render_png_async(
+            &self,
+            _source: String,
+            _background: String,
+        ) -> Option<mpsc::Receiver<Result<OverlayAssetMedia, String>>> {
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Err(
+                    "mmdc exited with exit status: 1: stderr=Error: Parse error on line 2:\n\
+                     ...A([start]) :::startEnd --> B\n\
+                     -----------------------^\n\
+                     Expecting 'SEMI', 'NEWLINE', 'SPACE', got 'STYLE_SEPARATOR'"
+                        .to_string(),
+                ))
+                .expect("send style separator failure");
+            Some(receiver)
+        }
+    }
+
+    let mut workspace = markdown_mermaid_popup_workspace();
+    let fence_row = 13;
+    let expected_editor_line = fence_row + 3 + 1;
+    let FloatingImageSource::Mermaid { row, .. } = &mut workspace.floats[0].images[0].source;
+    *row = fence_row;
+    let FloatingImageSource::Mermaid { source, .. } = &mut workspace.floats[0].images[0].source;
+    *source = "flowchart TD\n\n  A([start]) :::startEnd --> B".to_string();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(StyleSeparatorFailure));
+    let mut writer = RecordingOverlayWriter::default();
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace),
+            &capabilities_with_kitty_graphics(),
+            &[],
+            Some(&mut writer),
+        )
+        .expect("style separator parse failure should render diagnostics");
+
+    let popup_lines = &outcome.rendered_workspace.floats[0].lines;
+    assert!(
+        popup_lines
+            .iter()
+            .any(|line| line.contains("Mermaid line 2")),
+        "popup should keep the mmdc Mermaid body line for diagnostics: {popup_lines:?}"
+    );
+    assert!(
+        popup_lines
+            .iter()
+            .any(|line| line.contains(&format!("Fix editor line {expected_editor_line}"))),
+        "popup should show the editor line number, not only the Mermaid body line: {popup_lines:?}"
+    );
+    assert!(
+        popup_lines.iter().any(|line| line.contains("A([start])")),
+        "popup should show the offending Mermaid source line: {popup_lines:?}"
+    );
+    assert!(
+        popup_lines
+            .iter()
+            .any(|line| line.contains("remove space before")),
+        "popup should say what to edit: {popup_lines:?}"
+    );
+    assert!(
+        popup_lines.iter().any(|line| line.contains("Node:::class")),
+        "popup should suggest the concrete class syntax fix: {popup_lines:?}"
+    );
+    assert!(writer.writes.is_empty());
+}
+
+#[test]
+fn render_workspace_mermaid_subgraph_label_error_suggests_bracket_label() {
+    #[derive(Debug)]
+    struct SubgraphLabelFailure;
+
+    impl MermaidDiagramRenderer for SubgraphLabelFailure {
+        fn render_png(
+            &self,
+            _source: &str,
+            _background: &str,
+        ) -> Result<OverlayAssetMedia, String> {
+            panic!("floating Mermaid popup must not call synchronous render_png")
+        }
+
+        fn render_png_async(
+            &self,
+            _source: String,
+            _background: String,
+        ) -> Option<mpsc::Receiver<Result<OverlayAssetMedia, String>>> {
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Err(
+                    "mmdc exited with exit status: 1: stderr=Error: Lexical error on line 3. Unrecognized text.\n\
+                     ...A-->B  subgraph 配送・通知システム    C-->D\n\
+                     ----------------------^"
+                        .to_string(),
+                ))
+                .expect("send subgraph label failure");
+            Some(receiver)
+        }
+    }
+
+    let mut workspace = markdown_mermaid_popup_workspace();
+    let FloatingImageSource::Mermaid { source, .. } = &mut workspace.floats[0].images[0].source;
+    *source = "flowchart TD\n  A-->B\n  subgraph 配送・通知システム\n    C-->D\n  end".to_string();
+    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+        OverlayAssetStore::default(),
+        OptionalGraphicsAdapter::default(),
+    )
+    .with_mermaid_renderer_for_tests(Box::new(SubgraphLabelFailure));
+    let mut writer = RecordingOverlayWriter::default();
+
+    let outcome = coordinator
+        .render_workspace_result::<WorkspaceProjectionError>(
+            Ok(workspace),
+            &capabilities_with_kitty_graphics(),
+            &[],
+            Some(&mut writer),
+        )
+        .expect("subgraph label parse failure should render diagnostics");
+
+    let popup_lines = &outcome.rendered_workspace.floats[0].lines;
+    assert!(
+        popup_lines.iter().any(|line| line.contains("subgraph id[")),
+        "popup should suggest bracketed subgraph labels: {popup_lines:?}"
+    );
+    assert!(writer.writes.is_empty());
 }
 
 #[test]
@@ -664,6 +1435,23 @@ fn renderer_option_contract_is_no_longer_source_only_future_guard() {
     assert!(
         renderer_source.contains("clear_before_draw"),
         "task 4 requires renderer to honor core-derived clear-before-draw"
+    );
+}
+
+#[test]
+fn optional_graphics_overlay_is_rendered_after_text_frame_draw() {
+    let coordinator_source = fs::read_to_string("src/presentation/render/coordinator.rs")
+        .expect("render coordinator source should be readable");
+    let text_draw = coordinator_source
+        .find("draw_with_mode_and_options(&rendered_workspace")
+        .expect("coordinator should draw the text frame");
+    let overlay_draw = coordinator_source
+        .find(".render_overlay(&graphics_request")
+        .expect("coordinator should render optional graphics overlays");
+
+    assert!(
+        text_draw < overlay_draw,
+        "kitty overlays must be emitted after text draw so the TUI frame does not overwrite the image"
     );
 }
 

@@ -118,6 +118,38 @@ pub fn run_terminal_input_loop<S: TerminalEventSource>(
                         break;
                     }
                 }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    let vertical_delta = match mouse_event.kind {
+                        MouseEventKind::ScrollUp => -1,
+                        MouseEventKind::ScrollDown => 1,
+                        _ => 0,
+                    };
+                    let (delta_x, delta_y) = if mouse_event.modifiers.contains(KeyModifiers::SHIFT)
+                    {
+                        (vertical_delta, 0)
+                    } else {
+                        (0, vertical_delta)
+                    };
+                    log::debug!(
+                        "[input_loop] forwarding mouse wheel: column={}, row={}, delta=({}, {})",
+                        mouse_event.column,
+                        mouse_event.row,
+                        delta_x,
+                        delta_y
+                    );
+                    if sender
+                        .blocking_send(UiEvent::MouseWheel {
+                            column: mouse_event.column,
+                            row: mouse_event.row,
+                            delta_x,
+                            delta_y,
+                        })
+                        .is_err()
+                    {
+                        log::debug!("[input_loop] receiver closed while sending wheel event");
+                        break;
+                    }
+                }
                 _ => {}
             },
             Event::Paste(text) => {
@@ -272,6 +304,15 @@ mod tests {
             column,
             row,
             modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn shift_mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::SHIFT,
         })
     }
 
@@ -593,7 +634,6 @@ mod tests {
                 Ok(true),
                 Ok(true),
                 Ok(true),
-                Ok(true),
                 Ok(false),
                 Ok(false),
             ],
@@ -601,7 +641,6 @@ mod tests {
                 Ok(mouse_event(MouseEventKind::Down(MouseButton::Right), 1, 1)),
                 Ok(mouse_event(MouseEventKind::Down(MouseButton::Middle), 1, 1)),
                 Ok(mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 1)),
-                Ok(mouse_event(MouseEventKind::ScrollDown, 1, 1)),
                 Ok(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 1)),
                 Ok(Event::Paste(String::new())),
             ],
@@ -619,6 +658,65 @@ mod tests {
         assert!(
             receiver.try_recv().is_err(),
             "要件外の mouse/paste event は receiver に現れないこと"
+        );
+    }
+
+    #[test]
+    fn input_loop_forwards_mouse_wheel_events() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let mut source = MockEventSource::new(
+            vec![Ok(true), Ok(true), Ok(true), Ok(false), Ok(false)],
+            vec![
+                Ok(mouse_event(MouseEventKind::ScrollDown, 2, 3)),
+                Ok(mouse_event(MouseEventKind::ScrollUp, 4, 5)),
+                Ok(shift_mouse_event(MouseEventKind::ScrollDown, 6, 7)),
+            ],
+        );
+
+        let stop_for_thread = stop_requested.clone();
+        let handle = std::thread::spawn(move || {
+            run_terminal_input_loop(&mut source, sender, stop_for_thread);
+        });
+
+        let first = receiver
+            .blocking_recv()
+            .expect("first wheel event should be forwarded");
+        let second = receiver
+            .blocking_recv()
+            .expect("second wheel event should be forwarded");
+        let third = receiver
+            .blocking_recv()
+            .expect("shift wheel event should be forwarded as horizontal pan");
+        stop_requested.store(true, Ordering::Relaxed);
+        handle.join().expect("input loop thread should stop");
+
+        assert_eq!(
+            first,
+            UiEvent::MouseWheel {
+                column: 2,
+                row: 3,
+                delta_x: 0,
+                delta_y: 1,
+            }
+        );
+        assert_eq!(
+            second,
+            UiEvent::MouseWheel {
+                column: 4,
+                row: 5,
+                delta_x: 0,
+                delta_y: -1,
+            }
+        );
+        assert_eq!(
+            third,
+            UiEvent::MouseWheel {
+                column: 6,
+                row: 7,
+                delta_x: 1,
+                delta_y: 0,
+            }
         );
     }
 

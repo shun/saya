@@ -5321,6 +5321,138 @@ mod tests {
         );
     }
 
+    #[test]
+    fn markdown_mermaid_projection_does_not_render_partial_line_range_block() {
+        let mut snapshot = snapshot_for_projection_text(String::new(), 6, 0, 0, 4);
+        snapshot.buffers[0].name = "hoge.md".to_string();
+        let session_state = EditorSessionState::new(Some(PathBuf::from("tmp/hoge.md")));
+        let full_source_lines = vec![
+            "```mermaid".to_string(),
+            "stateDiagram-v2".to_string(),
+            "    [*] --> Idle".to_string(),
+            "    Idle --> Done".to_string(),
+            "    Done --> [*]".to_string(),
+            "```".to_string(),
+            "after".to_string(),
+        ];
+        let mut line_ranges = BTreeMap::new();
+        line_ranges.insert(
+            1,
+            CoreBufferLineRange {
+                buffer_id: 1,
+                source_revision: CoreBufferRevision { value: 1 },
+                start_row: 0,
+                line_count: 2,
+                total_line_count: full_source_lines.len(),
+                lines: full_source_lines[..2].to_vec(),
+            },
+        );
+        let markdown_source = full_source_lines.join("\n");
+        let mut markdown_document_maps = BTreeMap::new();
+        markdown_document_maps.insert(1, Arc::new(MarkdownDocumentMap::parse(&markdown_source)));
+        let mut viewport_store = WindowViewportStore::new();
+        viewport_store.sync_from_windows(&snapshot.windows);
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &line_ranges,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            #[cfg(feature = "tree-sitter-syntax")]
+            tree_sitter_syntax: &BTreeMap::new(),
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 8,
+        })
+        .expect("workspace projection");
+
+        assert!(
+            model.panes[0]
+                .line_projections
+                .iter()
+                .all(|line| line.display_text != "[mermaid diagram]"),
+            "partial Mermaid blocks must not render a placeholder with incomplete source"
+        );
+    }
+
+    #[test]
+    fn markdown_mermaid_projection_keeps_full_block_as_body_text() {
+        let mut snapshot = snapshot_for_projection_text(String::new(), 1, 0, 0, 6);
+        snapshot.buffers[0].name = "hoge.md".to_string();
+        let session_state = EditorSessionState::new(Some(PathBuf::from("tmp/hoge.md")));
+        let source_lines = vec![
+            "```mermaid".to_string(),
+            "graph TD".to_string(),
+            "  A-->B".to_string(),
+            "```".to_string(),
+            "after".to_string(),
+        ];
+        let mut line_ranges = BTreeMap::new();
+        line_ranges.insert(
+            1,
+            CoreBufferLineRange {
+                buffer_id: 1,
+                source_revision: CoreBufferRevision { value: 1 },
+                start_row: 0,
+                line_count: source_lines.len(),
+                total_line_count: source_lines.len(),
+                lines: source_lines.clone(),
+            },
+        );
+        let markdown_source = source_lines.join("\n");
+        let mut markdown_document_maps = BTreeMap::new();
+        markdown_document_maps.insert(1, Arc::new(MarkdownDocumentMap::parse(&markdown_source)));
+        let mut viewport_store = WindowViewportStore::new();
+        viewport_store.sync_from_windows(&snapshot.windows);
+        let search_states = BTreeMap::new();
+        let syntax_lines = BTreeMap::new();
+
+        let model = project_workspace(&WorkspaceProjectionInput {
+            snapshot: &snapshot,
+            light_snapshot: None,
+            line_ranges: &line_ranges,
+            session_state: &session_state,
+            visual_selection: None,
+            search_states: &search_states,
+            syntax_lines: &syntax_lines,
+            #[cfg(feature = "tree-sitter-syntax")]
+            tree_sitter_syntax: &BTreeMap::new(),
+            markdown_document_maps: &markdown_document_maps,
+            command_preview: None,
+            core_message: None,
+            notification_prompt: None,
+            system_warning: None,
+            transient_info: None,
+            viewport_store: &viewport_store,
+            terminal_width: 80,
+            terminal_height: 8,
+        })
+        .expect("workspace projection");
+
+        assert_eq!(
+            model.panes[0].lines,
+            vec!["```mermaid", "graph TD", "  A-->B", "```", "after"]
+        );
+        assert!(
+            model.panes[0]
+                .line_projections
+                .iter()
+                .all(|line| line.display_text != "[mermaid diagram]"),
+            "Mermaid blocks should stay as body text; image rendering belongs to preview floats"
+        );
+    }
+
     fn snapshot_for_projection_text(
         text: String,
         cursor_row: usize,

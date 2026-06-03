@@ -142,6 +142,10 @@ pub struct StartupOptionsSnapshot {
     pub message_height: u16,
     pub list: bool,
     pub listchars: String,
+    pub mermaid_preview_auto: bool,
+    pub mermaid_preview_background: String,
+    pub mermaid_preview_width_percent: u16,
+    pub mermaid_preview_height_percent: u16,
     pub foldmethod: String,
     pub foldlevel: u16,
 }
@@ -228,6 +232,14 @@ impl StartupRegistrySnapshot {
                 message_height: normalize_message_height(state.message_height),
                 list: state.list,
                 listchars: state.listchars.clone(),
+                mermaid_preview_auto: state.mermaid_preview_auto,
+                mermaid_preview_background: state.mermaid_preview_background.clone(),
+                mermaid_preview_width_percent: normalize_percent(
+                    state.mermaid_preview_width_percent,
+                ),
+                mermaid_preview_height_percent: normalize_percent(
+                    state.mermaid_preview_height_percent,
+                ),
                 foldmethod: state.foldmethod.clone(),
                 foldlevel: normalize_u16(state.foldlevel),
             },
@@ -1068,6 +1080,10 @@ fn startup_registry_from_registry(
             message_height: normalize_message_height(state.message_height),
             list: state.list,
             listchars: state.listchars.clone(),
+            mermaid_preview_auto: state.mermaid_preview_auto,
+            mermaid_preview_background: state.mermaid_preview_background.clone(),
+            mermaid_preview_width_percent: normalize_percent(state.mermaid_preview_width_percent),
+            mermaid_preview_height_percent: normalize_percent(state.mermaid_preview_height_percent),
             foldmethod: state.foldmethod.clone(),
             foldlevel: normalize_u16(state.foldlevel),
         },
@@ -1171,6 +1187,10 @@ fn normalize_message_height(message_height: i64) -> u16 {
     u16::try_from(message_height).unwrap_or(5).max(1)
 }
 
+fn normalize_percent(value: i64) -> u16 {
+    u16::try_from(value.clamp(1, 100)).unwrap_or(100)
+}
+
 fn normalize_u16(value: i64) -> u16 {
     u16::try_from(value.max(0)).unwrap_or(u16::MAX)
 }
@@ -1217,6 +1237,22 @@ fn apply_startup_presentation_to_session_state(
         (
             SayaOptionName::ListChars,
             SayaOptionValue::String(options.listchars.clone()),
+        ),
+        (
+            SayaOptionName::MermaidPreview,
+            SayaOptionValue::Boolean(options.mermaid_preview_auto),
+        ),
+        (
+            SayaOptionName::MermaidPreviewBackground,
+            SayaOptionValue::String(options.mermaid_preview_background.clone()),
+        ),
+        (
+            SayaOptionName::MermaidPreviewWidth,
+            SayaOptionValue::Number(i64::from(options.mermaid_preview_width_percent)),
+        ),
+        (
+            SayaOptionName::MermaidPreviewHeight,
+            SayaOptionValue::Number(i64::from(options.mermaid_preview_height_percent)),
         ),
         (
             SayaOptionName::FoldMethod,

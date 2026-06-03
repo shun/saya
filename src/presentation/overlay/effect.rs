@@ -2,6 +2,7 @@ use crate::core::notification_prompt::{
     MessageLineCandidate, MessageLineSource, WorkspaceMessageLineState,
     resolve_workspace_message_line,
 };
+use crate::presentation::floating_window::FloatingWindowId;
 use crate::presentation::screen_model::{CommandLineModel, WorkspaceScreenModel};
 use crate::terminal::capability::TerminalCapabilityProfile;
 
@@ -10,6 +11,11 @@ pub enum OverlayContentKey {
     Builtin {
         kind: &'static str,
         variant: &'static str,
+    },
+    MermaidImage {
+        buffer_id: i32,
+        row: usize,
+        digest: String,
     },
     RuntimeRegistered {
         id: String,
@@ -20,6 +26,11 @@ impl OverlayContentKey {
     pub fn describe(&self) -> String {
         match self {
             Self::Builtin { kind, variant } => format!("builtin:{kind}:{variant}"),
+            Self::MermaidImage {
+                buffer_id,
+                row,
+                digest,
+            } => format!("mermaid-image:{buffer_id}:{row}:{digest}"),
             Self::RuntimeRegistered { id } => format!("runtime:{id}"),
         }
     }
@@ -28,13 +39,36 @@ impl OverlayContentKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayTarget {
     ActivePaneCorner,
+    PaneCell {
+        window_id: i32,
+        row: u16,
+        col: u16,
+        cell_width: u16,
+        cell_height: u16,
+    },
+    FloatCell {
+        float_id: FloatingWindowId,
+        row: u16,
+        col: u16,
+        cell_width: u16,
+        cell_height: u16,
+    },
     StatusArea,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlaySourceRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationOverlayIntent {
     pub content_key: OverlayContentKey,
     pub target: OverlayTarget,
+    pub source_rect: Option<OverlaySourceRect>,
     pub fallback_text: String,
 }
 
@@ -130,6 +164,7 @@ impl PresentationEffectProjectorService for PresentationEffectProjector {
                 .map(|intent| PresentationOverlayIntent {
                     content_key: intent.content_key.clone(),
                     target: intent.target,
+                    source_rect: None,
                     fallback_text: intent.fallback_text.clone(),
                 })
                 .collect()

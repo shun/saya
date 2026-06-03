@@ -1,5 +1,8 @@
+use crate::presentation::floating_window::FloatingBorder;
 use crate::presentation::overlay::asset_store::OverlayAssetSnapshot;
-use crate::presentation::overlay::effect::{OverlayTarget, PresentationOverlayIntent};
+use crate::presentation::overlay::effect::{
+    OverlaySourceRect, OverlayTarget, PresentationOverlayIntent,
+};
 use crate::presentation::screen_model::{ScreenCursorStyle, WorkspaceScreenModel};
 use crate::terminal::capability::{InlineGraphicsProtocol, TerminalCapabilityProfile};
 use crate::terminal::io_broker::TerminalIoBroker;
@@ -56,6 +59,7 @@ pub struct GraphicsOverlayRequest<'a> {
     pub cell_y: u16,
     pub cell_width: u16,
     pub cell_height: u16,
+    pub source_rect: Option<OverlaySourceRect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +71,11 @@ pub enum OverlayRenderResult {
 pub trait OptionalGraphicsAdapterService {
     fn negotiate(&self, capabilities: &TerminalCapabilityProfile)
     -> Option<InlineGraphicsProtocol>;
+    fn clear_overlays(
+        &mut self,
+        protocol: InlineGraphicsProtocol,
+        writer: &mut dyn OverlayTerminalWriter,
+    ) -> OverlayRenderResult;
     fn project_request<'a>(
         &self,
         intent: &'a PresentationOverlayIntent,
@@ -125,6 +134,51 @@ impl OptionalGraphicsAdapterService for OptionalGraphicsAdapter {
                     1,
                 )
             }
+            OverlayTarget::PaneCell {
+                window_id,
+                row,
+                col,
+                cell_width,
+                cell_height,
+            } => {
+                let pane = workspace
+                    .panes
+                    .iter()
+                    .find(|pane| pane.window_id == window_id)?;
+                (
+                    pane.rect.x.saturating_add(col),
+                    pane.rect.y.saturating_add(row),
+                    cell_width.max(1),
+                    cell_height.max(1),
+                )
+            }
+            OverlayTarget::FloatCell {
+                float_id,
+                row,
+                col,
+                cell_width,
+                cell_height,
+            } => {
+                let float = workspace.floats.iter().find(|float| float.id == float_id)?;
+                let border_offset = match float.chrome.border {
+                    FloatingBorder::None => 0,
+                    FloatingBorder::Single => 1,
+                };
+                (
+                    float
+                        .rect
+                        .x
+                        .saturating_add(border_offset)
+                        .saturating_add(col),
+                    float
+                        .rect
+                        .y
+                        .saturating_add(border_offset)
+                        .saturating_add(row),
+                    cell_width.max(1),
+                    cell_height.max(1),
+                )
+            }
             OverlayTarget::StatusArea => {
                 let width = active_pane.rect.width.min(12).max(1);
                 (
@@ -144,7 +198,37 @@ impl OptionalGraphicsAdapterService for OptionalGraphicsAdapter {
             cell_y,
             cell_width,
             cell_height,
+            source_rect: intent.source_rect,
         })
+    }
+
+    fn clear_overlays(
+        &mut self,
+        protocol: InlineGraphicsProtocol,
+        writer: &mut dyn OverlayTerminalWriter,
+    ) -> OverlayRenderResult {
+        let encoded = match protocol {
+            InlineGraphicsProtocol::Kitty => encode_kitty_clear_visible_payload(),
+            InlineGraphicsProtocol::Sixel => String::new(),
+        };
+        if encoded.is_empty() {
+            return OverlayRenderResult::Rendered;
+        }
+        match writer.write_overlay_bytes(encoded.as_bytes()) {
+            Ok(()) => {
+                log::debug!(
+                    "[optional_graphics] overlay clear succeeded: protocol={protocol:?}, bytes={}",
+                    encoded.len()
+                );
+                OverlayRenderResult::Rendered
+            }
+            Err(error) => {
+                log::debug!(
+                    "[optional_graphics] overlay clear failed: protocol={protocol:?}, error={error}"
+                );
+                OverlayRenderResult::FallbackToText
+            }
+        }
     }
 
     fn render_overlay(
@@ -166,7 +250,20 @@ impl OptionalGraphicsAdapterService for OptionalGraphicsAdapter {
             InlineGraphicsProtocol::Sixel => encode_sixel_payload(request),
         };
         match writer.write_overlay_bytes(encoded.as_bytes()) {
-            Ok(()) => OverlayRenderResult::Rendered,
+            Ok(()) => {
+                log::debug!(
+                    "[optional_graphics] overlay write succeeded: protocol={protocol:?}, asset_ref={}, bytes={}, cell=({},{} {}x{}), media={}x{}",
+                    request.asset.asset_ref.id,
+                    encoded.len(),
+                    request.cell_x,
+                    request.cell_y,
+                    request.cell_width,
+                    request.cell_height,
+                    request.asset.metadata.pixel_width,
+                    request.asset.metadata.pixel_height
+                );
+                OverlayRenderResult::Rendered
+            }
             Err(error) => {
                 log::debug!(
                     "[optional_graphics] overlay write failed, falling back to text: protocol={protocol:?}, error={error}"
@@ -177,17 +274,44 @@ impl OptionalGraphicsAdapterService for OptionalGraphicsAdapter {
     }
 }
 
+fn encode_kitty_clear_visible_payload() -> String {
+    "\u{1b}_Ga=d\u{1b}\\".to_string()
+}
+
 fn encode_kitty_payload(request: &GraphicsOverlayRequest<'_>) -> String {
-    format!(
-        "\u{1b}_Ga=T,f=100,s={},v={},x={},y={},c={},r={};{}\u{1b}\\",
-        request.asset.metadata.pixel_width,
-        request.asset.metadata.pixel_height,
-        request.cell_x,
-        request.cell_y,
-        request.cell_width,
-        request.cell_height,
-        hex_payload(request.asset.bytes)
-    )
+    let encoded = base64_payload(request.asset.bytes);
+    let mut output = format!(
+        "\u{1b}[{};{}H",
+        request.cell_y.saturating_add(1),
+        request.cell_x.saturating_add(1)
+    );
+    let mut remaining = encoded.as_str();
+    while !remaining.is_empty() {
+        let chunk_len = remaining.len().min(KITTY_CHUNK_BYTES);
+        let (chunk, rest) = remaining.split_at(chunk_len);
+        remaining = rest;
+        let more_chunks = !remaining.is_empty();
+        let source_rect = request
+            .source_rect
+            .map(|rect| {
+                format!(
+                    ",x={},y={},w={},h={}",
+                    rect.x, rect.y, rect.width, rect.height
+                )
+            })
+            .unwrap_or_default();
+        let mut control = format!(
+            "a=T,f=100,s={},v={},c={},r={}",
+            request.asset.metadata.pixel_width,
+            request.asset.metadata.pixel_height,
+            request.cell_width,
+            request.cell_height,
+        );
+        control.push_str(&source_rect);
+        control.push_str(&format!(",m={}", if more_chunks { 1 } else { 0 }));
+        output.push_str(&format!("\u{1b}_G{control};{chunk}\u{1b}\\"));
+    }
+    output
 }
 
 fn encode_sixel_payload(request: &GraphicsOverlayRequest<'_>) -> String {
@@ -201,6 +325,31 @@ fn encode_sixel_payload(request: &GraphicsOverlayRequest<'_>) -> String {
 
 fn hex_payload(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+const KITTY_CHUNK_BYTES: usize = 4096;
+const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_payload(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        encoded.push(BASE64_TABLE[(b0 >> 2) as usize] as char);
+        encoded.push(BASE64_TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(BASE64_TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(BASE64_TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -288,6 +437,7 @@ mod tests {
                 id: "runtime.preview".to_string(),
             },
             target: OverlayTarget::ActivePaneCorner,
+            source_rect: None,
             fallback_text: "preview unavailable".to_string(),
         };
         let request = OptionalGraphicsAdapter::default()
@@ -305,5 +455,49 @@ mod tests {
         assert_eq!(request.cell_y, 1);
         assert_eq!(request.cell_height, 1);
         assert!(request.cell_x >= 2);
+    }
+
+    #[test]
+    fn kitty_encoder_uses_base64_payload_and_positions_cursor_before_image() {
+        let asset_ref = OverlayAssetRef {
+            id: "overlay-1".to_string(),
+        };
+        let media = OverlayAssetMedia::png("preview", 2, 1, b"png".to_vec());
+        let request = GraphicsOverlayRequest {
+            asset: OverlayAssetSnapshot {
+                asset_ref: &asset_ref,
+                metadata: &media.metadata,
+                bytes: &media.bytes,
+            },
+            cell_x: 4,
+            cell_y: 2,
+            cell_width: 8,
+            cell_height: 3,
+            source_rect: None,
+        };
+
+        let encoded = encode_kitty_payload(&request);
+
+        assert!(
+            encoded.starts_with("\u{1b}[3;5H\u{1b}_G"),
+            "kitty image should be emitted after cursor positioning, got {encoded:?}"
+        );
+        assert!(
+            encoded.contains("a=T,f=100,s=2,v=1,c=8,r=3,m=0;"),
+            "kitty control data should include PNG metadata and final chunk marker: {encoded:?}"
+        );
+        assert!(
+            encoded.contains(";cG5n\u{1b}\\"),
+            "kitty payload must be base64 PNG bytes, not hex: {encoded:?}"
+        );
+        assert!(
+            !encoded.contains(";706e67"),
+            "kitty payload must not use hex encoding"
+        );
+    }
+
+    #[test]
+    fn kitty_clear_payload_deletes_visible_images() {
+        assert_eq!(encode_kitty_clear_visible_payload(), "\u{1b}_Ga=d\u{1b}\\");
     }
 }

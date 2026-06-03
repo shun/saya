@@ -296,6 +296,18 @@ fn current_presentation_value(
         crate::runtime::options::SayaOptionName::MarkdownRender => {
             SayaOptionValue::Boolean(session_state.markdown_render())
         }
+        crate::runtime::options::SayaOptionName::MermaidPreview => {
+            SayaOptionValue::Boolean(session_state.mermaid_preview_auto())
+        }
+        crate::runtime::options::SayaOptionName::MermaidPreviewBackground => {
+            SayaOptionValue::String(session_state.mermaid_preview_background().to_string())
+        }
+        crate::runtime::options::SayaOptionName::MermaidPreviewWidth => {
+            SayaOptionValue::Number(i64::from(session_state.mermaid_preview_width_percent()))
+        }
+        crate::runtime::options::SayaOptionName::MermaidPreviewHeight => {
+            SayaOptionValue::Number(i64::from(session_state.mermaid_preview_height_percent()))
+        }
         crate::runtime::options::SayaOptionName::FoldMethod => {
             SayaOptionValue::String(session_state.foldmethod().to_string())
         }

@@ -495,6 +495,7 @@ impl PanelManager {
                         Vec::<FloatingInlineStyle>::new()
                     }
                 },
+                images: Vec::new(),
                 cursor: panel.focused.then_some(match panel.content {
                     PanelContentRef::Terminal { cursor, .. } => {
                         cursor.unwrap_or(FloatingCursor { line: 0, column: 0 })

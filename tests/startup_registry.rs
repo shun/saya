@@ -513,6 +513,70 @@ async fn startup_cmdheight_is_collected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_mermaidpreview_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.mermaidpreview = false;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Option {
+            name: StartupOptionName::MermaidPreview,
+            value: StartupOptionValue::Boolean(false),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_mermaid_preview_size_percent_options_are_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.mermaidpreviewwidth = 72;
+            saya.options.mermaidpreviewheight = 64;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[
+            StartupRegistryEntry::Option {
+                name: StartupOptionName::MermaidPreviewWidth,
+                value: StartupOptionValue::Number(72),
+            },
+            StartupRegistryEntry::Option {
+                name: StartupOptionName::MermaidPreviewHeight,
+                value: StartupOptionValue::Number(64),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_mermaid_preview_background_option_is_collected() {
+    let registry = collect_startup_registry(
+        r##"
+            saya.options.mermaidpreviewbackground = "#ffffff";
+        "##,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Option {
+            name: StartupOptionName::MermaidPreviewBackground,
+            value: StartupOptionValue::String("#ffffff".to_string()),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_syntax_is_collected() {
     let registry = collect_startup_registry(
         r#"
@@ -624,6 +688,26 @@ async fn startup_keymap_registered_command_reference_is_collected() {
             mode: SayaKeyMode::Normal,
             lhs: "<leader>w".to_string(),
             action: SayaKeymapAction::RegisteredCommand("writeCurrent".to_string()),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_keymap_can_bind_manual_mermaid_preview_command() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.keymap.set("normal", "gm", saya.commands.execute("markdown.previewMermaid"));
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Keymap {
+            mode: SayaKeyMode::Normal,
+            lhs: "gm".to_string(),
+            action: SayaKeymapAction::RegisteredCommand("markdown.previewMermaid".to_string()),
         }]
     );
 }

@@ -44,6 +44,10 @@ pub enum ConfigOptionName {
     LastStatus,
     List,
     ListChars,
+    MermaidPreview,
+    MermaidPreviewBackground,
+    MermaidPreviewHeight,
+    MermaidPreviewWidth,
     MessageHeight,
     RelativeNumber,
     ScrollOff,
@@ -311,6 +315,10 @@ impl From<SayaOptionName> for ConfigOptionName {
             SayaOptionName::LastStatus => Self::LastStatus,
             SayaOptionName::List => Self::List,
             SayaOptionName::ListChars => Self::ListChars,
+            SayaOptionName::MermaidPreview => Self::MermaidPreview,
+            SayaOptionName::MermaidPreviewBackground => Self::MermaidPreviewBackground,
+            SayaOptionName::MermaidPreviewHeight => Self::MermaidPreviewHeight,
+            SayaOptionName::MermaidPreviewWidth => Self::MermaidPreviewWidth,
             SayaOptionName::MessageHeight => Self::MessageHeight,
             SayaOptionName::RelativeNumber => Self::RelativeNumber,
             SayaOptionName::ScrollOff => Self::ScrollOff,
@@ -1038,6 +1046,10 @@ fn saya_option_name_from_config_name(name: ConfigOptionName) -> SayaOptionName {
         ConfigOptionName::LastStatus => SayaOptionName::LastStatus,
         ConfigOptionName::List => SayaOptionName::List,
         ConfigOptionName::ListChars => SayaOptionName::ListChars,
+        ConfigOptionName::MermaidPreview => SayaOptionName::MermaidPreview,
+        ConfigOptionName::MermaidPreviewBackground => SayaOptionName::MermaidPreviewBackground,
+        ConfigOptionName::MermaidPreviewHeight => SayaOptionName::MermaidPreviewHeight,
+        ConfigOptionName::MermaidPreviewWidth => SayaOptionName::MermaidPreviewWidth,
         ConfigOptionName::MessageHeight => SayaOptionName::MessageHeight,
         ConfigOptionName::RelativeNumber => SayaOptionName::RelativeNumber,
         ConfigOptionName::ScrollOff => SayaOptionName::ScrollOff,
@@ -1478,6 +1490,10 @@ pub struct ConfigApplyState {
     pub message_height: i64,
     pub list: bool,
     pub listchars: String,
+    pub mermaid_preview_auto: bool,
+    pub mermaid_preview_background: String,
+    pub mermaid_preview_width_percent: i64,
+    pub mermaid_preview_height_percent: i64,
     pub foldmethod: String,
     pub foldlevel: i64,
     pub key_mappings: Vec<AppliedKeyMapping>,
@@ -1516,6 +1532,10 @@ impl ConfigApplyState {
             message_height: 5,
             list: false,
             listchars: "tab:>-,trail:-".to_string(),
+            mermaid_preview_auto: true,
+            mermaid_preview_background: "transparent".to_string(),
+            mermaid_preview_width_percent: 55,
+            mermaid_preview_height_percent: 55,
             foldmethod: "manual".to_string(),
             foldlevel: 0,
             key_mappings: Vec::new(),
@@ -1740,6 +1760,45 @@ fn apply_single_command(
                 state.listchars = s.clone();
                 Ok(())
             }
+            (ConfigOptionName::MermaidPreview, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime][mermaid_preview] setting mermaidpreview: {} -> {}",
+                    state.mermaid_preview_auto,
+                    b
+                );
+                state.mermaid_preview_auto = *b;
+                Ok(())
+            }
+            (ConfigOptionName::MermaidPreviewBackground, ConfigOptionValue::String(s)) => {
+                let background = normalize_mermaid_preview_background(s);
+                log::debug!(
+                    "[config_runtime][mermaid_preview] setting mermaidpreviewbackground: {:?} -> {:?}",
+                    state.mermaid_preview_background,
+                    background
+                );
+                state.mermaid_preview_background = background;
+                Ok(())
+            }
+            (ConfigOptionName::MermaidPreviewWidth, ConfigOptionValue::Number(n)) => {
+                validate_number_range("mermaidpreviewwidth", *n, 1, 100)?;
+                log::debug!(
+                    "[config_runtime][mermaid_preview] setting mermaidpreviewwidth: {} -> {}",
+                    state.mermaid_preview_width_percent,
+                    n
+                );
+                state.mermaid_preview_width_percent = *n;
+                Ok(())
+            }
+            (ConfigOptionName::MermaidPreviewHeight, ConfigOptionValue::Number(n)) => {
+                validate_number_range("mermaidpreviewheight", *n, 1, 100)?;
+                log::debug!(
+                    "[config_runtime][mermaid_preview] setting mermaidpreviewheight: {} -> {}",
+                    state.mermaid_preview_height_percent,
+                    n
+                );
+                state.mermaid_preview_height_percent = *n;
+                Ok(())
+            }
             (ConfigOptionName::FoldMethod, ConfigOptionValue::String(s)) => {
                 log::debug!(
                     "[config_runtime] setting foldmethod: {:?} -> {:?}",
@@ -1794,6 +1853,15 @@ fn validate_number_range(name: &str, value: i64, min: i64, max: i64) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn normalize_mermaid_preview_background(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "transparent".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// 設定の全フローを実行する統合関数。

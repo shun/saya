@@ -7,9 +7,11 @@
 //! `lsp_float.rs` は markdown の存在を知らずに描画行を受け取れる。
 
 use saya::presentation::markdown::render::{
-    InlineStyleKind, RenderedFloatContent, render_markdown_to_float_content,
+    InlineStyleKind, MermaidDiagramRenderer, RenderedFloatContent,
+    render_markdown_to_float_content, render_markdown_to_float_content_with_mermaid_renderer,
     render_plaintext_to_float_content, wrap_rendered_content_to_width,
 };
+use saya::presentation::overlay::asset_store::OverlayAssetMedia;
 
 fn line_strings(content: &RenderedFloatContent) -> Vec<&str> {
     content.lines.iter().map(String::as_str).collect()
@@ -24,6 +26,27 @@ fn styles_on_line(content: &RenderedFloatContent, line: usize) -> Vec<InlineStyl
         .collect()
 }
 
+#[derive(Debug, Default)]
+struct FakeMermaidRenderer {
+    rendered_sources: std::sync::Mutex<Vec<String>>,
+}
+
+impl MermaidDiagramRenderer for FakeMermaidRenderer {
+    fn render_png(&self, source: &str, background: &str) -> Result<OverlayAssetMedia, String> {
+        assert_eq!(background, "transparent");
+        self.rendered_sources
+            .lock()
+            .expect("fake renderer lock")
+            .push(source.to_string());
+        Ok(OverlayAssetMedia::png(
+            "mermaid diagram",
+            320,
+            180,
+            b"fake-png".to_vec(),
+        ))
+    }
+}
+
 #[test]
 fn render_markdown_strips_fence_marker_lines_and_keeps_code_body() {
     let source = "```rust\nfn foo(x: i32) -> i32 { x }\n```\n";
@@ -32,6 +55,36 @@ fn render_markdown_strips_fence_marker_lines_and_keeps_code_body() {
         line_strings(&rendered),
         vec!["fn foo(x: i32) -> i32 { x }"],
         "fenced code block markers must be removed, body preserved"
+    );
+}
+
+#[test]
+fn render_markdown_renders_mermaid_fence_as_image_placeholder_with_png_asset() {
+    let source = "Before\n```mermaid\ngraph TD\n  A-->B\n```\nAfter\n";
+    let renderer = FakeMermaidRenderer::default();
+
+    let rendered = render_markdown_to_float_content_with_mermaid_renderer(source, Some(&renderer));
+
+    assert_eq!(
+        line_strings(&rendered),
+        vec!["Before", "[mermaid diagram]", "After"],
+        "mermaid fenced block should be rendered as a single display placeholder"
+    );
+    assert_eq!(
+        rendered.images.len(),
+        1,
+        "rendered PNG asset should be attached"
+    );
+    assert_eq!(rendered.images[0].line, 1);
+    assert_eq!(rendered.images[0].media.metadata.pixel_width, 320);
+    assert_eq!(rendered.images[0].media.bytes, b"fake-png");
+    assert_eq!(
+        renderer
+            .rendered_sources
+            .lock()
+            .expect("fake renderer lock")[0],
+        "graph TD\n  A-->B",
+        "renderer must receive only the fenced mermaid body"
     );
 }
 

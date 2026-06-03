@@ -331,6 +331,7 @@ fn selector_tui_model_to_workspace_float_with_start(
         },
         lines,
         inline_styles,
+        images: Vec::new(),
         cursor,
         focusable: false,
         mouse: false,

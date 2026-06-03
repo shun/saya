@@ -49,6 +49,10 @@ pub enum SayaOptionName {
     List,
     ListChars,
     MarkdownRender,
+    MermaidPreview,
+    MermaidPreviewBackground,
+    MermaidPreviewHeight,
+    MermaidPreviewWidth,
     MessageHeight,
     NumberWidth,
     RelativeNumber,
@@ -83,6 +87,10 @@ impl SayaOptionName {
             Self::List => "list",
             Self::ListChars => "listchars",
             Self::MarkdownRender => "markdownrender",
+            Self::MermaidPreview => "mermaidpreview",
+            Self::MermaidPreviewBackground => "mermaidpreviewbackground",
+            Self::MermaidPreviewHeight => "mermaidpreviewheight",
+            Self::MermaidPreviewWidth => "mermaidpreviewwidth",
             Self::MessageHeight => "cmdheight",
             Self::NumberWidth => "numberwidth",
             Self::RelativeNumber => "relativenumber",
@@ -409,6 +417,34 @@ const OPTION_DEFINITIONS: &[SayaOptionDefinition] = &[
         aliases: &["mdrender"],
     },
     SayaOptionDefinition {
+        name: SayaOptionName::MermaidPreview,
+        value_type: SayaOptionType::Boolean,
+        owner: SayaOptionOwner::PresentationOwned,
+        startup_public: true,
+        aliases: &["mmdpreview"],
+    },
+    SayaOptionDefinition {
+        name: SayaOptionName::MermaidPreviewBackground,
+        value_type: SayaOptionType::String,
+        owner: SayaOptionOwner::PresentationOwned,
+        startup_public: true,
+        aliases: &["mmdpreviewbackground"],
+    },
+    SayaOptionDefinition {
+        name: SayaOptionName::MermaidPreviewWidth,
+        value_type: SayaOptionType::Number,
+        owner: SayaOptionOwner::PresentationOwned,
+        startup_public: true,
+        aliases: &["mmdpreviewwidth"],
+    },
+    SayaOptionDefinition {
+        name: SayaOptionName::MermaidPreviewHeight,
+        value_type: SayaOptionType::Number,
+        owner: SayaOptionOwner::PresentationOwned,
+        startup_public: true,
+        aliases: &["mmdpreviewheight"],
+    },
+    SayaOptionDefinition {
         name: SayaOptionName::MessageHeight,
         value_type: SayaOptionType::Number,
         owner: SayaOptionOwner::PresentationOwned,
@@ -542,6 +578,58 @@ mod tests {
             !markdown_render.startup_public,
             "Markdown render mode is command-controlled until the startup API is explicitly designed"
         );
+
+        let mermaid_preview =
+            SayaOptionRegistry::resolve("mermaidpreview").expect("mermaidpreview option");
+        assert_eq!(mermaid_preview.name, SayaOptionName::MermaidPreview);
+        assert_eq!(mermaid_preview.value_type, SayaOptionType::Boolean);
+        assert_eq!(mermaid_preview.owner, SayaOptionOwner::PresentationOwned);
+        assert!(
+            mermaid_preview.startup_public,
+            "Mermaid auto preview should be configurable from TypeScript startup"
+        );
+
+        let mermaid_preview_background = SayaOptionRegistry::resolve("mermaidpreviewbackground")
+            .expect("mermaidpreviewbackground option");
+        assert_eq!(
+            mermaid_preview_background.name,
+            SayaOptionName::MermaidPreviewBackground
+        );
+        assert_eq!(
+            mermaid_preview_background.value_type,
+            SayaOptionType::String
+        );
+        assert_eq!(
+            mermaid_preview_background.owner,
+            SayaOptionOwner::PresentationOwned
+        );
+        assert!(mermaid_preview_background.startup_public);
+
+        let mermaid_preview_width =
+            SayaOptionRegistry::resolve("mermaidpreviewwidth").expect("mermaidpreviewwidth option");
+        assert_eq!(
+            mermaid_preview_width.name,
+            SayaOptionName::MermaidPreviewWidth
+        );
+        assert_eq!(mermaid_preview_width.value_type, SayaOptionType::Number);
+        assert_eq!(
+            mermaid_preview_width.owner,
+            SayaOptionOwner::PresentationOwned
+        );
+        assert!(mermaid_preview_width.startup_public);
+
+        let mermaid_preview_height = SayaOptionRegistry::resolve("mermaidpreviewheight")
+            .expect("mermaidpreviewheight option");
+        assert_eq!(
+            mermaid_preview_height.name,
+            SayaOptionName::MermaidPreviewHeight
+        );
+        assert_eq!(mermaid_preview_height.value_type, SayaOptionType::Number);
+        assert_eq!(
+            mermaid_preview_height.owner,
+            SayaOptionOwner::PresentationOwned
+        );
+        assert!(mermaid_preview_height.startup_public);
     }
 
     #[test]
@@ -582,6 +670,30 @@ mod tests {
                 .expect("markdownrender toggle")
                 .operation,
             SayaSetOperation::Toggle
+        );
+        assert_eq!(
+            SayaOptionRegistry::parse_set_command(":set nomermaidpreview")
+                .expect("nomermaidpreview")
+                .operation,
+            SayaSetOperation::Assign(SayaOptionValue::Boolean(false))
+        );
+        assert_eq!(
+            SayaOptionRegistry::parse_set_command(":set mermaidpreviewwidth=72")
+                .expect("mermaidpreviewwidth")
+                .operation,
+            SayaSetOperation::Assign(SayaOptionValue::Number(72))
+        );
+        assert_eq!(
+            SayaOptionRegistry::parse_set_command(":set mermaidpreviewheight=64")
+                .expect("mermaidpreviewheight")
+                .operation,
+            SayaSetOperation::Assign(SayaOptionValue::Number(64))
+        );
+        assert_eq!(
+            SayaOptionRegistry::parse_set_command(":set mermaidpreviewbackground=#ffffff")
+                .expect("mermaidpreviewbackground")
+                .operation,
+            SayaSetOperation::Assign(SayaOptionValue::String("#ffffff".to_string()))
         );
     }
 }

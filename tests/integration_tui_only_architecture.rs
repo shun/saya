@@ -695,7 +695,14 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
         graphics.rendered_workspace.visible_message_text(),
         Some("preview unavailable")
     );
-    assert!(writer.writes.is_empty());
+    assert!(
+        writer
+            .writes
+            .iter()
+            .all(|write| write == b"\x1b_Ga=d\x1b\\"),
+        "graphics fallback may clear stale terminal images, but must not emit image payloads: {:?}",
+        writer.writes
+    );
 }
 
 #[test]

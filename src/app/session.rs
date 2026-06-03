@@ -69,6 +69,31 @@ pub enum DirectoryBufferMode {
     Writable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MermaidPreviewZoom {
+    Fit,
+    Percent(u16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MermaidPreviewViewState {
+    pub focused: bool,
+    pub zoom: MermaidPreviewZoom,
+    pub pan_x_px: u32,
+    pub pan_y_px: u32,
+}
+
+impl Default for MermaidPreviewViewState {
+    fn default() -> Self {
+        Self {
+            focused: false,
+            zoom: MermaidPreviewZoom::Fit,
+            pan_x_px: 0,
+            pan_y_px: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryBufferListingOptions {
     pub show_hidden: bool,
@@ -92,6 +117,23 @@ fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
             .ok()
             .zip(std::fs::canonicalize(right).ok())
             .is_some_and(|(left, right)| left == right)
+}
+
+fn apply_signed_delta_u32(value: u32, delta: i32) -> u32 {
+    if delta.is_negative() {
+        value.saturating_sub(delta.unsigned_abs())
+    } else {
+        value.saturating_add(delta as u32)
+    }
+}
+
+fn normalize_mermaid_preview_background(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "transparent".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn rebase_path_under_root(path: &Path, old_root: &Path, new_root: &Path) -> Option<PathBuf> {
@@ -294,6 +336,13 @@ pub struct EditorSessionState {
     list: bool,
     listchars: String,
     markdown_render: bool,
+    mermaid_preview_auto: bool,
+    mermaid_preview_background: String,
+    mermaid_preview_width_percent: u16,
+    mermaid_preview_height_percent: u16,
+    mermaid_preview_manual_active: bool,
+    mermaid_preview_view: MermaidPreviewViewState,
+    mermaid_preview_closed: bool,
     foldmethod: String,
     foldlevel: u16,
     resolved_theme: ResolvedTheme,
@@ -388,6 +437,13 @@ impl EditorSessionState {
             list: false,
             listchars: "tab:>-,trail:-".to_string(),
             markdown_render: true,
+            mermaid_preview_auto: true,
+            mermaid_preview_background: "transparent".to_string(),
+            mermaid_preview_width_percent: 55,
+            mermaid_preview_height_percent: 55,
+            mermaid_preview_manual_active: false,
+            mermaid_preview_view: MermaidPreviewViewState::default(),
+            mermaid_preview_closed: false,
             foldmethod: "manual".to_string(),
             foldlevel: 0,
             resolved_theme: ResolvedTheme::default(),
@@ -1235,6 +1291,159 @@ impl EditorSessionState {
         self.markdown_render
     }
 
+    pub fn mermaid_preview_auto(&self) -> bool {
+        self.mermaid_preview_auto
+    }
+
+    pub fn mermaid_preview_background(&self) -> &str {
+        &self.mermaid_preview_background
+    }
+
+    pub fn mermaid_preview_width_percent(&self) -> u16 {
+        self.mermaid_preview_width_percent
+    }
+
+    pub fn mermaid_preview_height_percent(&self) -> u16 {
+        self.mermaid_preview_height_percent
+    }
+
+    pub fn request_mermaid_preview(&mut self) {
+        log::debug!("[editor_session][mermaid_preview] manual preview requested");
+        self.mermaid_preview_manual_active = true;
+        self.mermaid_preview_view.focused = true;
+        self.mermaid_preview_closed = false;
+    }
+
+    pub fn mermaid_preview_manual_active(&self) -> bool {
+        self.mermaid_preview_manual_active
+    }
+
+    pub fn mermaid_preview_focused(&self) -> bool {
+        self.mermaid_preview_view.focused
+    }
+
+    pub fn mermaid_preview_view(&self) -> MermaidPreviewViewState {
+        self.mermaid_preview_view
+    }
+
+    pub fn mermaid_preview_closed(&self) -> bool {
+        self.mermaid_preview_closed
+    }
+
+    pub fn mermaid_preview_zoom(&self) -> MermaidPreviewZoom {
+        self.mermaid_preview_view.zoom
+    }
+
+    pub fn mermaid_preview_pan(&self) -> (u32, u32) {
+        (
+            self.mermaid_preview_view.pan_x_px,
+            self.mermaid_preview_view.pan_y_px,
+        )
+    }
+
+    pub fn focus_mermaid_preview(&mut self) {
+        if self.mermaid_preview_manual_active || self.mermaid_preview_auto {
+            self.mermaid_preview_view.focused = true;
+            log::debug!("[editor_session][mermaid_preview] preview focused");
+        }
+    }
+
+    pub fn unfocus_mermaid_preview(&mut self, reason: &str) {
+        if self.mermaid_preview_view.focused {
+            log::debug!(
+                "[editor_session][mermaid_preview] preview unfocused: reason={}",
+                reason
+            );
+        }
+        self.mermaid_preview_view.focused = false;
+    }
+
+    pub fn close_mermaid_preview(&mut self, reason: &str) {
+        log::debug!(
+            "[editor_session][mermaid_preview] preview closed: reason={}",
+            reason
+        );
+        self.mermaid_preview_manual_active = false;
+        self.mermaid_preview_view.focused = false;
+        self.mermaid_preview_view.zoom = MermaidPreviewZoom::Fit;
+        self.mermaid_preview_view.pan_x_px = 0;
+        self.mermaid_preview_view.pan_y_px = 0;
+        self.mermaid_preview_closed = true;
+    }
+
+    pub fn reopen_mermaid_preview_if_closed(&mut self, reason: &str) {
+        if self.mermaid_preview_closed {
+            log::debug!(
+                "[editor_session][mermaid_preview] closed preview suppression cleared: reason={}",
+                reason
+            );
+        }
+        self.mermaid_preview_closed = false;
+    }
+
+    pub fn zoom_mermaid_preview_in(&mut self) {
+        let next = match self.mermaid_preview_view.zoom {
+            MermaidPreviewZoom::Fit => 125,
+            MermaidPreviewZoom::Percent(percent) => percent.saturating_add(25).min(400),
+        };
+        self.mermaid_preview_view.zoom = MermaidPreviewZoom::Percent(next);
+        log::debug!(
+            "[editor_session][mermaid_preview] zoom in: percent={}",
+            next
+        );
+    }
+
+    pub fn zoom_mermaid_preview_out(&mut self) {
+        let next = match self.mermaid_preview_view.zoom {
+            MermaidPreviewZoom::Fit => 75,
+            MermaidPreviewZoom::Percent(percent) => percent.saturating_sub(25).max(25),
+        };
+        self.mermaid_preview_view.zoom = MermaidPreviewZoom::Percent(next);
+        log::debug!(
+            "[editor_session][mermaid_preview] zoom out: percent={}",
+            next
+        );
+    }
+
+    pub fn zoom_mermaid_preview_fit(&mut self) {
+        self.mermaid_preview_view.zoom = MermaidPreviewZoom::Fit;
+        self.mermaid_preview_view.pan_x_px = 0;
+        self.mermaid_preview_view.pan_y_px = 0;
+        log::debug!("[editor_session][mermaid_preview] zoom reset to fit");
+    }
+
+    pub fn zoom_mermaid_preview_actual_size(&mut self) {
+        self.mermaid_preview_view.zoom = MermaidPreviewZoom::Percent(100);
+        self.mermaid_preview_view.pan_x_px = 0;
+        self.mermaid_preview_view.pan_y_px = 0;
+        log::debug!("[editor_session][mermaid_preview] zoom set to 100%");
+    }
+
+    pub fn pan_mermaid_preview(&mut self, delta_x_px: i32, delta_y_px: i32) {
+        self.mermaid_preview_view.pan_x_px =
+            apply_signed_delta_u32(self.mermaid_preview_view.pan_x_px, delta_x_px);
+        self.mermaid_preview_view.pan_y_px =
+            apply_signed_delta_u32(self.mermaid_preview_view.pan_y_px, delta_y_px);
+        log::debug!(
+            "[editor_session][mermaid_preview] pan updated: x_px={}, y_px={}, delta=({}, {})",
+            self.mermaid_preview_view.pan_x_px,
+            self.mermaid_preview_view.pan_y_px,
+            delta_x_px,
+            delta_y_px
+        );
+    }
+
+    pub fn clear_mermaid_preview_manual(&mut self, reason: &str) {
+        if self.mermaid_preview_manual_active {
+            log::debug!(
+                "[editor_session][mermaid_preview] manual preview cleared: reason={}",
+                reason
+            );
+        }
+        self.mermaid_preview_manual_active = false;
+        self.unfocus_mermaid_preview(reason);
+    }
+
     pub fn foldmethod(&self) -> &str {
         &self.foldmethod
     }
@@ -1391,6 +1600,45 @@ impl EditorSessionState {
                     value
                 );
                 self.markdown_render = value;
+                Ok(())
+            }
+            (SayaOptionName::MermaidPreview, SayaOptionValue::Boolean(value)) => {
+                log::debug!(
+                    "[editor_session][mermaid_preview] auto preview option updated: {} -> {}",
+                    self.mermaid_preview_auto,
+                    value
+                );
+                self.mermaid_preview_auto = value;
+                Ok(())
+            }
+            (SayaOptionName::MermaidPreviewBackground, SayaOptionValue::String(value)) => {
+                let next = normalize_mermaid_preview_background(&value);
+                log::debug!(
+                    "[editor_session][mermaid_preview] preview background updated: {:?} -> {:?}",
+                    self.mermaid_preview_background,
+                    next
+                );
+                self.mermaid_preview_background = next;
+                Ok(())
+            }
+            (SayaOptionName::MermaidPreviewWidth, SayaOptionValue::Number(value)) => {
+                let next = u16::try_from(value.clamp(1, 100)).unwrap_or(100);
+                log::debug!(
+                    "[editor_session][mermaid_preview] preview width percent updated: {} -> {}",
+                    self.mermaid_preview_width_percent,
+                    next
+                );
+                self.mermaid_preview_width_percent = next;
+                Ok(())
+            }
+            (SayaOptionName::MermaidPreviewHeight, SayaOptionValue::Number(value)) => {
+                let next = u16::try_from(value.clamp(1, 100)).unwrap_or(100);
+                log::debug!(
+                    "[editor_session][mermaid_preview] preview height percent updated: {} -> {}",
+                    self.mermaid_preview_height_percent,
+                    next
+                );
+                self.mermaid_preview_height_percent = next;
                 Ok(())
             }
             (SayaOptionName::FoldMethod, SayaOptionValue::String(value)) => {
@@ -2168,6 +2416,59 @@ mod tests {
         state.set_line_numbers(false);
 
         assert!(!state.line_numbers(), "行番号表示が無効になること");
+    }
+
+    #[test]
+    fn mermaid_preview_auto_option_can_be_disabled_and_manual_state_is_explicitly_cleared() {
+        let mut state = EditorSessionState::new(None);
+        assert!(state.mermaid_preview_auto());
+
+        state
+            .apply_presentation_option(
+                SayaOptionName::MermaidPreview,
+                SayaOptionValue::Boolean(false),
+            )
+            .expect("mermaidpreview option should apply");
+        assert!(!state.mermaid_preview_auto());
+
+        state.request_mermaid_preview();
+        assert!(state.mermaid_preview_manual_active());
+        state.clear_mermaid_preview_manual("test");
+        assert!(!state.mermaid_preview_manual_active());
+    }
+
+    #[test]
+    fn mermaid_preview_view_state_tracks_focus_zoom_and_pan_separately_from_auto_option() {
+        let mut state = EditorSessionState::new(None);
+
+        state.request_mermaid_preview();
+        assert!(state.mermaid_preview_focused());
+        assert_eq!(state.mermaid_preview_zoom(), MermaidPreviewZoom::Fit);
+
+        state.zoom_mermaid_preview_in();
+        assert_eq!(
+            state.mermaid_preview_zoom(),
+            MermaidPreviewZoom::Percent(125)
+        );
+        state.pan_mermaid_preview(7, 11);
+        assert_eq!(state.mermaid_preview_pan(), (7, 11));
+
+        state.zoom_mermaid_preview_fit();
+        assert_eq!(state.mermaid_preview_zoom(), MermaidPreviewZoom::Fit);
+        assert_eq!(state.mermaid_preview_pan(), (0, 0));
+
+        state.zoom_mermaid_preview_actual_size();
+        assert_eq!(
+            state.mermaid_preview_zoom(),
+            MermaidPreviewZoom::Percent(100)
+        );
+
+        state.close_mermaid_preview("test");
+        assert!(!state.mermaid_preview_manual_active());
+        assert!(!state.mermaid_preview_focused());
+        assert!(state.mermaid_preview_closed());
+        state.reopen_mermaid_preview_if_closed("test");
+        assert!(!state.mermaid_preview_closed());
     }
 
     #[test]

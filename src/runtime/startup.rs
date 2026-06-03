@@ -52,6 +52,10 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.cmdheight",
     "saya.options.list",
     "saya.options.listchars",
+    "saya.options.mermaidpreview",
+    "saya.options.mermaidpreviewbackground",
+    "saya.options.mermaidpreviewwidth",
+    "saya.options.mermaidpreviewheight",
     "saya.options.foldmethod",
     "saya.options.foldlevel",
     "saya.keymap.set",
@@ -503,6 +507,14 @@ defineNumberOption("ch", "cmdheight", 5);
 defineBoolOption("list", "list", false);
 defineStringOption("listchars", "listchars", "tab:>-,trail:-");
 defineStringOption("lcs", "listchars", "tab:>-,trail:-");
+defineBoolOption("mermaidpreview", "mermaidpreview", true);
+defineBoolOption("mmdpreview", "mermaidpreview", true);
+defineStringOption("mermaidpreviewbackground", "mermaidpreviewbackground", "transparent");
+defineStringOption("mmdpreviewbackground", "mermaidpreviewbackground", "transparent");
+defineNumberOption("mermaidpreviewwidth", "mermaidpreviewwidth", 55);
+defineNumberOption("mmdpreviewwidth", "mermaidpreviewwidth", 55);
+defineNumberOption("mermaidpreviewheight", "mermaidpreviewheight", 55);
+defineNumberOption("mmdpreviewheight", "mermaidpreviewheight", 55);
 defineStringOption("foldmethod", "foldmethod", "manual");
 defineStringOption("fdm", "foldmethod", "manual");
 defineNumberOption("foldlevel", "foldlevel", 0);
@@ -593,6 +605,10 @@ declare global {
         cmdheight: number;
         list: boolean;
         listchars: string;
+        mermaidpreview: boolean;
+        mermaidpreviewbackground: string;
+        mermaidpreviewwidth: number;
+        mermaidpreviewheight: number;
         foldmethod: string;
         foldlevel: number;
     }

@@ -36,6 +36,10 @@ declare global {
         cmdheight: number;
         list: boolean;
         listchars: string;
+        mermaidpreview: boolean;
+        mermaidpreviewbackground: string;
+        mermaidpreviewwidth: number;
+        mermaidpreviewheight: number;
         foldmethod: string;
         foldlevel: number;
     }

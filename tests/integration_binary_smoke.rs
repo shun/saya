@@ -213,6 +213,65 @@ fn opening_missing_file_then_quitting_without_write_does_not_create_the_file() {
 }
 
 #[test]
+fn opening_markdown_mermaid_file_keeps_body_raw_through_the_sy_binary() {
+    let target_path = unique_path("markdown-mermaid.md");
+    std::fs::write(
+        &target_path,
+        "Before\n```mermaid\ngraph TD\n  A-->B\n```\nAfter\n",
+    )
+    .expect("markdown mermaid fixture should be created");
+
+    let output = run_sy_headless_smoke_with_env(
+        &[target_path
+            .to_str()
+            .expect("target path should be valid UTF-8")],
+        &[("SAYA_BINARY_SMOKE_QUIT_WITHOUT_EDIT", "1")],
+    );
+
+    assert!(
+        output.status.success(),
+        "sy binary should open markdown mermaid file cleanly: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let startup_state = smoke_state(&output.stderr, "startup");
+    let lines = startup_state["lines"]
+        .as_array()
+        .expect("startup state should include visible lines")
+        .iter()
+        .filter_map(|line| line.as_str())
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let without_number = trimmed
+                .split_once(' ')
+                .filter(|(prefix, _)| prefix.chars().all(|ch| ch.is_ascii_digit()))
+                .map(|(_, rest)| rest)
+                .unwrap_or(trimmed);
+            without_number.to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        lines.iter().any(|line| line == "```mermaid"),
+        "Mermaid fence must remain in the body view: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "graph TD")
+            && lines
+                .iter()
+                .any(|line| line == "A-->B" || line == "  A-->B"),
+        "Mermaid body must remain visible as source text: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line == "[mermaid diagram]"),
+        "inline image placeholder must not replace body source lines: {lines:?}"
+    );
+
+    std::fs::remove_file(&target_path).expect("cleanup markdown target");
+}
+
+#[test]
 fn starting_with_directory_opens_dired_listing_through_the_sy_binary() {
     let root_path = unique_path("dired-startup-root");
     let nested_path = root_path.join("src");

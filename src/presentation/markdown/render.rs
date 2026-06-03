@@ -20,11 +20,20 @@
 //!   `LinkUrl` の範囲を別々に記録する
 //! - 末尾の連続空行は trim、内側の空行は段落区切りとして保持する
 
+use std::ffi::OsString;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::presentation::markdown::structure::{
     MarkdownBlockKind, MarkdownDocumentMap, MarkdownInlineKind, MarkdownTextRange,
 };
+use crate::presentation::overlay::asset_store::OverlayAssetMedia;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineStyleKind {
@@ -46,11 +55,104 @@ pub struct InlineStyle {
 pub struct RenderedFloatContent {
     pub lines: Vec<String>,
     pub inline_styles: Vec<InlineStyle>,
+    pub images: Vec<RenderedMarkdownImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedMarkdownImage {
+    pub line: usize,
+    pub alt_text: String,
+    pub media: OverlayAssetMedia,
+}
+
+pub trait MermaidDiagramRenderer: std::fmt::Debug + Send + Sync {
+    fn render_png(&self, source: &str, background: &str) -> Result<OverlayAssetMedia, String>;
+
+    fn render_png_async(
+        &self,
+        _source: String,
+        _background: String,
+    ) -> Option<Receiver<Result<OverlayAssetMedia, String>>> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MmdcMermaidDiagramRenderer {
+    command: String,
+    timeout: Duration,
+    scale: u32,
+}
+
+impl Default for MmdcMermaidDiagramRenderer {
+    fn default() -> Self {
+        Self {
+            command: std::env::var("SAYA_MERMAID_MMDC").unwrap_or_else(|_| "mmdc".to_string()),
+            timeout: Duration::from_secs(5),
+            scale: std::env::var("SAYA_MERMAID_SCALE")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|scale| (1..=4).contains(scale))
+                .unwrap_or(2),
+        }
+    }
+}
+
+impl MmdcMermaidDiagramRenderer {
+    pub fn new(command: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            command: command.into(),
+            timeout,
+            scale: 2,
+        }
+    }
+
+    pub fn with_scale(mut self, scale: u32) -> Self {
+        self.scale = scale.clamp(1, 4);
+        self
+    }
+}
+
+impl MermaidDiagramRenderer for MmdcMermaidDiagramRenderer {
+    fn render_png(&self, source: &str, background: &str) -> Result<OverlayAssetMedia, String> {
+        render_mermaid_png_with_mmdc(&self.command, self.timeout, self.scale, background, source)
+    }
+
+    fn render_png_async(
+        &self,
+        source: String,
+        background: String,
+    ) -> Option<Receiver<Result<OverlayAssetMedia, String>>> {
+        let command = self.command.clone();
+        let timeout = self.timeout;
+        let scale = self.scale;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result =
+                render_mermaid_png_with_mmdc(&command, timeout, scale, &background, &source);
+            if sender.send(result).is_err() {
+                log::debug!(
+                    "[markdown_render] async mmdc result dropped because receiver disappeared"
+                );
+            }
+        });
+        Some(receiver)
+    }
 }
 
 /// Markdown ソースを float に表示可能な行リストへ変換する。
 /// 変換ルールはモジュールヘッダの説明に従う。
 pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
+    render_markdown_to_float_content_with_mermaid_renderer(source, None)
+}
+
+/// Markdown ソースを float に表示可能な行リストへ変換する。
+/// Mermaid fenced code block は renderer が渡された場合だけ PNG アセットへ
+/// materialize し、表示行には安定した placeholder を残す。
+pub fn render_markdown_to_float_content_with_mermaid_renderer(
+    source: &str,
+    mermaid_renderer: Option<&dyn MermaidDiagramRenderer>,
+) -> RenderedFloatContent {
     let map = MarkdownDocumentMap::parse(source);
     let source_lines: Vec<&str> = source.lines().collect();
 
@@ -63,14 +165,23 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
 
     let mut rendered_lines: Vec<String> = Vec::with_capacity(source_lines.len());
     let mut inline_styles: Vec<InlineStyle> = Vec::new();
+    let mut images: Vec<RenderedMarkdownImage> = Vec::new();
 
     // fence ブロックの「ヘッダ行 / フッタ行」を識別するための index 集合。
     // 内部のコード本文は通常 line として出力する。
     let mut fence_marker_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut rendered_mermaid_blocks: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
     for block in &map.blocks {
-        if let MarkdownBlockKind::FencedCodeBlock { .. } = block.kind {
+        if let MarkdownBlockKind::FencedCodeBlock { ref info, .. } = block.kind {
             fence_marker_lines.insert(block.range.start.line);
             fence_marker_lines.insert(block.range.end.line);
+            if is_mermaid_info_string(info.as_deref())
+                && mermaid_renderer.is_some()
+                && block.range.end.line > block.range.start.line
+            {
+                rendered_mermaid_blocks.insert(block.range.start.line, block.range.end.line);
+            }
         }
     }
 
@@ -79,13 +190,55 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
     // 構築するため、列のオフセット変換も追跡する。
     let mut source_to_rendered: Vec<Option<RenderedLineMap>> = vec![None; source_lines.len()];
 
-    for (source_line_idx, source_line) in source_lines.iter().enumerate() {
+    let mut source_line_idx = 0usize;
+    while source_line_idx < source_lines.len() {
+        let source_line = source_lines[source_line_idx];
+        if let Some(end_line) = rendered_mermaid_blocks.get(&source_line_idx).copied()
+            && let Some(renderer) = mermaid_renderer
+        {
+            let body = source_lines
+                .iter()
+                .take(end_line)
+                .skip(source_line_idx + 1)
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
+            match renderer.render_png(&body, "transparent") {
+                Ok(media) => {
+                    let rendered_index = rendered_lines.len();
+                    rendered_lines.push("[mermaid diagram]".to_string());
+                    images.push(RenderedMarkdownImage {
+                        line: rendered_index,
+                        alt_text: "mermaid diagram".to_string(),
+                        media,
+                    });
+                    log::debug!(
+                        "[markdown_render] rendered mermaid fence to image: start_line={}, end_line={}, body_bytes={}, rendered_line={}",
+                        source_line_idx,
+                        end_line,
+                        body.len(),
+                        rendered_index
+                    );
+                    source_line_idx = end_line.saturating_add(1);
+                    continue;
+                }
+                Err(error) => {
+                    log::debug!(
+                        "[markdown_render] mermaid render failed, falling back to fenced body text: start_line={}, end_line={}, error={error}",
+                        source_line_idx,
+                        end_line
+                    );
+                }
+            }
+        }
+
         if fence_marker_lines.contains(&source_line_idx) {
             log::debug!(
                 "[markdown_render] dropped fence marker line: index={}, content={:?}",
                 source_line_idx,
                 source_line
             );
+            source_line_idx += 1;
             continue;
         }
 
@@ -103,6 +256,7 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
             rendered_index,
             column_offsets: line_render.column_offsets,
         });
+        source_line_idx += 1;
     }
 
     // 末尾連続空行を trim（内部の空行は段落区切りとして保持）
@@ -171,6 +325,7 @@ pub fn render_markdown_to_float_content(source: &str) -> RenderedFloatContent {
     RenderedFloatContent {
         lines: rendered_lines,
         inline_styles,
+        images,
     }
 }
 
@@ -189,6 +344,7 @@ pub fn wrap_rendered_content_to_width(
     let RenderedFloatContent {
         lines,
         inline_styles,
+        images,
     } = content;
     let mut wrapped_lines: Vec<String> = Vec::with_capacity(lines.len());
     let mut source_to_rendered_start: Vec<usize> = Vec::with_capacity(lines.len());
@@ -241,17 +397,29 @@ pub fn wrap_rendered_content_to_width(
         .into_iter()
         .filter(|style| style.line < wrapped_lines.len())
         .collect();
+    let mapped_images: Vec<RenderedMarkdownImage> = images
+        .into_iter()
+        .filter_map(|mut image| {
+            if image.line >= source_was_wrapped.len() || source_was_wrapped[image.line] {
+                return None;
+            }
+            image.line = source_to_rendered_start[image.line];
+            (image.line < wrapped_lines.len()).then_some(image)
+        })
+        .collect();
 
     log::debug!(
-        "[markdown_render] wrap_rendered_content_to_width: rendered_lines={}, inline_styles={}, max_width={}",
+        "[markdown_render] wrap_rendered_content_to_width: rendered_lines={}, inline_styles={}, images={}, max_width={}",
         wrapped_lines.len(),
         truncated_styles.len(),
+        mapped_images.len(),
         max_width
     );
 
     RenderedFloatContent {
         lines: wrapped_lines,
         inline_styles: truncated_styles,
+        images: mapped_images,
     }
 }
 
@@ -327,7 +495,13 @@ pub fn render_plaintext_to_float_content(source: &str) -> RenderedFloatContent {
     RenderedFloatContent {
         lines,
         inline_styles: Vec::new(),
+        images: Vec::new(),
     }
+}
+
+fn is_mermaid_info_string(info: Option<&str>) -> bool {
+    info.and_then(|info| info.split_whitespace().next())
+        .is_some_and(|language| language.eq_ignore_ascii_case("mermaid"))
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +566,133 @@ fn is_markdown_escapable_punctuation(byte: u8) -> bool {
             | b'='
             | b'"'
     )
+}
+
+fn render_mermaid_png_with_mmdc(
+    command: &str,
+    timeout: Duration,
+    scale: u32,
+    background: &str,
+    source: &str,
+) -> Result<OverlayAssetMedia, String> {
+    let work_dir = std::env::temp_dir().join(format!(
+        "saya-mermaid-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("system clock error before mmdc render: {error}"))?
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|error| format!("failed to create mermaid temp dir: {error}"))?;
+    let input_path = work_dir.join("diagram.mmd");
+    let output_path = work_dir.join("diagram.png");
+    let cleanup_dir = work_dir.clone();
+    let result = (|| {
+        let mut input = std::fs::File::create(&input_path)
+            .map_err(|error| format!("failed to create mermaid input: {error}"))?;
+        input
+            .write_all(source.as_bytes())
+            .map_err(|error| format!("failed to write mermaid input: {error}"))?;
+        log::debug!(
+            "[markdown_render] invoking mmdc renderer: command={}, input={:?}, output={:?}, timeout_ms={}, scale={}, background={:?}, source_bytes={}",
+            command,
+            input_path,
+            output_path,
+            timeout.as_millis(),
+            scale,
+            background,
+            source.len()
+        );
+        let mut child = Command::new(command)
+            .args(mmdc_render_args(
+                &input_path,
+                &output_path,
+                scale,
+                background,
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("failed to spawn mmdc `{command}`: {error}"))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child
+                .try_wait()
+                .map_err(|error| format!("failed while waiting for mmdc: {error}"))?
+            {
+                Some(status) => {
+                    let output = child
+                        .wait_with_output()
+                        .map_err(|error| format!("failed to collect mmdc output: {error}"))?;
+                    if !status.success() {
+                        return Err(format!(
+                            "mmdc exited with {status}: stderr={}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ));
+                    }
+                    break;
+                }
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("mmdc timed out after {} ms", timeout.as_millis()));
+                }
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        let bytes = std::fs::read(&output_path)
+            .map_err(|error| format!("failed to read mmdc PNG output: {error}"))?;
+        let (width, height) = png_dimensions(&bytes).unwrap_or((1, 1));
+        log::debug!(
+            "[markdown_render] mmdc renderer produced PNG: bytes={}, width={}, height={}",
+            bytes.len(),
+            width,
+            height
+        );
+        Ok(OverlayAssetMedia::png(
+            "mermaid diagram",
+            width,
+            height,
+            bytes,
+        ))
+    })();
+    if let Err(error) = std::fs::remove_dir_all(&cleanup_dir) {
+        log::debug!(
+            "[markdown_render] failed to remove mermaid temp dir: path={:?}, error={error}",
+            cleanup_dir
+        );
+    }
+    result
+}
+
+fn mmdc_render_args(
+    input_path: &Path,
+    output_path: &Path,
+    scale: u32,
+    background: &str,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("-i"),
+        input_path.as_os_str().to_os_string(),
+        OsString::from("-o"),
+        output_path.as_os_str().to_os_string(),
+        OsString::from("-b"),
+        OsString::from(background),
+        OsString::from("--scale"),
+        OsString::from(scale.to_string()),
+    ]
+}
+
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((width.max(1), height.max(1)))
 }
 
 fn render_line(source_line: &str) -> LineRenderResult {
@@ -625,4 +926,36 @@ fn map_inline_columns(
         column_start: rendered_start?,
         column_end: rendered_end?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mmdc_render_args_include_configured_background_color() {
+        let args = mmdc_render_args(
+            Path::new("/tmp/diagram.mmd"),
+            Path::new("/tmp/diagram.png"),
+            2,
+            "#ffffff",
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "-i",
+                "/tmp/diagram.mmd",
+                "-o",
+                "/tmp/diagram.png",
+                "-b",
+                "#ffffff",
+                "--scale",
+                "2",
+            ]
+        );
+    }
 }
