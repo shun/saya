@@ -37,6 +37,7 @@ use saya::features::search::query::{SearchStateError, SearchVisibleState};
 use saya::features::search::refresh::{
     SearchModeHint, SearchRefreshInput, WindowSearchRefreshStore,
 };
+use saya::features::search::substitute_preview::build_substitute_preview_render;
 use saya::features::selector::keymap::{
     SelectorAction, SelectorKeyRoute, SelectorModeSwitch, selector_key_route_for_model,
 };
@@ -8733,7 +8734,7 @@ fn build_workspace_render_output(
             .with_viewport_sync_summary(&viewport_summary);
     }
     let line_range_started_at = std::time::Instant::now();
-    let line_ranges =
+    let mut line_ranges =
         collect_workspace_line_ranges(&outcome.core_bridge, &snapshot, viewport_store);
     let line_range_ms = line_range_started_at.elapsed().as_millis();
     search_refresh_store.retain_windows(
@@ -8744,14 +8745,24 @@ fn build_workspace_render_output(
             .collect::<Vec<_>>(),
     );
     let search_started_at = std::time::Instant::now();
-    let search_states = collect_workspace_search_states(
-        &mut outcome.core_bridge,
+    let substitute_preview_search_states = collect_workspace_substitute_preview_states(
         &snapshot,
-        viewport_store,
-        search_refresh_store,
-        resolve_prompt_revision(command_line_prompt, command_line_buffer),
-        resolve_search_mode_hint(command_line_prompt, command_line_buffer),
-    )?;
+        &mut line_ranges,
+        command_line_prompt,
+        command_line_buffer,
+    );
+    let search_states = if substitute_preview_search_states.is_empty() {
+        collect_workspace_search_states(
+            &mut outcome.core_bridge,
+            &snapshot,
+            viewport_store,
+            search_refresh_store,
+            resolve_prompt_revision(command_line_prompt, command_line_buffer),
+            resolve_search_mode_hint(command_line_prompt, command_line_buffer),
+        )?
+    } else {
+        substitute_preview_search_states
+    };
     let search_ms = search_started_at.elapsed().as_millis();
     let syntax_enabled = outcome.core_bridge.is_syntax_enabled();
     let syntax_started_at = std::time::Instant::now();
@@ -10166,6 +10177,47 @@ fn collect_workspace_search_states(
     Ok(search_states)
 }
 
+fn collect_workspace_substitute_preview_states(
+    snapshot: &vim_core_rs::CoreSnapshot,
+    line_ranges: &mut BTreeMap<i32, CoreBufferLineRange>,
+    command_line_prompt: Option<char>,
+    command_line_buffer: &str,
+) -> BTreeMap<i32, SearchVisibleState> {
+    let mut search_states = BTreeMap::new();
+    if command_line_prompt != Some(':') {
+        return search_states;
+    }
+
+    for window in &snapshot.windows {
+        let Some(line_range) = line_ranges.get(&window.id).cloned() else {
+            log::debug!(
+                "[main][substitute_preview] skipped window because visible line range is missing: window_id={}, buffer_id={}",
+                window.id,
+                window.buf_id
+            );
+            continue;
+        };
+        let Some(preview) = build_substitute_preview_render(
+            window,
+            &line_range,
+            command_line_prompt,
+            command_line_buffer,
+        ) else {
+            continue;
+        };
+        log::debug!(
+            "[main][substitute_preview] using live substitute preview render state: window_id={}, matches={}, pattern={:?}, preview_lines={}",
+            window.id,
+            preview.search_state.matches.len(),
+            preview.search_state.input_pattern,
+            preview.line_range.lines.len()
+        );
+        line_ranges.insert(window.id, preview.line_range);
+        search_states.insert(window.id, preview.search_state);
+    }
+    search_states
+}
+
 fn collect_workspace_syntax_lines(
     core_bridge: &saya::core::bridge::CoreBridge,
     snapshot: &vim_core_rs::CoreSnapshot,
@@ -10626,6 +10678,12 @@ fn build_command_line_only_workspace(
     if command_line_prompt != Some(':') {
         return None;
     }
+    if substitute_preview_command_may_need_workspace_projection(command_line_buffer) {
+        trace_redraw_diagnostic(format_args!(
+            "command-line-only redraw bypassed because substitute live preview needs search overlay projection"
+        ));
+        return None;
+    }
     let last_workspace = last_workspace?;
     let preview = format!(":{}", command_line_buffer);
     let cursor_col = command_line_cursor_display_col(
@@ -10646,6 +10704,39 @@ fn build_command_line_only_workspace(
         cursor_col,
     });
     Some(workspace)
+}
+
+fn substitute_preview_command_may_need_workspace_projection(command_line_buffer: &str) -> bool {
+    let input = command_line_buffer
+        .trim_start()
+        .strip_prefix(':')
+        .unwrap_or(command_line_buffer.trim_start());
+    let input = input
+        .strip_prefix('%')
+        .unwrap_or_else(|| strip_ex_range_prefix(input));
+    let input = input.trim_start();
+    input
+        .strip_prefix("s")
+        .is_some_and(|rest| substitute_command_boundary(rest))
+        || input
+            .strip_prefix("substitute")
+            .is_some_and(|rest| substitute_command_boundary(rest))
+}
+
+fn strip_ex_range_prefix(input: &str) -> &str {
+    let range_len = input
+        .char_indices()
+        .take_while(|(_, ch)| matches!(ch, '0'..='9' | '.' | '$' | ',' | ';' | '+' | '-'))
+        .last()
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(0);
+    &input[range_len..]
+}
+
+fn substitute_command_boundary(rest: &str) -> bool {
+    rest.bytes()
+        .next()
+        .is_none_or(|byte| byte.is_ascii_punctuation() || byte.is_ascii_whitespace())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11022,6 +11113,9 @@ mod tests {
 
     #[test]
     fn active_mermaid_block_appends_preview_float_without_changing_body_lines() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "# Test\n```mermaid\ngraph TD\n  A-->B\n```\nafter\n";
         let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
         let mut snapshot = bridge.snapshot();
@@ -11082,6 +11176,9 @@ mod tests {
 
     #[test]
     fn mermaid_preview_float_uses_roomy_terminal_relative_size() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
         let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
         let mut snapshot = bridge.snapshot();
@@ -11127,6 +11224,9 @@ mod tests {
 
     #[test]
     fn mermaid_preview_float_size_uses_configured_window_percentages() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
         let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
         let mut snapshot = bridge.snapshot();
@@ -11177,6 +11277,9 @@ mod tests {
 
     #[test]
     fn mermaid_preview_float_source_includes_configured_background() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
         let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
         let mut snapshot = bridge.snapshot();
@@ -11221,6 +11324,9 @@ mod tests {
 
     #[test]
     fn insert_mode_does_not_append_mermaid_preview_float() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
         let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
         let mut snapshot = bridge.snapshot();
@@ -11257,6 +11363,9 @@ mod tests {
 
     #[test]
     fn mermaid_preview_auto_off_skips_float_but_manual_request_appends_once() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
         let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
         let mut snapshot = bridge.snapshot();
@@ -11461,6 +11570,9 @@ mod tests {
 
     #[test]
     fn mermaid_preview_mouse_wheel_pans_only_after_preview_focus() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source = "```mermaid\ngraph TD\n  A-->B\n```\n";
         let bridge = saya::core::bridge::CoreBridge::new(source).expect("core bridge");
         let mut snapshot = bridge.snapshot();
@@ -11579,6 +11691,82 @@ mod tests {
             "production render must not inject demo floats from SAYA_FLOAT_DEMO"
         );
         assert!(floating_window_manager.is_empty());
+    }
+
+    #[test]
+    fn workspace_render_highlights_substitute_matches_before_commit() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target_path = unique_path("substitute-preview").with_extension("txt");
+        std::fs::write(&target_path, "foo foo\nbar foo\n").expect("test file");
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::File(target_path.clone()),
+            config_source: saya::app::cli::ConfigSource::Default,
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        let mut session_state = outcome.editor_session_state();
+        let mut viewport_store = WindowViewportStore::new();
+        let mut search_refresh_store = WindowSearchRefreshStore::default();
+        let mut markdown_metadata_cache = MarkdownMetadataCache::default();
+
+        let workspace = build_workspace_render_output(
+            &mut outcome,
+            &mut session_state,
+            &mut viewport_store,
+            ViewportSyncMode::Core,
+            &mut search_refresh_store,
+            &mut markdown_metadata_cache,
+            Some(':'),
+            "%s/foo/baz",
+            "%s/foo/baz".len(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            80,
+            24,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("workspace should render");
+
+        let active_pane = workspace
+            .panes
+            .iter()
+            .find(|pane| pane.window_id == workspace.active_window_id)
+            .expect("active pane should exist");
+        assert_eq!(
+            active_pane.search_overlays.len(),
+            2,
+            "substitute live preview should highlight each line's first replacement before Enter"
+        );
+        assert!(
+            active_pane
+                .lines
+                .iter()
+                .any(|line| line.contains("baz foo")),
+            "substitute live preview should render the first visible line with replacement text: {:?}",
+            active_pane.lines
+        );
+        assert!(
+            active_pane
+                .lines
+                .iter()
+                .any(|line| line.contains("bar baz")),
+            "substitute live preview should render the second visible line with replacement text: {:?}",
+            active_pane.lines
+        );
+        assert_eq!(
+            outcome.core_bridge.snapshot().text,
+            "foo foo\nbar foo\n",
+            "substitute preview must not mutate the buffer before command commit"
+        );
+        std::fs::remove_file(target_path).expect("test file should be removed");
     }
 
     #[test]
@@ -18071,6 +18259,26 @@ mod tests {
             build_command_line_only_workspace(Some(&last_workspace), Some('/'), "pattern", 7, 4);
 
         assert_eq!(rendered, None);
+    }
+
+    #[test]
+    fn command_line_only_render_is_not_used_for_substitute_live_preview() {
+        let last_workspace = main_test_workspace();
+
+        for command in [
+            "%s/foo/bar",
+            "s/foo/bar",
+            "substitute/foo/bar",
+            "10,20s/foo/bar",
+        ] {
+            let rendered =
+                build_command_line_only_workspace(Some(&last_workspace), Some(':'), command, 3, 4);
+
+            assert_eq!(
+                rendered, None,
+                "substitute input should rebuild workspace overlays instead of reusing stale projection: {command}"
+            );
+        }
     }
 
     #[test]

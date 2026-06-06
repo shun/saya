@@ -67,6 +67,12 @@ and display-space mappings, and `src/presentation/render/renderer.rs` renders
 the projected screen model. This path must not mutate buffer text or
 re-implement Vim motion.
 
+Column coordinates follow a single rule across this projection. Internal buffer
+columns are UTF-8 byte offsets, and `saya` owns the byte-to-display-column
+projection using its own tab size, gutter width, and cell widths. See
+[ADR 0005](adr/0005-use-byte-columns-internally-and-character-columns-at-the-typescript-api.md)
+for the byte-versus-character column contract.
+
 Syntax, highlight, and conceal have a different boundary. `vim-core-rs` owns
 the extraction semantics and public core data. `saya` can collect visible
 `CoreSyntaxChunk` values, project them into display cells, and render them, but
