@@ -1,5 +1,6 @@
 .DS_Store
 target/
+**/target/
 .kiro/
 .claude/
 .gemini/
@@ -9,3 +10,8 @@ target/
 !.codex/hooks/**
 .agents/
 tmp/
+*.swp
+
+# vim-core-rs の生成物（vendor-sync.sh で都度生成・公開時のみ同梱）
+crates/vim-core-rs/vendor/vim_src/
+crates/vim-core-rs/vendor/upstream/

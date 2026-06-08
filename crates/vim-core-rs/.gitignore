@@ -1,0 +1,10 @@
+.claude/
+.gemini/
+.codex/
+.kiro/
+.DS_Store
+.cursor/
+tmp/
+target/
+vendor/vim_src/
+vendor/upstream/

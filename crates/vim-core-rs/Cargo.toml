@@ -1,0 +1,76 @@
+[package]
+name = "vim-core-rs"
+version = "0.1.5"
+edition = "2024"
+description = "Rust host integration layer for one embedded Vim runtime"
+build = "build.rs"
+license-file = "LICENSE"
+readme = "README.md"
+repository = "https://github.com/shun/vim-core-rs"
+include = [
+  "/Cargo.toml",
+  "/README.md",
+  "/LICENSE",
+  "/LICENSE-vim",
+  "/THIRD_PARTY_NOTICES.md",
+  "/build.rs",
+  "/build_allowlist.rs",
+  "/build_artifact.rs",
+  "/build_compile_plan.rs",
+  "/build_link_audit.rs",
+  "/build_test_runner.rs",
+  "/docs/**",
+  "/native/**",
+  "/src/**",
+  "/tests/**",
+  "/vendor/vim_src/**",
+  "/vim-source-allowlist.txt",
+  "/vim-source-build-manifest.txt",
+  "/upstream-metadata.json",
+  "/upstream-test-classification.json",
+  "/upstream-test-skiplist.txt",
+]
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+tree-sitter-syntax = ["dep:tree-sitter"]
+experimental-tree-sitter = ["tree-sitter-syntax"]
+tree-sitter-markdown = ["tree-sitter-syntax", "dep:tree-sitter-md", "tree-sitter-md/parser"]
+tree-sitter-rust = ["tree-sitter-syntax", "dep:tree-sitter-rust"]
+tree-sitter-typescript = ["tree-sitter-syntax", "dep:tree-sitter-typescript"]
+tree-sitter-go = ["tree-sitter-syntax", "dep:tree-sitter-go"]
+
+[dependencies]
+log = "0.4"
+tree-sitter = { version = "0.26.8", optional = true }
+tree-sitter-md = { version = "0.5.3", optional = true, default-features = false }
+tree-sitter-rust = { version = "0.24.2", optional = true }
+tree-sitter-typescript = { version = "0.23.2", optional = true }
+tree-sitter-go = { version = "0.25.0", optional = true }
+
+[build-dependencies]
+bindgen = "0.72"
+cc = "1.2"
+flate2 = "1"
+globset = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+walkdir = "2.5"
+
+[dev-dependencies]
+flate2 = "1"
+globset = "0.4"
+libc = "0.2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3"
+walkdir = "2.5"

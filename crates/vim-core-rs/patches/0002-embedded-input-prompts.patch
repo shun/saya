@@ -1,0 +1,87 @@
+diff --git a/src/ex_getln.c b/src/ex_getln.c
+index b2cfcb7..7ae7323 100644
+--- a/src/ex_getln.c
++++ b/src/ex_getln.c
+@@ -12,6 +12,7 @@
+  */
+ 
+ #include "vim.h"
++#include "vim_bridge.h"
+ 
+ // Return value when handling keys in command-line mode.
+ #define CMDLINE_NOT_CHANGED	1
+@@ -5116,6 +5117,36 @@ get_user_input(
+ 
+     prompt = tv_get_string_chk(&argvars[0]);
+ 
++    if (vim_core_bridge_embedded_mode_active() && prompt != NULL)
++    {
++	char	*response = NULL;
++	uintptr_t response_len = 0;
++	bool	cancelled = false;
++	vim_core_input_request_kind_t request_kind = secret
++		    ? VIM_CORE_INPUT_REQUEST_SECRET
++		    : VIM_CORE_INPUT_REQUEST_COMMAND_LINE;
++
++	if (vim_core_bridge_take_input_response(
++		    request_kind, &response, &response_len, &cancelled))
++	{
++	    if (cancelled)
++		rettv->vval.v_string = vim_strsave((char_u *)"");
++	    else if (response != NULL)
++		rettv->vval.v_string =
++		    vim_strnsave((char_u *)response, (int)response_len);
++	    else
++		rettv->vval.v_string = vim_strsave((char_u *)"");
++	    vim_core_bridge_free_input_response(response);
++	    return;
++	}
++
++	vim_core_bridge_enqueue_input_request(
++		(const char *)prompt,
++		(uintptr_t)STRLEN(prompt),
++		request_kind);
++	return;
++    }
++
+ # ifdef NO_CONSOLE_INPUT
+     // While starting up, there is no place to enter text. When running tests
+     // with --not-a-term we assume feedkeys() will be used.
+diff --git a/src/message.c b/src/message.c
+index cfe9f6f..5d8cf90 100644
+--- a/src/message.c
++++ b/src/message.c
+@@ -4288,6 +4288,33 @@ do_dialog(
+ 	return dfltbutton;   // return default option
+ # endif
+ 
++    if (vim_core_bridge_embedded_mode_active())
++    {
++	char	*response = NULL;
++	uintptr_t response_len = 0;
++	bool	cancelled = false;
++
++	if (vim_core_bridge_take_input_response(
++		    VIM_CORE_INPUT_REQUEST_CONFIRMATION,
++		    &response,
++		    &response_len,
++		    &cancelled))
++	{
++	    if (cancelled || response == NULL || response_len == 0)
++		retval = 0;
++	    else
++		retval = atoi(response);
++	    vim_core_bridge_free_input_response(response);
++	    return retval;
++	}
++
++	vim_core_bridge_enqueue_input_request(
++		(const char *)message,
++		message == NULL ? 0 : (uintptr_t)STRLEN(message),
++		VIM_CORE_INPUT_REQUEST_CONFIRMATION);
++	return 0;
++    }
++
+ # ifdef FEAT_GUI_DIALOG
+     // When GUI is running and 'c' not in 'guioptions', use the GUI dialog
+     if (gui.in_use && vim_strchr(p_go, GO_CONDIALOG) == NULL)

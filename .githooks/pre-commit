@@ -1,0 +1,30 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+tmp_files=$(mktemp)
+trap 'rm -f "$tmp_files"' EXIT HUP INT TERM
+
+git diff --cached --name-only --diff-filter=ACMR -- '*.rs' \
+  | while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      if [ -f "$path" ]; then
+        printf '%s\n' "$path"
+      fi
+    done >"$tmp_files"
+
+if [ ! -s "$tmp_files" ]; then
+  exit 0
+fi
+
+if ! command -v rustfmt >/dev/null 2>&1; then
+  echo "pre-commit: rustfmt is required but was not found in PATH" >&2
+  exit 1
+fi
+
+echo "pre-commit: running rustfmt on staged Rust files"
+xargs rustfmt --edition 2024 <"$tmp_files"
+xargs -I{} git add -- "{}" <"$tmp_files"

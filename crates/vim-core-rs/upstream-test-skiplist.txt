@@ -1,0 +1,2 @@
+# Upstream Vim tests that are currently skipped
+# Format: test_name.vim | reason

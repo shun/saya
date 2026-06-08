@@ -1,0 +1,14 @@
+# saya モノレポ共通の Cargo 設定。
+#
+# vim-core-rs はワークスペースのメンバークレートとして「常にソースから」ビルドする。
+# vim-core-rs の build.rs は、env 未設定時はクレート直下の `.git` 有無で
+# source/prebuilt を判定する（source_build_requested → repository_checkout_detected）。
+# モノレポでは `crates/vim-core-rs/.git` が存在しない（jj 管理）ため、放置すると
+# prebuilt 経路に切り替わり、本来 standalone リポで使っていた source ビルドと挙動が
+# ずれる（例: ウィンドウ resize の不整合）。
+#
+# ワークスペースのソース（`crates/vim-core-rs/vendor/vim_src`）から一貫してビルドする
+# ため、ここで明示的に source ビルドを強制する。CI（ci.yml / release-crate.yml）でも
+# 同じ env を設定しており、それと一致させる。
+[env]
+VIM_CORE_FROM_SOURCE = "1"

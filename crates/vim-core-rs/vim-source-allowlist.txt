@@ -1,0 +1,15 @@
+vendor/vim_src/runtime/doc/doctags.c
+vendor/vim_src/runtime/tools/blink.c
+vendor/vim_src/src/*.h
+vendor/vim_src/src/auto/**
+vendor/vim_src/src/config.h.in
+vendor/vim_src/src/config.mk.in
+vendor/vim_src/src/link.sh
+vendor/vim_src/src/osdef.sh
+vendor/vim_src/src/osdef1.h.in
+vendor/vim_src/src/osdef2.h.in
+vendor/vim_src/src/pathdef.sh
+vendor/vim_src/src/proto/**/*.pro
+vendor/vim_src/src/xdiff/**
+vendor/vim_src/src/testdir/*.vim
+vendor/vim_src/src/*.c

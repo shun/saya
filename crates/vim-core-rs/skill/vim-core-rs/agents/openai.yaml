@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vim Core RS"
+  short_description: "Guide vim-core-rs contract and integration work"
+  default_prompt: "Use $vim-core-rs to inspect Vim-owned window semantics, search extraction APIs, and the right contract tests before changing vim-core-rs."

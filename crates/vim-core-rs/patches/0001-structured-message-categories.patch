@@ -1,0 +1,475 @@
+diff --git a/src/message.c b/src/message.c
+index ac25fe3..cfe9f6f 100644
+--- a/src/message.c
++++ b/src/message.c
+@@ -14,6 +14,7 @@
+ #define MESSAGE_FILE		// don't include prototype for smsg()
+ 
+ #include "vim.h"
++#include "vim_bridge.h"
+ 
+ static void add_msg_hist(char_u *s, int len, int attr);
+ static void check_msg_hist(void);
+@@ -54,6 +55,48 @@ static struct msg_hist *last_msg_hist = NULL;
+ static int msg_hist_len = 0;
+ static int msg_hist_max = 500;		// The default max value is 500
+ 
++    static vim_core_message_severity_t
++vim_core_message_severity_from_attr(int attr)
++{
++    int base_attr;
++
++    base_attr = attr & ~MSG_HIST;
++    if (base_attr == 0)
++	base_attr = HL_ATTR(HLF_MSG);
++
++    if (base_attr == HL_ATTR(HLF_E))
++	return VIM_CORE_MESSAGE_SEVERITY_ERROR;
++    if (base_attr == HL_ATTR(HLF_W))
++	return VIM_CORE_MESSAGE_SEVERITY_WARNING;
++    return VIM_CORE_MESSAGE_SEVERITY_INFO;
++}
++
++    static int
++vim_core_enqueue_embedded_message(
++    const char *message,
++    int attr,
++    vim_core_message_category_t category)
++{
++    if (!vim_core_bridge_embedded_mode_active() || message == NULL || *message == NUL)
++	return FALSE;
++
++    vim_core_bridge_enqueue_message_event(
++	message,
++	(uintptr_t)STRLEN((char_u *)message),
++	vim_core_message_severity_from_attr(attr),
++	category);
++    return TRUE;
++}
++
++    static void
++vim_core_enqueue_embedded_pager_prompt(vim_core_pager_prompt_kind_t kind)
++{
++    if (!vim_core_bridge_embedded_mode_active())
++	return;
++
++    vim_core_bridge_enqueue_pager_prompt_event(kind);
++}
++
+ // flags obtained from the 'messagesopt' option
+ #define MESSAGES_HIT_ENTER	0x001
+ #define MESSAGES_WAIT		0x002
+@@ -183,6 +217,16 @@ msg_attr_keep(
+ 	ch_log(NULL, "ERROR: %s", s);
+ #endif
+ 
++    if (vim_core_enqueue_embedded_message(
++	    s,
++	    attr,
++	    VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE))
++    {
++	need_fileinfo = FALSE;
++	--entered;
++	return TRUE;
++    }
++
+     // Truncate the message if needed.
+     msg_start();
+     buf = msg_strtrunc((char_u *)s, FALSE);
+@@ -779,7 +823,8 @@ emsg_core(const char *s)
+      * Display name and line number for the source of the error.
+      */
+     msg_scroll = TRUE;
+-    msg_source(attr);
++    if (!vim_core_bridge_embedded_mode_active())
++	msg_source(attr);
+ 
+     /*
+      * Display the error message itself.
+@@ -1273,6 +1327,17 @@ wait_return(int redraw)
+ 	return;
+     }
+ 
++    if (vim_core_bridge_embedded_mode_active())
++    {
++	vim_core_enqueue_embedded_pager_prompt(VIM_CORE_PAGER_PROMPT_HIT_RETURN);
++	need_wait_return = FALSE;
++	did_wait_return = TRUE;
++	emsg_on_display = FALSE;
++	lines_left = -1;
++	reset_last_sourcing();
++	return;
++    }
++
+     redir_off = TRUE;		// don't redirect this message
+     oldState = State;
+     if (quit_more)
+@@ -3303,6 +3368,15 @@ do_more_prompt(int typed_char)
+ 	return FALSE;
+     entered = TRUE;
+ 
++    if (vim_core_bridge_embedded_mode_active())
++    {
++	vim_core_enqueue_embedded_pager_prompt(VIM_CORE_PAGER_PROMPT_MORE);
++	lines_left = Rows - 1;
++	State = oldState;
++	entered = FALSE;
++	return FALSE;
++    }
++
+     if (typed_char == 'G')
+     {
+ 	// "g<": Find first line on the last page.
+@@ -4165,6 +4210,12 @@ give_warning_with_source(char_u *message, int hl, int with_source)
+ 
+     if (with_source)
+     {
++	if (vim_core_bridge_embedded_mode_active())
++	{
++	    (void)msg_attr((char *)message, HL_ATTR(HLF_W));
++	}
++	else
++	{
+ 	// Do what msg() does, but with a column offset if the warning should
+ 	// be after the mode message.
+ 	msg_start();
+@@ -4173,6 +4224,7 @@ give_warning_with_source(char_u *message, int hl, int with_source)
+ 	msg_puts_attr((char *)message, HL_ATTR(HLF_W) | MSG_HIST);
+ 	msg_clr_eos();
+ 	(void)msg_end();
++	}
+     }
+     else if (msg_attr((char *)message, keep_msg_attr) && msg_scrolled == 0)
+ 	set_keep_msg(message, keep_msg_attr);
+diff --git a/src/option.c b/src/option.c
+index 9722eba..2e2f757 100644
+--- a/src/option.c
++++ b/src/option.c
+@@ -37,6 +37,7 @@
+ 
+ #define IN_OPTION_C
+ #include "vim.h"
++#include "vim_bridge.h"
+ #include "optiondefs.h"
+ 
+ static void set_options_default(int opt_flags);
+@@ -6225,6 +6226,12 @@ showoptions(
+ #define INC 20
+ #define GAP 3
+ 
++    if (vim_core_bridge_embedded_mode_active() && all != 0)
++    {
++	vim_core_bridge_enqueue_pager_prompt_event(VIM_CORE_PAGER_PROMPT_MORE);
++	return;
++    }
++
+     items = ALLOC_MULT(struct vimoption *, OPTION_COUNT);
+     if (items == NULL)
+ 	return;
+diff --git a/src/undo.c b/src/undo.c
+index 3b0a152..4070f28 100644
+--- a/src/undo.c
++++ b/src/undo.c
+@@ -85,6 +85,7 @@
+ #define CRYPT_BUF_SIZE 8192
+ 
+ #include "vim.h"
++#include "vim_bridge.h"
+ 
+ // Structure passed around between functions.
+ // Avoids passing cryptstate_T when encryption not available.
+@@ -3051,12 +3052,29 @@ u_undo_end(
+     if (VIsual_active)
+ 	check_pos(curbuf, &VIsual);
+ 
+-    smsg_attr_keep(0, _("%ld %s; %s #%ld  %s"),
+-	    u_oldcount < 0 ? -u_oldcount : u_oldcount,
+-	    _(msgstr),
+-	    did_undo ? _("before") : _("after"),
+-	    uhp == NULL ? 0L : uhp->uh_seq,
+-	    msgbuf);
++    if (vim_core_bridge_embedded_mode_active())
++    {
++	char status_msg[IOSIZE];
++
++	vim_snprintf(status_msg, IOSIZE, _("%ld %s; %s #%ld  %s"),
++		u_oldcount < 0 ? -u_oldcount : u_oldcount,
++		_(msgstr),
++		did_undo ? _("before") : _("after"),
++		uhp == NULL ? 0L : uhp->uh_seq,
++		msgbuf);
++	vim_core_bridge_enqueue_message_event(
++		status_msg,
++		(uintptr_t)STRLEN((char_u *)status_msg),
++		VIM_CORE_MESSAGE_SEVERITY_INFO,
++		VIM_CORE_MESSAGE_CATEGORY_COMMAND_FEEDBACK);
++    }
++    else
++	smsg_attr_keep(0, _("%ld %s; %s #%ld  %s"),
++		u_oldcount < 0 ? -u_oldcount : u_oldcount,
++		_(msgstr),
++		did_undo ? _("before") : _("after"),
++		uhp == NULL ? 0L : uhp->uh_seq,
++		msgbuf);
+ }
+ 
+ /*
+diff --git a/src/eval.c b/src/eval.c
+index ba18a41..b7c0602 100644
+--- a/src/eval.c
++++ b/src/eval.c
+@@ -13,6 +13,7 @@
+ #define USING_FLOAT_STUFF
+ 
+ #include "vim.h"
++#include "vim_bridge.h"
+ 
+ #if defined(FEAT_EVAL)
+ 
+@@ -7809,8 +7810,11 @@ ex_echo(exarg_T *eap)
+     int		did_emsg_before = did_emsg;
+     int		called_emsg_before = called_emsg;
+     evalarg_T	evalarg;
++    int		embedded_message = vim_core_bridge_embedded_mode_active();
++    garray_T	embedded_ga;
+ 
+     fill_evalarg_from_eap(&evalarg, eap, eap->skip);
++    ga_init2(&embedded_ga, 1, 80);
+ 
+     if (eap->skip)
+ 	++emsg_skip;
+@@ -7843,7 +7847,33 @@ ex_echo(exarg_T *eap)
+ 		semsg(_(e_expression_does_not_result_in_value_str), arg_start);
+ 		break;
+ 	    }
+-	    echo_one(&rettv, eap->cmdidx == CMD_echo, &atstart, &needclr);
++	    if (embedded_message)
++	    {
++		char_u	*tofree;
++		char_u	numbuf[NUMBUFLEN];
++		char_u	*p = echo_string(&rettv, &tofree, numbuf, get_copyID());
++
++		if (p != NULL)
++		{
++		    int len = (int)STRLEN(p);
++		    int needs_space = eap->cmdidx == CMD_echo && !atstart;
++
++		    if (ga_grow(&embedded_ga, len + needs_space + 1) == FAIL)
++		    {
++			vim_free(tofree);
++			clear_tv(&rettv);
++			break;
++		    }
++		    if (needs_space)
++			((char_u *)(embedded_ga.ga_data))[embedded_ga.ga_len++] = ' ';
++		    STRCPY((char_u *)(embedded_ga.ga_data) + embedded_ga.ga_len, p);
++		    embedded_ga.ga_len += len;
++		}
++		atstart = FALSE;
++		vim_free(tofree);
++	    }
++	    else
++		echo_one(&rettv, eap->cmdidx == CMD_echo, &atstart, &needclr);
+ 	}
+ 
+ 	clear_tv(&rettv);
+@@ -7854,6 +7884,18 @@ ex_echo(exarg_T *eap)
+ 
+     if (eap->skip)
+ 	--emsg_skip;
++    else if (embedded_message)
++    {
++	if (embedded_ga.ga_data != NULL && embedded_ga.ga_len > 0)
++	{
++	    ((char_u *)(embedded_ga.ga_data))[embedded_ga.ga_len] = NUL;
++	    vim_core_bridge_enqueue_message_event(
++		    (char *)embedded_ga.ga_data,
++		    (uintptr_t)embedded_ga.ga_len,
++		    VIM_CORE_MESSAGE_SEVERITY_INFO,
++		    VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++	}
++    }
+     else
+     {
+ 	// remove text that may still be there from the command
+@@ -7862,6 +7904,7 @@ ex_echo(exarg_T *eap)
+ 	if (eap->cmdidx == CMD_echo)
+ 	    msg_end();
+     }
++    ga_clear(&embedded_ga);
+ }
+ 
+ /*
+@@ -7969,32 +8012,68 @@ ex_execute(exarg_T *eap)
+ 
+ 	if (eap->cmdidx == CMD_echomsg)
+ 	{
+-	    msg_attr(ga.ga_data, echo_attr);
+-	    out_flush();
++	    if (vim_core_bridge_embedded_mode_active())
++		vim_core_bridge_enqueue_message_event(
++			(char *)ga.ga_data,
++			(uintptr_t)STRLEN(ga.ga_data),
++			VIM_CORE_MESSAGE_SEVERITY_INFO,
++			VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++	    else
++	    {
++		msg_attr(ga.ga_data, echo_attr);
++		out_flush();
++	    }
+ 	}
+ 	else if (eap->cmdidx == CMD_echowindow)
+ 	{
+ #ifdef HAS_MESSAGE_WINDOW
+-	    start_echowindow(eap->addr_count > 0 ? eap->line2 : 0);
++	    if (!vim_core_bridge_embedded_mode_active())
++		start_echowindow(eap->addr_count > 0 ? eap->line2 : 0);
+ #endif
+-	    msg_attr(ga.ga_data, echo_attr);
++	    if (vim_core_bridge_embedded_mode_active())
++		vim_core_bridge_enqueue_message_event(
++			(char *)ga.ga_data,
++			(uintptr_t)STRLEN(ga.ga_data),
++			VIM_CORE_MESSAGE_SEVERITY_INFO,
++			VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++	    else
++		msg_attr(ga.ga_data, echo_attr);
+ #ifdef HAS_MESSAGE_WINDOW
+-	    end_echowindow();
++	    if (!vim_core_bridge_embedded_mode_active())
++		end_echowindow();
+ #endif
+ 	}
+ 	else if (eap->cmdidx == CMD_echoconsole)
+ 	{
+-	    ui_write(ga.ga_data, (int)STRLEN(ga.ga_data), TRUE);
+-	    ui_write((char_u *)"\r\n", 2, TRUE);
++	    if (vim_core_bridge_embedded_mode_active())
++		vim_core_bridge_enqueue_message_event(
++			(char *)ga.ga_data,
++			(uintptr_t)STRLEN(ga.ga_data),
++			VIM_CORE_MESSAGE_SEVERITY_INFO,
++			VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++	    else
++	    {
++		ui_write(ga.ga_data, (int)STRLEN(ga.ga_data), TRUE);
++		ui_write((char_u *)"\r\n", 2, TRUE);
++	    }
+ 	}
+ 	else if (eap->cmdidx == CMD_echoerr)
+ 	{
+-	    int		save_did_emsg = did_emsg;
++	    if (vim_core_bridge_embedded_mode_active())
++		vim_core_bridge_enqueue_message_event(
++			(char *)ga.ga_data,
++			(uintptr_t)STRLEN(ga.ga_data),
++			VIM_CORE_MESSAGE_SEVERITY_ERROR,
++			VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++	    else
++	    {
++		int		save_did_emsg = did_emsg;
+ 
+-	    // We don't want to abort following commands, restore did_emsg.
+-	    emsg(ga.ga_data);
+-	    if (!force_abort)
+-		did_emsg = save_did_emsg;
++		// We don't want to abort following commands, restore did_emsg.
++		emsg(ga.ga_data);
++		if (!force_abort)
++		    did_emsg = save_did_emsg;
++	    }
+ 	}
+ 	else if (eap->cmdidx == CMD_execute)
+ 	{
+diff --git a/src/vim9execute.c b/src/vim9execute.c
+index f7d0cc3..7013b3e 100644
+--- a/src/vim9execute.c
++++ b/src/vim9execute.c
+@@ -13,6 +13,7 @@
+ 
+ #define USING_FLOAT_STUFF
+ #include "vim.h"
++#include "vim_bridge.h"
+ 
+ #if defined(FEAT_EVAL)
+ 
+@@ -4079,33 +4080,69 @@ exec_instructions(ectx_T *ectx)
+ 				goto on_error;
+ 			    }
+ 			}
+-			else
++		    else
++		    {
++			msg_sb_eol();
++			if (iptr->isn_type == ISN_ECHOMSG)
+ 			{
+-			    msg_sb_eol();
+-			    if (iptr->isn_type == ISN_ECHOMSG)
++			    if (vim_core_bridge_embedded_mode_active())
++				vim_core_bridge_enqueue_message_event(
++					(char *)ga.ga_data,
++					(uintptr_t)STRLEN(ga.ga_data),
++					VIM_CORE_MESSAGE_SEVERITY_INFO,
++					VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++			    else
+ 			    {
+ 				msg_attr(ga.ga_data, echo_attr);
+ 				out_flush();
+ 			    }
++			}
+ #ifdef HAS_MESSAGE_WINDOW
+ 			    else if (iptr->isn_type == ISN_ECHOWINDOW)
+ 			    {
+-				start_echowindow(
++				if (vim_core_bridge_embedded_mode_active())
++				    vim_core_bridge_enqueue_message_event(
++					    (char *)ga.ga_data,
++					    (uintptr_t)STRLEN(ga.ga_data),
++					    VIM_CORE_MESSAGE_SEVERITY_INFO,
++					    VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++				else
++				{
++				    start_echowindow(
+ 					      iptr->isn_arg.echowin.ewin_time);
+-				msg_attr(ga.ga_data, echo_attr);
+-				end_echowindow();
++				    msg_attr(ga.ga_data, echo_attr);
++				    end_echowindow();
++				}
+ 			    }
+ #endif
+ 			    else if (iptr->isn_type == ISN_ECHOCONSOLE)
+ 			    {
+-				ui_write(ga.ga_data, (int)STRLEN(ga.ga_data),
++				if (vim_core_bridge_embedded_mode_active())
++				    vim_core_bridge_enqueue_message_event(
++					    (char *)ga.ga_data,
++					    (uintptr_t)STRLEN(ga.ga_data),
++					    VIM_CORE_MESSAGE_SEVERITY_INFO,
++					    VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++				else
++				{
++				    ui_write(ga.ga_data, (int)STRLEN(ga.ga_data),
+ 									 TRUE);
+-				ui_write((char_u *)"\r\n", 2, TRUE);
++				    ui_write((char_u *)"\r\n", 2, TRUE);
++				}
+ 			    }
+ 			    else
+ 			    {
+-				SOURCING_LNUM = iptr->isn_lnum;
+-				emsg(ga.ga_data);
++				if (vim_core_bridge_embedded_mode_active())
++				    vim_core_bridge_enqueue_message_event(
++					    (char *)ga.ga_data,
++					    (uintptr_t)STRLEN(ga.ga_data),
++					    VIM_CORE_MESSAGE_SEVERITY_ERROR,
++					    VIM_CORE_MESSAGE_CATEGORY_USER_VISIBLE);
++				else
++				{
++				    SOURCING_LNUM = iptr->isn_lnum;
++				    emsg(ga.ga_data);
++				}
+ 			    }
+ 			}
+ 		    }

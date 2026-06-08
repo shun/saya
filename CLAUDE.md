@@ -13,7 +13,7 @@ Neovim に由来する歴史的負債や互換レイヤーを持ち込まない�
 
 設定系の拡張は Vim script を前提にせず、`deno_core` を使って
 TypeScript で記述できることを重要な方向性とします。高負荷処理は必要に
-応じて Wasm へオフロードする、`docs/architecture.md` の
+応じて Wasm へオフロードする、`crates/saya/docs/architecture.md` の
 ハイブリッド構成を前提にしてください。
 
 関連リポジトリ:
@@ -30,7 +30,7 @@ TypeScript で記述できることを重要な方向性とします。高負荷
 - 高負荷処理は TypeScript に閉じ込めず Wasm オフロードを検討する
 - Neovim 互換性は不要であり、そのための複雑性を持ち込まない
 - CLI エディタとしての起動速度、単純さ、可搬性を重視する
-- レイヤー分離は `docs/architecture.md` を基準に守る
+- レイヤー分離は `crates/saya/docs/architecture.md` を基準に守る
 
 ## エージェントへの期待
 
