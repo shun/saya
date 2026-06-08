@@ -2446,14 +2446,19 @@ fn project_markdown_table_block_projections(
     source_text: &str,
     absolute_row: usize,
     line_start_col: u16,
+    available_width: usize,
 ) -> Option<Vec<ScreenLineProjection>> {
     let map = map?;
     let block = map.blocks.iter().find(|block| {
         matches!(block.kind, MarkdownBlockKind::Table)
             && (block.range.start.line..=block.range.end.line).contains(&absolute_row)
     })?;
-    let rendered_rows =
-        render_markdown_table_block(source_text, block.range.start.line, block.range.end.line)?;
+    let rendered_rows = render_markdown_table_block(
+        source_text,
+        block.range.start.line,
+        block.range.end.line,
+        available_width,
+    )?;
     let source_lines = source_text.lines().collect::<Vec<_>>();
     let projections = rendered_rows
         .into_iter()
@@ -2510,6 +2515,9 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
         0
     };
     let raw_expansion = resolve_markdown_raw_expansion(input);
+    // Width available to the rendered table body: the pane minus the line-number
+    // gutter. `0` means the pane width is unknown, leaving the table unconstrained.
+    let table_available_width = usize::from(input.rect.width).saturating_sub(usize::from(line_start_col));
 
     let visible_rows = if input.line_range.is_some() {
         input_visible_rows(input)
@@ -2535,6 +2543,7 @@ fn project_markdown_line_projections(input: &ProjectionInput<'_>) -> Vec<ScreenL
                 source_text.as_str(),
                 absolute_row,
                 line_start_col,
+                table_available_width,
             )
         {
             let table_end = table_projections
@@ -2886,10 +2895,16 @@ fn markdown_conceal_ranges_for_line(
     normalized
 }
 
+/// Minimum width kept for a single table column when the natural layout has to
+/// be shrunk to fit the pane. Three display cells leave room for at least a
+/// short word fragment plus the wrap to continue on the next line.
+const MIN_MARKDOWN_TABLE_COLUMN_WIDTH: usize = 3;
+
 fn render_markdown_table_block(
     source_text: &str,
     start_line: usize,
     end_line: usize,
+    available_width: usize,
 ) -> Option<Vec<RenderedMarkdownTableLine>> {
     let raw_rows = (start_line..=end_line)
         .map(|line| source_text.split('\n').nth(line).unwrap_or_default())
@@ -2906,17 +2921,27 @@ fn render_markdown_table_block(
         return None;
     }
 
-    let mut column_widths = vec![0usize; column_count];
+    let mut natural_widths = vec![0usize; column_count];
     for (row_index, cells) in parsed_rows.iter().enumerate() {
         if row_index == 1 {
             continue;
         }
         for (column_index, cell) in cells.iter().take(column_count).enumerate() {
             for display_line in markdown_table_cell_display_lines(cell) {
-                column_widths[column_index] =
-                    column_widths[column_index].max(display_width(display_line, 1));
+                natural_widths[column_index] =
+                    natural_widths[column_index].max(display_width(display_line, 1));
             }
         }
+    }
+
+    let column_widths = fit_markdown_table_column_widths(&natural_widths, available_width);
+    if column_widths != natural_widths {
+        log::debug!(
+            "[screen_model] markdown table columns shrunk to fit pane: available_width={}, natural={:?}, fitted={:?}",
+            available_width,
+            natural_widths,
+            column_widths
+        );
     }
 
     let mut rendered = Vec::new();
@@ -3135,6 +3160,99 @@ fn markdown_table_cell_display_lines(cell: &str) -> Vec<&str> {
     if lines.is_empty() { vec![""] } else { lines }
 }
 
+/// Shrink the natural per-column widths so the rendered table fits within
+/// `available_width`. Columns are reduced one display cell at a time, always
+/// trimming the widest column first, so the available room is shared evenly.
+/// An `available_width` of `0` means the pane width is unknown and the natural
+/// layout is kept untouched.
+fn fit_markdown_table_column_widths(natural_widths: &[usize], available_width: usize) -> Vec<usize> {
+    let column_count = natural_widths.len();
+    if column_count == 0 || available_width == 0 {
+        return natural_widths.to_vec();
+    }
+
+    // Each column renders as `│ <content> ` (border + two pad spaces) plus one
+    // trailing `│`, so the non-content chrome is `3 * columns + 1`.
+    let chrome = column_count.saturating_mul(3).saturating_add(1);
+    let budget = available_width.saturating_sub(chrome);
+    let natural_total = natural_widths.iter().sum::<usize>();
+    if natural_total <= budget {
+        return natural_widths.to_vec();
+    }
+
+    let mut widths = natural_widths.to_vec();
+    loop {
+        if widths.iter().sum::<usize>() <= budget {
+            break;
+        }
+        let Some((index, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > MIN_MARKDOWN_TABLE_COLUMN_WIDTH)
+            .max_by_key(|(_, width)| **width)
+        else {
+            // Every column is already at the floor; the pane is too narrow to
+            // shrink further without dropping columns entirely.
+            break;
+        };
+        widths[index] -= 1;
+    }
+    widths
+}
+
+/// Wrap a single rendered cell to `width` display cells, returning one entry per
+/// display line. Existing line breaks (from `<br>`) are preserved, words are
+/// kept whole when they fit, and any word wider than the column is hard-broken
+/// by display width so multi-byte characters never split mid-cell incorrectly.
+fn wrap_markdown_table_cell(cell: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    for segment in cell.split('\n') {
+        wrap_markdown_table_segment(segment, width, &mut lines);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn wrap_markdown_table_segment(segment: &str, width: usize, lines: &mut Vec<String>) {
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in segment.split(' ') {
+        let word_width = display_width(word, 1);
+        if !current.is_empty() && current_width.saturating_add(1).saturating_add(word_width) > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        if word_width <= width {
+            if current.is_empty() {
+                current.push_str(word);
+                current_width = word_width;
+            } else {
+                current.push(' ');
+                current.push_str(word);
+                current_width += 1 + word_width;
+            }
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        for ch in word.chars() {
+            let ch_width = char_display_width(ch);
+            if current_width + ch_width > width && current_width > 0 {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+    }
+    lines.push(current);
+}
+
 fn render_markdown_table_content_rows(
     cells: &[String],
     column_widths: &[usize],
@@ -3143,11 +3261,11 @@ fn render_markdown_table_content_rows(
     let cell_lines = column_widths
         .iter()
         .enumerate()
-        .map(|(column_index, _)| {
+        .map(|(column_index, width)| {
             cells
                 .get(column_index)
-                .map(|cell| markdown_table_cell_display_lines(cell))
-                .unwrap_or_else(|| vec![""])
+                .map(|cell| wrap_markdown_table_cell(cell, *width))
+                .unwrap_or_else(|| vec![String::new()])
         })
         .collect::<Vec<_>>();
     let row_height = cell_lines.iter().map(Vec::len).max().unwrap_or(1);
@@ -3158,7 +3276,7 @@ fn render_markdown_table_content_rows(
             let cell = cell_lines
                 .get(column_index)
                 .and_then(|lines| lines.get(display_row))
-                .copied()
+                .map(String::as_str)
                 .unwrap_or_default();
             let padded = pad_markdown_table_cell(
                 cell,
@@ -4480,6 +4598,55 @@ mod tests {
             snapshot.text, source,
             "Markdown table projection must not mutate the raw buffer text"
         );
+    }
+
+    #[test]
+    fn markdown_projection_wraps_table_cells_to_available_width() {
+        let _lock = session_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "| Col | Description |\n|---|---|\n| a | one two three four five six |\n";
+        let bridge = CoreBridge::new(source).expect("core bridge");
+        let snapshot = bridge.snapshot();
+        let session_state = EditorSessionState::new(None);
+        let markdown_map = MarkdownDocumentMap::parse(source);
+        let mut input = ProjectionInput::new(&snapshot, &session_state, None)
+            .with_markdown_document_map(Some(&markdown_map));
+        input.is_active = false;
+        input.rect = PaneRect {
+            x: 0,
+            y: 0,
+            width: 24,
+            height: 24,
+        };
+
+        let model = project(&input);
+
+        let rendered = model
+            .line_projections
+            .iter()
+            .map(|row| row.display_text.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "│ Col │ Description    │",
+                "│─────│────────────────│",
+                "│ a   │ one two three  │",
+                "│     │ four five six  │",
+                "",
+            ],
+            "wide table cells must wrap to the available pane width"
+        );
+
+        for row in &rendered {
+            assert!(
+                display_width(row, 1) <= usize::from(input.rect.width),
+                "rendered table row must not exceed pane width: {row:?}"
+            );
+        }
     }
 
     #[test]
