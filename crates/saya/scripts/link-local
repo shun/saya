@@ -6,7 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/distribution-common.sh"
 
 prefix="${PREFIX:-$HOME/.local}"
-linked_home="$REPO_ROOT/target/saya-home"
+# saya-home はビルド成果物なので、バイナリと同じワークスペース共有 target に置く。
+# REPO_ROOT(crates/saya) ではなく WS_ROOT を使い、crates/saya/target を新規に
+# 掘らないことで、出力先を dev/target 配下へ一本化する。
+linked_home="$WS_ROOT/target/saya-home"
 bin_link="$prefix/bin/sy"
 home_link="$prefix/share/saya"
 
