@@ -1,4 +1,5 @@
 use crate::input::router::KeyInput;
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandLineEditAction {
@@ -185,4 +186,42 @@ fn next_char_boundary(buffer: &str, cursor_byte_index: usize) -> Option<usize> {
         .chars()
         .next()
         .map(|ch| cursor_byte_index + ch.len_utf8())
+}
+
+pub fn command_line_display_width(text: &str, tab_size: u16) -> usize {
+    let tab_size = usize::from(tab_size.max(1));
+    let mut display_col = 0usize;
+    for ch in text.chars() {
+        if ch == '\t' {
+            display_col = next_command_line_tab_stop(display_col, tab_size);
+        } else {
+            display_col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    display_col
+}
+
+pub fn command_line_cursor_display_col(
+    prompt: char,
+    command_line_buffer: &str,
+    cursor_byte_index: usize,
+    tab_size: u16,
+) -> u16 {
+    let cursor_byte_index = cursor_byte_index.min(command_line_buffer.len());
+    let cursor_byte_index =
+        clamp_to_command_line_char_boundary(command_line_buffer, cursor_byte_index);
+    let prefix = format!("{}{}", prompt, &command_line_buffer[..cursor_byte_index]);
+    u16::try_from(command_line_display_width(&prefix, tab_size)).unwrap_or(u16::MAX)
+}
+
+pub(crate) fn clamp_to_command_line_char_boundary(buffer: &str, cursor_byte_index: usize) -> usize {
+    let mut index = cursor_byte_index.min(buffer.len());
+    while index > 0 && !buffer.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+pub(crate) fn next_command_line_tab_stop(display_col: usize, tab_size: usize) -> usize {
+    display_col + (tab_size - (display_col % tab_size)).min(tab_size)
 }

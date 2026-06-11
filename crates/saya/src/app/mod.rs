@@ -1,7 +1,11 @@
 pub mod bootstrap;
 pub mod cli;
+pub mod cli_output;
 pub mod event_loop;
 pub mod ftplugin;
+pub mod host_command;
 pub mod host_io;
+pub mod outcome_consume;
+pub mod runtime_dispatch;
 pub mod session;
 pub mod startup;

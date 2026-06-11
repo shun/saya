@@ -226,21 +226,35 @@ fn main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
 
 #[test]
 fn main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
-    let source = std::fs::read_to_string("src/main.rs")
-        .expect("main source should be readable from the repository root");
+    let checks: &[(&str, &[&str])] = &[
+        ("src/main.rs", &["last_structural_refresh"]),
+        (
+            "src/app/outcome_consume.rs",
+            &[
+                "StructuralRefresh::from_folded_effects(&effects.structural)",
+                "last_structural_refresh",
+            ],
+        ),
+        (
+            "src/presentation/render/workspace_output.rs",
+            &[
+                "sync_from_windows_for_render",
+                "with_viewport_sync_summary",
+                "projection_summary()",
+                "with_projection_summary",
+            ],
+        ),
+    ];
 
-    for expected in [
-        "StructuralRefresh::from_folded_effects(&effects.structural)",
-        "last_structural_refresh",
-        "sync_from_windows_for_render",
-        "with_viewport_sync_summary",
-        "projection_summary()",
-        "with_projection_summary",
-    ] {
-        assert!(
-            source.contains(expected),
-            "main consume/render path should expose task 3 structural refresh wiring: {expected}"
-        );
+    for (path, expected_terms) in checks {
+        let source = std::fs::read_to_string(path)
+            .expect("consume path source should be readable from the repository root");
+        for expected in *expected_terms {
+            assert!(
+                source.contains(expected),
+                "consume/render path should expose task 3 structural refresh wiring in {path}: {expected}"
+            );
+        }
     }
 }
 
@@ -319,6 +333,28 @@ fn structural_refresh_boundary_guard_names_each_checked_boundary() {
                 "PendingRedrawRequest",
             ],
         },
+        BoundaryGuard {
+            boundary: "outcome_consume_path",
+            path: "src/app/outcome_consume.rs",
+            forbidden_terms: &[
+                "CoreHostAction",
+                "CoreEvent",
+                "take_pending_redraw",
+                "take_pending_redraw_requests",
+                "PendingRedrawRequest",
+            ],
+        },
+        BoundaryGuard {
+            boundary: "workspace_output_path",
+            path: "src/presentation/render/workspace_output.rs",
+            forbidden_terms: &[
+                "CoreHostAction",
+                "CoreEvent",
+                "take_pending_redraw",
+                "take_pending_redraw_requests",
+                "PendingRedrawRequest",
+            ],
+        },
     ] {
         guard.assert_clean();
     }
@@ -388,14 +424,26 @@ fn structural_refresh_acceptance_command_is_headless_timeout_guarded_and_complet
 #[test]
 fn typed_message_line_migration_forbids_direct_string_overwrite_paths() {
     for path in [
-        "src/presentation/screen_model.rs",
+        "src/presentation/screen_model",
         "src/presentation/overlay/effect.rs",
         "src/presentation/render/coordinator.rs",
-        "src/presentation/render/renderer.rs",
+        "src/presentation/render/renderer",
+        "src/presentation/render/workspace_output.rs",
         "src/main.rs",
     ] {
-        let source =
-            std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        let source = if std::path::Path::new(path).is_dir() {
+            std::fs::read_dir(path)
+                .unwrap_or_else(|error| panic!("{path}: {error}"))
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
+                .map(|entry| {
+                    std::fs::read_to_string(entry.path())
+                        .unwrap_or_else(|error| panic!("{path}: {error}"))
+                })
+                .collect::<String>()
+        } else {
+            std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"))
+        };
         for forbidden in [
             "global_message_line =",
             "pub global_message_line: Option<String>",

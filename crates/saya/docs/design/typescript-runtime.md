@@ -10,7 +10,7 @@ different problems with different public surfaces.
 ## Phase 1: Startup evaluation
 
 Startup evaluation happens before the editor session begins. The implementation
-lives in `src/runtime/startup.rs`.
+lives in `src/runtime/startup/`.
 
 This phase gives `init.ts` a narrow `saya` surface for declaring initial state
 and callback registrations.

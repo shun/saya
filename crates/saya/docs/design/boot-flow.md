@@ -9,7 +9,7 @@ session state plus an initial screen projection.
 ## Entry points
 
 The current startup path begins in `src/main.rs` and moves through
-`src/app/cli.rs` and `src/app/bootstrap.rs`.
+`src/app/cli.rs` and `src/app/bootstrap/`.
 
 - `parse_launch_request(...)` parses the target path and optional `--config`
   file.

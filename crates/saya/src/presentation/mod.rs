@@ -1,8 +1,11 @@
+pub mod floating_input;
+pub mod floating_models;
 pub mod floating_window;
 pub mod markdown;
 pub mod overlay;
 pub mod panel;
 pub mod render;
+pub mod runtime_commands;
 pub mod screen_model;
 pub mod structural_refresh;
 pub mod theme;

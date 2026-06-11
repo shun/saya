@@ -1,6 +1,11 @@
 use crate::presentation::screen_model::ScreenCursorStyle;
 use std::io;
 
+/// 現在のターミナルサイズ（列, 行）を返す。取得に失敗した場合は 80x24 を返す。
+pub fn current_terminal_size() -> (u16, u16) {
+    crossterm::terminal::size().unwrap_or((80, 24))
+}
+
 #[derive(Debug, Default)]
 pub struct TerminalLifecycle;
 

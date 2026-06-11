@@ -62,8 +62,8 @@ logic.
 This layer also owns presentation metadata that is specific to `saya`. The
 Markdown WYSIWYG path is the current example: `main.rs` builds
 `MarkdownDocumentMap` values outside the draw loop,
-`src/presentation/screen_model.rs` projects raw buffer text into display text
-and display-space mappings, and `src/presentation/render/renderer.rs` renders
+`src/presentation/screen_model/` projects raw buffer text into display text
+and display-space mappings, and `src/presentation/render/renderer/` renders
 the projected screen model. This path must not mutate buffer text or
 re-implement Vim motion.
 
@@ -101,7 +101,7 @@ The `src/` tree mirrors this ownership model so new code has an obvious home.
 
 The TypeScript layer exists in two phases.
 
-- `src/runtime/startup.rs` evaluates `init.ts` before session startup and
+- `src/runtime/startup/` evaluates `init.ts` before session startup and
   collects a normalized startup registry.
 - `src/runtime/live.rs` hosts runtime callbacks, typed payload dispatch, and
   command execution against a host capability bridge.

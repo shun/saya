@@ -9,8 +9,15 @@ otherwise.
 
 The internal implementation is split into three layers.
 
-- `src/lib.rs` owns the public facade, intent parsing, host-action draining,
-  option conversion, and FFI result translation.
+- `src/lib.rs` owns the public facade, Ex intent dispatch, and host-action
+  draining. The `ParsedExIntent` type and its dispatch stay here, while the Ex
+  command text parser that produces it now lives in `src/ex_command.rs`.
+  Likewise the `CorePendingInput` type stays here, while the pending input /
+  motion grammar parser that derives it now lives in `src/pending_input.rs`.
+  The FFI result translation helpers (the `convert_*` cluster) now live in
+  `src/convert.rs`; the converted public Core types and the shared
+  `ConvertedOptionValue` enum stay in `src/lib.rs`, and that module reaches
+  them via `use super::*;`.
 - `src/vfs.rs` owns the virtual document coordination layer, request ledger,
   deferred close state, and VFS transaction log.
 - `src/vfd.rs` owns job I/O emulation through virtual file descriptors and the
@@ -71,9 +78,11 @@ These methods are private helpers on `VimCoreSession`.
   Performs the typed option read before the public typed accessors unpack the
   internal enum.
 
-### Free helper functions in `src/lib.rs`
+### Free helper functions
 
-These helpers convert raw bridge output into safe Rust values.
+These helpers convert raw bridge output into safe Rust values. The `convert_*`
+helpers now live in `src/convert.rs`; the option-name/value `CString`
+validators remain in `src/lib.rs`. Behavior is unchanged regardless of file.
 
 - `convert_command_result`
   Maps the bridge command result enum into `CoreCommandOutcome` or

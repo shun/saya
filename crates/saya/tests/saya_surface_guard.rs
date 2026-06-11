@@ -207,8 +207,15 @@ fn integration_editing_smoke_does_not_reintroduce_core_owned_selection_and_edit_
 
 #[test]
 fn core_bridge_debug_does_not_materialize_full_snapshots() {
-    let source = std::fs::read_to_string("src/core/bridge.rs")
-        .expect("core bridge source should be readable from the repository root");
+    let source = std::fs::read_dir("src/core/bridge")
+        .expect("core bridge module directory should be readable from the repository root")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
+        .map(|entry| {
+            std::fs::read_to_string(entry.path())
+                .expect("core bridge source should be readable from the repository root")
+        })
+        .collect::<String>();
 
     assert!(
         !source.contains(".field(\"snapshot\", &self.snapshot())"),

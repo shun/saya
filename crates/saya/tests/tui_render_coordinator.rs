@@ -1421,7 +1421,7 @@ fn unresolved_projection_failure_keeps_failure_diagnostic_separate_from_retained
 fn renderer_option_contract_is_no_longer_source_only_future_guard() {
     let coordinator_source = fs::read_to_string("src/presentation/render/coordinator.rs")
         .expect("render coordinator source should be readable");
-    let renderer_source = fs::read_to_string("src/presentation/render/renderer.rs")
+    let renderer_source = fs::read_to_string("src/presentation/render/renderer/mod.rs")
         .expect("renderer source should be readable");
 
     assert!(

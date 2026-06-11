@@ -453,8 +453,8 @@ application.
 - The TypeScript layer defines the public `saya.theme` declaration surface.
 - The startup registry stores normalized theme declarations.
 - The application layer owns `ThemeRegistry` and resolved presentation styles.
-- `src/presentation/screen_model.rs` maps Markdown metadata to semantic presentation ranges.
-- `src/presentation/render/renderer.rs` renders already-resolved styles according to terminal
+- `src/presentation/screen_model/` maps Markdown metadata to semantic presentation ranges.
+- `src/presentation/render/renderer/` renders already-resolved styles according to terminal
   capability.
 - `vim-core-rs` remains responsible for syntax extraction, including any
   future embedded-language extraction contract.

@@ -107,3 +107,13 @@ pub fn suspend_current_process_for_job_control() -> io::Result<()> {
 fn current_terminal_size() -> (u16, u16) {
     crossterm::terminal::size().unwrap_or((80, 24))
 }
+
+/// ジョブコントロール関連の診断トレースを出力する。`SAYA_TRACE_JOB_CONTROL`
+/// が設定されている場合は標準エラーにも出す。
+pub fn trace_job_control_diagnostic(args: std::fmt::Arguments<'_>) {
+    let message = args.to_string();
+    log::debug!("[job_control_diagnostic] {message}");
+    if std::env::var_os("SAYA_TRACE_JOB_CONTROL").is_some() {
+        eprintln!("[saya-trace][job-control] {message}");
+    }
+}

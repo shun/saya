@@ -10,7 +10,14 @@ target/
 !.codex/hooks/**
 .agents/
 tmp/
-*.swp
+# Vim スワップファイル（github/gitignore の Vim.gitignore 相当）
+# 末尾文字ローテーション(.swp→.swa)に加え、中央文字が変わる(.svz 等)・
+# basename 無しの無名バッファ swap(.swp/.swc 等)も網羅する。
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
 
 # vim-core-rs の生成物（vendor-sync.sh で都度生成・公開時のみ同梱）
 crates/vim-core-rs/vendor/vim_src/

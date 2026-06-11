@@ -1387,6 +1387,9 @@ fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
         .expect("event loop source is readable");
     let main_source =
         std::fs::read_to_string(manifest_dir.join("src/main.rs")).expect("main source is readable");
+    let outcome_consume_source =
+        std::fs::read_to_string(manifest_dir.join("src/app/outcome_consume.rs"))
+            .expect("outcome consume source is readable");
 
     assert!(
         !event_loop_source.contains("RedrawPlan"),
@@ -1397,8 +1400,8 @@ fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
         "main loop must pass structural RedrawPlan to render coordination instead of relying on event coalescing"
     );
     assert!(
-        main_source.contains("structural_refresh.redraw_plan.full")
-            && main_source.contains("structural_refresh.redraw_plan.clear_before_draw"),
+        outcome_consume_source.contains("structural_refresh.redraw_plan.full")
+            && outcome_consume_source.contains("structural_refresh.redraw_plan.clear_before_draw"),
         "folded full and clear-before-draw metadata must remain observable before render"
     );
 }
