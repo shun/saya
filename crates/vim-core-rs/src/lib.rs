@@ -131,6 +131,60 @@ impl CorePendingInput {
     }
 }
 
+/// ADR 0006 Phase 3: あるキー列を core に dispatch すると完成コマンドになるのか、
+/// それともまだ追加キーを待つ pending 状態になるのかを表す予測結果。
+///
+/// host 側の入力パイプラインは、この予測を使って「pending の間は backend を呼ばず
+/// キーをバッファし、完成した時だけ完成キー列を 1 回 dispatch する」越境制御を行う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreInputCompleteness {
+    /// この時点で core に渡すと完成コマンドとして実行される（pending を残さない）。
+    /// `pending_for_dispatch_sequence` が pending と判定しなかったキー列はここに入る。
+    /// 予測器のカバー範囲外（Insert モード等の非 Normal 系文法）も「完成扱い」とし、
+    /// 従来どおり即時 dispatch する（退行回避）。
+    Complete,
+    /// このキー列は未完成で、追加キーを待つ pending 状態になる。
+    /// 例: operator `d`（motion 待ち）、`f`（文字待ち）、`g`（prefix）など。
+    Pending,
+}
+
+impl CoreInputCompleteness {
+    pub fn is_pending(self) -> bool {
+        matches!(self, CoreInputCompleteness::Pending)
+    }
+}
+
+/// ADR 0006 Phase 3: キー列が完成コマンドになるかを非破壊（状態を一切変えない）に
+/// 予測する純粋関数。
+///
+/// `pending_input.rs` の `pending_for_dispatch_sequence` をそのまま再利用する。
+/// この関数は `VimCoreSession` の状態を読まず書かないため、host から完成判定の
+/// 予測器として安全に呼べる（重複文法を host 側に再実装しない、という ADR 0006 の
+/// 方針に沿う）。
+///
+/// 注意:
+/// - 対象は Normal 系の sequence 文法（`mode_uses_normal_sequence_grammar`）のみ。
+///   Insert モードなど対象外のモードでは常に `Complete` を返し、host は従来どおり
+///   即時 dispatch する。
+/// - `pending_for_dispatch_sequence` は native typeahead を参照しない予測器なので、
+///   native pending にしか現れない一部の待ち（FFI 側のみが知る状態）は判定できない。
+///   その場合も `Complete` を返すため、host は「完成扱いで即送出」にフォールバックする
+///   （pending を host で握りすぎて退行するより安全側）。
+pub fn predict_input_completeness(sequence: &str, mode: CoreMode) -> CoreInputCompleteness {
+    if sequence.is_empty() {
+        return CoreInputCompleteness::Complete;
+    }
+    if !mode_uses_normal_sequence_grammar(mode) {
+        return CoreInputCompleteness::Complete;
+    }
+    let predicted = pending_for_dispatch_sequence(sequence);
+    if predicted.is_pending() {
+        CoreInputCompleteness::Pending
+    } else {
+        CoreInputCompleteness::Complete
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreMarkPosition {
     pub buf_id: i32,

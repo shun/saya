@@ -6,7 +6,8 @@ pub fn collect_startup_registry_for_plugin_operation(
     config_source: ConfigSource,
 ) -> Result<Option<(StartupRegistry, String)>, String> {
     let mut warnings = Vec::new();
-    let loaded_config = load_config_with_fallback(config_source, &mut warnings);
+    let loaded_config =
+        load_config_with_fallback(config_source, DefaultConfigBase::EnvResolved, &mut warnings);
     let LoadedConfig::File { path, source } = loaded_config else {
         return Ok(None);
     };

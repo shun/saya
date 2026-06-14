@@ -4,9 +4,21 @@ use super::*;
 
 pub(super) fn merge_plugin_startup_cache(
     loaded_config: &LoadedConfig,
+    plugin_cache_root: Option<&PluginCacheRoot>,
     registry: &mut StartupRegistry,
 ) {
-    let host = PluginHost::default_from_env();
+    // 注入された cache root があればそれを使い（テストの密閉用）、無ければ従来どおり
+    // 環境変数解決（本番）に委ねる。これにより本番の挙動を変えずにテストだけ密閉できる。
+    let host = match plugin_cache_root {
+        Some(root) => {
+            log::debug!(
+                "[bootstrap][plugin-host] using injected plugin cache root (hermetic): {}",
+                root.path().display()
+            );
+            PluginHost::new(root.clone())
+        }
+        None => PluginHost::default_from_env(),
+    };
     let validation = match loaded_config {
         LoadedConfig::Default => StartupPlanValidation::Any,
         LoadedConfig::File { source, .. } => {

@@ -47,6 +47,11 @@ pub struct CoreBridge {
     active_input_correlation_id: Option<u64>,
     pending_transport_key: Option<String>,
     syntax_enabled: bool,
+    /// ADR 0006 Phase 3: `dispatch_key` が core に渡された回数。
+    /// 「pending 中は backend を呼ばない／完成時のみ 1 回呼ぶ」をログ・テストで
+    /// 観測するための seam。transport prefix のバッファリングで実際の dispatch を
+    /// 行わなかった回も含めず、core へ実投入した回数のみ数える。
+    dispatch_key_count: u64,
 }
 
 fn core_session_options_from_env() -> CoreSessionOptions {
@@ -106,7 +111,14 @@ impl CoreBridge {
             active_input_correlation_id: None,
             pending_transport_key: None,
             syntax_enabled: false,
+            dispatch_key_count: 0,
         })
+    }
+
+    /// ADR 0006 Phase 3: これまでに core へ実投入した `dispatch_key` の回数。
+    /// transport prefix のバッファリングで実投入しなかった呼び出しは数えない。
+    pub fn dispatch_key_count(&self) -> u64 {
+        self.dispatch_key_count
     }
 
     pub fn new_with_target_path(
@@ -151,6 +163,27 @@ impl CoreBridge {
 
     pub fn pending_input_is_pending(&self) -> bool {
         self.light_snapshot().pending_input.is_pending()
+    }
+
+    /// ADR 0006 Phase 3: キー列 `sequence` を現在のモードで core に dispatch したとき、
+    /// 完成コマンドになるか pending（追加キー待ち）になるかを非破壊に予測する。
+    ///
+    /// core の純粋予測器 `predict_input_completeness` をそのまま委譲する薄いクエリ。
+    /// session 状態を一切変更しないため、host 入力パイプラインが「pending の間は
+    /// backend を呼ばず、完成時のみ完成キー列を 1 回 dispatch する」越境制御に使える。
+    pub fn classify_input_completeness(
+        &self,
+        sequence: &str,
+    ) -> vim_core_rs::CoreInputCompleteness {
+        let mode = self.light_snapshot().mode;
+        let completeness = vim_core_rs::predict_input_completeness(sequence, mode);
+        log::debug!(
+            "[core_bridge] classify_input_completeness: sequence={:?}, mode={:?}, completeness={:?}",
+            sequence,
+            mode,
+            completeness
+        );
+        completeness
     }
 
     pub fn light_snapshot(&self) -> CoreLightSnapshot {
@@ -437,10 +470,12 @@ impl CoreBridge {
         } else {
             key.to_string()
         };
+        self.dispatch_key_count += 1;
         log::debug!(
-            "[core_bridge] dispatching key: {:?} (len={})",
+            "[core_bridge] dispatching key: {:?} (len={}, dispatch_key_count={})",
             key,
-            key.len()
+            key.len(),
+            self.dispatch_key_count
         );
         let outcome = if self.should_handle_ctrl_c_interrupt(&key) {
             self.handle_ctrl_c_interrupt()?

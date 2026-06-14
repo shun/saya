@@ -848,6 +848,7 @@ pub fn normal_quit_warning_message() -> &'static str {
     "No write since last change (add ! to override)"
 }
 
+mod command;
 mod command_line;
 mod directory;
 mod floating_ui;
@@ -861,6 +862,7 @@ mod selector;
 mod shutdown_intent;
 mod startup_keymap;
 
+pub use command::*;
 pub use command_line::*;
 pub use directory::*;
 pub use floating_ui::*;

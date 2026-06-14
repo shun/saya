@@ -53,6 +53,13 @@ pub async fn execute_startup_keymap_registered_command(
     )
 }
 
+// ADR 0006 Phase 3: Phase 0 の止血（`resolve_startup_keymap_with_core_sync` /
+// `StartupKeymapResolution`）は撤去した。入力ルーティングは完成判定を集約した
+// 単一パイプライン（`resolve_pipeline_command_buffered`）へ一本化され、prefix を
+// core へ先行送出して同期させる必要も、mapping 確定時に core 側 pending を ESC で
+// 巻き戻す必要もなくなった。完成判定は core の非破壊予測器
+// (`predict_input_completeness`) を予測関数として host から呼ぶ形で実現する。
+
 pub fn startup_keymap_action_for_input(
     keymaps: &[crate::app::bootstrap::StartupKeymapSnapshot],
     mode: CoreMode,
@@ -63,49 +70,18 @@ pub fn startup_keymap_action_for_input(
     startup_keymap_action_for_lhs(keymaps, mode, &lhs)
 }
 
-pub fn startup_keymap_action_for_snapshot_input(
-    keymaps: &[crate::app::bootstrap::StartupKeymapSnapshot],
-    snapshot: &vim_core_rs::CoreLightSnapshot,
-    key: &KeyInput,
-    pending_lhs: &mut Option<String>,
-) -> Option<StartupKeymapAction> {
-    let mode = startup_keymap_mode_from_core_mode(snapshot.mode)?;
-    let key_lhs = startup_keymap_lhs_from_input(key)?;
-    if let Some(prefix) = pending_lhs.take() {
-        let lhs = format!("{prefix}{key_lhs}");
-        if let Some(action) = startup_keymap_action_for_lhs(keymaps, mode, &lhs) {
-            return Some(action);
-        }
-        if startup_keymap_has_longer_prefix(keymaps, mode, &lhs) {
-            *pending_lhs = Some(lhs);
-            return None;
-        }
-    }
-
-    if snapshot.pending_input.pending_keys.is_empty() {
-        if let Some(action) = startup_keymap_action_for_lhs(keymaps, mode, &key_lhs) {
-            return Some(action);
-        }
-        if startup_keymap_has_longer_prefix(keymaps, mode, &key_lhs) {
-            *pending_lhs = Some(key_lhs);
-        }
-        return None;
-    }
-    let pending_lhs = (!snapshot.pending_input.pending_keys.is_empty())
-        .then(|| format!("{}{}", snapshot.pending_input.pending_keys, key_lhs));
-    let direct_lhs = startup_keymap_lhs_from_input(key)?;
-
-    [pending_lhs.as_deref(), Some(direct_lhs.as_str())]
-        .into_iter()
-        .flatten()
-        .find_map(|lhs| {
-            keymaps
-                .iter()
-                .rev()
-                .find(|keymap| keymap.mode == mode && keymap.lhs == lhs)
-                .map(|keymap| keymap.action.clone())
-        })
-}
+// ADR 0006 Phase 2/3 整理: legacy wrapper `startup_keymap_action_for_snapshot_input`
+// （snapshot + host pending を受け、2 キー prefix を結合解決していた）は削除した。
+// 本番の入力解決は完成判定を集約した単一パイプライン
+// （`resolve_pipeline_command` / `resolve_pipeline_command_buffered`, command.rs）へ
+// 一本化済みであり、唯一残っていた wrapper の本番呼び出し元（起動スモーク
+// `run_binary_completion_smoke`）は単キー `<C-x>` を 1 回解決するだけだったため、
+// 下位純粋関数 `startup_keymap_action_for_input` 直接利用へ移管した。
+// 2 キー prefix 解決の本番回帰は `tests/integration_input_pipeline.rs` が担保する。
+//
+// 下位関数 `startup_keymap_action_for_lhs` / `startup_keymap_has_longer_prefix` /
+// `startup_keymap_lhs_from_input` / `startup_keymap_mode_from_core_mode` は、現役の
+// パイプライン本体 `resolve_pipeline_command`（command.rs）が依存しているため残す。
 
 pub fn startup_keymap_action_for_lhs(
     keymaps: &[crate::app::bootstrap::StartupKeymapSnapshot],
@@ -128,6 +104,15 @@ pub fn startup_keymap_has_longer_prefix(
         .iter()
         .any(|keymap| keymap.mode == mode && keymap.lhs.starts_with(lhs) && keymap.lhs != lhs)
 }
+
+// ADR 0006 Phase 2/3 整理: 旧テスト module `adr0006_phase1_tests`
+// （`keymap_resolution_ignores_core_pending_when_host_pending_is_empty`）は、削除した
+// wrapper `startup_keymap_action_for_snapshot_input` 専用のため撤去した。
+// その「core pending（`snapshot.pending_input.pending_keys`）を keymap 解決の決定源に
+// しない」性質は、現役パイプライン `resolve_pipeline_command`（command.rs）が
+// snapshot から `mode` のみを参照し core pending を一切読まない構造そのもので保証され、
+// `tests/integration_input_pipeline.rs` の
+// `pipeline_ignores_core_pending_when_host_pending_is_empty` が本番経路で明示検証する。
 
 pub fn startup_keymap_mode_from_core_mode(mode: CoreMode) -> Option<StartupKeymapMode> {
     match mode {

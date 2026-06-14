@@ -184,6 +184,122 @@ pub fn dispatch_floating_window_key(
     }
 }
 
+/// ADR 0006 Phase 3: 完成したキー列を core へ 1 回 dispatch し、その後段処理
+/// （outcome 回収・host action・buffer-changed・dirty 同期・redraw）をまとめて行う。
+///
+/// 旧 `dispatch_resolved_intent_key` の `EditKey` 腕から抽出した共通処理。
+/// Phase 3 の buffered パイプライン（完成コマンドのみ越境）と、legacy intent 経路の
+/// 両方から再利用する。引数 `keys` は **完成済みのキー列**（例 `"gg"`, `"dw"`, `"3j"`）
+/// であり、部分入力（pending）は呼び出し側で host にバッファ済みである前提。
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_complete_keys_to_core(
+    keys: &str,
+    outcome: &mut BootstrapOutcome,
+    outcome_accumulator: &mut MainOutcomeAccumulator,
+    session_state: &mut EditorSessionState,
+    transient_msg: &mut Option<String>,
+    system_warning: &mut Option<String>,
+    host_action_runtime: &mut HostActionRuntime,
+    runtime_session: &mut Option<RuntimeSessionOwner>,
+    need_redraw: &mut bool,
+    runtime_presentation_intents: &mut Vec<RuntimePresentationIntent>,
+    lsif_bridge: &LsifBridgeHandle,
+    floating_window_manager: &mut FloatingWindowManager,
+    completion_float_manager: &mut CompletionFloatManager,
+    lsp_diagnostic_store: &mut LspDiagnosticStore,
+    terminal_float_manager: &mut TerminalFloatManager,
+    panel_manager: &mut PanelManager,
+    workspace_projection_dirty: &mut bool,
+) -> Option<ShutdownReason> {
+    let before_snapshot = outcome.core_bridge.light_snapshot();
+    let need_redraw_before_dispatch = *need_redraw;
+    log::info!(
+        "[main][pipeline] dispatching complete command sequence to backend (only complete commands cross the boundary): keys={:?}, dispatch_key_count_before={}",
+        keys,
+        outcome.core_bridge.dispatch_key_count()
+    );
+    let dispatch_result = outcome.core_bridge.dispatch_key(keys);
+    let after_snapshot = outcome.core_bridge.light_snapshot();
+    log::info!(
+        "[main][pipeline] complete command dispatched: keys={:?}, dispatch_key_count_after={}, result={:?}",
+        keys,
+        outcome.core_bridge.dispatch_key_count(),
+        dispatch_result
+    );
+    if apply_floating_lifecycle_after_core_edit(
+        floating_window_manager,
+        &before_snapshot,
+        &after_snapshot,
+    ) {
+        *workspace_projection_dirty = true;
+    }
+    trace_redraw_diagnostic(format_args!(
+        "edit keys dispatched: keys={:?}, result={:?}, revision {}->{}, cursor ({},{}) -> ({},{}), mode {:?}->{:?}, need_redraw_before={}",
+        keys,
+        dispatch_result,
+        before_snapshot.revision,
+        after_snapshot.revision,
+        before_snapshot.cursor_row,
+        before_snapshot.cursor_col,
+        after_snapshot.cursor_row,
+        after_snapshot.cursor_col,
+        before_snapshot.mode,
+        after_snapshot.mode,
+        need_redraw_before_dispatch
+    ));
+    consume_core_outcomes_from_core(&mut outcome.core_bridge, outcome_accumulator, need_redraw);
+
+    if let Some(reason) = process_pending_host_actions_with_runtime(
+        outcome,
+        outcome_accumulator,
+        session_state,
+        transient_msg,
+        system_warning,
+        host_action_runtime,
+        runtime_session.as_mut(),
+        need_redraw,
+        runtime_presentation_intents,
+        Some(lsif_bridge),
+    )
+    .await
+    {
+        return Some(reason);
+    }
+
+    if after_snapshot.revision != before_snapshot.revision {
+        if let Some(reason) = dispatch_buffer_changed_with_runtime(
+            runtime_session.as_mut(),
+            outcome,
+            session_state,
+            transient_msg,
+            need_redraw,
+            runtime_presentation_intents,
+            floating_window_manager,
+            completion_float_manager,
+            lsp_diagnostic_store,
+            terminal_float_manager,
+            panel_manager,
+            Some(lsif_bridge),
+        )
+        .await
+        {
+            return Some(reason);
+        }
+    }
+
+    sync_session_dirty_from_core(session_state, &outcome.core_bridge);
+    trace_redraw_diagnostic(format_args!(
+        "edit keys host policy forcing redraw after dispatch: keys={:?}, cursor=({},{}), revision={}, prior_need_redraw={}",
+        keys,
+        after_snapshot.cursor_row,
+        after_snapshot.cursor_col,
+        after_snapshot.revision,
+        *need_redraw
+    ));
+    *need_redraw = true;
+    None
+}
+
 /// startup keymap で消費されなかったキーを intent 解決して core へディスパッチする。
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch_resolved_intent_key(
@@ -217,85 +333,29 @@ pub async fn dispatch_resolved_intent_key(
     match intent {
         EditorIntent::EditKey(k) => {
             *viewport_sync_mode = viewport_sync_mode_for_input(key);
-            let before_snapshot = outcome.core_bridge.light_snapshot();
-            let need_redraw_before_dispatch = *need_redraw;
-            let dispatch_result = outcome.core_bridge.dispatch_key(&k);
-            let after_snapshot = outcome.core_bridge.light_snapshot();
-            if apply_floating_lifecycle_after_core_edit(
-                floating_window_manager,
-                &before_snapshot,
-                &after_snapshot,
-            ) {
-                *workspace_projection_dirty = true;
-            }
-            trace_redraw_diagnostic(format_args!(
-                "edit key dispatched: key={:?}, result={:?}, revision {}->{}, cursor ({},{}) -> ({},{}), mode {:?}->{:?}, need_redraw_before={}",
-                k,
-                dispatch_result,
-                before_snapshot.revision,
-                after_snapshot.revision,
-                before_snapshot.cursor_row,
-                before_snapshot.cursor_col,
-                after_snapshot.cursor_row,
-                after_snapshot.cursor_col,
-                before_snapshot.mode,
-                after_snapshot.mode,
-                need_redraw_before_dispatch
-            ));
-            consume_core_outcomes_from_core(
-                &mut outcome.core_bridge,
-                outcome_accumulator,
-                need_redraw,
-            );
-
-            if let Some(reason) = process_pending_host_actions_with_runtime(
+            if let Some(reason) = dispatch_complete_keys_to_core(
+                &k,
                 outcome,
                 outcome_accumulator,
                 session_state,
                 transient_msg,
                 system_warning,
                 host_action_runtime,
-                runtime_session.as_mut(),
+                runtime_session,
                 need_redraw,
                 runtime_presentation_intents,
-                Some(lsif_bridge),
+                lsif_bridge,
+                floating_window_manager,
+                completion_float_manager,
+                lsp_diagnostic_store,
+                terminal_float_manager,
+                panel_manager,
+                workspace_projection_dirty,
             )
             .await
             {
                 return Some(reason);
             }
-
-            if after_snapshot.revision != before_snapshot.revision {
-                if let Some(reason) = dispatch_buffer_changed_with_runtime(
-                    runtime_session.as_mut(),
-                    outcome,
-                    session_state,
-                    transient_msg,
-                    need_redraw,
-                    runtime_presentation_intents,
-                    floating_window_manager,
-                    completion_float_manager,
-                    lsp_diagnostic_store,
-                    terminal_float_manager,
-                    panel_manager,
-                    Some(lsif_bridge),
-                )
-                .await
-                {
-                    return Some(reason);
-                }
-            }
-
-            sync_session_dirty_from_core(session_state, &outcome.core_bridge);
-            trace_redraw_diagnostic(format_args!(
-                "edit key host policy forcing redraw after dispatch: key={:?}, cursor=({},{}), revision={}, prior_need_redraw={}",
-                k,
-                after_snapshot.cursor_row,
-                after_snapshot.cursor_col,
-                after_snapshot.revision,
-                *need_redraw
-            ));
-            *need_redraw = true;
         }
         EditorIntent::Save => {
             let snapshot = outcome.core_bridge.snapshot();

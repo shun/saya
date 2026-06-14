@@ -10,6 +10,7 @@
 /// 既存ファイル起動、新規バッファ起動、読込失敗を個別に確認する。
 /// 起動失敗時にセッションが中途半端に残らないことを確認する。
 /// Requirements: 1.1, 1.2, 1.3, 3.4
+use std::collections::BTreeMap;
 use std::io;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use saya::app::cli::{
 use saya::app::session::{EditorSessionState, SaveRequestError};
 use saya::app::startup::prepare_launch_and_start_terminal;
 use saya::presentation::screen_model::{ProjectionInput, project};
+use saya::runtime::plugin::{LazyIndex, LazyTarget, PluginCacheRoot, PluginHost};
 use saya::terminal::lifecycle::TerminalBackend;
 use vim_core_rs::CoreMode;
 
@@ -58,6 +60,73 @@ fn remove_unreadable_file(path: &std::path::Path) {
 
 fn default_request() -> LaunchRequest {
     LaunchRequest::default()
+}
+
+/// 密閉（hermetic）な起動環境。
+///
+/// 環境変数（HOME/XDG/SAYA_HOME）を一切変更せず、`LaunchRequest` への注入だけで
+/// `ConfigSource::Default` の解決元と plugin cache を一時ディレクトリへ閉じ込める。
+/// これにより、開発者マシンの実 `~/.config/saya/init.ts` を一切読まずに起動フローを
+/// 検証できる。設定ディレクトリには `init.ts` を置かない（＝設定なし）ため、
+/// `ConfigSource::Default` は `DefaultUsed` 経路を通り warning なしで完了する。
+/// plugin cache には lazy index を書き込み、bundled manifest fallback を回避することで
+/// 実 plugin home へのアクセスを防ぐ。Drop で一時ディレクトリを後始末する。
+struct HermeticStartup {
+    cache_root: PathBuf,
+    config_dir: PathBuf,
+}
+
+impl HermeticStartup {
+    fn new(name: &str) -> Self {
+        let cache_root = unique_path(&format!("{name}-cache"));
+        let config_dir = unique_path(&format!("{name}-config"));
+
+        // 隔離されたプラグインキャッシュに lazy index を書き込み、本番同様の探索経路を通す。
+        // これにより loaded_plugin_entries > 0 となり、実 plugin home を探す bundled
+        // manifest fallback を回避できる。
+        let host = PluginHost::new(PluginCacheRoot::new(cache_root.clone()));
+        let mut commands = BTreeMap::new();
+        commands.insert(
+            "__test.noop".to_string(),
+            LazyTarget {
+                plugin: "__test".to_string(),
+                module: "__test.ts".to_string(),
+                export_name: "setup".to_string(),
+            },
+        );
+        host.write_lazy_index(&LazyIndex {
+            version: LazyIndex::CURRENT_VERSION,
+            commands,
+            events: BTreeMap::new(),
+        })
+        .expect("隔離されたプラグインキャッシュへの書き込みが成功すること");
+
+        Self {
+            cache_root,
+            config_dir,
+        }
+    }
+
+    /// 注入済みの cache root を返す。
+    fn plugin_cache_root(&self) -> PluginCacheRoot {
+        PluginCacheRoot::new(self.cache_root.clone())
+    }
+
+    /// 既存の `LaunchRequest` へ密閉用の注入（plugin cache / default config dir）を施す。
+    fn inject(&self, request: LaunchRequest) -> LaunchRequest {
+        LaunchRequest {
+            plugin_cache_root: Some(self.plugin_cache_root()),
+            default_config_dir: Some(self.config_dir.clone()),
+            ..request
+        }
+    }
+}
+
+impl Drop for HermeticStartup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.cache_root);
+        let _ = std::fs::remove_dir_all(&self.config_dir);
+    }
 }
 
 fn cwd_test_lock() -> &'static Mutex<()> {
@@ -214,6 +283,7 @@ impl TerminalBackend for RecordingTerminalBackend {
 #[test]
 fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
     let _lock = test_lock();
+    let hermetic = HermeticStartup::new("existing-file");
     let target_path = unique_path("existing-file");
     let target_content = "Hello Saya\nSecond line\n";
     std::fs::write(&target_path, target_content).expect("テストファイルの作成");
@@ -223,7 +293,8 @@ fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
         .expect("CLI 引数のパースが成功すること");
     assert_eq!(request.target_path(), Some(&target_path));
 
-    // 2. 起動準備
+    // 2. 起動準備（実ホームの init.ts を読まないよう密閉用の注入を施す）
+    let request = hermetic.inject(request);
     let outcome = prepare_launch(request).expect("既存ファイルでの起動が成功すること");
 
     // 3. 起動結果の検証
@@ -262,12 +333,14 @@ fn existing_file_startup_flow_from_cli_args_to_initial_screen_model() {
 #[test]
 fn new_buffer_startup_flow_without_target_path() {
     let _lock = test_lock();
+    let hermetic = HermeticStartup::new("new-buffer");
     // 1. CLI 引数パース（対象パスなし）
     let request =
         parse_launch_request::<&[&str], &&str>(&[]).expect("空引数のパースが成功すること");
     assert_eq!(request.target_path(), None);
 
-    // 2. 起動準備
+    // 2. 起動準備（実ホームの init.ts を読まないよう密閉用の注入を施す）
+    let request = hermetic.inject(request);
     let outcome = prepare_launch(request).expect("新規バッファでの起動が成功すること");
 
     // 3. 起動結果の検証
@@ -392,28 +465,29 @@ fn startup_failure_leaves_terminal_lifecycle_uninitialized() {
 #[test]
 fn session_guard_released_after_startup_failure() {
     let _lock = test_lock();
+    let hermetic = HermeticStartup::new("session-cleanup");
     #[cfg(unix)]
     let restricted_path = create_unreadable_file("session-cleanup");
 
     // 1. 最初の起動試行（失敗する）
-    let result = prepare_launch(LaunchRequest {
+    let result = prepare_launch(hermetic.inject(LaunchRequest {
         #[cfg(unix)]
         input_source: InputSource::File(restricted_path.clone()),
         #[cfg(not(unix))]
         input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
         ..default_request()
-    });
+    }));
     assert!(result.is_err(), "起動は失敗すること");
     #[cfg(unix)]
     remove_unreadable_file(&restricted_path);
 
-    // 2. セッションガードが解放されているので、再度起動可能
-    let outcome = prepare_launch(LaunchRequest {
+    // 2. セッションガードが解放されているので、再度起動可能（実ホーム非依存で密閉）
+    let outcome = prepare_launch(hermetic.inject(LaunchRequest {
         input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
         ..default_request()
-    });
+    }));
     assert!(
         outcome.is_ok(),
         "起動失敗後にセッションが解放され、再起動できること"
@@ -424,23 +498,24 @@ fn session_guard_released_after_startup_failure() {
 #[test]
 fn session_guard_released_after_successful_startup_outcome_dropped() {
     let _lock = test_lock();
-    // 1. 成功起動
+    let hermetic = HermeticStartup::new("guard-drop");
+    // 1. 成功起動（実ホーム非依存で密閉）
     {
-        let _outcome = prepare_launch(LaunchRequest {
+        let _outcome = prepare_launch(hermetic.inject(LaunchRequest {
             input_source: InputSource::Empty,
             config_source: ConfigSource::Default,
             ..default_request()
-        })
+        }))
         .expect("起動成功");
         // outcome がスコープを抜けて drop される
     }
 
     // 2. 再度起動可能であること
-    let outcome2 = prepare_launch(LaunchRequest {
+    let outcome2 = prepare_launch(hermetic.inject(LaunchRequest {
         input_source: InputSource::Empty,
         config_source: ConfigSource::Default,
         ..default_request()
-    });
+    }));
     assert!(
         outcome2.is_ok(),
         "前回の outcome drop 後にセッションガードが解放され、再起動できること"
@@ -453,14 +528,18 @@ fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
     let _lock = launch_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hermetic = HermeticStartup::new("repeat");
     let success_path = unique_path("repeat-success");
     #[cfg(unix)]
     let failure_path = create_unreadable_file("repeat-failure");
 
     std::fs::write(&success_path, "line1\nline2\n").expect("成功用のテストファイルの作成");
 
-    let success_request = parse_launch_request(["-R", "+2", success_path.to_str().unwrap()])
-        .expect("成功サイクル用 CLI 引数のパースが成功すること");
+    // 成功サイクルは config 解決へ到達するため、実ホーム非依存で密閉する。
+    let success_request = hermetic.inject(
+        parse_launch_request(["-R", "+2", success_path.to_str().unwrap()])
+            .expect("成功サイクル用 CLI 引数のパースが成功すること"),
+    );
     #[cfg(unix)]
     let failure_request = parse_launch_request(["-R", "+2", failure_path.to_str().unwrap()])
         .expect("失敗サイクル用 CLI 引数のパースが成功すること");
@@ -719,7 +798,9 @@ fn startup_eval_failure_projects_into_initial_message_line() {
 #[test]
 fn startup_from_stdin_populates_initial_snapshot() {
     let _lock = test_lock();
-    let request = parse_launch_request(["-"]).expect("CLI 引数のパースが成功すること");
+    let hermetic = HermeticStartup::new("stdin");
+    let request = hermetic
+        .inject(parse_launch_request(["-"]).expect("CLI 引数のパースが成功すること"));
     let mut stdin = Cursor::new("stdin line 1\nstdin line 2\n");
 
     let outcome =
@@ -739,8 +820,11 @@ fn startup_with_initial_line_number_moves_cursor_to_requested_line() {
     let target_path = unique_path("cursor-line");
     std::fs::write(&target_path, "line1\nline2\nline3\n").expect("テストファイルの作成");
 
-    let request = parse_launch_request(["+2", target_path.to_str().unwrap()])
-        .expect("CLI 引数のパースが成功すること");
+    let hermetic = HermeticStartup::new("cursor-line");
+    let request = hermetic.inject(
+        parse_launch_request(["+2", target_path.to_str().unwrap()])
+            .expect("CLI 引数のパースが成功すること"),
+    );
     let outcome = prepare_launch(request).expect("行指定付き起動が成功すること");
 
     assert_eq!(outcome.initial_snapshot.cursor_row, 1);
@@ -755,8 +839,11 @@ fn startup_with_end_of_file_moves_cursor_to_last_line() {
     let target_path = unique_path("cursor-end");
     std::fs::write(&target_path, "line1\nline2\nline3\n").expect("テストファイルの作成");
 
-    let request = parse_launch_request(["+", target_path.to_str().unwrap()])
-        .expect("CLI 引数のパースが成功すること");
+    let hermetic = HermeticStartup::new("cursor-end");
+    let request = hermetic.inject(
+        parse_launch_request(["+", target_path.to_str().unwrap()])
+            .expect("CLI 引数のパースが成功すること"),
+    );
     let outcome = prepare_launch(request).expect("EOF 指定付き起動が成功すること");
 
     assert_eq!(outcome.initial_snapshot.cursor_row, 2);
@@ -771,8 +858,11 @@ fn startup_with_read_only_rejects_save_request() {
     let target_path = unique_path("read-only");
     std::fs::write(&target_path, "line1\n").expect("テストファイルの作成");
 
-    let request = parse_launch_request(["-R", target_path.to_str().unwrap()])
-        .expect("CLI 引数のパースが成功すること");
+    let hermetic = HermeticStartup::new("read-only");
+    let request = hermetic.inject(
+        parse_launch_request(["-R", target_path.to_str().unwrap()])
+            .expect("CLI 引数のパースが成功すること"),
+    );
     let outcome = prepare_launch(request).expect("read-only 起動が成功すること");
     let session_state = outcome.editor_session_state();
     let save_result = session_state.build_save_request(&outcome.initial_snapshot.text);
@@ -788,8 +878,11 @@ fn startup_with_dash_dash_accepts_leading_dash_file_name() {
     let target_path = unique_path("-leading-name.txt");
     std::fs::write(&target_path, "dash file\n").expect("テストファイルの作成");
 
-    let request = parse_launch_request(["--", target_path.to_str().unwrap()])
-        .expect("CLI 引数のパースが成功すること");
+    let hermetic = HermeticStartup::new("dash-dash");
+    let request = hermetic.inject(
+        parse_launch_request(["--", target_path.to_str().unwrap()])
+            .expect("CLI 引数のパースが成功すること"),
+    );
     let outcome = prepare_launch(request).expect("ダッシュ始まりのファイル起動が成功すること");
 
     assert_eq!(outcome.target_path, Some(target_path.clone()));

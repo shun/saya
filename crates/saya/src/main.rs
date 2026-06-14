@@ -28,17 +28,17 @@ use saya::app::runtime_dispatch::{
     DirectoryOperationConfirmationKeyAction, SaveSnapshotOutcome,
     directory_operation_cancel_message, directory_operation_confirmation_key_action,
     execute_runtime_host_command, save_error_message, save_snapshot_result_with_path_override,
-    startup_keymap_action_for_input, take_pending_directory_save_then_quit_shutdown,
+    take_pending_directory_save_then_quit_shutdown,
 };
 use saya::app::runtime_dispatch::{
-    LsifBridgeHandle, dispatch_buffer_changed_with_runtime, dispatch_buffer_open_with_runtime,
-    execute_startup_keymap_registered_command,
-    handle_directory_operation_confirmation_key_with_runtime, save_snapshot_result,
-    startup_keymap_action_for_snapshot_input,
+    BufferedResolution, Command, LsifBridgeHandle, dispatch_buffer_changed_with_runtime,
+    dispatch_buffer_open_with_runtime, execute_startup_keymap_registered_command,
+    handle_directory_operation_confirmation_key_with_runtime, resolve_pipeline_command_buffered,
+    save_snapshot_result, startup_keymap_action_for_input,
 };
 use saya::app::runtime_dispatch::{
-    dispatch_completion_float_key, dispatch_floating_window_key, dispatch_resolved_intent_key,
-    resolve_input_active_window_id,
+    dispatch_completion_float_key, dispatch_complete_keys_to_core, dispatch_floating_window_key,
+    dispatch_resolved_intent_key, resolve_input_active_window_id,
 };
 use saya::app::runtime_dispatch::{
     dispatch_mouse_click, dispatch_mouse_wheel, dispatch_pasted_text,
@@ -312,6 +312,12 @@ async fn main() {
     let mut command_line_edit = CommandLineEdit::default();
     let mut runtime_input_prompt: Option<RuntimeInputPromptUiState> = None;
     let mut startup_keymap_pending_lhs: Option<String> = None;
+    // ADR 0006 Phase 3: host 入力パイプラインの単一 pending 状態。
+    // - host_count: count digit を host 側に蓄積（core へは流さない）。
+    // - host_passthrough: keymap 非該当キーのうち、core 予測が pending と判定した
+    //   未完成キー列を host にバッファする。完成と判定された時のみ core へ 1 回送る。
+    let mut host_count: Option<usize> = None;
+    let mut host_passthrough: String = String::new();
     let mut command_line_histories = load_histories_from_default_cache();
     let mut runtime_presentation_intents: Vec<RuntimePresentationIntent> = Vec::new();
     let mut last_workspace_model: Option<WorkspaceScreenModel> = None;
@@ -686,121 +692,209 @@ async fn main() {
                                 workspace_projection_dirty
                             );
                         } else if !handled {
-                            let pending_lhs_before = startup_keymap_pending_lhs.clone();
-                            if let Some(action) = startup_keymap_action_for_snapshot_input(
+                            // ADR 0006 Phase 3: モーダル入力を単一パイプラインで解決する。
+                            // 完成判定をパイプラインに集約し、完成コマンドのみを backend へ
+                            // 越境させる。部分入力（keymap prefix / count / operator の motion
+                            // 待ち等）は host 側（host_pending / host_count / host_passthrough）に
+                            // 留め、core を一切呼ばない。
+                            //
+                            // Phase 0 の止血（prefix を core に先行送出して同期 + ESC 巻き戻し）は
+                            // 撤去した。完成判定は core の非破壊予測器
+                            // (`classify_input_completeness`) を予測関数として使うため、
+                            // host/core の pending が乖離する余地がなくなった。
+                            let input_snapshot_for_pipeline =
+                                outcome.core_bridge.light_snapshot();
+                            let predict_mode = input_snapshot_for_pipeline.mode;
+                            let resolution = resolve_pipeline_command_buffered(
                                 &outcome.startup_registry.keymaps,
-                                &outcome.core_bridge.light_snapshot(),
-                                &key,
+                                &input_snapshot_for_pipeline,
                                 &mut startup_keymap_pending_lhs,
-                            ) {
-                                handled = true;
-                                log::debug!(
-                                    "[main] applying startup keymap before core dispatch: key={:?}, action={:?}",
-                                    key,
-                                    action
-                                );
-                                if outcome.core_bridge.pending_input_is_pending() {
-                                    let _ = outcome.core_bridge.dispatch_key("\x1b");
-                                    consume_core_outcomes_from_core(
-                                        &mut outcome.core_bridge,
+                                &mut host_count,
+                                &mut host_passthrough,
+                                &key,
+                                |seq: &str| {
+                                    vim_core_rs::predict_input_completeness(seq, predict_mode)
+                                },
+                            );
+                            log::info!(
+                                "[main][pipeline] phase3 buffered resolution: key={:?}, resolution={:?}, host_pending={:?}, host_count={:?}, host_passthrough={:?}",
+                                key,
+                                resolution,
+                                startup_keymap_pending_lhs,
+                                host_count,
+                                host_passthrough
+                            );
+                            match resolution {
+                                BufferedResolution::Command(Command::BuiltinEdit(rhs)) => {
+                                    handled = true;
+                                    log::debug!(
+                                        "[main][pipeline] dispatching BuiltinEdit complete command to core: rhs={:?}",
+                                        rhs
+                                    );
+                                    if let Some(reason) = dispatch_complete_keys_to_core(
+                                        &rhs,
+                                        &mut outcome,
                                         &mut outcome_accumulator,
+                                        &mut session_state,
+                                        &mut transient_msg,
+                                        &mut system_warning,
+                                        &mut host_action_runtime,
+                                        &mut runtime_session,
                                         &mut need_redraw,
+                                        &mut runtime_presentation_intents,
+                                        &lsif_bridge,
+                                        &mut floating_window_manager,
+                                        &mut completion_float_manager,
+                                        &mut lsp_diagnostic_store,
+                                        &mut terminal_float_manager,
+                                        &mut panel_manager,
+                                        &mut workspace_projection_dirty,
+                                    )
+                                    .await
+                                    {
+                                        break 'main reason;
+                                    }
+                                }
+                                BufferedResolution::Command(Command::HostCommand {
+                                    name: command_name,
+                                    count: host_command_count,
+                                }) => {
+                                    handled = true;
+                                    log::info!(
+                                        "[main][pipeline] executing HostCommand (count carried in type): command={}, count={:?}",
+                                        command_name,
+                                        host_command_count
+                                    );
+                                    if let Some(trace) = pending_input_perf_trace.as_mut() {
+                                        trace.command = Some(command_name.clone());
+                                        log::info!(
+                                            "[PERF][main][input_trace] registered_command_start trace_id={} key={} command={} elapsed_ms={}",
+                                            trace.id,
+                                            trace.key,
+                                            command_name,
+                                            trace.started_at.elapsed().as_millis()
+                                        );
+                                    }
+                                    let command_started_at = std::time::Instant::now();
+                                    if let Some(reason) =
+                                        execute_startup_keymap_registered_command(
+                                            runtime_session.as_mut(),
+                                            &command_name,
+                                            &mut outcome,
+                                            &mut session_state,
+                                            &mut floating_window_manager,
+                                            &mut completion_float_manager,
+                                            &mut lsp_diagnostic_store,
+                                            &mut terminal_float_manager,
+                                            &mut panel_manager,
+                                            Some(&mut runtime_input_prompt),
+                                            &mut transient_msg,
+                                            &mut need_redraw,
+                                            &mut runtime_presentation_intents,
+                                            Some(&lsif_bridge),
+                                        )
+                                        .await
+                                    {
+                                        break 'main reason;
+                                    }
+                                    if let Some(trace) = pending_input_perf_trace.as_mut() {
+                                        let command_elapsed_ms =
+                                            command_started_at.elapsed().as_millis();
+                                        trace.command_elapsed_ms = Some(command_elapsed_ms);
+                                        log::info!(
+                                            "[PERF][main][input_trace] registered_command_done trace_id={} key={} command={} command_ms={} total_ms={}",
+                                            trace.id,
+                                            trace.key,
+                                            command_name,
+                                            command_elapsed_ms,
+                                            trace.started_at.elapsed().as_millis()
+                                        );
+                                    }
+                                    need_redraw = true;
+                                }
+                                BufferedResolution::DispatchComplete(complete_keys) => {
+                                    handled = true;
+                                    log::debug!(
+                                        "[main][pipeline] dispatching complete builtin sequence to core (passthrough completed): keys={:?}",
+                                        complete_keys
+                                    );
+                                    if let Some(reason) = dispatch_complete_keys_to_core(
+                                        &complete_keys,
+                                        &mut outcome,
+                                        &mut outcome_accumulator,
+                                        &mut session_state,
+                                        &mut transient_msg,
+                                        &mut system_warning,
+                                        &mut host_action_runtime,
+                                        &mut runtime_session,
+                                        &mut need_redraw,
+                                        &mut runtime_presentation_intents,
+                                        &lsif_bridge,
+                                        &mut floating_window_manager,
+                                        &mut completion_float_manager,
+                                        &mut lsp_diagnostic_store,
+                                        &mut terminal_float_manager,
+                                        &mut panel_manager,
+                                        &mut workspace_projection_dirty,
+                                    )
+                                    .await
+                                    {
+                                        break 'main reason;
+                                    }
+                                }
+                                BufferedResolution::HoldPending
+                                | BufferedResolution::CountAccumulated => {
+                                    // 部分入力は host に留め backend を呼ばない。
+                                    handled = true;
+                                    need_redraw = true;
+                                    log::debug!(
+                                        "[main][pipeline] partial input held in host pipeline, backend NOT called: key={:?}, host_pending={:?}, host_count={:?}, host_passthrough={:?}",
+                                        key,
+                                        startup_keymap_pending_lhs,
+                                        host_count,
+                                        host_passthrough
                                     );
                                 }
-                                match action {
-                                    StartupKeymapAction::Literal(rhs) => {
-                                        let _ = outcome.core_bridge.dispatch_key(&rhs);
-                                        consume_core_outcomes_from_core(
-                                            &mut outcome.core_bridge,
+                                BufferedResolution::Unhandled => {
+                                    // pipeline で扱えないキー（lhs 表現不能等）。
+                                    // バッファに未完成キーが残っていれば core へ flush してから
+                                    // 後続の従来処理（`:`/`/` や dispatch_resolved_intent_key）へ。
+                                    if !host_passthrough.is_empty() {
+                                        let flushed = std::mem::take(&mut host_passthrough);
+                                        log::debug!(
+                                            "[main][pipeline] unhandled key with residual passthrough buffer; flushing buffer to core before legacy path: flushed={:?}, key={:?}",
+                                            flushed,
+                                            key
+                                        );
+                                        if let Some(reason) = dispatch_complete_keys_to_core(
+                                            &flushed,
+                                            &mut outcome,
                                             &mut outcome_accumulator,
-                                            &mut need_redraw,
-                                        );
-
-                                        if let Some(reason) =
-                                            process_pending_host_actions_with_runtime(
-                                                &mut outcome,
-                                                &mut outcome_accumulator,
-                                                &mut session_state,
-                                                &mut transient_msg,
-                                                &mut system_warning,
-                                                &mut host_action_runtime,
-                                                runtime_session.as_mut(),
-                                                &mut need_redraw,
-                                                &mut runtime_presentation_intents,
-                                                Some(&lsif_bridge),
-                                            )
-                                            .await
-                                        {
-                                            break 'main reason;
-                                        }
-                                        sync_session_dirty_from_core(
                                             &mut session_state,
-                                            &outcome.core_bridge,
-                                        );
-                                    }
-                                    StartupKeymapAction::RegisteredCommand(command_name) => {
-                                        log::info!(
-                                            "[main][keymap] executing registered command from keymap: key={:?}, command={}",
-                                            key,
-                                            command_name
-                                        );
-                                        if let Some(trace) = pending_input_perf_trace.as_mut() {
-                                            trace.command = Some(command_name.clone());
-                                            log::info!(
-                                                "[PERF][main][input_trace] registered_command_start trace_id={} key={} command={} elapsed_ms={}",
-                                                trace.id,
-                                                trace.key,
-                                                command_name,
-                                                trace.started_at.elapsed().as_millis()
-                                            );
-                                        }
-                                        let command_started_at = std::time::Instant::now();
-                                        if let Some(reason) =
-                                            execute_startup_keymap_registered_command(
-                                                runtime_session.as_mut(),
-                                                &command_name,
-                                                &mut outcome,
-                                                &mut session_state,
-                                                &mut floating_window_manager,
-                                                &mut completion_float_manager,
-                                                &mut lsp_diagnostic_store,
-                                                &mut terminal_float_manager,
-                                                &mut panel_manager,
-                                                Some(&mut runtime_input_prompt),
-                                                &mut transient_msg,
-                                                &mut need_redraw,
-                                                &mut runtime_presentation_intents,
-                                                Some(&lsif_bridge),
-                                            )
-                                            .await
+                                            &mut transient_msg,
+                                            &mut system_warning,
+                                            &mut host_action_runtime,
+                                            &mut runtime_session,
+                                            &mut need_redraw,
+                                            &mut runtime_presentation_intents,
+                                            &lsif_bridge,
+                                            &mut floating_window_manager,
+                                            &mut completion_float_manager,
+                                            &mut lsp_diagnostic_store,
+                                            &mut terminal_float_manager,
+                                            &mut panel_manager,
+                                            &mut workspace_projection_dirty,
+                                        )
+                                        .await
                                         {
                                             break 'main reason;
                                         }
-                                        if let Some(trace) = pending_input_perf_trace.as_mut() {
-                                            let command_elapsed_ms =
-                                                command_started_at.elapsed().as_millis();
-                                            trace.command_elapsed_ms = Some(command_elapsed_ms);
-                                            log::info!(
-                                                "[PERF][main][input_trace] registered_command_done trace_id={} key={} command={} command_ms={} total_ms={}",
-                                                trace.id,
-                                                trace.key,
-                                                command_name,
-                                                command_elapsed_ms,
-                                                trace.started_at.elapsed().as_millis()
-                                            );
-                                        }
                                     }
+                                    log::debug!(
+                                        "[main][pipeline] resolution unhandled, falling through to legacy path: key={:?}",
+                                        key
+                                    );
                                 }
-                                need_redraw = true;
-                            } else if startup_keymap_pending_lhs.is_some()
-                                && startup_keymap_pending_lhs != pending_lhs_before
-                            {
-                                handled = true;
-                                log::debug!(
-                                    "[main] startup keymap prefix pending: key={:?}, pending_lhs={:?}",
-                                    key,
-                                    startup_keymap_pending_lhs
-                                );
                             }
                         }
 
@@ -1280,12 +1374,16 @@ async fn run_binary_completion_smoke(
         .core_bridge
         .dispatch_key("A")
         .map_err(|error| format!("completion smoke insert mode failed: {error:?}"))?;
-    let mut startup_keymap_pending_lhs = None;
-    let action = startup_keymap_action_for_snapshot_input(
+    // ADR 0006 Phase 2/3: legacy wrapper `startup_keymap_action_for_snapshot_input`
+    // を廃止し、単キー解決は下位純粋関数 `startup_keymap_action_for_input` を直接使う。
+    // スモークは単キー `<C-x>` を pending 無しで 1 回解決するだけなので、2 キー
+    // prefix 結合能力（本番は単一パイプライン `resolve_pipeline_command_buffered`
+    // が担う）は不要。`core_bridge.mode()` は `light_snapshot().mode` と同値であり、
+    // 解決結果（mode + lhs から `startup_keymap_action_for_lhs`）は移管前と等価。
+    let action = startup_keymap_action_for_input(
         &outcome.startup_registry.keymaps,
-        &outcome.core_bridge.light_snapshot(),
+        outcome.core_bridge.mode(),
         &KeyInput::Ctrl('x'),
-        &mut startup_keymap_pending_lhs,
     )
     .ok_or_else(|| {
         format!(
@@ -5296,12 +5394,12 @@ mod tests {
         let mut runtime_presentation_intents = Vec::new();
 
         outcome.core_bridge.dispatch_key("A").expect("enter insert");
-        let mut startup_keymap_pending_lhs = None;
-        let action = startup_keymap_action_for_snapshot_input(
+        // ADR 0006 Phase 2/3: legacy wrapper を廃止し、下位純粋関数で単キー解決する
+        // （本番スモーク `run_binary_completion_smoke` と同一経路）。
+        let action = startup_keymap_action_for_input(
             &outcome.startup_registry.keymaps,
-            &outcome.core_bridge.light_snapshot(),
+            outcome.core_bridge.mode(),
             &KeyInput::Ctrl('x'),
-            &mut startup_keymap_pending_lhs,
         )
         .unwrap_or_else(|| {
             panic!(
@@ -6463,81 +6561,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn startup_keymap_action_for_input_resolves_pending_two_key_sequence() {
-        let _lock = saya::app::bootstrap::launch_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let keymaps = vec![saya::app::bootstrap::StartupKeymapSnapshot {
-            mode: StartupKeymapMode::Normal,
-            lhs: "gr".to_string(),
-            action: StartupKeymapAction::RegisteredCommand("dired.refresh".to_string()),
-        }];
-        let mut bridge = saya::core::bridge::CoreBridge::new("README.md\nsrc/\n")
-            .expect("core bridge should initialize");
-
-        bridge.dispatch_key("g").expect("g should become pending");
-
-        let mut startup_keymap_pending_lhs = None;
-        assert_eq!(
-            startup_keymap_action_for_snapshot_input(
-                &keymaps,
-                &bridge.light_snapshot(),
-                &KeyInput::Char('r'),
-                &mut startup_keymap_pending_lhs,
-            ),
-            Some(StartupKeymapAction::RegisteredCommand(
-                "dired.refresh".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn startup_keymap_action_for_input_tracks_custom_two_key_prefix() {
-        let _lock = saya::app::bootstrap::launch_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let keymaps = vec![
-            saya::app::bootstrap::StartupKeymapSnapshot {
-                mode: StartupKeymapMode::Normal,
-                lhs: "sg".to_string(),
-                action: StartupKeymapAction::RegisteredCommand("selector.rg".to_string()),
-            },
-            saya::app::bootstrap::StartupKeymapSnapshot {
-                mode: StartupKeymapMode::Normal,
-                lhs: "sr".to_string(),
-                action: StartupKeymapAction::RegisteredCommand("selector.resume".to_string()),
-            },
-        ];
-        let bridge = saya::core::bridge::CoreBridge::new("README.md\n")
-            .expect("core bridge should initialize");
-        let snapshot = bridge.light_snapshot();
-        let mut pending_lhs = None;
-
-        assert_eq!(
-            startup_keymap_action_for_snapshot_input(
-                &keymaps,
-                &snapshot,
-                &KeyInput::Char('s'),
-                &mut pending_lhs,
-            ),
-            None
-        );
-        assert_eq!(pending_lhs.as_deref(), Some("s"));
-
-        assert_eq!(
-            startup_keymap_action_for_snapshot_input(
-                &keymaps,
-                &snapshot,
-                &KeyInput::Char('r'),
-                &mut pending_lhs,
-            ),
-            Some(StartupKeymapAction::RegisteredCommand(
-                "selector.resume".to_string()
-            ))
-        );
-        assert_eq!(pending_lhs, None);
-    }
+    // ADR 0006 Phase 3 整理: `startup_keymap_action_for_snapshot_input` の 2 キー
+    // prefix 解決を検証していた
+    // `startup_keymap_action_for_input_resolves_pending_two_key_sequence` /
+    // `startup_keymap_action_for_input_tracks_custom_two_key_prefix` は削除した。
+    //
+    // 理由: 同関数の 2 キー解決能力は本番で未使用である。本番の唯一の呼び出し元
+    // `run_binary_completion_smoke`（main.rs）は単キー `<C-x>` を解決するだけで、
+    // `g` 始まり等の 2 キー mapping 解決は単一パイプライン
+    // （`resolve_pipeline_command_buffered`）が担う。2 キー解決の本番回帰は
+    // integration テスト `tests/integration_input_pipeline.rs`
+    // （`production_pipeline_gg_jumps_to_row0_with_g_prefixed_keymap` /
+    // `production_pipeline_gd_resolves_registered_host_command`）が担保する。
+    // 本番未使用の 2 キー能力を緑で誤表現しないため、これらのユニットテストは撤去した。
 
     #[test]
     fn runtime_current_buffer_snapshot_includes_cursor_line_for_dired_navigation() {

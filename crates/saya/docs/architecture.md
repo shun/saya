@@ -84,7 +84,10 @@ The `src/` tree mirrors this ownership model so new code has an obvious home.
 - `src/app/` owns startup assembly, bootstrapping, session state, host I/O, and
   the event loop.
 - `src/input/` owns key routing, command-line editing, command history, and
-  local ex-command routing.
+  local ex-command routing. See
+  [ADR 0006](adr/0006-resolve-modal-input-in-a-single-pipeline.md) for the
+  decision to resolve modal input in a single pipeline and to pass only complete
+  commands to the editing backend.
 - `src/presentation/` owns screen projection, viewport state, Markdown
   presentation metadata, render-ready models, theme resolution, overlays, and
   TUI rendering.

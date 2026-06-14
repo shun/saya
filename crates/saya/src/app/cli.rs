@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use crate::runtime::plugin::PluginCommand;
+use crate::runtime::plugin::{PluginCacheRoot, PluginCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchRequest {
@@ -10,6 +10,18 @@ pub struct LaunchRequest {
     pub initial_cursor: InitialCursorPosition,
     pub read_only: bool,
     pub startup_action: StartupAction,
+    /// 起動時に参照するプラグインキャッシュの基点を明示注入するための seam。
+    ///
+    /// 本番起動では `None` を維持し、`PluginHost::default_from_env()`（環境変数
+    /// 解決）に委ねる。テストではここへ一時ディレクトリを注入することで、環境変数を
+    /// 一切変更せずにプラグインキャッシュを密閉できる。
+    pub plugin_cache_root: Option<PluginCacheRoot>,
+    /// `ConfigSource::Default` を解決するときの設定ディレクトリ基点を明示注入する seam。
+    ///
+    /// 本番起動では `None` を維持し、`default_init_ts_path()`（`XDG_CONFIG_HOME` /
+    /// `HOME` 解決、すなわち実ユーザーのホーム）に委ねる。テストではここへ一時ディレクトリ
+    /// を注入することで、実ホームを読まずに `ConfigSource::Default` の挙動を検証できる。
+    pub default_config_dir: Option<PathBuf>,
 }
 
 impl Default for LaunchRequest {
@@ -20,6 +32,8 @@ impl Default for LaunchRequest {
             initial_cursor: InitialCursorPosition::None,
             read_only: false,
             startup_action: StartupAction::Edit,
+            plugin_cache_root: None,
+            default_config_dir: None,
         }
     }
 }

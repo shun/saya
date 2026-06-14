@@ -21,7 +21,7 @@ use crate::runtime::config::{
     StatusLineConfig, apply_config_commands, evaluate_capability_source,
 };
 use crate::runtime::options::{SayaOptionName, SayaOptionValue};
-use crate::runtime::plugin::{PluginHost, StartupPlanValidation};
+use crate::runtime::plugin::{PluginCacheRoot, PluginHost, StartupPlanValidation};
 use crate::runtime::startup::{
     StartupModulePrepareResult, collect_startup_registry, prepare_init_module,
 };
@@ -343,8 +343,14 @@ fn prepare_launch_with_guard<R: Read>(
 
     let config_started_at = Instant::now();
     let mut warnings = Vec::new();
-    let loaded_config = load_config_with_fallback(request.config_source, &mut warnings);
-    let bootstrap_state = resolve_bootstrap_state(&loaded_config);
+    let default_config_base = match request.default_config_dir.as_deref() {
+        Some(dir) => DefaultConfigBase::Injected(dir),
+        None => DefaultConfigBase::EnvResolved,
+    };
+    let loaded_config =
+        load_config_with_fallback(request.config_source, default_config_base, &mut warnings);
+    let bootstrap_state =
+        resolve_bootstrap_state(&loaded_config, request.plugin_cache_root.as_ref());
     warnings.extend(bootstrap_state.warnings.clone());
     apply_startup_core_options(&mut core_bridge, &bootstrap_state.startup_registry.options);
     apply_startup_ftplugin_options(
