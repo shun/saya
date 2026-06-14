@@ -47,11 +47,18 @@ impl TerminalBackend for CrosstermBackendImpl {
     }
 
     fn enable_keyboard_enhancement(&mut self) -> io::Result<()> {
+        // REPORT_EVENT_TYPES は push しない。saya は key release を使わず
+        // input_loop::map_key_input が Release を破棄するため、端末に release
+        // イベントを出させると `:q` 終了時に未処理の release（例: \x1b[13;1;3u）が
+        // シェルへ漏れる。エスケープ曖昧性解消に必要な DISAMBIGUATE_ESCAPE_CODES
+        // のみを push する。
+        log::debug!(
+            "[terminal] pushing keyboard enhancement flags: DISAMBIGUATE_ESCAPE_CODES (REPORT_EVENT_TYPES intentionally omitted to avoid leaking release events on exit)"
+        );
         execute!(
             io::stdout(),
             event::PushKeyboardEnhancementFlags(
                 event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
             )
         )
     }
