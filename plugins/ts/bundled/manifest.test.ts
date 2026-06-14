@@ -7,6 +7,7 @@ Deno.test("bundled manifests generate lazy command placeholders", async () => {
       new URL("./dired/manifest.json", import.meta.url),
       new URL("./completion/manifest.json", import.meta.url),
       new URL("./lsp-client/manifest.json", import.meta.url),
+      new URL("./agent/manifest.json", import.meta.url),
     ].map(async (url) =>
       JSON.parse(await Deno.readTextFile(url)) as SayaBundledPluginManifest
     ),
@@ -30,6 +31,14 @@ Deno.test("bundled manifests generate lazy command placeholders", async () => {
   ) {
     throw new Error("completion command should target saya-completion");
   }
+  if (!artifacts.lazyIndex.commands["panel.toggle"]) {
+    throw new Error("agent command placeholder missing");
+  }
+  if (
+    artifacts.lazyIndex.commands["panel.toggle"].plugin !== "saya-agent"
+  ) {
+    throw new Error("agent command should target saya-agent");
+  }
   if (artifacts.lockfile.plugins.length !== 0) {
     throw new Error("bundled manifests must not create lockfile entries");
   }
@@ -42,11 +51,17 @@ Deno.test("existing bundled import shims point at the new layout", async () => {
   const lspShim = await Deno.readTextFile(
     new URL("../saya-lsp-client.ts", import.meta.url),
   );
+  const agentShim = await Deno.readTextFile(
+    new URL("../saya-agent.ts", import.meta.url),
+  );
 
   if (!diredShim.includes("./bundled/dired/index.ts")) {
     throw new Error("dired shim does not point at bundled/dired");
   }
   if (!lspShim.includes("./bundled/lsp-client/index.ts")) {
     throw new Error("lsp-client shim does not point at bundled/lsp-client");
+  }
+  if (!agentShim.includes("./bundled/agent/index.ts")) {
+    throw new Error("agent shim does not point at bundled/agent");
   }
 });

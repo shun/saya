@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "saya-agent",
+  "module": "plugins/bundled/agent/index.ts",
+  "setup": "setupSayaAgent",
+  "lazy": {
+    "commands": [
+      "panel.toggle",
+      "panel.focus",
+      "panel.unfocus",
+      "panel.close",
+      "panel.detach",
+      "agent.sendCurrentFile",
+      "agent.sendCurrentLine",
+      "agent.sendSelectedRange",
+      "agent.sendPrompt"
+    ],
+    "events": []
+  }
+}

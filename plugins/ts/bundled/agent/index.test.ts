@@ -4,7 +4,7 @@ import {
   renderCurrentLinePrompt,
   renderSelectedRangePrompt,
   setupSayaAgent,
-} from "./saya-agent.ts";
+} from "./index.ts";
 
 Deno.test("Saya agent normalizes Codex-first tool presets with Gemini and Claude available", () => {
   const config = normalizeSayaAgentConfig();
