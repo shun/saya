@@ -2,6 +2,10 @@
 //!
 //! This file stays focused on host/application API exposure and capability
 //! boundaries. It must not drift into duplicated editing semantics.
+//!
+//! 注意: `docs_lint_*` / `source_lint_*` 接頭辞のテストは非挙動メタゲート
+//! （docs/source の scope 境界を符号化する lint・CI 別ロール想定）であり、
+//! 実行時の挙動は検証しない。scope 境界の文書化を保持するために存在する。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,38 +24,9 @@ use saya::runtime::startup::{
     evaluate_startup_module, startup_forbidden_surface_names, startup_public_surface_names,
 };
 
-fn saya_surface_suite_scope_statement() -> &'static str {
-    "public-surface boundary suite for startup and runtime capability exposure in host/application API gating"
-}
-
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn saya_surface_suite_scope_statement_stays_pinned_to_public_boundary_ownership() {
-    let statement = saya_surface_suite_scope_statement();
-
-    assert!(
-        statement.contains("public-surface boundary suite"),
-        "suite ownership statement should stay explicit"
-    );
-    assert!(
-        statement.contains("startup"),
-        "suite ownership statement should keep startup responsibility visible"
-    );
-    assert!(
-        statement.contains("runtime"),
-        "suite ownership statement should keep runtime responsibility visible"
-    );
-    assert!(
-        statement.contains("host/application"),
-        "suite ownership statement should stay anchored to the host layer"
-    );
-    assert!(
-        !statement.contains("editing semantics"),
-        "suite ownership statement must not drift into core-editing ownership"
-    );
-}
-
-#[test]
-fn detailed_editing_semantics_validation_remains_owned_by_vim_core_rs() {
+fn docs_lint_detailed_editing_semantics_validation_remains_owned_by_vim_core_rs() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -65,8 +40,9 @@ fn detailed_editing_semantics_validation_remains_owned_by_vim_core_rs() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn saya_tests_are_added_only_for_host_application_value() {
+fn docs_lint_saya_tests_are_added_only_for_host_application_value() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -80,8 +56,9 @@ fn saya_tests_are_added_only_for_host_application_value() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn headless_end_to_end_coverage_is_preferred_over_core_detail_duplication() {
+fn docs_lint_headless_end_to_end_coverage_is_preferred_over_core_detail_duplication() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -95,8 +72,9 @@ fn headless_end_to_end_coverage_is_preferred_over_core_detail_duplication() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn live_runtime_review_is_recorded_against_saya_live_runtime_in_next_review() {
+fn docs_lint_live_runtime_review_is_recorded_against_saya_live_runtime_in_next_review() {
     let docs = std::fs::read_to_string("docs/testing-todo.md")
         .expect("testing todo should be readable from the repository root");
     let normalized = docs.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -117,8 +95,9 @@ fn live_runtime_review_is_recorded_against_saya_live_runtime_in_next_review() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn large_test_migration_review_records_current_inventory_without_premature_completion() {
+fn docs_lint_large_test_migration_review_records_current_inventory_without_premature_completion() {
     let docs = std::fs::read_to_string("docs/testing-todo.md")
         .expect("testing todo should be readable from the repository root");
     let normalized = docs.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -151,62 +130,11 @@ fn large_test_migration_review_records_current_inventory_without_premature_compl
     );
 }
 
+/// 非挙動メタゲート（source lint・CI 別ロール想定）。挙動は検証しない。
+/// `src/core/bridge` の Debug 実装が `snapshot()` を呼び出してバッファ全文を
+/// materialize しないことをソース文字列で確認する境界 lint。実挙動は検証しない。
 #[test]
-fn integration_editing_stays_trimmed_to_host_smoke_after_core_migration() {
-    let source = std::fs::read_to_string("tests/integration_editing.rs")
-        .expect("integration_editing source should be readable from the repository root");
-
-    assert!(
-        !source.contains("assert_eq!((selection.start_row, selection.start_col), (0, 6));"),
-        "saya should not keep exact visual-selection coordinates once vim-core-rs owns them"
-    );
-    assert!(
-        !source.contains("assert_eq!((selection.end_row, selection.end_col_exclusive), (0, 10));"),
-        "saya should not keep exact visual-selection ranges once vim-core-rs owns them"
-    );
-    assert!(
-        !source.contains("assert_eq!(snapshot.cursor_row, 1);"),
-        "saya should not keep exact cursor-row editing semantics in the representative editing smoke"
-    );
-    assert!(
-        !source.contains("assert_eq!(outcome.core_bridge.snapshot().mode, CoreMode::Insert);"),
-        "saya should not keep exact insert-mode transition semantics once vim-core-rs owns them"
-    );
-}
-
-#[test]
-fn integration_editing_smoke_does_not_reintroduce_core_owned_selection_and_edit_details() {
-    let source = std::fs::read_to_string("tests/integration_editing.rs")
-        .expect("integration editing suite should be readable from the repository root");
-
-    assert!(
-        !source.contains("(selection.start_row, selection.start_col)"),
-        "saya smoke should not pin exact visual-selection coordinates after vim-core-rs owns that contract"
-    );
-    assert!(
-        !source.contains("line.contains(\"XY\")"),
-        "saya smoke should not pin exact inserted-text semantics once vim-core-rs owns that round trip"
-    );
-    assert!(
-        !source.contains("snapshot.cursor_row, 1"),
-        "saya smoke should not pin exact cursor-row edit semantics once vim-core-rs owns delete/motion contracts"
-    );
-    assert!(
-        !source.contains("snapshot.mode, CoreMode::Insert"),
-        "saya smoke should not pin exact intermediate mode semantics once vim-core-rs owns them"
-    );
-    assert!(
-        source.contains("visual_selection.is_some()"),
-        "saya should keep host-side projection smoke for visual-selection handoff"
-    );
-    assert!(
-        source.contains("model.lines != initial_model.lines"),
-        "saya should keep high-level projection-change smoke for integrated editing flows"
-    );
-}
-
-#[test]
-fn core_bridge_debug_does_not_materialize_full_snapshots() {
+fn source_lint_core_bridge_debug_does_not_materialize_full_snapshots() {
     let source = std::fs::read_dir("src/core/bridge")
         .expect("core bridge module directory should be readable from the repository root")
         .filter_map(|entry| entry.ok())
@@ -223,8 +151,9 @@ fn core_bridge_debug_does_not_materialize_full_snapshots() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn register_behavior_remains_out_of_scope_for_saya() {
+fn docs_lint_register_behavior_remains_out_of_scope_for_saya() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -238,8 +167,9 @@ fn register_behavior_remains_out_of_scope_for_saya() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn mark_and_jumplist_behavior_remains_out_of_scope_for_saya() {
+fn docs_lint_mark_and_jumplist_behavior_remains_out_of_scope_for_saya() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -253,8 +183,9 @@ fn mark_and_jumplist_behavior_remains_out_of_scope_for_saya() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn undo_tree_behavior_remains_out_of_scope_for_saya() {
+fn docs_lint_undo_tree_behavior_remains_out_of_scope_for_saya() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -268,8 +199,9 @@ fn undo_tree_behavior_remains_out_of_scope_for_saya() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn search_syntax_popup_behavior_remains_out_of_scope_for_saya() {
+fn docs_lint_search_syntax_popup_behavior_remains_out_of_scope_for_saya() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -284,8 +216,9 @@ fn search_syntax_popup_behavior_remains_out_of_scope_for_saya() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn vfs_and_job_protocol_behavior_remains_out_of_scope_for_saya() {
+fn docs_lint_vfs_and_job_protocol_behavior_remains_out_of_scope_for_saya() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -371,8 +304,9 @@ fn runtime_surface_excludes_filesystem_and_network_capabilities() {
     assert!(!surface.contains(&"network"));
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
 #[test]
-fn dired_preview_surface_is_documented_from_setup_to_host_layer_decision() {
+fn docs_lint_dired_preview_surface_is_documented_from_setup_to_host_layer_decision() {
     let readme = std::fs::read_to_string("README.md")
         .expect("README should be readable from repository root");
     let adr = std::fs::read_to_string("docs/adr/0003-keep-dired-in-host-layer.md")

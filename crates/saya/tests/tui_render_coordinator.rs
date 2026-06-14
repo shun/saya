@@ -1417,8 +1417,21 @@ fn unresolved_projection_failure_keeps_failure_diagnostic_separate_from_retained
     );
 }
 
+/// 非挙動 source lint（NOT a behavior test）。
+///
+/// このテストはランタイム挙動を一切駆動せず、コーディネータ/レンダラの
+/// ソース文字列に特定シンボルが残っていることを `.contains` で確認するだけの
+/// 構文 grep である。実挙動（durable frame options が実際にレンダラへ渡り、
+/// `clear_before_draw` が尊重されること）は検証できない。
+///
+/// 理由: `TuiRenderCoordinator::new_for_tests` は `renderer: None` を設定し、
+/// `TuiRenderer` は具象構造体でトレイト継ぎ目を持たないため、テストから
+/// 実 option 経路を駆動して描画バイト列を観測する手段が存在しない。実 option
+/// 経路の挙動担保は、実レンダラを起動する経路（例: main.rs の実バイナリ系
+/// テストや E2E）に委ねる。本テストは「シンボルが消えて契約が静かに崩れる」
+/// 退行のみを捕捉する低価値ガードであり、緑であっても配線の正しさは保証しない。
 #[test]
-fn renderer_option_contract_is_no_longer_source_only_future_guard() {
+fn source_lint_renderer_option_contract_symbols_remain_present() {
     let coordinator_source = fs::read_to_string("src/presentation/render/coordinator.rs")
         .expect("render coordinator source should be readable");
     let renderer_source = fs::read_to_string("src/presentation/render/renderer/mod.rs")
@@ -1438,8 +1451,23 @@ fn renderer_option_contract_is_no_longer_source_only_future_guard() {
     );
 }
 
+/// 非挙動 source lint（NOT a behavior test）。
+///
+/// このテストはコーディネータのソース文字列内で
+/// `draw_with_mode_and_options(...)` の出現位置が `.render_overlay(...)` より
+/// 前にあることを文字オフセット比較で確認するだけの構文 grep であり、実際の
+/// バイト書き込み順（テキストフレーム → kitty オーバーレイ）は検証しない。
+///
+/// 真の write 列順検証はコーディネータ単体では実現できない。テキストフレーム
+/// 描画は具象 `TuiRenderer`（`new_for_tests` では `None`）に流れ、オーバーレイは
+/// `overlay_writer`（`RecordingOverlayWriter` が観測可能）に流れる別シンクである。
+/// 両者を同一の順序付きログに集約する継ぎ目が存在しないため、`RecordingOverlayWriter`
+/// が記録するのはオーバーレイ／kitty バイトのみで、テキスト描画との相対順序は
+/// 観測できない（＝本テストを冗長にする実 write 順テストは現状存在しない）。
+/// 実順序の担保は、実レンダラを起動する経路に委ねる。本テストはソース順が崩れる
+/// 退行のみを捕捉する低価値ガードである。
 #[test]
-fn optional_graphics_overlay_is_rendered_after_text_frame_draw() {
+fn source_lint_overlay_draw_call_follows_text_frame_draw_call() {
     let coordinator_source = fs::read_to_string("src/presentation/render/coordinator.rs")
         .expect("render coordinator source should be readable");
     let text_draw = coordinator_source

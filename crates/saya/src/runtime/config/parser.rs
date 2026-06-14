@@ -2,39 +2,6 @@
 
 use super::*;
 
-/// 設定ソースを評価し、ConfigCommand 列に変換する。
-///
-/// option 変更と key mapping に必要な最小コマンドへ変換する。
-/// Vim script 前提の入力を受け付けない形にする。
-pub fn evaluate_config(source_result: &ConfigSourceResult) -> ConfigLoadResult {
-    log::debug!(
-        "[config_runtime] evaluating config: {:?}",
-        match source_result {
-            ConfigSourceResult::Default => "default".to_string(),
-            ConfigSourceResult::Loaded { path, .. } => format!("loaded:{}", path.display()),
-            ConfigSourceResult::ReadFailed { path, .. } =>
-                format!("read_failed:{}", path.display()),
-        }
-    );
-
-    match evaluate_capability_source(source_result) {
-        CapabilityLoadResult::DefaultUsed => ConfigLoadResult::DefaultUsed,
-        CapabilityLoadResult::ReadFailed { path, message } => {
-            ConfigLoadResult::ReadFailed { path, message }
-        }
-        CapabilityLoadResult::EvalFailed { path, message } => {
-            ConfigLoadResult::EvalFailed { path, message }
-        }
-        CapabilityLoadResult::UnsupportedCapability {
-            path, capability, ..
-        } => ConfigLoadResult::EvalFailed {
-            path,
-            message: format!("未対応の capability です: {}", capability),
-        },
-        CapabilityLoadResult::Success { commands, .. } => ConfigLoadResult::Success { commands },
-    }
-}
-
 /// TypeScript capability source を評価し、startup registry を返す。
 pub fn evaluate_capability_source(source_result: &ConfigSourceResult) -> CapabilityLoadResult {
     log::debug!(

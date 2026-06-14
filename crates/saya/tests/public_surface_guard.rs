@@ -38,36 +38,6 @@ impl BoundaryGuard<'_> {
     }
 }
 
-fn public_surface_suite_scope_statement() -> &'static str {
-    "public-surface boundary suite for startup/runtime surface names and namespace exclusions in host/application API gating"
-}
-
-#[test]
-fn public_surface_suite_scope_statement_stays_pinned_to_boundary_ownership() {
-    let statement = public_surface_suite_scope_statement();
-
-    assert!(
-        statement.contains("public-surface boundary suite"),
-        "suite ownership statement should stay explicit"
-    );
-    assert!(
-        statement.contains("startup/runtime"),
-        "suite ownership statement should keep both surfaces visible"
-    );
-    assert!(
-        statement.contains("namespace exclusions"),
-        "suite ownership statement should keep namespace exclusions visible"
-    );
-    assert!(
-        statement.contains("host/application"),
-        "suite ownership statement should stay anchored to the host layer"
-    );
-    assert!(
-        !statement.contains("editing semantics"),
-        "suite ownership statement must not drift into core-editing ownership"
-    );
-}
-
 #[test]
 fn startup_surface_excludes_compatibility_string_apis() {
     let surface = startup_public_surface_paths();
@@ -211,8 +181,11 @@ fn collect_source_guard_paths(path: &Path, paths: &mut Vec<PathBuf>) {
     }
 }
 
+/// 非挙動メタゲート（source lint・CI 別ロール想定）。挙動は検証しない。
+/// `src/main.rs` が生の Core outcome enum を直接消費していないことをソース
+/// 文字列の有無で確認する境界 lint であり、実行時の畳み込み挙動は検証しない。
 #[test]
-fn main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
+fn source_lint_main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
     let source = std::fs::read_to_string("src/main.rs")
         .expect("main source should be readable from the repository root");
 
@@ -224,8 +197,11 @@ fn main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
     }
 }
 
+/// 非挙動メタゲート（source lint・CI 別ロール想定）。挙動は検証しない。
+/// consume/render パスの各ファイルが想定シンボルを含むかをソース文字列で
+/// 確認する配線 lint であり、実行時の構造リフレッシュ挙動は検証しない。
 #[test]
-fn main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
+fn source_lint_main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
     let checks: &[(&str, &[&str])] = &[
         ("src/main.rs", &["last_structural_refresh"]),
         (
@@ -258,8 +234,11 @@ fn main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
     }
 }
 
+/// 非挙動メタゲート（source lint・CI 別ロール想定）。挙動は検証しない。
+/// `structural_refresh.rs` が禁止シンボルを含まず畳み込み済み構造効果の名前に
+/// 留まることをソース文字列で確認する境界 lint であり、実挙動は検証しない。
 #[test]
-fn structural_refresh_consumes_only_folded_structural_effects() {
+fn source_lint_structural_refresh_consumes_only_folded_structural_effects() {
     BoundaryGuard {
         boundary: "structural_refresh",
         path: "src/presentation/structural_refresh.rs",
@@ -373,8 +352,11 @@ fn notification_projection_module_keeps_raw_core_enums_out_of_ui_surface() {
     }
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
+/// `docs/testing.md` が suite 固有の gtimeout 受け入れコマンド文字列を保持して
+/// いるかを確認する docs lint であり、コマンド自体の実行挙動は検証しない。
 #[test]
-fn testing_docs_pin_suite_specific_gtimeout_acceptance_commands() {
+fn docs_lint_testing_docs_pin_suite_specific_gtimeout_acceptance_commands() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 
@@ -389,8 +371,11 @@ fn testing_docs_pin_suite_specific_gtimeout_acceptance_commands() {
     }
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
+/// 構造リフレッシュ受け入れコマンドが docs に headless かつ timeout ガード付きで
+/// 完全に記載されているかを文字列で確認する docs lint であり、実行は検証しない。
 #[test]
-fn structural_refresh_acceptance_command_is_headless_timeout_guarded_and_complete() {
+fn docs_lint_structural_refresh_acceptance_command_is_headless_timeout_guarded_and_complete() {
     let docs = std::fs::read_to_string("docs/testing.md")
         .expect("testing docs should be readable from the repository root");
 

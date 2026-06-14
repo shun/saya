@@ -74,38 +74,11 @@ fn with_isolated_lazy_plugin_event<T>(name: &str, event_name: &str, f: impl FnOn
     result
 }
 
-fn typescript_runtime_suite_scope_statement() -> &'static str {
-    "TypeScript runtime integration suite for startup config, runtime callback dispatch, and host/application projection"
-}
-
+/// 非挙動メタゲート（命名 lint・CI 別ロール想定）。挙動は検証しない。
+/// runtime 系統合テストファイルが wave6 系の旧命名ではなく
+/// typescript_runtime 系の命名規約に揃っていることだけを確認する命名規約 lint。
 #[test]
-fn typescript_runtime_suite_scope_statement_stays_pinned_to_host_layer_integration() {
-    let statement = typescript_runtime_suite_scope_statement();
-
-    assert!(
-        statement.contains("TypeScript runtime integration suite"),
-        "suite ownership statement should stay explicit"
-    );
-    assert!(
-        statement.contains("startup config"),
-        "suite ownership statement should keep startup responsibility visible"
-    );
-    assert!(
-        statement.contains("runtime callback dispatch"),
-        "suite ownership statement should keep runtime integration visible"
-    );
-    assert!(
-        statement.contains("host/application"),
-        "suite ownership statement should stay anchored to the host layer"
-    );
-    assert!(
-        !statement.contains("editing semantics"),
-        "suite ownership statement must not drift into core-editing ownership"
-    );
-}
-
-#[test]
-fn runtime_related_test_files_use_typescript_runtime_prefix_instead_of_wave6_prefix() {
+fn meta_lint_runtime_related_test_files_use_typescript_runtime_prefix_instead_of_wave6_prefix() {
     let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
     let file_names: Vec<String> = std::fs::read_dir(&tests_dir)
         .expect("tests directory should be readable")

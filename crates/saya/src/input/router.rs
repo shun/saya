@@ -99,6 +99,61 @@ pub fn resolve_intent(key: &KeyInput) -> EditorIntent {
     intent
 }
 
+/// command-line（ex / search）入口に入るべきキーかを判定する純粋関数。
+///
+/// ADR 0006 回帰修正: `:` / `/` の command-line 入口は host の責務
+/// （architecture.md: `src/input/` が command-line editing / ex-command
+/// routing を持つ）。単一パイプラインに載せると `predict_input_completeness`
+/// が「完成 builtin」と判定して backend へ越境し、host の command-line 入口が
+/// バイパスされてコマンドモードに入れなくなる回帰が起きる。
+///
+/// 次の条件をすべて満たす「曖昧でない単打」のときに限り、パイプラインより前で
+/// host 入口へ確定させる対象として `Some(prompt)` を返す。
+///
+/// - mode が Normal
+/// - host 側に keymap prefix / count / passthrough のいずれも保留されていない
+/// - key が `:`（ex）または `/`（search）の単打
+///
+/// 上記以外（pending 中・Insert モード・count 中・他キー）は `None` を返し、
+/// 従来どおりパイプラインで解決させる（count や keymap prefix を落とさない）。
+///
+/// この判断を副作用のない関数として切り出すことで、本番イベントループ
+/// （`main.rs`）と端末経路の統合テストが同一の判断ロジックを駆動でき、
+/// 入力ルーティングの配線が leaf の再実装ではなく実コードで検証される。
+pub fn command_line_entry_for_key(
+    key: &KeyInput,
+    mode: vim_core_rs::CoreMode,
+    host_pending: &Option<String>,
+    host_count: &Option<usize>,
+    host_passthrough: &str,
+) -> Option<char> {
+    if mode != vim_core_rs::CoreMode::Normal {
+        return None;
+    }
+    if host_pending.is_some() || host_count.is_some() || !host_passthrough.is_empty() {
+        return None;
+    }
+    match key {
+        KeyInput::Char(c @ (':' | '/')) => Some(*c),
+        _ => None,
+    }
+}
+
+/// `KeyInput` を vim-core-rs が dispatch / 完成度予測で解釈する「実キー文字列」へ
+/// 変換する公開 API。
+///
+/// 重要（ADR 0006 回帰修正・A-1）:
+/// keymap 照合に使う lhs 表記（`<C-f>` のような Vim notation, `startup_keymap_lhs_from_input`）
+/// と、core が実際に解釈するキー文字列（`Ctrl-f` なら ASCII 制御コード `\u{6}`）は
+/// **別物**である。`Char` キーは両者が一致するため見過ごされていたが、`Ctrl(_)` 系は
+/// lhs 表記 `<C-f>` が core へ素通しされると core はこれを Ctrl-f と認識できず no-op に
+/// なる（Ctrl-f/Ctrl-b/Ctrl-d/Ctrl-u のページ送り回帰）。
+/// 単一入力パイプラインの `Passthrough` は lhs 表記ではなくこの実キー文字列を core へ
+/// 渡さなければならない。
+pub fn vim_key_for_input(key: &KeyInput) -> String {
+    key_input_to_vim_key(key)
+}
+
 /// KeyInput を vim-core-rs が解釈可能なキー文字列に変換する。
 fn key_input_to_vim_key(key: &KeyInput) -> String {
     match key {
@@ -170,6 +225,76 @@ fn modified_navigation_sequence(nav: NavigationKey, modifier: u8) -> &'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use vim_core_rs::CoreMode;
+
+    // ---- command_line_entry_for_key の純粋判定テスト ----
+
+    #[test]
+    fn command_line_entry_for_key_enters_ex_and_search_on_unambiguous_single_press() {
+        // Normal モードで host に何も保留がない単打 `:` / `/` は入口へ確定する。
+        assert_eq!(
+            command_line_entry_for_key(&KeyInput::Char(':'), CoreMode::Normal, &None, &None, ""),
+            Some(':')
+        );
+        assert_eq!(
+            command_line_entry_for_key(&KeyInput::Char('/'), CoreMode::Normal, &None, &None, ""),
+            Some('/')
+        );
+    }
+
+    #[test]
+    fn command_line_entry_for_key_ignores_non_command_keys() {
+        for key in [
+            KeyInput::Char('a'),
+            KeyInput::Char('j'),
+            KeyInput::Char(';'),
+            KeyInput::Escape,
+            KeyInput::Enter,
+        ] {
+            assert_eq!(
+                command_line_entry_for_key(&key, CoreMode::Normal, &None, &None, ""),
+                None,
+                "key {key:?} must not enter command-line"
+            );
+        }
+    }
+
+    #[test]
+    fn command_line_entry_for_key_does_not_intercept_when_host_has_pending() {
+        // keymap prefix 保留中は横取りしない（prefix を落とさないため）。
+        assert_eq!(
+            command_line_entry_for_key(
+                &KeyInput::Char(':'),
+                CoreMode::Normal,
+                &Some("g".to_string()),
+                &None,
+                "",
+            ),
+            None
+        );
+        // count 入力中も横取りしない。
+        assert_eq!(
+            command_line_entry_for_key(&KeyInput::Char('/'), CoreMode::Normal, &None, &Some(3), "",),
+            None
+        );
+        // operator passthrough 中も横取りしない。
+        assert_eq!(
+            command_line_entry_for_key(&KeyInput::Char(':'), CoreMode::Normal, &None, &None, "d"),
+            None
+        );
+    }
+
+    #[test]
+    fn command_line_entry_for_key_only_in_normal_mode() {
+        for mode in [CoreMode::Insert, CoreMode::Visual] {
+            assert_eq!(
+                command_line_entry_for_key(&KeyInput::Char(':'), mode, &None, &None, ""),
+                None,
+                "mode {mode:?} must not enter command-line on ':'"
+            );
+        }
+    }
 
     // ---- タスク 4.5: キー入力の intent 変換テスト ----
 

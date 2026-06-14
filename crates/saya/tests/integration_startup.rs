@@ -140,38 +140,11 @@ fn test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn startup_suite_scope_statement() -> &'static str {
-    "main startup and session orchestration suite for host/application launch preparation, session guard cleanup, bootstrap cleanup, startup warning routing, and initial projection"
-}
-
+/// 非挙動メタゲート（命名 lint・CI 別ロール想定）。挙動は検証しない。
+/// テストファイル名が wave6 系の旧命名規約ではなく startup 系の命名規約に
+/// 揃っていることだけを確認する命名規約 lint。
 #[test]
-fn startup_suite_scope_statement_stays_pinned_to_host_layer_orchestration() {
-    let statement = startup_suite_scope_statement();
-
-    assert!(
-        statement.contains("main startup and session orchestration suite"),
-        "suite ownership statement should stay explicit"
-    );
-    assert!(
-        statement.contains("launch preparation"),
-        "suite ownership statement should stay host-layer focused"
-    );
-    assert!(
-        statement.contains("session guard cleanup"),
-        "suite ownership statement should keep lifecycle responsibility visible"
-    );
-    assert!(
-        statement.contains("startup warning routing"),
-        "suite ownership statement should mention projected startup warnings"
-    );
-    assert!(
-        !statement.contains("editing semantics"),
-        "suite ownership statement must not drift into core-editing ownership"
-    );
-}
-
-#[test]
-fn startup_related_test_files_use_startup_prefix_instead_of_wave6_prefix() {
+fn meta_lint_startup_related_test_files_use_startup_prefix_instead_of_wave6_prefix() {
     let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
     let file_names: Vec<String> = std::fs::read_dir(&tests_dir)
         .expect("tests directory should be readable")
@@ -202,8 +175,11 @@ fn startup_related_test_files_use_startup_prefix_instead_of_wave6_prefix() {
     );
 }
 
+/// 非挙動メタゲート（ヘッダ lint・CI 別ロール想定）。挙動は検証しない。
+/// 主要な統合テストファイルの先頭コメントが host 層責務を明記しているかだけを
+/// 確認するヘッダコメント lint。
 #[test]
-fn major_integration_files_keep_host_layer_file_comments() {
+fn header_lint_major_integration_files_keep_host_layer_file_comments() {
     let major_files = [
         "integration_startup.rs",
         "integration_startup_boot_flow.rs",
@@ -799,8 +775,8 @@ fn startup_eval_failure_projects_into_initial_message_line() {
 fn startup_from_stdin_populates_initial_snapshot() {
     let _lock = test_lock();
     let hermetic = HermeticStartup::new("stdin");
-    let request = hermetic
-        .inject(parse_launch_request(["-"]).expect("CLI 引数のパースが成功すること"));
+    let request =
+        hermetic.inject(parse_launch_request(["-"]).expect("CLI 引数のパースが成功すること"));
     let mut stdin = Cursor::new("stdin line 1\nstdin line 2\n");
 
     let outcome =

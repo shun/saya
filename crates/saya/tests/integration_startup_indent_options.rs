@@ -18,6 +18,11 @@ fn unique_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("saya-startup-indent-{name}-{nanos}"))
 }
 
+/// startup config -> option -> core インデント適用の core/startup 契約検証。
+/// 検証主眼は core の option 適用（smartindent x shiftwidth）であり、`\r` は生バイト
+/// 直送する。Enter キー押下からの到達性は実バイナリ E2E
+/// `enter_key_triggers_autoindent_with_smartindent_through_the_sy_binary`
+/// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_smartindent_true_indents_after_open_brace() {
     let _lock = launch_test_lock()
@@ -66,6 +71,11 @@ fn startup_smartindent_true_indents_after_open_brace() {
     std::fs::remove_file(&config_path).expect("remove config");
 }
 
+/// startup config -> option -> core インデント適用の core/startup 契約検証。
+/// 検証主眼は core の option 適用（smartindent=false で素の改行）であり、`\r` は生バイト
+/// 直送する。Enter キー押下からの到達性は実バイナリ E2E
+/// `enter_key_triggers_autoindent_with_smartindent_through_the_sy_binary`
+/// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_smartindent_false_keeps_plain_newline_after_open_brace() {
     let _lock = launch_test_lock()
@@ -114,6 +124,11 @@ fn startup_smartindent_false_keeps_plain_newline_after_open_brace() {
     std::fs::remove_file(&config_path).expect("remove config");
 }
 
+/// startup config -> option -> core インデント適用の core/startup 契約検証。
+/// 検証主眼は core の option 適用（go ftplugin による noexpandtab override）であり、
+/// `\r` は生バイト直送する。Enter キー押下からの到達性は実バイナリ E2E
+/// `enter_key_triggers_autoindent_with_smartindent_through_the_sy_binary`
+/// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_go_ftplugin_overrides_global_expandtab_for_tab_indentation() {
     let _lock = launch_test_lock()
@@ -177,6 +192,11 @@ fn startup_go_ftplugin_overrides_global_expandtab_for_tab_indentation() {
     std::fs::remove_file(&config_path).expect("remove config");
 }
 
+/// startup config -> option -> core インデント適用の core/startup 契約検証。
+/// 検証主眼は core の option 適用（ftplugin 無効化で global expandtab を維持）であり、
+/// `\r` は生バイト直送する。Enter キー押下からの到達性は実バイナリ E2E
+/// `enter_key_triggers_autoindent_with_smartindent_through_the_sy_binary`
+/// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_ftplugin_can_be_disabled_from_config() {
     let _lock = launch_test_lock()
@@ -230,6 +250,11 @@ fn startup_ftplugin_can_be_disabled_from_config() {
     std::fs::remove_file(&config_path).expect("remove config");
 }
 
+/// startup config -> option -> core インデント適用の core/startup 契約検証。
+/// 検証主眼は core の option 適用（拡張子から引いた custom ftplugin override）であり、
+/// `\r` は生バイト直送する。Enter キー押下からの到達性は実バイナリ E2E
+/// `enter_key_triggers_autoindent_with_smartindent_through_the_sy_binary`
+/// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_custom_ftplugin_definition_applies_by_extension() {
     let _lock = launch_test_lock()

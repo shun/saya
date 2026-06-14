@@ -23,6 +23,80 @@ pub enum FloatingWindowKeyHandling {
     Closed { id: FloatingWindowId },
 }
 
+/// `main` のイベントループで、`command_line_prompt` 等のホスト所有導線を通過した
+/// 後に「どの focused サブシステムへキーを振り分けるか」を表す分類結果。
+///
+/// 実際のキー処理（leaf マネージャ呼び出し）はそれぞれの `dispatch_*` ラッパが
+/// 行うが、その**振り分け順序の判断**は副作用のない `focused_input_target_for_key`
+/// に集約する。これにより「フロート/補完/パネルは開くがキーが効かない」回帰
+/// （継ぎ目断線）を、巨大ループを再構成せずに単体テストで検出できるようにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusedInputTarget {
+    /// focused なパネル端末が `:` / `/` を受けて command-line 入口へ昇格する。
+    PanelCommandLineEntry,
+    /// focused な端末パネルへキーを書き込む（`begin_command_line` で昇格しない場合）。
+    TerminalPanel,
+    /// focused な端末フロートへキーを書き込む。
+    TerminalFloat,
+    /// focused な core-window フロートへキーを dispatch する。
+    CoreWindowFloat,
+    /// focused な completion メニューへキーを送る。
+    CompletionFloat,
+    /// focused な static-lines フロート（ホバー等）へキーを送る。
+    FloatingWindow,
+    /// どの focused サブシステムにも該当しない（通常編集パイプラインへ）。
+    None,
+}
+
+/// focused サブシステムへのキー振り分け対象を分類する純粋関数。
+///
+/// 引数は `main` イベントループが保持する各マネージャの focus 状態と、
+/// command-line 昇格に必要な最小限のコンテキストのみ。`main.rs` の
+/// `if !handled { ... }` 連鎖と**同じ優先順位**を表現し、本番ループは
+/// 観測ログとしてこの関数を実際に通すことで、配線をテストで検証できる
+/// 形にしている（C1 の `command_line_entry_for_key` と同じ思想）。
+///
+/// 優先順位は `dispatch_floating_ui_key`（panel → terminal float → core window
+/// float）→ `dispatch_completion_float_key` → `dispatch_floating_window_key`
+/// の実コード順に一致させる。
+#[allow(clippy::too_many_arguments)]
+pub fn focused_input_target_for_key(
+    key: &KeyInput,
+    mode: CoreMode,
+    panel_focused_terminal: bool,
+    floating_focused_terminal: bool,
+    floating_focused_core_window: bool,
+    completion_menu_active: bool,
+    floating_focused_static_lines: bool,
+) -> FocusedInputTarget {
+    if panel_focused_terminal {
+        // `begin_command_line_from_focused_panel` は Normal モードの `:` / `/`
+        // のみ昇格させ、それ以外は端末パネルへキーを書き込む。
+        let is_command_line_entry = matches!(
+            (mode, key),
+            (CoreMode::Normal, KeyInput::Char(':') | KeyInput::Char('/'))
+        );
+        return if is_command_line_entry {
+            FocusedInputTarget::PanelCommandLineEntry
+        } else {
+            FocusedInputTarget::TerminalPanel
+        };
+    }
+    if floating_focused_terminal {
+        return FocusedInputTarget::TerminalFloat;
+    }
+    if floating_focused_core_window {
+        return FocusedInputTarget::CoreWindowFloat;
+    }
+    if completion_menu_active {
+        return FocusedInputTarget::CompletionFloat;
+    }
+    if floating_focused_static_lines {
+        return FocusedInputTarget::FloatingWindow;
+    }
+    FocusedInputTarget::None
+}
+
 pub fn handle_completion_float_key(
     completion_manager: &mut CompletionFloatManager,
     floating_manager: &mut FloatingWindowManager,
@@ -550,5 +624,212 @@ pub(crate) fn floating_editor_mode_from_core(
         | CoreMode::SelectBlock => EditorMode::Visual,
         CoreMode::Replace => EditorMode::Replace,
         CoreMode::CommandLine => EditorMode::Command,
+    }
+}
+
+#[cfg(test)]
+mod focused_input_target_tests {
+    //! `focused_input_target_for_key` の純粋分類テスト。
+    //!
+    //! 巨大イベントループの `if !handled { ... }` 連鎖と同じ優先順位を表現する
+    //! ことを保証し、「フロート/補完/パネルは開くがキーが効かない」回帰
+    //! （振り分け順序の断線）を構造的に検出する。
+
+    use super::{FocusedInputTarget, focused_input_target_for_key};
+    use crate::input::router::KeyInput;
+    use vim_core_rs::CoreMode;
+
+    fn classify(
+        key: &KeyInput,
+        mode: CoreMode,
+        panel_terminal: bool,
+        float_terminal: bool,
+        float_core_window: bool,
+        completion: bool,
+        float_static: bool,
+    ) -> FocusedInputTarget {
+        focused_input_target_for_key(
+            key,
+            mode,
+            panel_terminal,
+            float_terminal,
+            float_core_window,
+            completion,
+            float_static,
+        )
+    }
+
+    #[test]
+    fn no_focused_subsystem_routes_to_none() {
+        assert_eq!(
+            classify(
+                &KeyInput::Char('j'),
+                CoreMode::Normal,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
+            FocusedInputTarget::None
+        );
+    }
+
+    #[test]
+    fn focused_completion_menu_routes_navigation_and_confirm_to_completion() {
+        for key in [
+            KeyInput::Down,
+            KeyInput::Up,
+            KeyInput::Enter,
+            KeyInput::Escape,
+        ] {
+            assert_eq!(
+                classify(&key, CoreMode::Insert, false, false, false, true, false),
+                FocusedInputTarget::CompletionFloat,
+                "completion menu must take navigation/confirm/close keys: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_static_lines_float_routes_to_floating_window() {
+        for key in [
+            KeyInput::Char('j'),
+            KeyInput::Char('k'),
+            KeyInput::Down,
+            KeyInput::Escape,
+        ] {
+            assert_eq!(
+                classify(&key, CoreMode::Normal, false, false, false, false, true),
+                FocusedInputTarget::FloatingWindow,
+                "focused static-lines float must take scroll/close keys: {key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_panel_terminal_promotes_colon_and_slash_to_command_line() {
+        assert_eq!(
+            classify(
+                &KeyInput::Char(':'),
+                CoreMode::Normal,
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
+            FocusedInputTarget::PanelCommandLineEntry
+        );
+        assert_eq!(
+            classify(
+                &KeyInput::Char('/'),
+                CoreMode::Normal,
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
+            FocusedInputTarget::PanelCommandLineEntry
+        );
+    }
+
+    #[test]
+    fn focused_panel_terminal_writes_other_keys_to_panel() {
+        assert_eq!(
+            classify(
+                &KeyInput::Char('a'),
+                CoreMode::Normal,
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
+            FocusedInputTarget::TerminalPanel
+        );
+        // Insert モードの `:` は command-line 昇格対象外なのでパネルへ書き込む。
+        assert_eq!(
+            classify(
+                &KeyInput::Char(':'),
+                CoreMode::Insert,
+                true,
+                false,
+                false,
+                false,
+                false
+            ),
+            FocusedInputTarget::TerminalPanel
+        );
+    }
+
+    #[test]
+    fn precedence_panel_then_terminal_float_then_core_window_then_completion_then_static() {
+        // 全 focus 述語が true でも、優先順位の先頭（panel）が選ばれる。
+        assert_eq!(
+            classify(
+                &KeyInput::Char('x'),
+                CoreMode::Normal,
+                true,
+                true,
+                true,
+                true,
+                true
+            ),
+            FocusedInputTarget::TerminalPanel
+        );
+        // panel を外すと terminal float。
+        assert_eq!(
+            classify(
+                &KeyInput::Char('x'),
+                CoreMode::Normal,
+                false,
+                true,
+                true,
+                true,
+                true
+            ),
+            FocusedInputTarget::TerminalFloat
+        );
+        // terminal float を外すと core-window float。
+        assert_eq!(
+            classify(
+                &KeyInput::Char('x'),
+                CoreMode::Normal,
+                false,
+                false,
+                true,
+                true,
+                true
+            ),
+            FocusedInputTarget::CoreWindowFloat
+        );
+        // core-window float を外すと completion。
+        assert_eq!(
+            classify(
+                &KeyInput::Char('x'),
+                CoreMode::Normal,
+                false,
+                false,
+                false,
+                true,
+                true
+            ),
+            FocusedInputTarget::CompletionFloat
+        );
+        // completion を外すと static-lines float。
+        assert_eq!(
+            classify(
+                &KeyInput::Char('x'),
+                CoreMode::Normal,
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
+            FocusedInputTarget::FloatingWindow
+        );
     }
 }

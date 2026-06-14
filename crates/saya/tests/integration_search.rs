@@ -27,6 +27,10 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
     .expect("テスト用の起動が成功すること")
 }
 
+/// core の検索実行契約を検証する。`/` 入口＆Enter コミットのキー到達性は
+/// E2E `slash_search_moves_cursor_to_match_*`
+/// (`integration_input_pipeline_e2e.rs`) が担保するため、ここでは
+/// `dispatch_key("/search\r")` を core へ直送して検索実行結果のみを検証する。
 #[test]
 fn search_starts_and_executes() {
     let _lock = saya::app::bootstrap::launch_test_lock()
@@ -35,12 +39,6 @@ fn search_starts_and_executes() {
     let mut outcome = launch_with_content("hello\nsearch test\nworld\n");
     let _session_state = EditorSessionState::new(outcome.target_path.clone());
 
-    // / starts search. Since main loop handles / mapping to command_line_prompt,
-    // the integration of core_bridge handling '/' search directly can also be tested.
-    // However, our `main.rs` intercepts `/` and then dispatches `/{cmd}\r`.
-
-    // We can at least test `vim-core-rs` behavior through `core_bridge`
-    // to ensure dispatching `/{cmd}\r` moves the cursor.
     outcome
         .core_bridge
         .dispatch_key("/search\r")
@@ -50,6 +48,10 @@ fn search_starts_and_executes() {
     assert_eq!(snapshot.cursor_row, 1); // 0-indexed, "search test" is on line 2 (index 1)
 }
 
+/// core の n/N 検索繰り返し実行契約を検証する。`n`/`N` キーの入口到達性は
+/// E2E `n_and_capital_n_repeat_search_*`
+/// (`integration_input_pipeline_e2e.rs`) が担保するため、ここでは
+/// core へ直送した際のカーソル移動結果のみを検証する。
 #[test]
 fn next_previous_search_results() {
     let _lock = saya::app::bootstrap::launch_test_lock()
@@ -73,6 +75,10 @@ fn next_previous_search_results() {
     assert_eq!(snapshot.cursor_row, 2);
 }
 
+/// 検索失敗時の E486 メッセージを、core 契約（`take_pending_messages`）と
+/// presentation 契約（`project()` の `message_line` 反映）の両面で検証する。
+/// 画面への実描画とキー到達性は E2E `slash_search_not_found_reports_e486_*`
+/// (`integration_input_pipeline_e2e.rs`) が担保する。
 #[test]
 fn search_not_found_message() {
     let _lock = saya::app::bootstrap::launch_test_lock()
@@ -183,74 +189,4 @@ fn search_hash() {
     outcome.core_bridge.dispatch_key("#").unwrap();
     let snapshot = outcome.core_bridge.snapshot();
     assert_eq!(snapshot.cursor_col, 0);
-}
-
-#[test]
-fn search_prompt_and_cancel_flow() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    let mut outcome = launch_with_content("hello\nsearch test\nworld\n");
-    let session_state = EditorSessionState::new(outcome.target_path.clone());
-
-    // 1. Initial state: Normal mode, no prompt
-    let snapshot = outcome.core_bridge.snapshot();
-    assert_eq!(snapshot.mode, CoreMode::Normal);
-
-    // Simulate pressing '/' to start search
-    let mut command_line_prompt = Some('/');
-    let mut command_line_buffer = String::new();
-
-    let model = project(&ProjectionInput::new(
-        &snapshot,
-        &session_state,
-        Some(&format!(
-            "{}{}",
-            command_line_prompt.unwrap(),
-            command_line_buffer
-        )),
-    ));
-    assert_eq!(model.message_line.as_deref(), Some("/"));
-
-    // Simulate typing "world"
-    command_line_buffer.push_str("world");
-    let model = project(&ProjectionInput::new(
-        &snapshot,
-        &session_state,
-        Some(&format!(
-            "{}{}",
-            command_line_prompt.unwrap(),
-            command_line_buffer
-        )),
-    ));
-    assert_eq!(model.message_line.as_deref(), Some("/world"));
-
-    // Simulate pressing Esc (cancel search)
-    command_line_buffer.clear();
-    let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
-    assert_eq!(model.message_line, None);
-
-    // Assert cursor hasn't moved
-    assert_eq!(outcome.core_bridge.snapshot().cursor_row, 0);
-
-    // Simulate pressing '/' again
-    command_line_prompt = Some('/');
-    command_line_buffer.push_str("search");
-
-    // Simulate pressing Enter (execute search)
-    let prompt = command_line_prompt.take().unwrap();
-    let cmd = format!("{}{}", prompt, command_line_buffer);
-    command_line_buffer.clear();
-
-    if cmd.starts_with('/') {
-        let search_keys = format!("{}\r", cmd);
-        outcome.core_bridge.dispatch_key(&search_keys).unwrap();
-    }
-
-    let snapshot = outcome.core_bridge.snapshot();
-    assert_eq!(snapshot.mode, CoreMode::Normal);
-    assert_eq!(snapshot.cursor_row, 1); // "search test" is on row 1
-
-    let model = project(&ProjectionInput::new(&snapshot, &session_state, None));
-    assert_eq!(model.message_line, None);
 }

@@ -872,6 +872,13 @@ impl fmt::Display for ExDelegationProofReport {
     }
 }
 
+/// リンク可能性ゲートの 1 シナリオ。
+///
+/// この型は「あるシナリオが依存する upstream シンボルがアーカイブに *リンク可能*
+/// として存在するか」だけを判定する。シンボルの存在は委譲が機能することの必要条件
+/// であって十分条件ではないため、ここでの "proof" は実挙動の証明ではなくリンク
+/// 可能性ゲートを意味する。実際の順次ディスパッチや buffer mutation 等の挙動検証は
+/// sequential_dispatch_contract 等の専用テストが担う。
 #[derive(Debug)]
 pub struct DelegationScenarioProof {
     pub name: String,

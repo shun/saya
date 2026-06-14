@@ -72,36 +72,6 @@ fn with_isolated_lazy_plugin_event<T>(name: &str, event_name: &str, f: impl FnOn
     result
 }
 
-fn typescript_runtime_suite_scope_statement() -> &'static str {
-    "TypeScript runtime integration suite for startup-registered commands, runtime callback dispatch, and host/application integration after application boot"
-}
-
-#[test]
-fn typescript_runtime_suite_scope_statement_stays_pinned_to_host_layer_integration() {
-    let statement = typescript_runtime_suite_scope_statement();
-
-    assert!(
-        statement.contains("TypeScript runtime integration suite"),
-        "suite ownership statement should stay explicit"
-    );
-    assert!(
-        statement.contains("startup-registered commands"),
-        "suite ownership statement should keep startup registration visible"
-    );
-    assert!(
-        statement.contains("runtime callback dispatch"),
-        "suite ownership statement should keep runtime integration visible"
-    );
-    assert!(
-        statement.contains("host/application"),
-        "suite ownership statement should stay anchored to the host layer"
-    );
-    assert!(
-        !statement.contains("editing semantics"),
-        "suite ownership statement must not drift into core-editing ownership"
-    );
-}
-
 struct RecordingHostBridge {
     executed_commands: Arc<TokioMutex<Vec<String>>>,
     read_buffers: Arc<TokioMutex<Vec<ReadonlyBufferSnapshot>>>,

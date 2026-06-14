@@ -30,7 +30,7 @@ use crate::app::bootstrap::{StartupKeymapAction, StartupKeymapSnapshot};
 
 use super::{
     startup_keymap_action_for_lhs, startup_keymap_has_longer_prefix, startup_keymap_lhs_from_input,
-    startup_keymap_mode_from_core_mode,
+    startup_keymap_lhs_notation_to_core_keys, startup_keymap_mode_from_core_mode,
 };
 use crate::input::router::KeyInput;
 use vim_core_rs::CoreLightSnapshot;
@@ -114,7 +114,10 @@ fn digit_value_for_count(key: &KeyInput, has_pending_count: bool) -> Option<usiz
 
 /// 蓄積中の count に新しい桁を合成する。
 fn accumulate_count(current: Option<usize>, digit: usize) -> usize {
-    current.unwrap_or(0).saturating_mul(10).saturating_add(digit)
+    current
+        .unwrap_or(0)
+        .saturating_mul(10)
+        .saturating_add(digit)
 }
 
 /// 解決した `MappingRhs` に host count を合成して最終 `Command` を作る。
@@ -133,7 +136,10 @@ pub fn compose_command_with_count(rhs: MappingRhs, count: Option<usize>) -> Comm
             };
             Command::BuiltinEdit(composed)
         }
-        MappingRhs::Command(Command::HostCommand { name, count: rhs_count }) => {
+        MappingRhs::Command(Command::HostCommand {
+            name,
+            count: rhs_count,
+        }) => {
             let effective = count.or(rhs_count);
             log::debug!(
                 "[main][pipeline] host command resolved with count (case 2: count carried in type, execution unwired in phase 2): name={name}, host_count={count:?}, rhs_count={rhs_count:?}, effective={effective:?}"
@@ -234,12 +240,17 @@ pub fn resolve_pipeline_command(
         // `gg` の 1 打目 `g` が失われ count も落ちる（ADR 0006 が指摘する gg 欠陥）。
         // ここでは結合 lhs 全体を count を合成して core へ flush する。
         let count = host_count.take();
+        // ADR 0006 回帰修正・A-1: lhs は keymap 照合用の Vim notation（例 `<C-f>`）であり、
+        // core へ素通しする実キー文字列ではない。notation を実キー（制御コード等）へ
+        // 復元してから flush する。Char のみで構成される combined lhs（例 `gg`）は
+        // 変換しても不変なので従来挙動を壊さない。
+        let core_keys = startup_keymap_lhs_notation_to_core_keys(&lhs);
         let flushed = match count {
-            Some(n) => format!("{n}{lhs}"),
-            None => lhs.clone(),
+            Some(n) => format!("{n}{core_keys}"),
+            None => core_keys.clone(),
         };
         log::debug!(
-            "[main][pipeline] host pending prefix did not complete a mapping; flush combined lhs to core as builtin: combined_lhs={lhs:?}, composed_count={count:?}, flushed={flushed:?}"
+            "[main][pipeline] host pending prefix did not complete a mapping; flush combined lhs to core as builtin: combined_lhs={lhs:?}, core_keys={core_keys:?}, composed_count={count:?}, flushed={flushed:?}"
         );
         return PipelineResolution::Passthrough(flushed);
     }
@@ -263,13 +274,18 @@ pub fn resolve_pipeline_command(
     }
 
     // (5) 素通し。count を prefix として合成して core へ流す。
+    // ADR 0006 回帰修正・A-1: key_lhs は keymap 照合用 notation（例 Ctrl-f なら `<C-f>`）。
+    // core は実キー文字列（Ctrl-f なら ASCII 制御コード `\u{6}`）を解釈するため、notation を
+    // 実キーへ復元してから渡す。これを怠ると core が `<C-f>` を Ctrl-f と認識できず no-op に
+    // なる（Ctrl-f/Ctrl-b/Ctrl-d/Ctrl-u のページ送り回帰）。Char キーは変換不変。
+    let core_keys = startup_keymap_lhs_notation_to_core_keys(&key_lhs);
     let count = host_count.take();
     let passthrough = match count {
-        Some(n) => format!("{n}{key_lhs}"),
-        None => key_lhs,
+        Some(n) => format!("{n}{core_keys}"),
+        None => core_keys,
     };
     log::debug!(
-        "[main][pipeline] passthrough to core: passthrough={passthrough:?}, composed_count={count:?}"
+        "[main][pipeline] passthrough to core: key_lhs={key_lhs:?}, passthrough={passthrough:?}, composed_count={count:?}"
     );
     PipelineResolution::Passthrough(passthrough)
 }
@@ -364,8 +380,7 @@ pub fn resolve_pipeline_command_buffered<F>(
 where
     F: Fn(&str) -> vim_core_rs::CoreInputCompleteness,
 {
-    let resolution =
-        resolve_pipeline_command(keymaps, snapshot, host_pending, host_count, key);
+    let resolution = resolve_pipeline_command(keymaps, snapshot, host_pending, host_count, key);
     match resolution {
         PipelineResolution::Command(command) => {
             log::debug!(
@@ -443,6 +458,14 @@ mod adr0006_phase2_tests {
     /// pipeline をキー列で駆動し、確定した `Command` を順に集める最小ドライバ。
     /// `BuiltinEdit` は core に dispatch、`HostCommand` は実行せず記録のみ。
     /// `Passthrough` は core に dispatch する（count prefix 合成込み）。
+    ///
+    /// 位置づけ: これは本番対話ループ（main.rs）の match 腕の「ミラー」であり、
+    /// `resolve_pipeline_command` / `resolve_pipeline_command_buffered` の純粋契約
+    /// （どのキー列がどの `Command` / 解決へ落ちるか）のみを検証する。本番ループへの
+    /// 実配線（イベント取得→classify→resolve→core 越境の継ぎ目）は検証しない。
+    /// ミラーが本番 match と一致している保証はこのテスト自身にはなく、実配線の担保は
+    /// 実バイナリ E2E マトリクス `tests/integration_input_pipeline_e2e.rs`
+    /// （Ctrl-f/b・dd・`:`・`/`・`:w` 等）に委ねる。
     fn drive(
         keymaps: &[StartupKeymapSnapshot],
         bridge: &mut CoreBridge,
@@ -490,8 +513,7 @@ mod adr0006_phase2_tests {
             "gd",
             StartupKeymapAction::Literal("j".to_string()),
         )];
-        let mut bridge =
-            CoreBridge::new("l0\nl1\nl2\nl3\nl4\nl5\n").expect("core bridge init");
+        let mut bridge = CoreBridge::new("l0\nl1\nl2\nl3\nl4\nl5\n").expect("core bridge init");
         assert_eq!(bridge.snapshot().cursor_row, 0, "前提: カーソルは先頭行");
 
         let mut host_pending: Option<String> = None;
@@ -518,8 +540,14 @@ mod adr0006_phase2_tests {
             3,
             "3gd で 3 行下（row 3）へ移動すること"
         );
-        assert!(host_count.is_none(), "確定後は host count がクリアされること");
-        assert!(host_pending.is_none(), "確定後は host pending がクリアされること");
+        assert!(
+            host_count.is_none(),
+            "確定後は host count がクリアされること"
+        );
+        assert!(
+            host_pending.is_none(),
+            "確定後は host pending がクリアされること"
+        );
     }
 
     /// count×builtin grammar（mapping 不在）: `2gg` は mapping に該当しないが、
@@ -535,8 +563,7 @@ mod adr0006_phase2_tests {
             "gd",
             StartupKeymapAction::Literal("$".to_string()),
         )];
-        let mut bridge =
-            CoreBridge::new("l0\nl1\nl2\nl3\nl4\n").expect("core bridge init");
+        let mut bridge = CoreBridge::new("l0\nl1\nl2\nl3\nl4\n").expect("core bridge init");
         for _ in 0..4 {
             let _ = bridge.dispatch_key("j");
         }
@@ -575,8 +602,7 @@ mod adr0006_phase2_tests {
             "gd",
             StartupKeymapAction::Literal("G".to_string()),
         )];
-        let mut bridge =
-            CoreBridge::new("l0\nl1\nl2\nl3\n").expect("core bridge init");
+        let mut bridge = CoreBridge::new("l0\nl1\nl2\nl3\n").expect("core bridge init");
 
         let mut host_pending: Option<String> = None;
         let mut host_count: Option<usize> = None;
@@ -605,8 +631,7 @@ mod adr0006_phase2_tests {
             "gd",
             StartupKeymapAction::RegisteredCommand("lsp.definition".to_string()),
         )];
-        let mut bridge =
-            CoreBridge::new("l0\nl1\n").expect("core bridge init");
+        let mut bridge = CoreBridge::new("l0\nl1\n").expect("core bridge init");
 
         let mut host_pending: Option<String> = None;
         let mut host_count: Option<usize> = None;
@@ -639,8 +664,7 @@ mod adr0006_phase2_tests {
             "q",
             StartupKeymapAction::RegisteredCommand("plugin.run".to_string()),
         )];
-        let mut bridge =
-            CoreBridge::new("l0\nl1\n").expect("core bridge init");
+        let mut bridge = CoreBridge::new("l0\nl1\n").expect("core bridge init");
 
         let mut host_pending: Option<String> = None;
         let mut host_count: Option<usize> = None;
@@ -672,8 +696,7 @@ mod adr0006_phase2_tests {
             "gd",
             StartupKeymapAction::Literal("G".to_string()),
         )];
-        let bridge =
-            CoreBridge::new("l0\nl1\nl2\nl3\n").expect("core bridge init");
+        let bridge = CoreBridge::new("l0\nl1\nl2\nl3\n").expect("core bridge init");
 
         let mut host_pending: Option<String> = None;
         let mut host_count: Option<usize> = None;
@@ -692,18 +715,17 @@ mod adr0006_phase2_tests {
 
         // timeout 発火: g を builtin として core へ flush。
         let snapshot = bridge.light_snapshot();
-        let timeout = resolve_pipeline_on_timeout(
-            &keymaps,
-            &snapshot,
-            &mut host_pending,
-            &mut host_count,
-        );
+        let timeout =
+            resolve_pipeline_on_timeout(&keymaps, &snapshot, &mut host_pending, &mut host_count);
         assert_eq!(
             timeout,
             PipelineResolution::Passthrough("g".to_string()),
             "timeout 発火で pending prefix が builtin として flush されること"
         );
-        assert!(host_pending.is_none(), "timeout 後は host pending がクリアされること");
+        assert!(
+            host_pending.is_none(),
+            "timeout 後は host pending がクリアされること"
+        );
     }
 
     /// MappingRhs 正規化: StartupKeymapAction からの変換を担保。
@@ -748,6 +770,12 @@ mod adr0006_phase3_tests {
     /// Phase 3 の host 入力パイプラインを最小再現するドライバ。
     /// 各キーで `resolve_pipeline_command_buffered` を呼び、`DispatchComplete` のときだけ
     /// core に dispatch する。`HoldPending` / `CountAccumulated` は backend を呼ばない。
+    ///
+    /// 位置づけ: これは本番対話ループ（main.rs）の match 腕の「ミラー」であり、
+    /// `resolve_pipeline_command_buffered` の純粋契約（完成度判定により完成 Command
+    /// だけが core を越え、部分入力は host 側に留まること）のみを検証する。本番ループ
+    /// への実配線は検証しない。実配線の担保は実バイナリ E2E マトリクス
+    /// `tests/integration_input_pipeline_e2e.rs`（Ctrl-f/b・dd・`:`・`/`・`:w` 等）に委ねる。
     fn drive_buffered(
         keymaps: &[StartupKeymapSnapshot],
         bridge: &mut CoreBridge,
@@ -761,8 +789,7 @@ mod adr0006_phase3_tests {
             let snapshot = bridge.light_snapshot();
             // classify は core への参照を借りないよう、その時点のモードでクロージャを作る。
             let mode = snapshot.mode;
-            let classify =
-                |seq: &str| vim_core_rs::predict_input_completeness(seq, mode);
+            let classify = |seq: &str| vim_core_rs::predict_input_completeness(seq, mode);
             let resolution = resolve_pipeline_command_buffered(
                 keymaps,
                 &snapshot,
@@ -885,7 +912,11 @@ mod adr0006_phase3_tests {
             &KeyInput::Char('d'),
             |seq: &str| vim_core_rs::predict_input_completeness(seq, mode),
         );
-        assert_eq!(r, BufferedResolution::HoldPending, "d は motion 待ちで pending");
+        assert_eq!(
+            r,
+            BufferedResolution::HoldPending,
+            "d は motion 待ちで pending"
+        );
         assert_eq!(
             bridge.dispatch_key_count(),
             dispatch_before,
@@ -972,7 +1003,11 @@ mod adr0006_phase3_tests {
             &KeyInput::Char('g'),
             |seq: &str| vim_core_rs::predict_input_completeness(seq, mode),
         );
-        assert_eq!(rg, BufferedResolution::HoldPending, "g は keymap prefix pending");
+        assert_eq!(
+            rg,
+            BufferedResolution::HoldPending,
+            "g は keymap prefix pending"
+        );
         assert_eq!(
             bridge.dispatch_key_count(),
             dispatch_before,
@@ -1069,7 +1104,11 @@ mod adr0006_phase3_tests {
             let _ = drive_buffered(
                 &keymaps,
                 &mut bridge,
-                &[KeyInput::Char('2'), KeyInput::Char('g'), KeyInput::Char('g')],
+                &[
+                    KeyInput::Char('2'),
+                    KeyInput::Char('g'),
+                    KeyInput::Char('g'),
+                ],
                 &mut hp,
                 &mut hc,
                 &mut pb,

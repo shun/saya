@@ -367,28 +367,6 @@ impl From<SayaKeyMode> for ConfigKeyMode {
     }
 }
 
-/// 設定読み込みの結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigLoadResult {
-    /// 設定コマンドの適用成功
-    Success { commands: Vec<ConfigCommand> },
-    /// 設定なし（既定値使用）
-    DefaultUsed,
-    /// 読み込み失敗（warning 付きで継続）
-    ReadFailed { path: PathBuf, message: String },
-    /// 評価失敗（warning 付きで継続）
-    EvalFailed { path: PathBuf, message: String },
-}
-
-/// 設定入力のソースを表す。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigInput {
-    /// 設定なし（既定値を使用）
-    None,
-    /// ファイルパスから読み込む
-    FilePath(PathBuf),
-}
-
 mod apply;
 mod parser;
 mod source;
@@ -396,163 +374,31 @@ mod source;
 pub use apply::{
     AppliedKeyMapping, ConfigApplyError, ConfigApplyResult, ConfigApplyState, apply_config_commands,
 };
-pub use parser::{evaluate_capability_source, evaluate_config};
-pub use source::{ConfigSourceResult, read_config_source};
-
-/// 設定の全フローを実行する統合関数。
-///
-/// 読み込み -> 評価 -> 適用 を一貫して実行し、
-/// 失敗時は warning 付きで既定値を返す。
-pub fn load_and_apply_config(input: &ConfigInput) -> (ConfigApplyState, Vec<String>) {
-    log::debug!("[config_runtime] starting full config load-and-apply flow");
-    let mut warnings = Vec::new();
-    let mut state = ConfigApplyState::default_state();
-
-    let source_result = read_config_source(input);
-    let load_result = evaluate_config(&source_result);
-
-    match load_result {
-        ConfigLoadResult::Success { commands } => {
-            let apply_result = apply_config_commands(&commands, &mut state);
-            if !apply_result.is_fully_applied() {
-                for error in &apply_result.errors {
-                    let warning = format!(
-                        "設定コマンド {} の適用に失敗しました: {}",
-                        error.command_index + 1,
-                        error.message
-                    );
-                    log::debug!("[config_runtime] apply warning: {}", warning);
-                    warnings.push(warning);
-                }
-            }
-            log::debug!(
-                "[config_runtime] config applied: applied={}, warnings={}",
-                apply_result.applied_count,
-                warnings.len()
-            );
-        }
-        ConfigLoadResult::DefaultUsed => {
-            log::debug!("[config_runtime] using default config, no warnings");
-        }
-        ConfigLoadResult::ReadFailed { path, message } => {
-            let warning = format!(
-                "Failed to read config; using defaults ({}): {}",
-                path.display(),
-                message
-            );
-            log::debug!("[config_runtime] read failure warning: {}", warning);
-            warnings.push(warning);
-        }
-        ConfigLoadResult::EvalFailed { path, message } => {
-            let warning = format!(
-                "Failed to evaluate config; using defaults ({}): {}",
-                path.display(),
-                message
-            );
-            log::debug!("[config_runtime] eval failure warning: {}", warning);
-            warnings.push(warning);
-        }
-    }
-
-    log::debug!(
-        "[config_runtime] load-and-apply complete: state={:?}, warnings={}",
-        state,
-        warnings.len()
-    );
-    (state, warnings)
-}
+pub use parser::evaluate_capability_source;
+pub use source::ConfigSourceResult;
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
-    fn unique_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time went backwards")
-            .as_nanos();
-        std::env::temp_dir().join(format!("saya-config-{name}-{nanos}"))
-    }
-
-    // ==== タスク 8.1: 限定された設定入力を読み取れるようにする ====
+    // ==== タスク 8.2: JSON フォールバックパーサを実 production 経路で評価する ====
+    //
+    // これらは `evaluate_capability_source`（本番で JSON 設定を扱う経路）を直接駆動し、
+    // 手書き JSON パーサ (`parse_config_json` / `parse_capability_program`) の回帰を検出する。
 
     #[test]
-    fn read_config_returns_default_when_no_input() {
-        let result = read_config_source(&ConfigInput::None);
-
-        assert_eq!(
-            result,
-            ConfigSourceResult::Default,
-            "設定未指定時は既定値扱いになること"
-        );
-    }
-
-    #[test]
-    fn read_config_returns_loaded_when_file_exists() {
-        let config_path = unique_path("config-exists");
-        std::fs::write(&config_path, "{ \"tabstop\": 4 }").expect("write config");
-
-        let result = read_config_source(&ConfigInput::FilePath(config_path.clone()));
-
-        match result {
-            ConfigSourceResult::Loaded { path, source } => {
-                assert_eq!(path, config_path);
-                assert_eq!(source, "{ \"tabstop\": 4 }");
-            }
-            other => panic!("既存ファイルは Loaded を返すこと, got: {:?}", other),
-        }
-
-        std::fs::remove_file(config_path).expect("cleanup");
-    }
-
-    #[test]
-    fn read_config_returns_read_failed_when_file_missing() {
-        let missing_path = unique_path("config-missing");
-
-        let result = read_config_source(&ConfigInput::FilePath(missing_path.clone()));
-
-        match result {
-            ConfigSourceResult::ReadFailed { path, message } => {
-                assert_eq!(path, missing_path);
-                assert!(!message.is_empty(), "読み込み失敗メッセージは空でないこと");
-            }
-            other => panic!(
-                "存在しないファイルは ReadFailed を返すこと, got: {:?}",
-                other
-            ),
-        }
-    }
-
-    #[test]
-    fn read_config_treats_unspecified_as_default() {
-        // 設定未指定は既定値として扱い、エラーにならないこと
-        let result = read_config_source(&ConfigInput::None);
-        assert_eq!(result, ConfigSourceResult::Default);
-
-        let load_result = evaluate_config(&result);
-        assert_eq!(
-            load_result,
-            ConfigLoadResult::DefaultUsed,
-            "設定未指定は DefaultUsed になること"
-        );
-    }
-
-    // ==== タスク 8.2: 限定 API だけを使って設定を評価できるようにする ====
-
-    #[test]
-    fn evaluate_config_parses_tabstop_option() {
+    fn evaluate_capability_source_parses_json_tabstop_option() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
             source: "{ \"tabstop\": 4 }".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         match result {
-            ConfigLoadResult::Success { commands } => {
+            CapabilityLoadResult::Success { commands, .. } => {
                 assert_eq!(commands.len(), 1);
                 assert_eq!(
                     commands[0],
@@ -568,16 +414,16 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_parses_number_option() {
+    fn evaluate_capability_source_parses_json_number_option() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
             source: "{ \"number\": true }".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         match result {
-            ConfigLoadResult::Success { commands } => {
+            CapabilityLoadResult::Success { commands, .. } => {
                 assert_eq!(commands.len(), 1);
                 assert_eq!(
                     commands[0],
@@ -592,16 +438,16 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_parses_numberwidth_option() {
+    fn evaluate_capability_source_parses_json_numberwidth_option() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
             source: "{ \"numberwidth\": 6 }".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         match result {
-            ConfigLoadResult::Success { commands } => {
+            CapabilityLoadResult::Success { commands, .. } => {
                 assert_eq!(commands.len(), 1);
                 assert_eq!(
                     commands[0],
@@ -616,16 +462,16 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_parses_multiple_options() {
+    fn evaluate_capability_source_parses_multiple_json_options() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("test.json"),
             source: "{ \"tabstop\": 2, \"number\": false }".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         match result {
-            ConfigLoadResult::Success { commands } => {
+            CapabilityLoadResult::Success { commands, .. } => {
                 assert_eq!(commands.len(), 2, "複数オプションが全てパースされること");
             }
             other => panic!("Success を返すこと, got: {:?}", other),
@@ -633,16 +479,16 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_rejects_vim_script_syntax() {
+    fn evaluate_capability_source_rejects_vim_script_syntax() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("init.vim"),
             source: "set tabstop=4\nset number\n".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         match result {
-            ConfigLoadResult::EvalFailed { path, message } => {
+            CapabilityLoadResult::EvalFailed { path, message } => {
                 assert_eq!(path, PathBuf::from("init.vim"));
                 assert!(
                     message.contains("Vim script"),
@@ -655,31 +501,31 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_rejects_noremap_vim_script() {
+    fn evaluate_capability_source_rejects_noremap_vim_script() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("config.vim"),
             source: "nnoremap <leader>f :Files<CR>".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         assert!(
-            matches!(result, ConfigLoadResult::EvalFailed { .. }),
+            matches!(result, CapabilityLoadResult::EvalFailed { .. }),
             "noremap 構文は拒否されること"
         );
     }
 
     #[test]
-    fn evaluate_config_returns_empty_commands_for_empty_config() {
+    fn evaluate_capability_source_returns_empty_commands_for_empty_config() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("empty.json"),
             source: "{}".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         match result {
-            ConfigLoadResult::Success { commands } => {
+            CapabilityLoadResult::Success { commands, .. } => {
                 assert!(
                     commands.is_empty(),
                     "空の設定は空のコマンドリストを返すこと"
@@ -690,30 +536,30 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_returns_default_used_for_no_config() {
+    fn evaluate_capability_source_returns_default_used_for_no_config() {
         let source = ConfigSourceResult::Default;
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         assert_eq!(
             result,
-            ConfigLoadResult::DefaultUsed,
+            CapabilityLoadResult::DefaultUsed,
             "設定なしは DefaultUsed を返すこと"
         );
     }
 
     #[test]
-    fn evaluate_config_propagates_read_failure() {
+    fn evaluate_capability_source_propagates_read_failure() {
         let source = ConfigSourceResult::ReadFailed {
             path: PathBuf::from("missing.json"),
             message: "file not found".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
         assert_eq!(
             result,
-            ConfigLoadResult::ReadFailed {
+            CapabilityLoadResult::ReadFailed {
                 path: PathBuf::from("missing.json"),
                 message: "file not found".to_string(),
             },
@@ -875,23 +721,26 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_config_uses_typescript_capability_source_for_existing_boot_path() {
+    fn evaluate_capability_source_normalizes_ts_option_to_boot_command() {
         let source = ConfigSourceResult::Loaded {
             path: PathBuf::from("init.ts"),
             source: "saya.options.tabstop = 6;".to_string(),
         };
 
-        let result = evaluate_config(&source);
+        let result = evaluate_capability_source(&source);
 
-        assert_eq!(
-            result,
-            ConfigLoadResult::Success {
-                commands: vec![ConfigCommand::SetOption {
-                    name: ConfigOptionName::TabSize,
-                    value: ConfigOptionValue::Number(6),
-                }],
+        match result {
+            CapabilityLoadResult::Success { commands, .. } => {
+                assert_eq!(
+                    commands,
+                    vec![ConfigCommand::SetOption {
+                        name: ConfigOptionName::TabSize,
+                        value: ConfigOptionValue::Number(6),
+                    }]
+                );
             }
-        );
+            other => panic!("Success を返すこと, got: {:?}", other),
+        }
     }
 
     // ==== タスク 8.3: 設定コマンドを起動時の editor 状態へ適用する ====
@@ -1045,127 +894,7 @@ mod tests {
         assert_eq!(state.tab_size, 8, "空コマンドでは状態が変わらないこと");
     }
 
-    // ==== タスク 8.4: 設定失敗時に warning 付きで起動継続できるようにする ====
-
-    #[test]
-    fn load_and_apply_with_no_config_returns_defaults_and_no_warnings() {
-        let (state, warnings) = load_and_apply_config(&ConfigInput::None);
-
-        assert_eq!(state.tab_size, 8);
-        assert!(!state.line_numbers);
-        assert!(state.key_mappings.is_empty());
-        assert!(
-            warnings.is_empty(),
-            "設定なしの場合は warning なしで起動すること"
-        );
-    }
-
-    #[test]
-    fn load_and_apply_with_missing_file_returns_defaults_with_warning() {
-        let missing_path = unique_path("config-load-missing");
-
-        let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(missing_path));
-
-        assert_eq!(state.tab_size, 8, "読み込み失敗時は既定値で起動すること");
-        assert_eq!(
-            warnings.len(),
-            1,
-            "読み込み失敗時は warning が 1 つ出ること"
-        );
-        assert!(
-            warnings[0].contains("Failed to read config"),
-            "読み込み失敗の warning メッセージ: {}",
-            warnings[0]
-        );
-    }
-
-    #[test]
-    fn load_and_apply_with_vim_script_returns_defaults_with_warning() {
-        let vim_config = unique_path("config-vim");
-        std::fs::write(&vim_config, "set tabstop=4\nset number\n").expect("write vim config");
-
-        let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(vim_config.clone()));
-
-        assert_eq!(
-            state.tab_size, 8,
-            "Vim script 設定は無視され既定値になること"
-        );
-        assert_eq!(warnings.len(), 1, "評価失敗時は warning が 1 つ出ること");
-        assert!(
-            warnings[0].contains("Failed to evaluate config"),
-            "評価失敗の warning メッセージ: {}",
-            warnings[0]
-        );
-
-        std::fs::remove_file(vim_config).expect("cleanup");
-    }
-
-    #[test]
-    fn load_and_apply_with_valid_config_applies_successfully() {
-        let config_path = unique_path("config-valid");
-        std::fs::write(&config_path, "{ \"tabstop\": 4, \"number\": true }").expect("write config");
-
-        let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
-
-        assert_eq!(state.tab_size, 4, "tabstop が設定値に変更されること");
-        assert!(state.line_numbers, "number が設定値に変更されること");
-        assert!(
-            warnings.is_empty(),
-            "有効な設定では warning なしで適用されること"
-        );
-
-        std::fs::remove_file(config_path).expect("cleanup");
-    }
-
-    #[test]
-    fn load_and_apply_with_empty_config_uses_defaults_without_warning() {
-        let config_path = unique_path("config-empty");
-        std::fs::write(&config_path, "{}").expect("write empty config");
-
-        let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(config_path.clone()));
-
-        assert_eq!(state.tab_size, 8, "空設定は既定値のまま");
-        assert!(warnings.is_empty(), "空設定は warning なし");
-
-        std::fs::remove_file(config_path).expect("cleanup");
-    }
-
-    #[test]
-    fn config_failure_does_not_block_editor_basic_workflow() {
-        // 設定失敗後も既定値で完全に動作する状態が返ること
-        let missing_path = unique_path("config-fail-workflow");
-
-        let (state, warnings) = load_and_apply_config(&ConfigInput::FilePath(missing_path));
-
-        // 既定値で editor が動作可能な状態であること
-        assert_eq!(state.tab_size, 8);
-        assert!(!state.line_numbers);
-        assert!(state.key_mappings.is_empty());
-
-        // warning は出ているが、state は完全に有効
-        assert!(!warnings.is_empty());
-
-        // 状態は clone 可能（session に渡せる）
-        let _cloned = state.clone();
-    }
-
-    #[test]
-    fn read_failure_and_eval_failure_share_common_fallback() {
-        // 読み込み失敗と評価失敗の両方が同じ既定値 fallback を使うこと
-        let missing_path = unique_path("config-read-fail");
-        let (state_read_fail, _) = load_and_apply_config(&ConfigInput::FilePath(missing_path));
-
-        let vim_config = unique_path("config-eval-fail");
-        std::fs::write(&vim_config, "set number").expect("write vim config");
-        let (state_eval_fail, _) =
-            load_and_apply_config(&ConfigInput::FilePath(vim_config.clone()));
-
-        // 両方とも同じ既定値状態であること
-        assert_eq!(
-            state_read_fail, state_eval_fail,
-            "読み込み失敗と評価失敗で同じ既定値 fallback が使われること"
-        );
-
-        std::fs::remove_file(vim_config).expect("cleanup");
-    }
+    // 設定ファイル -> 初期 options/状態への反映と失敗時 fallback は、
+    // 本番起動経路 `prepare_launch`（実 deno_core 経由）を駆動する
+    // `tests/integration_config.rs` で検証する。
 }

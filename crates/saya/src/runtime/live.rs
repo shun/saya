@@ -5277,8 +5277,30 @@ mod tests {
         std::fs::remove_dir(root).expect("cleanup root");
     }
 
+    // NOTE: 遅延プラグインロード (`saya.plugins.loadLazy` ->
+    // `op_runtime_plugin_load_lazy`) は現状 **未実装** であり、op は request の
+    // validation とログ出力のみを行って `Ok(())` を返す no-op である
+    // (live.rs:2083-2121 を参照)。モジュールの import / 評価や、遅延ロード対象が
+    // 登録するコマンド・イベントの live registry への反映は一切行われない。
+    //
+    // 以前ここには `..._bridge_accepts_logged_lazy_command_trigger` という、
+    // 「loadLazy が成功裏に解決する」ことだけを確認するテストが存在したが、
+    // それは no-op が成功を返すことを追認するだけで「遅延プラグインが実際に
+    // ロードされコマンドが登録される」というユーザー可視挙動を全く検証して
+    // おらず、緑色が「遅延ロードが動作する」という誤解 (偽の安心感) を生んでいた。
+    //
+    // そのため下記テストは「遅延ロード対象モジュールの `setup` が実際に評価され、
+    // そこで登録されたコマンドが loadLazy 後に live registry 経由で実行可能になる」
+    // という本来保証すべき挙動を表明する aspirational test として書き換えたうえで
+    // `#[ignore]` している。遅延ロードが実装されたら ignore を外すことで、実装の
+    // 正しさを検証するテストとして即座に有効化できる。
     #[tokio::test(flavor = "current_thread")]
-    async fn seed_runtime_lazy_plugin_bridge_accepts_logged_lazy_command_trigger() {
+    #[ignore = "lazy plugin load is currently a no-op (op_runtime_plugin_load_lazy validates+logs only, does not evaluate the module); re-enable when real lazy loading is implemented"]
+    async fn seed_runtime_lazy_plugin_load_registers_module_command() {
+        // 遅延ロードのトリガとなるコマンド `GitStatus` を seed する。トリガが
+        // 発火すると `loadLazy` 経由で遅延モジュール (`git-tools`) が評価され、
+        // その `setup` が `GitStatusReal` という *seed には存在しない* 新規コマンドを
+        // 登録する、というのが遅延ロード実装後に期待される挙動。
         let host_bridge = Arc::new(RecordingHostBridge::new());
         let seed = CallbackRegistrySeed::from_startup_entries(vec![StartupRegistryEntry::Command {
             name: "GitStatus".to_string(),
@@ -5297,15 +5319,41 @@ mod tests {
             .to_string(),
         }]);
 
-        let runtime =
-            SayaLiveRuntime::spawn_from_seed(host_bridge, seed).expect("runtime should initialize");
-        let receipt = runtime
+        let runtime = SayaLiveRuntime::spawn_from_seed(host_bridge.clone(), seed)
+            .expect("runtime should initialize");
+
+        // 遅延ロードのトリガを実行する。実装後は、この時点で遅延モジュールが
+        // 評価され `GitStatusReal` が registry に登録されている必要がある。
+        runtime
             .execute_command("GitStatus")
-            .expect("lazy command should queue");
-        receipt
+            .expect("lazy command should queue")
             .await_result()
             .await
-            .expect("lazy command bridge should accept target");
+            .expect("lazy command trigger should resolve");
+
+        // ユーザー可視の本質: 遅延ロードで登録されたコマンドが実際に実行可能で
+        // あること。no-op 実装では `GitStatusReal` は registry に存在せず host
+        // command fallback に落ちるため、この実行は遅延ロードによる登録を意味
+        // しない。実装が入れば登録済みコールバックとして実行され、ここで観測できる。
+        runtime
+            .execute_command("GitStatusReal")
+            .expect("lazily registered command should queue")
+            .await_result()
+            .await
+            .expect("lazily registered command should be executable after lazy load");
+
+        // 遅延ロードされたコマンドのコールバックが評価され副作用 (host command の
+        // 発行) を起こしたことを確認する。これにより「ロードされた」ことが
+        // registry 参照の有無に依存せず観測できる。
+        assert!(
+            host_bridge
+                .executed_commands
+                .lock()
+                .await
+                .iter()
+                .any(|command| command == "git-tools:status"),
+            "lazily loaded module setup should have run and emitted its side effect"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

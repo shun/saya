@@ -80,8 +80,12 @@ fn buffer_keyword_completion_payload_parity_from_upstream_cases() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
+/// docs 内の語句一致のみを確認し、PUM 抽出契約が popupwin の提示所有権から
+/// 文書上分離されていることを保証する。実挙動は
+/// `buffer_keyword_completion_payload_parity_from_upstream_cases` が担う。
 #[test]
-fn pum_contract_stays_separate_from_popupwin_presentation_ownership() {
+fn docs_lint_pum_contract_stays_separate_from_popupwin_presentation_ownership() {
     let public_api_reference = std::fs::read_to_string("docs/public-api-reference.md")
         .expect("public API reference should be readable");
     let api_index =
@@ -98,8 +102,11 @@ fn pum_contract_stays_separate_from_popupwin_presentation_ownership() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
+/// docs に PUM と popupwin 除外を分離する語句が記載されていることのみを確認する。
+/// 実挙動は `buffer_keyword_completion_payload_parity_from_upstream_cases` が担う。
 #[test]
-fn pum_contract_docs_keep_pum_separate_from_popupwin_exclusion() {
+fn docs_lint_pum_contract_keeps_pum_separate_from_popupwin_exclusion() {
     let public_api_reference = fs::read_to_string("docs/public-api-reference.md")
         .expect("public API reference should be readable");
     let api_index = fs::read_to_string("docs/api-index.md").expect("API index should be readable");

@@ -171,6 +171,15 @@ impl CompletionMenuKeyBindings {
 }
 
 impl CompletionFloatManager {
+    /// 現在アクティブな completion メニューが存在するかどうか。
+    ///
+    /// `main` のイベントループが `focused_input_target_for_key` へ渡す focus
+    /// 述語として用いる。メニューが開いていれば、そのキーは
+    /// `dispatch_completion_float_key` 経由で leaf の `handle_key` へ流れる。
+    pub fn has_active_menu(&self) -> bool {
+        self.active_menu_id.is_some()
+    }
+
     pub fn open_menu(
         &mut self,
         floats: &mut FloatingWindowManager,

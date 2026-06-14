@@ -353,6 +353,22 @@ impl FloatingWindowManager {
             })
     }
 
+    /// 現在 focus されている float が、ローカルでキー処理可能な static-lines
+    /// （ホバー等のスクロール可能フロート）かどうかを返す。
+    ///
+    /// `dispatch_floating_window_key` が実際に処理できる float に絞った focus
+    /// 述語であり、`focused_input_target_for_key` の振り分け判断に用いる。
+    /// core-window / terminal / completion-menu などの float が focus されて
+    /// いる場合は `None` を返す（それらは別ラッパが先に処理する）。
+    pub fn focused_static_lines_id(&self) -> Option<FloatingWindowId> {
+        let float_id = self.focused_float_id()?;
+        self.windows
+            .iter()
+            .find(|window| window.id == float_id)
+            .filter(|window| matches!(window.content, FloatingContentRef::StaticLines { .. }))
+            .map(|window| window.id)
+    }
+
     pub fn focused_terminal_id(&self) -> Option<u64> {
         let float_id = self.focused_float_id()?;
         self.windows

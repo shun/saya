@@ -44,22 +44,6 @@ use saya::terminal::input_loop::TerminalEventSource;
 use saya::terminal::io_broker::TerminalIoPhase;
 use saya::terminal::lifecycle::TerminalBackend;
 
-fn tui_only_architecture_suite_scope_statement() -> &'static str {
-    "host/application TUI-only architecture suite for startup policy, dependency drift guard, terminal phase ownership, capability degradation, and portability"
-}
-
-#[test]
-fn tui_only_architecture_suite_scope_statement_stays_pinned_to_host_layer_boundaries() {
-    let statement = tui_only_architecture_suite_scope_statement();
-
-    assert!(statement.contains("TUI-only architecture suite"));
-    assert!(statement.contains("startup policy"));
-    assert!(statement.contains("dependency drift guard"));
-    assert!(statement.contains("terminal phase ownership"));
-    assert!(statement.contains("portability"));
-    assert!(!statement.contains("editing semantics"));
-}
-
 #[test]
 fn tui_surface_policy_pins_tui_only_mode_and_rejects_out_of_scope_surfaces() {
     let policy = UiSurfacePolicy::default();
@@ -710,8 +694,11 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
     );
 }
 
+/// 非挙動メタゲート（ソース lint・CI 別ロール想定）。挙動は検証しない。
+/// runtime/public 表層にターミナルプロトコル固有シンボルが漏れていないことを
+/// ソース文字列走査で確認する実 scope 境界ガード（source lint）。
 #[test]
-fn layered_architecture_keeps_terminal_protocols_out_of_runtime_and_public_surface() {
+fn source_lint_layered_architecture_keeps_terminal_protocols_out_of_runtime_and_public_surface() {
     let runtime_source =
         std::fs::read_to_string("src/runtime/integration.rs").expect("runtime source should load");
     let public_declaration = saya::RUNTIME_SAYA_TYPE_DECLARATION

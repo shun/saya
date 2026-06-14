@@ -47,41 +47,11 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
     .expect("テスト用の起動が成功すること")
 }
 
-fn save_quit_suite_scope_statement() -> &'static str {
-    "main host save or quit policy suite for host/application save results, quit decisions, and save-family host action coordination"
-}
-
 fn explicit_save_request(path: PathBuf, contents: &str) -> SaveRequest {
     SaveRequest {
         path,
         contents: contents.to_string(),
     }
-}
-
-#[test]
-fn save_quit_suite_scope_statement_stays_pinned_to_host_layer_policy() {
-    let statement = save_quit_suite_scope_statement();
-
-    assert!(
-        statement.contains("main host save or quit policy suite"),
-        "suite ownership statement should stay explicit"
-    );
-    assert!(
-        statement.contains("save results"),
-        "suite ownership statement should keep host-side save responsibility visible"
-    );
-    assert!(
-        statement.contains("quit decisions"),
-        "suite ownership statement should keep quit policy responsibility visible"
-    );
-    assert!(
-        statement.contains("save-family"),
-        "suite ownership statement should mention save-family coordination"
-    );
-    assert!(
-        !statement.contains("editing semantics"),
-        "suite ownership statement must not drift into core-editing ownership"
-    );
 }
 
 // ---- 9.3.1: 保存成功の確認 ----
@@ -121,6 +91,11 @@ fn save_success_clears_dirty_state_and_allows_quit() {
     assert_eq!(session_state.evaluate_quit(false), QuitDecision::Allow);
 }
 
+/// Write host action 機構の host 契約検証。`:w` が write host action を 1 件
+/// 発行し、host 側が保存要求を組み立てて保存できることを確認する。
+/// キーストロークからの `:` 入口到達性と実バイナリでの実保存は実バイナリ
+/// E2E (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*`)
+/// が担保する。
 #[test]
 fn write_host_action_saves_buffer_contents_on_success() {
     let _lock = test_lock();
@@ -220,6 +195,10 @@ fn save_failure_keeps_dirty_state_and_warns_on_quit() {
 
 // ---- 9.3.3: 未保存終了警告の確認 ----
 
+/// 未保存変更時の quit 判定 (`WarnUnsaved`) を確認する host ユニット契約。
+/// キー到達性と実バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*` /
+/// `wq_command_*` / `x_command_*`) が担保する。
 #[test]
 fn unsaved_changes_prevent_immediate_quit() {
     let _lock = test_lock();
@@ -263,6 +242,10 @@ fn force_quit_allows_exit_even_when_dirty() {
 
 // ---- 9.3.5: quit 経路での session cleanup 確認 ----
 
+/// quit 経路で outcome を drop した際の session cleanup を確認する host
+/// ユニット契約。キー到達性と実バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*` /
+/// `wq_command_*` / `x_command_*`) が担保する。
 #[test]
 fn quit_host_action_allows_dropping_outcome_for_session_cleanup() {
     let _lock = test_lock();
@@ -301,6 +284,10 @@ fn quit_host_action_allows_dropping_outcome_for_session_cleanup() {
     );
 }
 
+/// 強制 quit 後に outcome を drop すると swapfile が削除される drop 契約の
+/// 検証。キー到達性と実バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*` /
+/// `wq_command_*` / `x_command_*`) が担保する。
 #[test]
 fn force_quit_removes_swapfile_when_outcome_is_dropped() {
     let _lock = test_lock();
@@ -346,6 +333,9 @@ fn force_quit_removes_swapfile_when_outcome_is_dropped() {
     std::fs::remove_file(&target_path).expect("テストファイルの削除");
 }
 
+/// `:wq` の Write -> Quit 発行順を確認する core 契約 + 保存後の quit 許可を
+/// 確認する host 契約。キー到達性と実バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `wq_command_*`) が担保する。
 #[test]
 fn wq_host_coordination_saves_before_allowing_quit() {
     let _lock = test_lock();
@@ -408,6 +398,9 @@ fn wq_host_coordination_saves_before_allowing_quit() {
     );
 }
 
+/// clean buffer の `:x`/`:xit`/`:exit` が Quit のみをキューする core 契約。
+/// キー到達性と実バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `x_command_*`) が担保する。
 #[test]
 fn x_xit_exit_queue_quit_only_on_clean_buffer() {
     let _lock = test_lock();
@@ -439,6 +432,10 @@ fn x_xit_exit_queue_quit_only_on_clean_buffer() {
     }
 }
 
+/// dirty buffer の `:x`/`:xit`/`:exit` が Write -> Quit をキューする core
+/// 契約 + host 側の保存と quit 許可を確認する host 契約。キー到達性と実
+/// バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `x_command_*`) が担保する。
 #[test]
 fn x_xit_exit_queue_write_then_quit_on_dirty_buffer() {
     let _lock = test_lock();
@@ -493,6 +490,11 @@ fn x_xit_exit_queue_write_then_quit_on_dirty_buffer() {
     }
 }
 
+/// `:write <path> | quit` が explicit path 付き Write -> Quit をキューする
+/// core 契約 + host 側の explicit path 保存を確認する host 契約。キー到達性と
+/// 実バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*`) が
+/// 担保する。
 #[test]
 fn compound_write_file_then_quit_queues_write_before_quit_with_explicit_path() {
     let _lock = test_lock();
@@ -551,6 +553,11 @@ fn compound_write_file_then_quit_queues_write_before_quit_with_explicit_path() {
     );
 }
 
+/// dirty buffer の `:update <path> | quit` が Write -> Quit をキューする core
+/// 契約 + host 側の explicit path 保存を確認する host 契約。キー到達性と実
+/// バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*` /
+/// `wq_command_*` / `x_command_*`) が担保する。
 #[test]
 fn compound_update_file_then_quit_on_dirty_buffer_queues_write_before_quit() {
     let _lock = test_lock();
@@ -610,6 +617,11 @@ fn compound_update_file_then_quit_on_dirty_buffer_queues_write_before_quit() {
     );
 }
 
+/// clean buffer でも `:update <path> | quit` が Write -> Quit を保つ core
+/// 契約 + host 側の explicit path 保存を確認する host 契約。キー到達性と実
+/// バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*` /
+/// `wq_command_*` / `x_command_*`) が担保する。
 #[test]
 fn compound_update_file_then_quit_on_clean_buffer_still_preserves_write_before_quit() {
     let _lock = test_lock();
@@ -666,6 +678,11 @@ fn compound_update_file_then_quit_on_clean_buffer_still_preserves_write_before_q
     );
 }
 
+/// non-slash delimiter の substitute 変換が compound forwarding 中に壊れず
+/// Write -> Quit を維持する core 契約 + host 側の保存を確認する host 契約。
+/// キー到達性と実バイナリでの保存挙動は実バイナリ E2E
+/// (`integration_input_pipeline_e2e.rs` の `write_command_saves_file_*` /
+/// `wq_command_*` / `x_command_*`) が担保する。
 #[test]
 fn non_slash_delimiter_compound_update_then_quit_keeps_forwarding_intact() {
     let _lock = test_lock();

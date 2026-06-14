@@ -30,7 +30,7 @@ use saya::core::notification_prompt::{
     MessageLineCandidate, MessageLineSource, resolve_workspace_message_line,
 };
 use saya::features::search::query::{SearchVisibleQuery, SearchVisibleState};
-use saya::input::router::{EditorIntent, KeyInput, resolve_intent};
+use saya::input::router::{EditorIntent, KeyInput, command_line_entry_for_key, resolve_intent};
 use saya::presentation::markdown::structure::MarkdownDocumentMap;
 use saya::presentation::overlay::asset_store::OverlayAssetStore;
 use saya::presentation::overlay::optional_graphics::OptionalGraphicsAdapter;
@@ -163,10 +163,10 @@ fn display_model_reflects_editor_state_and_messages() {
     assert!(!model.dirty);
     assert_eq!(model.message_line, None);
 
-    // 編集とメッセージ設定
-    outcome.core_bridge.dispatch_key("i").unwrap();
-    outcome.core_bridge.dispatch_key("A").unwrap();
-    outcome.core_bridge.dispatch_key("\x1b").unwrap();
+    // 編集とメッセージ設定（host の入力ルーティング判断を実関数で駆動する）
+    dispatch_key_input(&mut outcome, KeyInput::Char('i'));
+    dispatch_key_input(&mut outcome, KeyInput::Char('A'));
+    dispatch_key_input(&mut outcome, KeyInput::Escape);
 
     session_state.update_dirty(outcome.core_bridge.snapshot().dirty);
     session_state.record_save_failure("Permission denied".to_string());
@@ -204,10 +204,11 @@ fn ctrl_c_guidance_projects_into_message_line() {
     let mut outcome = prepare_launch(LaunchRequest::default()).unwrap();
     let mut session_state = EditorSessionState::new(outcome.target_path.clone());
 
-    outcome.core_bridge.dispatch_key("i").unwrap();
-    outcome.core_bridge.dispatch_key("X").unwrap();
-    outcome.core_bridge.dispatch_key("\x1b").unwrap();
-    outcome.core_bridge.dispatch_key("\u{3}").unwrap();
+    // host の入力ルーティング判断（command-line 入口優先）を実関数で駆動する。
+    dispatch_key_input(&mut outcome, KeyInput::Char('i'));
+    dispatch_key_input(&mut outcome, KeyInput::Char('X'));
+    dispatch_key_input(&mut outcome, KeyInput::Escape);
+    dispatch_key_input(&mut outcome, KeyInput::Ctrl('c'));
 
     let latest_message = outcome
         .core_bridge
@@ -316,10 +317,6 @@ fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
         row,
         modifiers: KeyModifiers::NONE,
     })
-}
-
-fn terminal_suite_scope_statement() -> &'static str {
-    "terminal and presentation integration suite for terminal lifecycle, viewport, projection, renderer, and input-event-loop integration"
 }
 
 fn project_workspace_from_snapshot(
@@ -819,10 +816,12 @@ fn markdown_wysiwyg_cursor_blocks_survive_workspace_projection_and_headless_rend
         "the active heading block should stay raw while the rest of the document renders rich"
     );
 
-    outcome
-        .core_bridge
-        .dispatch_key("jj")
-        .expect("normal-mode cursor movement should reach the table block");
+    // hjkl 移動キーは host の入力ルーティング判断を実関数で駆動して core へ届ける。
+    // 一方、移動後の WYSIWYG projection 検証（cursor_row / line_projections）は
+    // vim-core-rs のカーソル契約に基づく core 契約として、引き続き projection 出力で
+    // 確認する。
+    dispatch_key_input(&mut outcome, KeyInput::Char('j'));
+    dispatch_key_input(&mut outcome, KeyInput::Char('j'));
 
     let table_workspace = project_markdown_workspace_from_snapshot(
         &outcome.core_bridge.snapshot(),
@@ -992,19 +991,50 @@ fn plain_terminal_capabilities() -> saya::terminal::capability::TerminalCapabili
 
 fn dispatch_ctrl_w(outcome: &mut saya::app::bootstrap::BootstrapOutcome, command: char) {
     log::debug!("[test] dispatching Ctrl-w command: {}", command);
-    let sequence = format!("\u{17}{command}");
-    outcome
-        .core_bridge
-        .dispatch_key(&sequence)
-        .expect("Ctrl-w command should be accepted");
+    // 生バイト直送をやめ、Ctrl-w とそれに続くコマンド文字をそれぞれ host の入力
+    // ルーティング判断（`route_terminal_key_through_host`）を通して core へ届ける。
+    // window コマンド文字（h/l/k/j/c/s/v/+/-/=/></ など）は command-line 入口
+    // (`:` / `/`) に該当しないため、いずれも EditKey として core へ渡る。
+    dispatch_key_input(outcome, KeyInput::Ctrl('w'));
+    dispatch_key_input(outcome, KeyInput::Char(command));
+}
+
+/// 端末から届いたキーを host の入力ルーティング判断に通した結果。
+///
+/// 本番イベントループ（`main.rs`）と同じ順序で、まず副作用のない
+/// `command_line_entry_for_key` を評価し、command-line（ex / search）入口に
+/// 入るべきキーかどうかを判定する。入口に入らないキーだけを `resolve_intent`
+/// で core 向け intent に正規化する。これにより `:` / `/` を leaf 再実装で
+/// EditKey 扱いして core 直送する偽の経路を排し、実コードの判断関数を駆動する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostInputRoute {
+    /// command-line 入口が立つ（host 側で prompt を保持する）。
+    CommandLineEntry(char),
+    /// command-line 入口に入らず core 向け intent として解決された。
+    Intent(EditorIntent),
+}
+
+/// 端末キーを host の routing 判断（`command_line_entry_for_key` 優先）に通す。
+///
+/// host pending / count / passthrough は本テスト経路では保持しないため空で渡す。
+fn route_terminal_key_through_host(key: &KeyInput, mode: vim_core_rs::CoreMode) -> HostInputRoute {
+    if let Some(prompt) = command_line_entry_for_key(key, mode, &None, &None, "") {
+        log::debug!(
+            "[test] host routing raised command-line entry: key={:?}, prompt={:?}",
+            key,
+            prompt
+        );
+        return HostInputRoute::CommandLineEntry(prompt);
+    }
+    HostInputRoute::Intent(resolve_intent(key))
 }
 
 fn dispatch_key_input(outcome: &mut saya::app::bootstrap::BootstrapOutcome, key: KeyInput) {
-    let intent = resolve_intent(&key);
-    match intent {
-        EditorIntent::EditKey(key_text) => {
+    let mode = outcome.core_bridge.mode();
+    match route_terminal_key_through_host(&key, mode) {
+        HostInputRoute::Intent(EditorIntent::EditKey(key_text)) => {
             log::debug!(
-                "[test] dispatching key input through intent router: key={:?}, vim_key={:?}",
+                "[test] dispatching key input through host routing: key={:?}, vim_key={:?}",
                 key,
                 key_text
             );
@@ -1014,10 +1044,40 @@ fn dispatch_key_input(outcome: &mut saya::app::bootstrap::BootstrapOutcome, key:
                 .expect("key input should be accepted");
         }
         other => panic!(
-            "unexpected non-edit intent in Ctrl-w sequence test: {:?}",
+            "unexpected non-edit routing in Ctrl-w sequence test: {:?}",
             other
         ),
     }
+}
+
+/// 端末から届いた検索入口シーケンス（`/pattern\r`）を、ADR 0006 が定める
+/// host 責務の経路で driving する。
+///
+/// `/` は `route_terminal_key_through_host` が `CommandLineEntry('/')` を返すこと
+/// （= core へ EditKey 直送しない）を実関数で確認し、続くパターン文字は host 側の
+/// command-line 編集バッファに蓄積する。Enter で host が確定する挙動を、本番の
+/// command-line ディスパッチャと同じ core API `commit_search_input` で再現する。
+/// これにより `/` の検索入口が leaf 再実装ではなく実コードの判断＋本番 API を通る。
+fn dispatch_search_through_host(
+    outcome: &mut saya::app::bootstrap::BootstrapOutcome,
+    pattern: &str,
+) {
+    let mode = outcome.core_bridge.mode();
+    let entry = route_terminal_key_through_host(&KeyInput::Char('/'), mode);
+    assert_eq!(
+        entry,
+        HostInputRoute::CommandLineEntry('/'),
+        "`/` は host routing で search の command-line 入口が立つこと（core 直送しない）"
+    );
+
+    log::debug!(
+        "[test] host owns search command-line buffer, committing through core API: pattern={:?}",
+        pattern
+    );
+    outcome
+        .core_bridge
+        .commit_search_input(pattern)
+        .expect("host should commit the accumulated search pattern through the core bridge");
 }
 
 async fn dispatch_terminal_key_events_through_user_path(
@@ -1049,9 +1109,9 @@ async fn dispatch_terminal_key_events_through_user_path(
             match event {
                 UiEvent::Input(key) => {
                     processed_inputs += 1;
-                    let intent = resolve_intent(&key);
-                    match intent {
-                        EditorIntent::EditKey(key_text) => {
+                    let mode = outcome.core_bridge.mode();
+                    match route_terminal_key_through_host(&key, mode) {
+                        HostInputRoute::Intent(EditorIntent::EditKey(key_text)) => {
                             outcome
                                 .core_bridge
                                 .dispatch_key(&key_text)
@@ -1116,16 +1176,68 @@ async fn collect_terminal_events_through_user_path(
 
 fn intent_text_from_input_event(event: UiEvent) -> Option<String> {
     match event {
-        UiEvent::Input(key) => match resolve_intent(&key) {
-            EditorIntent::EditKey(key_text) => Some(key_text),
-            EditorIntent::Save | EditorIntent::Quit { .. } => None,
-        },
+        // 端末から届いた入力イベントを host routing 判断（command-line 入口優先）に
+        // 通し、core 向け EditKey として解決された場合だけテキストを返す。
+        // command-line 入口に入るキー（`:` / `/`）はここでは None を返す。
+        UiEvent::Input(key) => {
+            match route_terminal_key_through_host(&key, vim_core_rs::CoreMode::Normal) {
+                HostInputRoute::Intent(EditorIntent::EditKey(key_text)) => Some(key_text),
+                HostInputRoute::Intent(EditorIntent::Save)
+                | HostInputRoute::Intent(EditorIntent::Quit { .. })
+                | HostInputRoute::CommandLineEntry(_) => None,
+            }
+        }
         other => panic!("expected input event, got {:?}", other),
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_colon_and_slash_raise_command_line_entry_through_host_routing() {
+    // 端末から `:` / `/` が届いたとき、host の入力ルーティング判断
+    // (`command_line_entry_for_key`) が command-line 入口を立てることを実関数で
+    // 検証する。これまでローカル再実装の `resolve_intent` で EditKey として core
+    // 直送していた偽の経路を排し、本番判断関数を駆動する。
+    let _lock = launch_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
+
+    let events = vec![char_key_event(':'), char_key_event('/')];
+    let forwarded = collect_terminal_events_through_user_path(events, 2).await;
+
+    let mut routes = Vec::new();
+    for event in forwarded {
+        match event {
+            UiEvent::Input(key) => {
+                let mode = outcome.core_bridge.mode();
+                routes.push(route_terminal_key_through_host(&key, mode));
+            }
+            other => panic!("入力イベントだけを期待していたが {:?} を受信", other),
+        }
+    }
+
+    assert_eq!(
+        routes,
+        vec![
+            HostInputRoute::CommandLineEntry(':'),
+            HostInputRoute::CommandLineEntry('/'),
+        ],
+        "端末から届いた `:` / `/` は host routing で command-line 入口が立つこと"
+    );
+
+    // 念のため core が Normal のまま（command-line 入口は host 側責務で、core に
+    // 直送していない）であることを確認する。
+    assert_eq!(outcome.core_bridge.mode(), vim_core_rs::CoreMode::Normal);
+}
+
+/// 非挙動メタゲート（命名規約 lint）。
+///
+/// これはエディタの挙動を検証するテストではなく、テストファイルの命名規約
+/// （presentation 系は `integration_presentation_*`、`wave6` 接頭辞は廃止）を
+/// 守らせるための lint である。CI 上は通常の挙動テストとは別ロール（規約チェック）
+/// として扱う想定で、`meta_lint_` 接頭辞で挙動テストと区別する。
 #[test]
-fn presentation_related_test_files_use_presentation_prefix_instead_of_wave6_prefix() {
+fn meta_lint_presentation_related_test_files_use_presentation_prefix_instead_of_wave6_prefix() {
     let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
     let file_names: Vec<String> = std::fs::read_dir(&tests_dir)
         .expect("tests directory should be readable")
@@ -1149,40 +1261,6 @@ fn presentation_related_test_files_use_presentation_prefix_instead_of_wave6_pref
     assert!(
         !file_names.contains(&"integration_wave6_line_numbers.rs".to_string()),
         "wave6 naming should be retired from the presentation suite"
-    );
-}
-
-#[test]
-fn terminal_suite_scope_statement_stays_pinned_to_host_layer_presentation() {
-    let statement = terminal_suite_scope_statement();
-
-    assert!(
-        statement.contains("terminal and presentation integration suite"),
-        "suite ownership statement should stay explicit"
-    );
-    assert!(
-        statement.contains("terminal lifecycle"),
-        "suite ownership statement should keep terminal lifecycle responsibility visible"
-    );
-    assert!(
-        statement.contains("viewport"),
-        "suite ownership statement should keep viewport responsibility visible"
-    );
-    assert!(
-        statement.contains("projection"),
-        "suite ownership statement should keep projection responsibility visible"
-    );
-    assert!(
-        statement.contains("input-event-loop"),
-        "suite ownership statement should keep input/event-loop responsibility visible"
-    );
-    assert!(
-        statement.contains("renderer"),
-        "suite ownership statement should keep renderer responsibility visible"
-    );
-    assert!(
-        !statement.contains("editing semantics"),
-        "suite ownership statement must not drift into core-editing ownership"
     );
 }
 
@@ -1218,9 +1296,9 @@ async fn input_event_loop_and_projection_stay_consistent_across_one_edit_cycle()
             match event {
                 UiEvent::Input(key) => {
                     processed_inputs += 1;
-                    let intent = resolve_intent(&key);
-                    match intent {
-                        EditorIntent::EditKey(key_text) => {
+                    let mode = outcome.core_bridge.mode();
+                    match route_terminal_key_through_host(&key, mode) {
+                        HostInputRoute::Intent(EditorIntent::EditKey(key_text)) => {
                             outcome
                                 .core_bridge
                                 .dispatch_key(&key_text)
@@ -1340,8 +1418,10 @@ async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
     for event in drained {
         match event {
             UiEvent::Input(key) => {
-                let intent = resolve_intent(&key);
-                if let EditorIntent::EditKey(key_text) = intent {
+                let mode = outcome.core_bridge.mode();
+                if let HostInputRoute::Intent(EditorIntent::EditKey(key_text)) =
+                    route_terminal_key_through_host(&key, mode)
+                {
                     outcome
                         .core_bridge
                         .dispatch_key(&key_text)
@@ -1907,7 +1987,10 @@ async fn mouse_paste_and_terminal_lifecycle_integrate_through_ui_events() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
-    outcome.core_bridge.dispatch_key("i").unwrap();
+    // Insert モードへの遷移キーは host の入力ルーティング判断を実関数で駆動する。
+    // 後続の paste 単位（a/b/\n/あ）はブラケットペースト本文として core へ直接
+    // 届く経路を再現するため、そのまま dispatch する。
+    dispatch_key_input(&mut outcome, KeyInput::Char('i'));
     for unit in ["a", "b", "\n", "あ"] {
         outcome
             .core_bridge
@@ -2402,24 +2485,14 @@ fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity(
         .core_bridge
         .apply_ex_command(":split")
         .expect("split should succeed");
-    outcome
-        .core_bridge
-        .dispatch_key("/needle\r")
-        .expect("search should succeed");
+    // 検索入口（`/needle`+Enter）は ADR 0006 の host 責務経路で driving する。
+    dispatch_search_through_host(&mut outcome, "needle");
     dispatch_ctrl_w(&mut outcome, 'k');
-    outcome
-        .core_bridge
-        .dispatch_key("G")
-        .expect("top cursor move");
+    // 移動キーは host の入力ルーティング判断を実関数で駆動して core へ届ける。
+    dispatch_key_input(&mut outcome, KeyInput::Char('G'));
     dispatch_ctrl_w(&mut outcome, 'j');
-    outcome
-        .core_bridge
-        .dispatch_key("g")
-        .expect("bottom gg part 1");
-    outcome
-        .core_bridge
-        .dispatch_key("g")
-        .expect("bottom gg part 2");
+    dispatch_key_input(&mut outcome, KeyInput::Char('g'));
+    dispatch_key_input(&mut outcome, KeyInput::Char('g'));
 
     let before_resize = outcome.core_bridge.snapshot();
     viewport_store.sync_from_windows(&before_resize.windows);

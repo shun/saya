@@ -2,8 +2,11 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+/// 非挙動メタゲート（report lint・CI 別ロール想定）。挙動は検証しない。
+/// build 時に生成されたレポート文字列の存在と `status: passed` 表記のみを照合する。
+/// 実際の native ソース監査ロジックの挙動は build_link_audit.rs 側が担う。
 #[test]
-fn native_source_audit_report_is_traceable() {
+fn report_lint_native_source_audit_report_is_traceable() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR should be set during cargo test");
     let report_path = Path::new(&out_dir).join("native-source-audit-report.txt");
 
@@ -19,8 +22,11 @@ fn native_source_audit_report_is_traceable() {
     );
 }
 
+/// 非挙動メタゲート（report lint・CI 別ロール想定）。挙動は検証しない。
+/// build 時に生成されたレポート文字列の存在と `status: passed` 表記のみを照合する。
+/// 実際の archive member 監査ロジックの挙動は build_link_audit.rs 側が担う。
 #[test]
-fn archive_member_audit_report_is_traceable() {
+fn report_lint_archive_member_audit_report_is_traceable() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR should be set during cargo test");
     let report_path = Path::new(&out_dir).join("archive-member-audit-report.txt");
 
@@ -36,8 +42,12 @@ fn archive_member_audit_report_is_traceable() {
     );
 }
 
+/// リンク可能性ゲート。Normal 系委譲が依存する upstream シンボルがアーカイブに
+/// リンク可能であることのみを、生成レポート経由で確認する。実挙動（実際の順次
+/// ディスパッチや buffer mutation 等）は sequential_dispatch_contract 等の
+/// 専用テストが担う。
 #[test]
-fn normal_delegation_proof_is_traceable() {
+fn linkability_gate_normal_delegation_is_traceable() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR should be set during cargo test");
     let report_path = Path::new(&out_dir).join("normal-delegation-proof.txt");
 
@@ -53,8 +63,12 @@ fn normal_delegation_proof_is_traceable() {
     );
 }
 
+/// リンク可能性ゲート。Ex 系委譲が依存する upstream シンボルがアーカイブに
+/// リンク可能であることのみを、生成レポート経由で確認する。実挙動（実際の
+/// command line 実行や host action 回収等）は sequential_dispatch_contract 等の
+/// 専用テストが担う。
 #[test]
-fn ex_delegation_proof_is_traceable() {
+fn linkability_gate_ex_delegation_is_traceable() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR should be set during cargo test");
     let report_path = Path::new(&out_dir).join("ex-delegation-proof.txt");
 
@@ -86,8 +100,10 @@ fn compile_proof_is_traceable() {
     assert!(proof.get("vendor_sources").is_some());
 }
 
+/// 非挙動メタゲート（license lint・CI 別ロール想定）。挙動は検証しない。
+/// LICENSE-vim の存在と Vim ライセンス文言の有無のみを照合する。
 #[test]
-fn vim_license_text_is_shipped_in_repository_root() {
+fn license_lint_vim_license_text_is_shipped_in_repository_root() {
     let license_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("LICENSE-vim");
     assert!(
         license_path.exists(),
@@ -101,8 +117,10 @@ fn vim_license_text_is_shipped_in_repository_root() {
     );
 }
 
+/// 非挙動メタゲート（license lint・CI 別ロール想定）。挙動は検証しない。
+/// LICENSE の Apache 2.0 / Vim ライセンス分割に関する文言の有無のみを照合する。
 #[test]
-fn root_license_describes_apache_and_vim_split() {
+fn license_lint_root_license_describes_apache_and_vim_split() {
     let license_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("LICENSE");
     assert!(
         license_path.exists(),
@@ -124,8 +142,10 @@ fn root_license_describes_apache_and_vim_split() {
     );
 }
 
+/// 非挙動メタゲート（license lint・CI 別ロール想定）。挙動は検証しない。
+/// THIRD_PARTY_NOTICES.md の改変 Vim 配布に関する文言の有無のみを照合する。
 #[test]
-fn third_party_notice_describes_modified_vim_distribution() {
+fn license_lint_third_party_notice_describes_modified_vim_distribution() {
     let notice_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("THIRD_PARTY_NOTICES.md");
     assert!(
         notice_path.exists(),
@@ -149,8 +169,10 @@ fn third_party_notice_describes_modified_vim_distribution() {
     );
 }
 
+/// 非挙動メタゲート（license lint・CI 別ロール想定）。挙動は検証しない。
+/// Cargo.toml が混在ライセンス向けに license-file を指す表記の有無のみを照合する。
 #[test]
-fn cargo_manifest_uses_license_file_for_mixed_licensing() {
+fn license_lint_cargo_manifest_uses_license_file_for_mixed_licensing() {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let content = fs::read_to_string(&manifest_path).expect("Cargo.toml should be readable");
 
@@ -164,8 +186,10 @@ fn cargo_manifest_uses_license_file_for_mixed_licensing() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
+/// docs/manifest 内の Rendering State Family 境界に関する語句の有無のみを照合する。
 #[test]
-fn rendering_state_family_boundary_is_documented_and_classified() {
+fn docs_lint_rendering_state_family_boundary_is_documented_and_classified() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let scope = fs::read_to_string(repo_root.join("docs/SCOPE.md"))
         .expect("docs/SCOPE.md should be readable");
@@ -231,8 +255,10 @@ fn rendering_state_family_boundary_is_documented_and_classified() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
+/// docs/manifest 内の Search family / incsearch 境界に関する語句の有無のみを照合する。
 #[test]
-fn incsearch_search_family_contract_is_documented_in_classification_metadata() {
+fn docs_lint_incsearch_search_family_contract_is_documented_in_classification_metadata() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let classification_doc =
         fs::read_to_string(repo_root.join("docs/upstream-test-classification.md"))
@@ -259,8 +285,10 @@ fn incsearch_search_family_contract_is_documented_in_classification_metadata() {
     );
 }
 
+/// 非挙動メタゲート（docs lint・CI 別ロール想定）。挙動は検証しない。
+/// docs/manifest 内の filesystem/environment promotion 境界に関する語句の有無のみを照合する。
 #[test]
-fn filesystem_environment_promotion_boundary_is_documented_in_traceability_outputs() {
+fn docs_lint_filesystem_environment_promotion_boundary_is_documented_in_traceability_outputs() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let classification_doc =
         fs::read_to_string(repo_root.join("docs/upstream-test-classification.md"))

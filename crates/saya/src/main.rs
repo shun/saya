@@ -23,6 +23,12 @@ use saya::app::runtime_dispatch::execute_runtime_host_command_with_floats;
 use saya::app::runtime_dispatch::handle_selector_accept_action;
 #[cfg(test)]
 use saya::app::runtime_dispatch::shutdown_reason_from_quit_decision;
+use saya::app::runtime_dispatch::{
+    BufferedResolution, Command, LsifBridgeHandle, dispatch_buffer_changed_with_runtime,
+    dispatch_buffer_open_with_runtime, execute_startup_keymap_registered_command,
+    handle_directory_operation_confirmation_key_with_runtime, resolve_pipeline_command_buffered,
+    save_snapshot_result, startup_keymap_action_for_input,
+};
 #[cfg(test)]
 use saya::app::runtime_dispatch::{
     DirectoryOperationConfirmationKeyAction, SaveSnapshotOutcome,
@@ -31,13 +37,7 @@ use saya::app::runtime_dispatch::{
     take_pending_directory_save_then_quit_shutdown,
 };
 use saya::app::runtime_dispatch::{
-    BufferedResolution, Command, LsifBridgeHandle, dispatch_buffer_changed_with_runtime,
-    dispatch_buffer_open_with_runtime, execute_startup_keymap_registered_command,
-    handle_directory_operation_confirmation_key_with_runtime, resolve_pipeline_command_buffered,
-    save_snapshot_result, startup_keymap_action_for_input,
-};
-use saya::app::runtime_dispatch::{
-    dispatch_completion_float_key, dispatch_complete_keys_to_core, dispatch_floating_window_key,
+    dispatch_complete_keys_to_core, dispatch_completion_float_key, dispatch_floating_window_key,
     dispatch_resolved_intent_key, resolve_input_active_window_id,
 };
 use saya::app::runtime_dispatch::{
@@ -75,7 +75,10 @@ use saya::input::command_line_history::{
 use saya::input::router::KeyInput;
 #[cfg(test)]
 use saya::input::router::NavigationKey;
-use saya::presentation::floating_input::{FloatingWindowKeyHandling, handle_completion_float_key};
+use saya::input::router::command_line_entry_for_key;
+use saya::presentation::floating_input::{
+    FloatingWindowKeyHandling, focused_input_target_for_key, handle_completion_float_key,
+};
 #[cfg(test)]
 use saya::presentation::floating_input::{
     begin_command_line_from_focused_panel, handle_core_window_float_key,
@@ -601,6 +604,28 @@ async fn main() {
                         }
 
                         if !handled {
+                            // 継ぎ目（#2）観測ログ: command-line 等ホスト所有導線を抜けた
+                            // 後、どの focused サブシステムへキーが流れるはずかを純粋関数で
+                            // 分類して記録する。実際の処理は後続の dispatch_* ラッパが行うが、
+                            // この分類関数を本番ループが実際に通すことで、振り分け順序の
+                            // 配線を単体テストで検証できる形にしている。
+                            let focused_input_target = focused_input_target_for_key(
+                                &key,
+                                outcome.core_bridge.mode(),
+                                panel_manager.focused_terminal_id().is_some(),
+                                floating_window_manager.focused_terminal_id().is_some(),
+                                floating_window_manager.focused_core_window_id().is_some(),
+                                completion_float_manager.has_active_menu(),
+                                floating_window_manager.focused_static_lines_id().is_some(),
+                            );
+                            log::debug!(
+                                "[main][input] focused-subsystem routing classified: key={:?}, target={:?}",
+                                key,
+                                focused_input_target
+                            );
+                        }
+
+                        if !handled {
                             if let Some(reason) = dispatch_floating_ui_key(
                                 &key,
                                 &mut outcome,
@@ -691,6 +716,40 @@ async fn main() {
                                 session_state.message_pager_active(),
                                 workspace_projection_dirty
                             );
+                        } else if let Some(prompt) = (!handled)
+                            .then(|| {
+                                // ADR 0006 回帰修正: command-line（ex / search）入口は host の
+                                // 責務（architecture.md: `src/input/` が command-line editing /
+                                // ex-command routing を持つ）。`:` / `/` を単一パイプラインに
+                                // 載せると `predict_input_completeness` が「完成 builtin」と判定し
+                                // backend へ越境してしまい、host の command-line 入口がバイパス
+                                // されてコマンドモードに入れなくなる。
+                                //
+                                // 判断ロジックは副作用のない `command_line_entry_for_key` に集約し、
+                                // 本番イベントループが実際にその関数を通る形にすることで、単体
+                                // テストが実コードの配線を検証できるようにしている。host pending /
+                                // count / passthrough が積まれているケースでは None を返し、ここでは
+                                // 横取りしない（count や keymap prefix を落とさないため）。
+                                command_line_entry_for_key(
+                                    &key,
+                                    outcome.core_bridge.mode(),
+                                    &startup_keymap_pending_lhs,
+                                    &host_count,
+                                    &host_passthrough,
+                                )
+                            })
+                            .flatten()
+                        {
+                            command_line_prompt = Some(prompt);
+                            command_line_edit.clear();
+                            command_line_histories.reset_navigation();
+                            handled = true;
+                            need_redraw = true;
+                            log::info!(
+                                "[main][pipeline] command-line entry intercepted before pipeline (host-owned): key={:?}, prompt={:?}",
+                                key,
+                                command_line_prompt
+                            );
                         } else if !handled {
                             // ADR 0006 Phase 3: モーダル入力を単一パイプラインで解決する。
                             // 完成判定をパイプラインに集約し、完成コマンドのみを backend へ
@@ -702,8 +761,7 @@ async fn main() {
                             // 撤去した。完成判定は core の非破壊予測器
                             // (`classify_input_completeness`) を予測関数として使うため、
                             // host/core の pending が乖離する余地がなくなった。
-                            let input_snapshot_for_pipeline =
-                                outcome.core_bridge.light_snapshot();
+                            let input_snapshot_for_pipeline = outcome.core_bridge.light_snapshot();
                             let predict_mode = input_snapshot_for_pipeline.mode;
                             let resolution = resolve_pipeline_command_buffered(
                                 &outcome.startup_registry.keymaps,
@@ -776,24 +834,23 @@ async fn main() {
                                         );
                                     }
                                     let command_started_at = std::time::Instant::now();
-                                    if let Some(reason) =
-                                        execute_startup_keymap_registered_command(
-                                            runtime_session.as_mut(),
-                                            &command_name,
-                                            &mut outcome,
-                                            &mut session_state,
-                                            &mut floating_window_manager,
-                                            &mut completion_float_manager,
-                                            &mut lsp_diagnostic_store,
-                                            &mut terminal_float_manager,
-                                            &mut panel_manager,
-                                            Some(&mut runtime_input_prompt),
-                                            &mut transient_msg,
-                                            &mut need_redraw,
-                                            &mut runtime_presentation_intents,
-                                            Some(&lsif_bridge),
-                                        )
-                                        .await
+                                    if let Some(reason) = execute_startup_keymap_registered_command(
+                                        runtime_session.as_mut(),
+                                        &command_name,
+                                        &mut outcome,
+                                        &mut session_state,
+                                        &mut floating_window_manager,
+                                        &mut completion_float_manager,
+                                        &mut lsp_diagnostic_store,
+                                        &mut terminal_float_manager,
+                                        &mut panel_manager,
+                                        Some(&mut runtime_input_prompt),
+                                        &mut transient_msg,
+                                        &mut need_redraw,
+                                        &mut runtime_presentation_intents,
+                                        Some(&lsif_bridge),
+                                    )
+                                    .await
                                     {
                                         break 'main reason;
                                     }

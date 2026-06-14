@@ -30,9 +30,7 @@ use std::sync::MutexGuard;
 use saya::app::bootstrap::{
     StartupKeymapAction, StartupKeymapMode, StartupKeymapSnapshot, launch_test_lock,
 };
-use saya::app::runtime_dispatch::{
-    BufferedResolution, Command, resolve_pipeline_command_buffered,
-};
+use saya::app::runtime_dispatch::{BufferedResolution, Command, resolve_pipeline_command_buffered};
 use saya::core::bridge::CoreBridge;
 use saya::input::router::KeyInput;
 
@@ -70,6 +68,17 @@ fn normal_keymap(lhs: &str, action: StartupKeymapAction) -> StartupKeymapSnapsho
 ///    - `HoldPending` / `CountAccumulated` -> backend を呼ばない。
 ///
 /// 戻り値: 確定した `HostCommand` 名と、core への完成 dispatch 列。
+///
+/// 位置づけ（重要）: これは本番対話ループ match 腕の「3 つ目のミラー」である
+/// （他の 2 つは `runtime_dispatch/command.rs` の `drive` / `drive_buffered`）。
+/// 本番 match と同一規約を手で再現しているが、ミラーである以上、本番ループへの
+/// 実配線（イベント取得→classify→resolve→core 越境の継ぎ目）そのものは検証しない。
+/// 実配線の担保は実バイナリ E2E マトリクス `tests/integration_input_pipeline_e2e.rs`
+/// （Ctrl-f/b・dd・`:`・`/`・`:w` 等）が負う前提で本ハーネスを維持する。
+///
+/// 罠の注意: E2E がスキップされた環境（実バイナリを起動できない CI 等）では、
+/// このミラーだけが緑になり「入力パイプラインは健全」という誤った安心感を与える。
+/// E2E skip 時の緑は配線の正しさを意味しない。
 struct ProductionPipelineTrace {
     host_commands: Vec<(String, Option<usize>)>,
     dispatched_to_core: Vec<String>,
@@ -150,7 +159,11 @@ fn production_pipeline_gg_jumps_to_row0_with_g_prefixed_keymap() {
     for _ in 0..3 {
         let _ = bridge.dispatch_key("j");
     }
-    assert_eq!(bridge.snapshot().cursor_row, 3, "前提: カーソルは最終行 row3");
+    assert_eq!(
+        bridge.snapshot().cursor_row,
+        3,
+        "前提: カーソルは最終行 row3"
+    );
     let dispatch_before = bridge.dispatch_key_count();
 
     let trace = drive_production_pipeline(
