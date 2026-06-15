@@ -160,6 +160,24 @@ pub(super) fn apply_startup_core_options(
             error
         );
     }
+
+    let hlsearch_command = if options.hlsearch {
+        "set hlsearch"
+    } else {
+        "set nohlsearch"
+    };
+    log::debug!(
+        "[bootstrap] applying startup hlsearch option through Vim core ex command: hlsearch={}, command={:?}",
+        options.hlsearch,
+        hlsearch_command
+    );
+    if let Err(error) = core_bridge.apply_ex_command(hlsearch_command) {
+        log::debug!(
+            "[bootstrap] startup hlsearch command application failed and was ignored: command={:?}, error={:?}",
+            hlsearch_command,
+            error
+        );
+    }
 }
 
 pub(super) fn apply_startup_ftplugin_options(

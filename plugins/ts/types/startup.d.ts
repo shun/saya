@@ -24,6 +24,7 @@ declare global {
         smartindent: boolean;
         ignorecase: boolean;
         smartcase: boolean;
+        hlsearch: boolean;
         syntax: boolean;
         scrolloff: number;
         sidescrolloff: number;

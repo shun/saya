@@ -402,6 +402,8 @@ defineBoolOption("ignorecase", "ignorecase", false);
 defineBoolOption("ic", "ignorecase", false);
 defineBoolOption("smartcase", "smartcase", false);
 defineBoolOption("scs", "smartcase", false);
+defineBoolOption("hlsearch", "hlsearch", false);
+defineBoolOption("hls", "hlsearch", false);
 defineBoolOption("syntax", "syntax", false);
 defineNumberOption("scrolloff", "scrolloff", 0);
 defineNumberOption("so", "scrolloff", 0);
@@ -492,6 +494,7 @@ declare global {
         smartindent: boolean;
         ignorecase: boolean;
         smartcase: boolean;
+        hlsearch: boolean;
         syntax: boolean;
         scrolloff: number;
         sidescrolloff: number;

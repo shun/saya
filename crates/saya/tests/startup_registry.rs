@@ -494,6 +494,44 @@ async fn startup_numberwidth_is_collected() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn startup_hlsearch_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.hlsearch = true;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Option {
+            name: StartupOptionName::HlSearch,
+            value: StartupOptionValue::Boolean(true),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_hlsearch_alias_hls_is_collected() {
+    let registry = collect_startup_registry(
+        r#"
+            saya.options.hls = true;
+        "#,
+    )
+    .await
+    .expect("startup registry");
+
+    assert_eq!(
+        registry.entries(),
+        &[StartupRegistryEntry::Option {
+            name: StartupOptionName::HlSearch,
+            value: StartupOptionValue::Boolean(true),
+        }]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startup_cmdheight_is_collected() {
     let registry = collect_startup_registry(
         r#"

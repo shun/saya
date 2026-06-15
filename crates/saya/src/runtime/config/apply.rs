@@ -70,6 +70,7 @@ pub struct ConfigApplyState {
     pub softtabstop: i64,
     pub autoindent: bool,
     pub smartindent: bool,
+    pub hlsearch: bool,
     pub ignorecase: bool,
     pub smartcase: bool,
     pub syntax: bool,
@@ -112,6 +113,7 @@ impl ConfigApplyState {
             softtabstop: 0,
             autoindent: false,
             smartindent: false,
+            hlsearch: false,
             ignorecase: false,
             smartcase: false,
             syntax: false,
@@ -227,6 +229,15 @@ fn apply_single_command(
                     b
                 );
                 state.smartcase = *b;
+                Ok(())
+            }
+            (ConfigOptionName::HlSearch, ConfigOptionValue::Boolean(b)) => {
+                log::debug!(
+                    "[config_runtime] setting hlsearch startup core command flag: {} -> {}",
+                    state.hlsearch,
+                    b
+                );
+                state.hlsearch = *b;
                 Ok(())
             }
             (ConfigOptionName::Syntax, ConfigOptionValue::Boolean(b)) => {

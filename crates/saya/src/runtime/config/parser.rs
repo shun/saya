@@ -570,6 +570,7 @@ fn saya_option_name_from_config_name(name: ConfigOptionName) -> SayaOptionName {
         ConfigOptionName::ExpandTab => SayaOptionName::ExpandTab,
         ConfigOptionName::FoldLevel => SayaOptionName::FoldLevel,
         ConfigOptionName::FoldMethod => SayaOptionName::FoldMethod,
+        ConfigOptionName::HlSearch => SayaOptionName::HlSearch,
         ConfigOptionName::IgnoreCase => SayaOptionName::IgnoreCase,
         ConfigOptionName::LastStatus => SayaOptionName::LastStatus,
         ConfigOptionName::List => SayaOptionName::List,

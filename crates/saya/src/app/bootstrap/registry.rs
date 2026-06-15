@@ -226,6 +226,7 @@ pub(super) fn startup_registry_from_registry(
             softtabstop: normalize_i16(state.softtabstop),
             autoindent: state.autoindent,
             smartindent: state.smartindent,
+            hlsearch: state.hlsearch,
             ignorecase: state.ignorecase,
             smartcase: state.smartcase,
             syntax: state.syntax,

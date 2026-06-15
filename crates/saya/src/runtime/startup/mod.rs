@@ -59,6 +59,7 @@ const STARTUP_PUBLIC_SURFACE_PATHS: &[&str] = &[
     "saya.options.smartindent",
     "saya.options.ignorecase",
     "saya.options.smartcase",
+    "saya.options.hlsearch",
     "saya.options.syntax",
     "saya.options.scrolloff",
     "saya.options.sidescrolloff",

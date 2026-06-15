@@ -235,6 +235,17 @@ Use this boolean property to enable line-number prefixes in the projected TUI.
 saya.options.number = true;
 ```
 
+### `saya.options.hlsearch`
+
+Use this boolean property to persist search highlighting so matches stay
+highlighted from launch without a manual `:set hlsearch`. The Vim-style alias
+`hls` maps to the same option. Saya applies the value to the Vim core at
+startup; highlights appear once a search pattern exists.
+
+```ts
+saya.options.hlsearch = true;
+```
+
 ## Keymaps
 
 The keymap surface lets you define startup keymaps as normalized registry
