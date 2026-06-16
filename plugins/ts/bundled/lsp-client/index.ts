@@ -625,6 +625,10 @@ const __lspManagerSourceTemplate =
   "  const sessions = new Map();\n" +
   "  const initializeResults = new Map();\n" +
   "  const pendingNotifications = [];\n" +
+  "  const documentSyncStates = new Map();\n" +
+  "  const documentSyncOpenDocuments = new Set();\n" +
+  "  const documentSyncDebounceMs = 150;\n" +
+  "  const documentSyncNotifyTimeoutMs = 1000;\n" +
   "  // hover / definition / references / completion などの「結果を待つ」\n" +
   "  // request 系メソッドについて、`${server.name}:${method}` を key に\n" +
   "  // 直前 inflight を覚えておく。次の同 key request が来たら前 token を\n" +
@@ -682,6 +686,205 @@ const __lspManagerSourceTemplate =
   "      }\n" +
   "    }\n" +
   "  }\n" +
+  "  function isDocumentSyncNotification(method) {\n" +
+  "    return method === 'textDocument/didOpen'\n" +
+  "      || method === 'textDocument/didChange'\n" +
+  "      || method === 'textDocument/didSave'\n" +
+  "      || method === 'textDocument/didClose';\n" +
+  "  }\n" +
+  "  function documentSyncResponse(method) {\n" +
+  "    const r = {};\n" +
+  "    r.source = 'lsp';\n" +
+  "    r.method = method;\n" +
+  "    r.result = null;\n" +
+  "    return r;\n" +
+  "  }\n" +
+  "  function documentSyncKey(request) {\n" +
+  "    const uri = request && request.params && request.params.textDocument ? request.params.textDocument.uri : '';\n" +
+  "    return request.server.name + ':' + (uri || '<unknown>');\n" +
+  "  }\n" +
+  "  function notifyWithTimeout(session, method, params) {\n" +
+  "    const notification = Promise.resolve(session.notify(method, params));\n" +
+  "    if (typeof setTimeout !== 'function' || typeof clearTimeout !== 'function') return notification;\n" +
+  "    return new Promise(function (resolve, reject) {\n" +
+  "      let settled = false;\n" +
+  "      const timer = setTimeout(function () {\n" +
+  "        if (settled) return;\n" +
+  "        settled = true;\n" +
+  "        reject(new Error('LSP document sync notify timed out: ' + method));\n" +
+  "      }, documentSyncNotifyTimeoutMs);\n" +
+  "      notification.then(function (value) {\n" +
+  "        if (settled) return;\n" +
+  "        settled = true;\n" +
+  "        clearTimeout(timer);\n" +
+  "        resolve(value);\n" +
+  "      }).catch(function (err) {\n" +
+  "        if (settled) return;\n" +
+  "        settled = true;\n" +
+  "        clearTimeout(timer);\n" +
+  "        reject(err);\n" +
+  "      });\n" +
+  "    });\n" +
+  "  }\n" +
+  "  async function sendDocumentSync(request, onDrain) {\n" +
+  "    let sessionPromise = sessions.get(request.server.name);\n" +
+  "    if (!sessionPromise) {\n" +
+  "      const autoInitializeParams = request.initializeParams || {};\n" +
+  "      console.log('[saya-lsp] auto-start session for ' + request.server.name + ' triggered by ' + request.method);\n" +
+  "      sessionPromise = spawnSession(request.server, autoInitializeParams);\n" +
+  "      sessions.set(request.server.name, sessionPromise);\n" +
+  "    }\n" +
+  "    const session = await sessionPromise;\n" +
+  "    const uri = request && request.params && request.params.textDocument ? request.params.textDocument.uri : '<unknown>';\n" +
+  "    console.log('[saya-lsp][doc-sync] notify start method=' + request.method + ' uri=' + uri);\n" +
+  "    await notifyWithTimeout(session, request.method, request.params);\n" +
+  "    console.log('[saya-lsp][doc-sync] notify done method=' + request.method + ' uri=' + uri);\n" +
+  "    const notifications = session.takeNotifications();\n" +
+  "    for (let i = 0; i < notifications.length; i = i + 1) {\n" +
+  "      const notification = notifications[i];\n" +
+  "      const routed = { source: 'lsp', method: notification && notification.method, params: notification && notification.params, result: notification };\n" +
+  "      if (typeof onDrain === 'function') {\n" +
+  "        try {\n" +
+  "          await onDrain(routed);\n" +
+  "        } catch (err) {\n" +
+  "          console.log('[saya-lsp] document sync notification route failed: ' + (err && err.message ? err.message : String(err)));\n" +
+  "        }\n" +
+  "      } else {\n" +
+  "        pendingNotifications.push(routed);\n" +
+  "      }\n" +
+  "    }\n" +
+  "  }\n" +
+  "  function ensureDocumentSyncState(key) {\n" +
+  "    let state = documentSyncStates.get(key);\n" +
+  "    if (!state) {\n" +
+  "      state = { timer: null, chain: Promise.resolve(), pendingOpen: null, pendingChange: null, pendingSave: null, pendingClose: null, onDrain: null };\n" +
+  "      documentSyncStates.set(key, state);\n" +
+  "    }\n" +
+  "    return state;\n" +
+  "  }\n" +
+  "  function clearDocumentSyncTimer(state) {\n" +
+  "    if (state.timer !== null) {\n" +
+  "      if (typeof clearTimeout === 'function') clearTimeout(state.timer);\n" +
+  "      state.timer = null;\n" +
+  "    }\n" +
+  "  }\n" +
+  "  function scheduleDocumentSyncFlush(key, delayMs) {\n" +
+  "    const state = documentSyncStates.get(key);\n" +
+  "    if (!state) return;\n" +
+  "    clearDocumentSyncTimer(state);\n" +
+  "    console.log('[saya-lsp][doc-sync] schedule flush key=' + key + ' delayMs=' + delayMs);\n" +
+  "    if (typeof setTimeout !== 'function' || typeof clearTimeout !== 'function') {\n" +
+  "      Promise.resolve().then(function () {\n" +
+  "        flushDocumentSync(key);\n" +
+  "      }).catch(function (err) {\n" +
+  "        console.log('[saya-lsp][doc-sync] microtask flush failed: ' + (err && err.message ? err.message : String(err)));\n" +
+  "      });\n" +
+  "      return;\n" +
+  "    }\n" +
+  "    state.timer = setTimeout(function () {\n" +
+  "      state.timer = null;\n" +
+  "      flushDocumentSync(key);\n" +
+  "    }, delayMs);\n" +
+  "  }\n" +
+  "  function flushDocumentSync(key) {\n" +
+  "    const state = documentSyncStates.get(key);\n" +
+  "    if (!state) return;\n" +
+  "    clearDocumentSyncTimer(state);\n" +
+  "    state.chain = state.chain.catch(function () {}).then(async function () {\n" +
+  "      const batch = [];\n" +
+  "      if (state.pendingOpen) {\n" +
+  "        batch.push(state.pendingOpen);\n" +
+  "        state.pendingOpen = null;\n" +
+  "      }\n" +
+  "      if (state.pendingClose) {\n" +
+  "        state.pendingChange = null;\n" +
+  "        state.pendingSave = null;\n" +
+  "      } else if (state.pendingChange) {\n" +
+  "        batch.push(state.pendingChange);\n" +
+  "        state.pendingChange = null;\n" +
+  "      }\n" +
+  "      if (!state.pendingClose && state.pendingSave) {\n" +
+  "        batch.push(state.pendingSave);\n" +
+  "        state.pendingSave = null;\n" +
+  "      }\n" +
+  "      if (state.pendingClose) {\n" +
+  "        batch.push(state.pendingClose);\n" +
+  "        state.pendingClose = null;\n" +
+  "      }\n" +
+  "      console.log('[saya-lsp][doc-sync] flush key=' + key + ' batch=' + batch.map(function (item) { return item.method; }).join(','));\n" +
+  "      for (let i = 0; i < batch.length; i = i + 1) {\n" +
+  "        try {\n" +
+  "          await sendDocumentSync(batch[i], state.onDrain);\n" +
+  "          if (batch[i].method === 'textDocument/didOpen') documentSyncOpenDocuments.add(key);\n" +
+  "          if (batch[i].method === 'textDocument/didClose') documentSyncOpenDocuments.delete(key);\n" +
+  "        } catch (err) {\n" +
+  "          const message = err && err.message ? String(err.message) : String(err);\n" +
+  "          console.log('[saya-lsp] document sync failed ' + batch[i].method + ': ' + message);\n" +
+  "          if (saya.commands && typeof saya.commands.execute === 'function') {\n" +
+  "            try {\n" +
+  "              await saya.commands.execute('lsp.status ' + JSON.stringify({ message: 'LSP document sync failed: ' + batch[i].method }));\n" +
+  "            } catch (_statusErr) {\n" +
+  "              // best-effort status update\n" +
+  "            }\n" +
+  "          }\n" +
+  "        }\n" +
+  "      }\n" +
+  "      if (!state.pendingOpen && !state.pendingChange && !state.pendingSave && !state.pendingClose && state.timer === null) {\n" +
+  "        documentSyncStates.delete(key);\n" +
+  "      }\n" +
+  "    });\n" +
+  "    return state.chain;\n" +
+  "  }\n" +
+  "  async function flushDocumentSyncForRequest(request) {\n" +
+  "    if (!request || !request.params || !request.params.textDocument || !request.params.textDocument.uri) return;\n" +
+  "    const key = documentSyncKey(request);\n" +
+  "    if (!documentSyncStates.has(key)) return;\n" +
+  "    console.log('[saya-lsp][doc-sync] request waits pending sync method=' + request.method + ' key=' + key);\n" +
+  "    await flushDocumentSync(key);\n" +
+  "    console.log('[saya-lsp][doc-sync] request pending sync done method=' + request.method + ' key=' + key);\n" +
+  "  }\n" +
+  "  function enqueueDocumentSync(request, onDrain) {\n" +
+  "    if (!isDocumentSyncNotification(request.method)) return dispatch(request);\n" +
+  "    const key = documentSyncKey(request);\n" +
+  "    const state = ensureDocumentSyncState(key);\n" +
+  "    if (typeof onDrain === 'function') state.onDrain = onDrain;\n" +
+  "    console.log('[saya-lsp][doc-sync] enqueue method=' + request.method + ' key=' + key);\n" +
+  "    if (request.method === 'textDocument/didOpen') {\n" +
+  "      state.pendingOpen = request;\n" +
+  "      documentSyncOpenDocuments.add(key);\n" +
+  "      state.pendingClose = null;\n" +
+  "      scheduleDocumentSyncFlush(key, 0);\n" +
+  "    } else if (request.method === 'textDocument/didChange') {\n" +
+  "      if (!state.pendingClose) {\n" +
+  "        if (!documentSyncOpenDocuments.has(key) && !state.pendingOpen) {\n" +
+  "          const change = request.params && Array.isArray(request.params.contentChanges) ? request.params.contentChanges[0] : null;\n" +
+  "          state.pendingOpen = {\n" +
+  "            source: request.source,\n" +
+  "            lspVersion: request.lspVersion,\n" +
+  "            method: 'textDocument/didOpen',\n" +
+  "            server: request.server,\n" +
+  "            initializeParams: request.initializeParams,\n" +
+  "            params: { textDocument: { uri: request.params.textDocument.uri, languageId: request.languageId || 'plaintext', version: request.params.textDocument.version, text: change && typeof change.text === 'string' ? change.text : '' } },\n" +
+  "          };\n" +
+  "          documentSyncOpenDocuments.add(key);\n" +
+  "        }\n" +
+  "        state.pendingChange = request;\n" +
+  "        scheduleDocumentSyncFlush(key, documentSyncDebounceMs);\n" +
+  "      }\n" +
+  "    } else if (request.method === 'textDocument/didSave') {\n" +
+  "      if (!state.pendingClose) {\n" +
+  "        state.pendingSave = request;\n" +
+  "        flushDocumentSync(key);\n" +
+  "      }\n" +
+  "    } else if (request.method === 'textDocument/didClose') {\n" +
+  "      state.pendingChange = null;\n" +
+  "      state.pendingSave = null;\n" +
+  "      state.pendingClose = request;\n" +
+  "      documentSyncOpenDocuments.delete(key);\n" +
+  "      flushDocumentSync(key);\n" +
+  "    }\n" +
+  "    return documentSyncResponse(request.method);\n" +
+  "  }\n" +
   "  function dispatch(request) {\n" +
   "    return (async function () {\n" +
   "      if (request.source !== 'lsp') {\n" +
@@ -708,6 +911,9 @@ const __lspManagerSourceTemplate =
   "        noop.method = method;\n" +
   "        noop.result = null;\n" +
   "        return noop;\n" +
+  "      }\n" +
+  "      if (method !== 'shutdown') {\n" +
+  "        await flushDocumentSyncForRequest(request);\n" +
   "      }\n" +
   "      let sessionPromise = sessions.get(request.server.name);\n" +
   "      if (!sessionPromise) {\n" +
@@ -749,20 +955,12 @@ const __lspManagerSourceTemplate =
   "        r.result = null;\n" +
   "        return r;\n" +
   "      }\n" +
-  "      const isNotification = method === 'textDocument/didOpen'\n" +
-  "        || method === 'textDocument/didChange'\n" +
-  "        || method === 'textDocument/didSave'\n" +
-  "        || method === 'textDocument/didClose';\n" +
-  "      if (isNotification) {\n" +
+  "      if (isDocumentSyncNotification(method)) {\n" +
   "        await session.notify(method, request.params);\n" +
   "        for (const notification of session.takeNotifications()) {\n" +
   "          pendingNotifications.push({ source: 'lsp', method: notification && notification.method, params: notification && notification.params, result: notification });\n" +
   "        }\n" +
-  "        const r = {};\n" +
-  "        r.source = 'lsp';\n" +
-  "        r.method = method;\n" +
-  "        r.result = null;\n" +
-  "        return r;\n" +
+  "        return documentSyncResponse(method);\n" +
   "      }\n" +
   "      const cancellable = isCancellableMethod(method);\n" +
   "      const cancelKey = request.server.name + ':' + method;\n" +
@@ -804,6 +1002,7 @@ const __lspManagerSourceTemplate =
   "  }\n" +
   "  const api = {};\n" +
   "  api.dispatch = dispatch;\n" +
+  "  api.enqueueDocumentSync = enqueueDocumentSync;\n" +
   "  api.drainNotifications = function () {\n" +
   "    return pendingNotifications.splice(0, pendingNotifications.length);\n" +
   "  };\n" +
@@ -811,6 +1010,12 @@ const __lspManagerSourceTemplate =
   "    for (const key of Array.from(inflightCancels.keys())) {\n" +
   "      supersedePreviousInflight(key);\n" +
   "    }\n" +
+  "    for (const key of Array.from(documentSyncStates.keys())) {\n" +
+  "      const state = documentSyncStates.get(key);\n" +
+  "      if (state) clearDocumentSyncTimer(state);\n" +
+  "    }\n" +
+  "    documentSyncStates.clear();\n" +
+  "    documentSyncOpenDocuments.clear();\n" +
   "    const all = Array.from(sessions.values());\n" +
   "    sessions.clear();\n" +
   "    for (let i = 0; i < all.length; i = i + 1) {\n" +
@@ -1199,6 +1404,15 @@ function createRuntimeBridgeCallbackSource(
       "    }\n" +
       "    const manager = globalThis.__sayaLspManager;\n" +
       "    try {\n" +
+  "      const isDocumentSyncNotification = method === 'textDocument/didOpen'\n" +
+  "        || method === 'textDocument/didChange'\n" +
+  "        || method === 'textDocument/didSave'\n" +
+  "        || method === 'textDocument/didClose';\n" +
+  "      if (isDocumentSyncNotification && typeof manager.enqueueDocumentSync === 'function') {\n" +
+  "        return manager.enqueueDocumentSync(request, async (notification) => {\n" +
+  "          await routeFeatureResponse(notification);\n" +
+  "        });\n" +
+  "      }\n" +
   "      const response = await manager.dispatch(request);\n" +
   "      if (selectedServer) rememberServerCapabilities(selectedServer, response);\n" +
   "      for (const notification of manager.drainNotifications()) {\n" +

@@ -955,6 +955,57 @@ Deno.test("LSP source maps completion response into typed completion menu", asyn
   }
 });
 
+Deno.test("startup-safe LSP source filters candidates by current prefix", async () => {
+  const fake = installSayaFake({
+    method: "textDocument/completion",
+    result: {
+      items: [
+        { label: "as", kind: 14 },
+        { label: "do", kind: 14 },
+        { label: "setupTokyoNightTheme", kind: 3 },
+        { label: "setupLspPlugin", kind: 3 },
+      ],
+    },
+  }, {
+    cursorCol: 5,
+    currentLine: "setup",
+    text: "setup\n",
+  });
+
+  await setupSayaCompletion({
+    sources: [createLspCompletionSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake, {
+    method: "textDocument/completion",
+    result: {
+      items: [
+        { label: "as", kind: 14 },
+        { label: "do", kind: 14 },
+        { label: "setupTokyoNightTheme", kind: 3 },
+        { label: "setupLspPlugin", kind: 3 },
+      ],
+    },
+  });
+
+  await fake.registered.get("completion.trigger")?.();
+
+  if (fake.shown.length !== 1) {
+    throw new Error(`expected one completion menu, got ${fake.shown.length}`);
+  }
+  const labels = (fake.shown[0] as any).candidates.map((candidate: any) =>
+    candidate.label
+  );
+  if (
+    JSON.stringify(labels) !==
+      JSON.stringify(["setupLspPlugin", "setupTokyoNightTheme"])
+  ) {
+    throw new Error(
+      `unexpected filtered LSP labels: ${JSON.stringify(labels)}`,
+    );
+  }
+});
+
 Deno.test("LSP source can hide deep completion candidates", async () => {
   const fake = installSayaFake({
     method: "textDocument/completion",

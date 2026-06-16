@@ -708,11 +708,24 @@ function createBundledCompletionRuntimeCommand(
                   break;
                 }
               }
+              const normalized = uniqueByLabel(items.map(normalizeLspItem).filter(Boolean).map((candidate) => ({ ...candidate, source: query.sourceId })));
+              const prefix = String(query.prefix ?? "").toLowerCase();
+              const candidates = prefix
+                ? normalized.filter((candidate) => {
+                  const label = String(candidate.label ?? "").toLowerCase();
+                  if (label === prefix) return false;
+                  if (label.startsWith(prefix)) return true;
+                  return label.split(/[^a-z0-9_$]+/i).some((part) =>
+                    part.toLowerCase().startsWith(prefix)
+                  );
+                })
+                : normalized;
+              console.debug("[saya-completion][lsp] prefix=" + JSON.stringify(query.prefix) + " raw=" + items.length + " filtered=" + candidates.length);
               return {
                 sourceId: query.sourceId,
                 prefix: query.prefix,
                 replaceRange,
-                candidates: uniqueByLabel(items.map(normalizeLspItem).filter(Boolean).map((candidate) => ({ ...candidate, source: query.sourceId }))),
+                candidates,
               };
             } catch (error) {
               console.debug("[saya-completion] optional LSP source skipped: " + String(error));
