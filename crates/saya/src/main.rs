@@ -7857,6 +7857,94 @@ mod tests {
         }
     }
 
+    /// dired 経由で TypeScript ファイルを開いた場合でも、直接開きと同様に
+    /// Vim の行ベース syntax（`get_line_syntax`）が有効になり、実ハイライト
+    /// チャンク（syn_id != 0）が得られることを保証する回帰テスト。
+    ///
+    /// Tree-sitter 言語推定（document_id 由来）だけを見る既存テストでは、
+    /// filetype 未設定による Vim syntax 無効化（ハイライト不発）を検出できない。
+    #[tokio::test(flavor = "current_thread")]
+    async fn dired_enter_typescript_file_enables_vim_line_syntax() {
+        let _lock = saya::app::bootstrap::launch_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let source = "export function main(value: number): number { return value + 1; }\n";
+        let root_path = unique_path("dired-enter-ts-vim-syntax-root");
+        let source_path = root_path.join("main.ts");
+        let config_path = unique_path("dired-enter-ts-vim-syntax-init").with_extension("ts");
+        std::fs::create_dir_all(&root_path).expect("root directory");
+        std::fs::write(&source_path, source).expect("source file");
+        std::fs::write(&config_path, dired_phase1_config_source()).expect("config file");
+
+        let mut outcome = saya::app::bootstrap::prepare_launch(saya::app::cli::LaunchRequest {
+            input_source: saya::app::cli::InputSource::Empty,
+            config_source: saya::app::cli::ConfigSource::File(config_path.clone()),
+            ..saya::app::cli::LaunchRequest::default()
+        })
+        .expect("launch should succeed");
+        outcome.core_bridge.set_screen_size(24, 80);
+        outcome
+            .core_bridge
+            .apply_ex_command("syntax on")
+            .expect("syntax on should enable Vim syntax highlighting");
+        let mut session_state = outcome.editor_session_state();
+        let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+            .expect("runtime session should initialize");
+
+        execute_runtime_host_command(
+            &format!("edit {}", root_path.display()),
+            &mut outcome,
+            &mut session_state,
+        )
+        .expect("open root listing");
+        execute_runtime_command_for_test(
+            &mut outcome,
+            &mut session_state,
+            &mut runtime_session,
+            "dired.enter",
+        )
+        .await;
+
+        assert_eq!(outcome.target_path, Some(source_path.clone()));
+        let snapshot = outcome.core_bridge.snapshot();
+        let active_window = snapshot
+            .active_window()
+            .expect("dired.enter should leave an active source window");
+        let active_buffer = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id == active_window.buf_id)
+            .expect("active buffer metadata should exist");
+
+        // dired 経由では buffer 名はディレクトリのまま残るが（既存仕様）、
+        // filetype 検出が走るため Vim syntax は有効になる。
+        // 1行目（`export function ...`）にキーワード等が含まれるため、Vim syntax が
+        // 有効なら syn_id != 0 のハイライトチャンクが必ず得られる。
+        let mut highlighted = false;
+        for _ in 0..20 {
+            let chunks = outcome
+                .core_bridge
+                .get_line_syntax(active_window.id, 1)
+                .expect("get_line_syntax should succeed for visible line");
+            if chunks.iter().any(|chunk| chunk.syn_id != 0) {
+                highlighted = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            highlighted,
+            "dired-opened TypeScript file should enable Vim line syntax (syn_id != 0 chunk on line 1); \
+             active_buffer.name={:?}, document_id={:?}",
+            active_buffer.name, active_buffer.document_id
+        );
+
+        std::fs::remove_file(config_path).expect("cleanup config");
+        std::fs::remove_dir_all(root_path).expect("cleanup root directory");
+    }
+
     #[cfg(feature = "tree-sitter-syntax")]
     #[tokio::test(flavor = "current_thread")]
     async fn dired_open_then_enter_renders_tree_sitter_highlight_for_another_file() {

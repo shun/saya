@@ -449,6 +449,30 @@ pub fn execute_runtime_host_command_with_floats(
                         message: format!("failed to project directory buffer listing: {error:?}"),
                     })?;
             }
+            // dired/VFS 経由でファイルを開いた場合、core は VFS commit で本文と
+            // document_id を反映するが、再利用バッファの名前はディレクトリのまま
+            // 残り、`:edit` のように filetype 検出（BufRead の filetypedetect
+            // autocmd）が走らない。その結果 Vim の行ベース syntax が無効化され、
+            // TypeScript などがハイライトされない。ここで開いたファイルパスを
+            // 明示してファイルタイプ検出を実行し、直接開きと同じ状態へ揃える。
+            if !is_directory_edit && !effect.vfs_load_failed {
+                let detect_command = format!(
+                    "doautocmd filetypedetect BufRead {}",
+                    escape_runtime_edit_path(&path)
+                );
+                log::debug!(
+                    "[main][dired] running filetype detection after VFS file open: path={}, command={}",
+                    path.display(),
+                    detect_command
+                );
+                if let Err(error) = outcome.core_bridge.apply_ex_command(&detect_command) {
+                    log::debug!(
+                        "[main][dired] filetype detection after VFS file open failed and was ignored: path={}, error={:?}",
+                        path.display(),
+                        error
+                    );
+                }
+            }
             outcome.target_path = Some(path);
             Ok(effect)
         }
