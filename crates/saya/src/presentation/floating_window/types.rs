@@ -74,6 +74,8 @@ impl FloatingAnchorSignature {
 /// theme key にマップして実際の色 / 太字 / 下線を決定する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FloatingInlineStyleKind {
+    /// 選択中の行。補完メニューなどの row highlight に使う。
+    Selection,
     /// 検索や selector の一致範囲
     Match,
     /// インラインコード相当（モノスペース強調）

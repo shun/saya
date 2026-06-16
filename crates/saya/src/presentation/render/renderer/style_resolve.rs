@@ -49,6 +49,7 @@ pub(super) fn line_to_styled_spans<'a>(
 pub(super) fn inline_kind_modifier_style(kind: FloatingInlineStyleKind) -> Style {
     use ratatui::style::Modifier;
     match kind {
+        FloatingInlineStyleKind::Selection => Style::default().add_modifier(Modifier::REVERSED),
         FloatingInlineStyleKind::Match => Style::default()
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::UNDERLINED),

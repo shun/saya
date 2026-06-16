@@ -589,9 +589,21 @@ fn bundled_completion_binary_smoke_can_select_second_candidate() {
     assert!(
         after_down_lines.iter().any(|line| {
             line.as_str()
-                .is_some_and(|line| line.starts_with("> ") && line.contains("typed"))
+                .is_some_and(|line| !line.starts_with("> ") && line.contains("typed"))
         }),
-        "second completion candidate should be selected after Down: {after_down_lines:?}"
+        "completion candidate lines should no longer use cursor prefixes after Down: {after_down_lines:?}"
+    );
+    let after_down_styles = after_down["inlineStyles"]
+        .as_array()
+        .expect("selected completion inline styles should be an array");
+    assert!(
+        after_down_styles.iter().any(|style| {
+            style["kind"] == "Selection"
+                && style["line"].as_u64() == Some(1)
+                && style["columnStart"].as_u64() == Some(0)
+                && style["columnEnd"].as_u64().is_some_and(|end| end > 0)
+        }),
+        "second completion candidate should be row-highlighted after Down: {after_down_styles:?}"
     );
     let after_confirm = smoke_state(&output.stderr, "completion-after-confirm");
     assert_eq!(after_confirm["cursorRow"], 0);

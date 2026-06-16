@@ -2501,6 +2501,47 @@ fn workspace_render_applies_inline_styles_to_float_text_via_span_split() {
 }
 
 #[test]
+fn workspace_render_applies_selection_inline_style_to_float_row() {
+    use ratatui::style::Modifier;
+    let mut terminal =
+        Terminal::new(TestBackend::new(20, 4)).expect("test terminal should initialize");
+    let mut model = workspace_with_typed_message(None);
+    model.floats = vec![FloatingScreenModel {
+        id: FloatingWindowId(1),
+        content: FloatingContentRef::CompletionMenu { menu_id: 1 },
+        rect: PaneRect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 1,
+        },
+        lines: vec!["selected row".to_string()],
+        inline_styles: vec![FloatingInlineStyle {
+            kind: FloatingInlineStyleKind::Selection,
+            line: 0,
+            column_start: 0,
+            column_end: 12,
+        }],
+        images: Vec::new(),
+        cursor: None,
+        focusable: true,
+        mouse: true,
+        chrome: FloatingChrome {
+            border: FloatingBorder::None,
+        },
+        zindex: 100,
+        creation_order: 1,
+    }];
+
+    draw_workspace_frame(&mut terminal, &model, true, RenderTextMode::StyledTrueColor)
+        .expect("workspace render should succeed");
+
+    let buffer = terminal.backend().buffer().clone();
+    assert!(buffer[(0u16, 0u16)].modifier.contains(Modifier::REVERSED));
+    assert!(buffer[(11u16, 0u16)].modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
 fn workspace_render_applies_terminal_cell_styles_to_float_text() {
     use ratatui::style::{Color, Modifier};
     let mut terminal =

@@ -8,8 +8,9 @@ use crate::features::completion::session::{
 use crate::input::router::{KeyInput, NavigationKey};
 use crate::presentation::floating_window::{
     FloatingAnchor, FloatingBorder, FloatingChrome, FloatingContentRef, FloatingFit,
-    FloatingInputOutcome, FloatingLifecycle, FloatingPlacement, FloatingRelativeTo, FloatingSize,
-    FloatingWindowId, FloatingWindowManager, FloatingZIndex,
+    FloatingInlineStyle, FloatingInlineStyleKind, FloatingInputOutcome, FloatingLifecycle,
+    FloatingPlacement, FloatingRelativeTo, FloatingSize, FloatingWindowId, FloatingWindowManager,
+    FloatingZIndex,
 };
 
 const COMPLETION_MENU_GROUP: &str = "completion:menu";
@@ -103,6 +104,12 @@ struct CompletionMenuKeyBindings {
     previous: Vec<KeyInput>,
     page_next: Vec<KeyInput>,
     page_previous: Vec<KeyInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderedCompletionMenu {
+    lines: Vec<String>,
+    inline_styles: Vec<FloatingInlineStyle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,16 +216,16 @@ impl CompletionFloatManager {
             max_visible_items,
             request.candidates.len(),
         );
-        let visible_lines = render_completion_lines(
+        let rendered_menu = render_completion_menu(
             &request.candidates,
             selected_index,
             scroll_offset,
             max_visible_items,
         );
-        let menu_size = menu_size_for_lines(&visible_lines, max_visible_items);
+        let menu_size = menu_size_for_lines(&rendered_menu.lines, max_visible_items);
 
         let menu_id = floats.open_rendered_lines_with_lifecycle_and_replacement_group(
-            visible_lines,
+            rendered_menu.lines,
             |id| FloatingContentRef::CompletionMenu { menu_id: id.0 },
             FloatingLifecycle::CloseOnInsert,
             Some(COMPLETION_MENU_GROUP.to_string()),
@@ -238,6 +245,7 @@ impl CompletionFloatManager {
             FloatingZIndex::Completion,
             true,
         );
+        floats.set_inline_styles(menu_id, rendered_menu.inline_styles);
         let state = CompletionMenuState {
             window_id: request.window_id,
             candidates: request.candidates,
@@ -684,14 +692,15 @@ fn refresh_menu_lines(
         state.max_visible_items,
         state.candidates.len(),
     );
-    let lines = render_completion_lines(
+    let rendered_menu = render_completion_menu(
         &state.candidates,
         state.selected_index,
         state.scroll_offset,
         state.max_visible_items,
     );
-    state.menu_size = menu_size_for_lines(&lines, state.max_visible_items);
-    floats.replace_rendered_lines(menu_id, lines, state.menu_size);
+    state.menu_size = menu_size_for_lines(&rendered_menu.lines, state.max_visible_items);
+    floats.replace_rendered_lines(menu_id, rendered_menu.lines, state.menu_size);
+    floats.set_inline_styles(menu_id, rendered_menu.inline_styles);
 }
 
 fn scroll_offset_for_selection(
@@ -714,22 +723,55 @@ fn scroll_offset_for_selection(
     .min(max_offset)
 }
 
-fn render_completion_lines(
+fn render_completion_menu(
     candidates: &[CompletionCandidate],
     selected_index: usize,
     scroll_offset: usize,
     visible_items: usize,
-) -> Vec<String> {
-    candidates
+) -> RenderedCompletionMenu {
+    let rows = candidates
         .iter()
         .enumerate()
         .skip(scroll_offset)
         .take(visible_items.max(1))
-        .map(|(index, candidate)| {
-            let prefix = if index == selected_index { "> " } else { "  " };
-            format!("{prefix}{}", render_candidate(candidate))
+        .map(|(index, candidate)| (index, render_candidate(candidate)))
+        .collect::<Vec<_>>();
+    let content_width = rows
+        .iter()
+        .map(|(_, line)| UnicodeWidthStr::width(line.as_str()))
+        .max()
+        .unwrap_or(usize::from(DEFAULT_MENU_WIDTH))
+        .clamp(usize::from(DEFAULT_MENU_WIDTH), usize::from(MAX_MENU_WIDTH));
+    let mut inline_styles = Vec::new();
+    let lines = rows
+        .into_iter()
+        .enumerate()
+        .map(|(visible_index, (candidate_index, line))| {
+            if candidate_index != selected_index {
+                return line;
+            }
+            let highlighted = pad_line_to_display_width(line, content_width);
+            inline_styles.push(FloatingInlineStyle {
+                kind: FloatingInlineStyleKind::Selection,
+                line: visible_index,
+                column_start: 0,
+                column_end: highlighted.len(),
+            });
+            highlighted
         })
-        .collect()
+        .collect();
+    RenderedCompletionMenu {
+        lines,
+        inline_styles,
+    }
+}
+
+fn pad_line_to_display_width(mut line: String, width: usize) -> String {
+    let current_width = UnicodeWidthStr::width(line.as_str());
+    if current_width < width {
+        line.extend(std::iter::repeat(' ').take(width - current_width));
+    }
+    line
 }
 
 fn render_candidate(candidate: &CompletionCandidate) -> String {

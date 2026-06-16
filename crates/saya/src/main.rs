@@ -1521,11 +1521,28 @@ async fn run_binary_completion_smoke(
                 ));
             }
         }
-        let selected_lines = floating_window_manager
+        let selected_window = floating_window_manager
             .windows()
             .iter()
-            .find(|window| matches!(window.content, FloatingContentRef::CompletionMenu { .. }))
+            .find(|window| matches!(window.content, FloatingContentRef::CompletionMenu { .. }));
+        let selected_lines = selected_window
             .map(|window| window.lines.clone())
+            .unwrap_or_default();
+        let selected_inline_styles = selected_window
+            .map(|window| {
+                window
+                    .inline_styles
+                    .iter()
+                    .map(|style| {
+                        serde_json::json!({
+                            "kind": format!("{:?}", style.kind),
+                            "line": style.line,
+                            "columnStart": style.column_start,
+                            "columnEnd": style.column_end,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         eprintln!(
             "[main][smoke][completion] menu after Down: lines={:?}",
@@ -1535,6 +1552,7 @@ async fn run_binary_completion_smoke(
             "completion-menu-after-down",
             serde_json::json!({
                 "lines": selected_lines,
+                "inlineStyles": selected_inline_styles,
             }),
         );
     }

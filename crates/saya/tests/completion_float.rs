@@ -5,8 +5,8 @@ use saya::features::completion::float::{
 use saya::features::completion::session::CompletionKeyBindingsRequest;
 use saya::input::router::KeyInput;
 use saya::presentation::floating_window::{
-    FloatingAnchor, FloatingContentRef, FloatingFit, FloatingInputOutcome, FloatingPlacement,
-    FloatingRelativeTo, FloatingWindowManager, FloatingZIndex, WorkspaceFocus,
+    FloatingAnchor, FloatingContentRef, FloatingFit, FloatingInlineStyleKind, FloatingInputOutcome,
+    FloatingPlacement, FloatingRelativeTo, FloatingWindowManager, FloatingZIndex, WorkspaceFocus,
 };
 use saya::presentation::screen_model::PaneRect;
 
@@ -126,11 +126,23 @@ fn completion_menu_opens_structured_candidate_owner_and_documentation_float() {
         .find(|float| float.id == opened.menu_id)
         .expect("menu should resolve");
     assert_eq!(
-        menu_model.lines,
-        vec![
-            "  [Function] println! - macro",
-            "> [Function] print! - macro"
-        ]
+        menu_model
+            .lines
+            .iter()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>(),
+        vec!["[Function] println! - macro", "[Function] print! - macro"]
+    );
+    assert_eq!(menu_model.inline_styles.len(), 1);
+    assert_eq!(
+        menu_model.inline_styles[0].kind,
+        FloatingInlineStyleKind::Selection
+    );
+    assert_eq!(menu_model.inline_styles[0].line, 1);
+    assert_eq!(menu_model.inline_styles[0].column_start, 0);
+    assert_eq!(
+        menu_model.inline_styles[0].column_end,
+        menu_model.lines[1].len()
     );
 }
 
@@ -186,9 +198,18 @@ fn completion_selection_keys_update_selected_row_scroll_and_documentation() {
         .debug_window(opened.menu_id)
         .expect("menu should remain open after selection");
     assert_eq!(
-        menu.lines,
-        vec!["  [Function] print! - macro", "> [Module] process - module"]
+        menu.lines
+            .iter()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>(),
+        vec!["[Function] print! - macro", "[Module] process - module"]
     );
+    assert_eq!(menu.inline_styles.len(), 1);
+    assert_eq!(
+        menu.inline_styles[0].kind,
+        FloatingInlineStyleKind::Selection
+    );
+    assert_eq!(menu.inline_styles[0].line, 1);
     let docs_id = completion
         .active_documentation_id()
         .expect("documentation float should remain active");
@@ -207,13 +228,22 @@ fn completion_selection_keys_update_selected_row_scroll_and_documentation() {
             selected_index: 1
         }
     );
+    let menu = floats
+        .debug_window(opened.menu_id)
+        .expect("menu should remain open");
     assert_eq!(
-        floats
-            .debug_window(opened.menu_id)
-            .expect("menu should remain open")
-            .lines,
-        vec!["> [Function] print! - macro", "  [Module] process - module"]
+        menu.lines
+            .iter()
+            .map(|line| line.trim_end())
+            .collect::<Vec<_>>(),
+        vec!["[Function] print! - macro", "[Module] process - module"]
     );
+    assert_eq!(menu.inline_styles.len(), 1);
+    assert_eq!(
+        menu.inline_styles[0].kind,
+        FloatingInlineStyleKind::Selection
+    );
+    assert_eq!(menu.inline_styles[0].line, 0);
 }
 
 #[test]
