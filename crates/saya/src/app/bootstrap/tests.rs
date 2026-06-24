@@ -10,12 +10,13 @@ use crate::app::bootstrap::{
     StartupKeymapSnapshot, StartupRegistrySnapshot, bootstrap_warning_message, prepare_launch,
 };
 use crate::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use crate::app::test_support::launch_serial_lock as session_test_lock;
 use crate::runtime::config::{
     AppliedKeyMapping, ConfigApplyState, ConfigKeyMode, SayaKeyMode, SayaKeymapAction,
     StartupRegistry, StartupRegistryEntry,
 };
 use crate::runtime::plugin::{LazyIndex, LazyTarget, PluginHost};
-use crate::support::session_guard::{SessionGuard, test_lock as session_test_lock};
+use crate::support::session_guard::SessionGuard;
 
 use crate::app::bootstrap::config_resolve::hermetic_guard::GuardScope;
 use crate::runtime::plugin::PluginCacheRoot;

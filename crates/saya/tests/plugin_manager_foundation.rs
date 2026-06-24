@@ -1,9 +1,10 @@
+mod support;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::launch_test_lock;
 use saya::runtime::config::{
     StartupPluginDeclaration, StartupPluginSource, StartupRegistry, StartupRegistryEntry,
 };
@@ -12,6 +13,7 @@ use saya::runtime::plugin::{
     PluginHost, PluginLockfile, PluginManagerReport, StartupPlan, StartupPlanEntry,
     StartupPlanValidation,
 };
+use support::session::launch_serial_lock;
 
 fn unique_cache_root(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -177,7 +179,7 @@ fn plugin_host_generates_lazy_placeholders_that_log_trigger_bridge() {
 
 #[test]
 fn plugin_host_generates_lazy_placeholders_from_bundled_manifests() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PluginCacheRoot::new(unique_cache_root("bundled-fallback"));
@@ -211,7 +213,7 @@ fn plugin_host_generates_lazy_placeholders_from_bundled_manifests() {
 
 #[test]
 fn plugin_host_errors_when_explicit_saya_home_has_no_bundled_runtime() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let missing_home = unique_cache_root("missing-saya-home");
@@ -311,7 +313,7 @@ fn plugin_operations_report_cache_artifacts_and_append_operation_logs() {
 
 #[test]
 fn plugin_sync_regenerates_bundled_startup_and_lazy_artifacts_without_locking_bundled_plugins() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PluginCacheRoot::new(unique_cache_root("sync-bundled"));
@@ -352,7 +354,7 @@ fn plugin_sync_regenerates_bundled_startup_and_lazy_artifacts_without_locking_bu
 
 #[test]
 fn plugin_sync_writes_artifacts_from_startup_plugin_declarations() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PluginCacheRoot::new(unique_cache_root("sync-startup-declarations"));

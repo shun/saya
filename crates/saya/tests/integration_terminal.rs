@@ -10,6 +10,8 @@
 //! file name、mode、dirty、message line が表示へ反映されることを確認する。
 //! Requirements: 2.5, 3.1, 3.4
 
+mod support;
+
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
@@ -22,7 +24,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use saya::app::bootstrap::{launch_test_lock, prepare_launch};
+use saya::app::bootstrap::prepare_launch;
 use saya::app::cli::{ConfigSource, InitialCursorPosition, InputSource, LaunchRequest};
 use saya::app::event_loop::{EventLoopCoordinator, LoopAction, UiEvent};
 use saya::app::session::EditorSessionState;
@@ -47,6 +49,7 @@ use saya::terminal::capability::{
 };
 use saya::terminal::input_loop::{TerminalEventSource, run_terminal_input_loop};
 use saya::terminal::lifecycle::{TerminalBackend, TerminalLifecycle};
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -136,7 +139,7 @@ fn terminal_lifecycle_start_and_restore() {
 
 #[test]
 fn display_model_reflects_editor_state_and_messages() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("display");
@@ -198,7 +201,7 @@ fn display_model_reflects_editor_state_and_messages() {
 
 #[test]
 fn ctrl_c_guidance_projects_into_message_line() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).unwrap();
@@ -403,7 +406,7 @@ fn project_markdown_workspace_from_snapshot(
 
 #[test]
 fn markdown_workspace_keeps_mermaid_fence_as_body_text() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let markdown_source = "Before\n```mermaid\ngraph TD\n  A-->B\n```\nAfter\n";
@@ -547,7 +550,7 @@ fn active_window(snapshot: &vim_core_rs::CoreSnapshot) -> &vim_core_rs::CoreWind
 }
 
 fn split_summary_for_command(split_command: &str) -> Vec<WindowLayoutSummary> {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -626,7 +629,7 @@ fn assert_active_window_matches_direction(
 
 #[test]
 fn workspace_projection_returns_explicit_failure_when_active_window_is_missing() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -651,7 +654,7 @@ fn workspace_projection_returns_explicit_failure_when_active_window_is_missing()
 
 #[test]
 fn headless_smoke_renders_split_and_rollback_display_without_pty() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -666,7 +669,7 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
         InlineGraphicsProbeResult::Disabled,
     )
     .detect();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -759,7 +762,7 @@ fn headless_smoke_renders_split_and_rollback_display_without_pty() {
 
 #[test]
 fn markdown_wysiwyg_cursor_blocks_survive_workspace_projection_and_headless_render() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("markdown-wysiwyg").with_extension("md");
@@ -773,7 +776,7 @@ fn markdown_wysiwyg_cursor_blocks_survive_workspace_projection_and_headless_rend
     .expect("Markdown launch should succeed");
     let session_state = EditorSessionState::new(outcome.target_path.clone());
     let capabilities = plain_terminal_capabilities();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1197,7 +1200,7 @@ async fn terminal_colon_and_slash_raise_command_line_entry_through_host_routing(
     // (`command_line_entry_for_key`) が command-line 入口を立てることを実関数で
     // 検証する。これまでローカル再実装の `resolve_intent` で EditKey として core
     // 直送していた偽の経路を排し、本番判断関数を駆動する。
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1266,7 +1269,7 @@ fn meta_lint_presentation_related_test_files_use_presentation_prefix_instead_of_
 
 #[tokio::test(flavor = "current_thread")]
 async fn input_event_loop_and_projection_stay_consistent_across_one_edit_cycle() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1332,7 +1335,7 @@ async fn input_event_loop_and_projection_stay_consistent_across_one_edit_cycle()
 
 #[tokio::test(flavor = "current_thread")]
 async fn redraw_events_coalesce_without_dropping_non_redraw_events() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1465,8 +1468,8 @@ fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let event_loop_source = std::fs::read_to_string(manifest_dir.join("src/app/event_loop.rs"))
         .expect("event loop source is readable");
-    let main_source =
-        std::fs::read_to_string(manifest_dir.join("src/main.rs")).expect("main source is readable");
+    let program_source = std::fs::read_to_string(manifest_dir.join("src/app/program.rs"))
+        .expect("program source is readable");
     let outcome_consume_source =
         std::fs::read_to_string(manifest_dir.join("src/app/outcome_consume.rs"))
             .expect("outcome consume source is readable");
@@ -1476,7 +1479,7 @@ fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
         "event loop coalescing must stay a scheduling concern and must not mutate folded RedrawPlan"
     );
     assert!(
-        main_source.contains("render_workspace_result_with_structural_refresh"),
+        program_source.contains("render_workspace_result_with_structural_refresh"),
         "main loop must pass structural RedrawPlan to render coordination instead of relying on event coalescing"
     );
     assert!(
@@ -1488,7 +1491,7 @@ fn event_loop_coalescing_does_not_own_folded_redraw_plan_metadata() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn resize_event_refreshes_viewport_and_projection() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("resize");
@@ -1574,7 +1577,7 @@ async fn resize_event_refreshes_viewport_and_projection() {
 
 #[test]
 fn split_and_ctrl_w_navigation_keep_window_ids_and_active_pane_in_sync() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1667,7 +1670,7 @@ fn ctrl_w_split_commands_match_ex_split_layout_and_active_pane() {
 
 #[test]
 fn ctrl_w_split_commands_work_when_prefix_and_target_arrive_as_separate_key_inputs() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut split_outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1697,7 +1700,7 @@ fn ctrl_w_split_commands_work_when_prefix_and_target_arrive_as_separate_key_inpu
 
 #[tokio::test(flavor = "current_thread")]
 async fn ctrl_w_split_commands_work_when_prefix_and_target_arrive_as_separate_terminal_events() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut split_outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1734,7 +1737,7 @@ async fn ctrl_w_split_commands_work_when_prefix_and_target_arrive_as_separate_te
 #[tokio::test(flavor = "current_thread")]
 async fn ctrl_w_navigation_commands_work_when_prefix_and_target_arrive_as_separate_terminal_events()
 {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut horizontal = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1794,7 +1797,7 @@ async fn ctrl_w_navigation_commands_work_when_prefix_and_target_arrive_as_separa
 #[tokio::test(flavor = "current_thread")]
 async fn ctrl_w_reposition_commands_work_when_prefix_and_target_arrive_as_separate_terminal_events()
 {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -1983,7 +1986,7 @@ async fn mouse_paste_and_terminal_lifecycle_integrate_through_ui_events() {
         "mouse click should become one-based SGR and paste should preserve character order"
     );
 
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2028,7 +2031,7 @@ async fn mouse_paste_and_terminal_lifecycle_integrate_through_ui_events() {
 #[tokio::test(flavor = "current_thread")]
 async fn ctrl_w_close_and_geometry_commands_work_when_prefix_and_target_arrive_as_separate_terminal_events()
  {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut close_outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2137,7 +2140,7 @@ async fn ctrl_w_close_and_geometry_commands_work_when_prefix_and_target_arrive_a
 
 #[test]
 fn ctrl_w_h_and_l_move_to_expected_horizontal_neighbors() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2165,7 +2168,7 @@ fn ctrl_w_h_and_l_move_to_expected_horizontal_neighbors() {
 
 #[test]
 fn ctrl_w_j_and_k_move_to_expected_vertical_neighbors() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2193,7 +2196,7 @@ fn ctrl_w_j_and_k_move_to_expected_vertical_neighbors() {
 
 #[test]
 fn ctrl_w_close_removes_closed_window_from_viewport_tracking_and_workspace_projection() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2254,7 +2257,7 @@ fn ctrl_w_close_removes_closed_window_from_viewport_tracking_and_workspace_proje
 
 #[test]
 fn ctrl_w_geometry_commands_are_reflected_in_workspace_projection() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2296,7 +2299,7 @@ fn ctrl_w_geometry_commands_are_reflected_in_workspace_projection() {
 
 #[test]
 fn ctrl_w_reposition_commands_move_active_pane_to_requested_edge() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2322,7 +2325,7 @@ fn ctrl_w_reposition_commands_move_active_pane_to_requested_edge() {
 
 #[test]
 fn ctrl_w_equal_and_resize_commands_follow_geometry_rules() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2390,7 +2393,7 @@ fn ctrl_w_equal_and_resize_commands_follow_geometry_rules() {
 
 #[test]
 fn ctrl_w_close_on_last_window_keeps_layout_and_surfaces_message() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut outcome = prepare_launch(LaunchRequest::default()).expect("起動が成功すること");
@@ -2462,7 +2465,7 @@ fn ctrl_w_close_on_last_window_keeps_layout_and_surfaces_message() {
 
 #[test]
 fn split_focus_resize_keeps_inactive_pane_viewport_search_and_cursor_continuity() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("split-continuity");

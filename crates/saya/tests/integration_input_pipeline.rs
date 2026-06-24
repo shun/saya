@@ -25,20 +25,21 @@
 //! hermetic: 実 `~/.config/saya/init.ts` を一切読まない。keymaps はテスト内で
 //! 明示構築し、`CoreBridge` はインメモリのテキストで初期化する。
 
+mod support;
+
 use std::sync::MutexGuard;
 
-use saya::app::bootstrap::{
-    StartupKeymapAction, StartupKeymapMode, StartupKeymapSnapshot, launch_test_lock,
-};
+use saya::app::bootstrap::{StartupKeymapAction, StartupKeymapMode, StartupKeymapSnapshot};
 use saya::app::runtime_dispatch::{BufferedResolution, Command, resolve_pipeline_command_buffered};
 use saya::core::bridge::CoreBridge;
 use saya::input::router::KeyInput;
+use support::session::launch_serial_lock;
 
 /// `CoreBridge::new`（core セッション確保）はプロセス内で排他が必要なため、
-/// 既存 integration テスト（core_host_actions_contract.rs）と同じ `launch_test_lock`
+/// 既存 integration テスト（core_host_actions_contract.rs）と同じ `launch_serial_lock`
 /// で直列化する。
 fn test_lock() -> MutexGuard<'static, ()> {
-    launch_test_lock()
+    launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

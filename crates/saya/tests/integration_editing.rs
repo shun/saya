@@ -1,3 +1,5 @@
+mod support;
+
 /// 統合テスト: 編集フローの検証
 ///
 /// モード遷移、画面投影、入力、dirty 状態が一連で動くことを確認する。
@@ -7,15 +9,14 @@ use std::path::PathBuf;
 use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{
-    BootstrapOutcome, StartupKeymapSnapshot, launch_test_lock, prepare_launch,
-};
+use saya::app::bootstrap::{BootstrapOutcome, StartupKeymapSnapshot, prepare_launch};
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::app::runtime_dispatch::{BufferedResolution, Command, resolve_pipeline_command_buffered};
 use saya::app::session::EditorSessionState;
 use saya::input::router::{EditorIntent, KeyInput, resolve_intent};
 use saya::presentation::screen_model::{ProjectionInput, project};
 use saya::presentation::viewport::{ViewportState, ViewportSyncMode, WindowViewportStore};
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -26,7 +27,7 @@ fn unique_path(name: &str) -> PathBuf {
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {
-    launch_test_lock()
+    launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

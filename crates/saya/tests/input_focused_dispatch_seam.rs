@@ -15,9 +15,10 @@
 //! 必ずラッパ経由で実マネージャを駆動し、`handled` / `need_redraw` /
 //! `workspace_projection_dirty` 等のフラグ遷移まで検証する。
 
+mod support;
+
 use std::sync::MutexGuard;
 
-use saya::app::bootstrap::launch_test_lock;
 use saya::app::runtime_dispatch::dispatch_floating_window_key;
 use saya::core::bridge::CoreBridge;
 use saya::features::completion::float::{
@@ -39,6 +40,7 @@ use saya::presentation::panel::{
     PanelCloseBehavior, PanelContent, PanelManager, PanelOpenRequest, PanelPosition, PanelSize,
 };
 use saya::terminal::float::TerminalFloatManager;
+use support::session::launch_serial_lock;
 use vim_core_rs::CoreMode;
 
 // ============================================================================
@@ -105,10 +107,10 @@ fn completion_request() -> CompletionMenuFloatRequest {
 }
 
 /// CoreBridge は単一のグローバルコアセッションを掴むため、`CoreBridge::new`
-/// を使うテストは launch_test_lock で直列化する（並列実行で
+/// を使うテストは launch_serial_lock で直列化する（並列実行で
 /// `SessionAlreadyActive` を避けるため）。
 fn core_test_lock() -> MutexGuard<'static, ()> {
-    launch_test_lock()
+    launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

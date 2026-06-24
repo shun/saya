@@ -8,8 +8,6 @@
 use crate::presentation::floating_window::{
     FloatingBorder, FloatingInlineStyle, FloatingInlineStyleKind, FloatingScreenModel,
 };
-#[cfg(test)]
-use crate::presentation::screen_model::PaneRect;
 use crate::presentation::screen_model::{
     CommandLineModel, ScreenCursorStyle, ScreenModel, ScreenSyntaxCategory, ScreenSyntaxModifier,
     ScreenTreeSitterSyntax, WorkspaceScreenModel,
@@ -644,4 +642,5 @@ use pane::*;
 use style_resolve::*;
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;

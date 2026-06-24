@@ -307,7 +307,7 @@ fn workspace(window_id: i32, buffer_id: i32, line: &str, message: &str) -> Works
 #[test]
 fn render_workspace_applies_active_cursor_style_to_writer() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -330,7 +330,7 @@ fn render_workspace_applies_active_cursor_style_to_writer() {
 #[test]
 fn render_workspace_prefers_command_line_cursor_style() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -357,11 +357,11 @@ fn render_workspace_prefers_command_line_cursor_style() {
 #[test]
 fn render_workspace_registers_floating_mermaid_png_and_calls_kitty_overlay() {
     let capabilities = capabilities_with_kitty_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    .with_mermaid_renderer(Box::new(FakeMermaidRenderer));
     let mut writer = RecordingOverlayWriter::default();
 
     let outcome = coordinator
@@ -402,11 +402,11 @@ fn render_workspace_registers_floating_mermaid_png_and_calls_kitty_overlay() {
 #[test]
 fn render_workspace_zoomed_mermaid_popup_uses_kitty_source_rectangle() {
     let capabilities = capabilities_with_kitty_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    .with_mermaid_renderer(Box::new(FakeMermaidRenderer));
     let mut writer = RecordingOverlayWriter::default();
 
     coordinator
@@ -434,11 +434,11 @@ fn render_workspace_zoomed_mermaid_popup_uses_kitty_source_rectangle() {
 #[test]
 fn render_workspace_passes_mermaid_background_to_renderer() {
     let capabilities = capabilities_with_kitty_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(BackgroundAssertingMermaidRenderer));
+    .with_mermaid_renderer(Box::new(BackgroundAssertingMermaidRenderer));
     let mut writer = RecordingOverlayWriter::default();
     let mut workspace = markdown_mermaid_popup_workspace();
     let FloatingImageSource::Mermaid { background, .. } = &mut workspace.floats[0].images[0].source;
@@ -464,11 +464,11 @@ fn render_workspace_does_not_block_on_async_mermaid_cache_miss() {
     let capabilities = capabilities_with_kitty_graphics();
     let sender = Arc::new(Mutex::new(None));
     let redraws = Arc::new(AtomicUsize::new(0));
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(AsyncMermaidRenderer {
+    .with_mermaid_renderer(Box::new(AsyncMermaidRenderer {
         sender: sender.clone(),
     }));
     {
@@ -559,11 +559,11 @@ fn render_workspace_does_not_block_on_async_mermaid_cache_miss() {
 #[test]
 fn render_workspace_never_uses_synchronous_mermaid_renderer_for_popup() {
     let capabilities = capabilities_with_kitty_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(SyncOnlyMermaidRenderer));
+    .with_mermaid_renderer(Box::new(SyncOnlyMermaidRenderer));
     let mut writer = RecordingOverlayWriter::default();
 
     let outcome = coordinator
@@ -592,11 +592,11 @@ fn render_workspace_never_uses_synchronous_mermaid_renderer_for_popup() {
 fn render_workspace_reuses_cached_mermaid_png_across_repeated_frames() {
     let capabilities = capabilities_with_kitty_graphics();
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(CountingMermaidRenderer {
+    .with_mermaid_renderer(Box::new(CountingMermaidRenderer {
         calls: calls.clone(),
     }));
     let mut first_writer = RecordingOverlayWriter::default();
@@ -636,11 +636,11 @@ fn render_workspace_reuses_cached_mermaid_png_across_repeated_frames() {
 #[test]
 fn render_workspace_clears_stale_kitty_image_when_next_frame_has_no_overlay() {
     let capabilities = capabilities_with_kitty_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    .with_mermaid_renderer(Box::new(FakeMermaidRenderer));
     let mut first_writer = RecordingOverlayWriter::default();
     let mut second_writer = RecordingOverlayWriter::default();
 
@@ -674,11 +674,11 @@ fn render_workspace_clears_stale_kitty_image_when_next_frame_has_no_overlay() {
 #[test]
 fn render_workspace_restores_mermaid_text_when_kitty_graphics_are_disabled() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(FakeMermaidRenderer));
+    .with_mermaid_renderer(Box::new(FakeMermaidRenderer));
     let mut writer = RecordingOverlayWriter::default();
 
     let outcome = coordinator
@@ -712,11 +712,11 @@ fn render_workspace_restores_mermaid_text_when_kitty_graphics_are_disabled() {
 #[test]
 fn render_workspace_restores_mermaid_text_when_png_conversion_fails() {
     let capabilities = capabilities_with_kitty_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(FailingMermaidRenderer));
+    .with_mermaid_renderer(Box::new(FailingMermaidRenderer));
     let mut writer = RecordingOverlayWriter::default();
 
     let outcome = coordinator
@@ -799,11 +799,11 @@ fn render_workspace_mermaid_parse_error_points_to_source_line_and_hint() {
     *row = fence_row;
     let FloatingImageSource::Mermaid { source, .. } = &mut workspace.floats[0].images[0].source;
     *source = "flowchart TD\n\n  A([start]) :::startEnd --> B".to_string();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(StyleSeparatorFailure));
+    .with_mermaid_renderer(Box::new(StyleSeparatorFailure));
     let mut writer = RecordingOverlayWriter::default();
 
     let outcome = coordinator
@@ -880,11 +880,11 @@ fn render_workspace_mermaid_subgraph_label_error_suggests_bracket_label() {
     let mut workspace = markdown_mermaid_popup_workspace();
     let FloatingImageSource::Mermaid { source, .. } = &mut workspace.floats[0].images[0].source;
     *source = "flowchart TD\n  A-->B\n  subgraph 配送・通知システム\n    C-->D\n  end".to_string();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     )
-    .with_mermaid_renderer_for_tests(Box::new(SubgraphLabelFailure));
+    .with_mermaid_renderer(Box::new(SubgraphLabelFailure));
     let mut writer = RecordingOverlayWriter::default();
 
     let outcome = coordinator
@@ -906,7 +906,7 @@ fn render_workspace_mermaid_subgraph_label_error_suggests_bracket_label() {
 
 #[test]
 fn command_line_overlay_render_applies_command_cursor_style_without_workspace_render() {
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -927,7 +927,7 @@ fn command_line_overlay_render_applies_command_cursor_style_without_workspace_re
 
 #[test]
 fn repeated_command_line_overlay_does_not_rewrite_unchanged_cursor_style() {
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -951,7 +951,7 @@ fn repeated_command_line_overlay_does_not_rewrite_unchanged_cursor_style() {
 #[test]
 fn projection_failure_rollback_applies_retained_cursor_style() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1031,7 +1031,7 @@ fn projection_failure_diagnostic_has_refresh_context_and_retains_last_valid_scre
     assert!(diagnostic.invalidation.layout_dirty);
 
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1069,7 +1069,7 @@ fn projection_failure_diagnostic_has_refresh_context_and_retains_last_valid_scre
 #[test]
 fn valid_refresh_after_projection_failure_replaces_the_retained_screen() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1120,7 +1120,7 @@ fn valid_refresh_after_projection_failure_replaces_the_retained_screen() {
 #[test]
 fn projection_failure_render_does_not_replace_last_successful_workspace_state() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1186,7 +1186,7 @@ fn redraw_plan_for_full_clear() -> RedrawPlan {
 #[test]
 fn renderer_option_propagation_preserves_full_and_clear_before_draw() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1225,7 +1225,7 @@ fn syntax_chunks_force_color_text_mode_even_when_terminal_profile_is_monochrome(
         InlineGraphicsProbeResult::Unsupported,
     )
     .detect();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1269,7 +1269,7 @@ fn empty_syntax_chunks_keep_monochrome_text_mode_for_syntax_off_fast_path() {
         InlineGraphicsProbeResult::Unsupported,
     )
     .detect();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1293,7 +1293,7 @@ fn empty_syntax_chunks_keep_monochrome_text_mode_for_syntax_off_fast_path() {
 #[test]
 fn projection_failure_outcome_exposes_diagnostic_and_retained_state() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1347,7 +1347,7 @@ fn projection_failure_outcome_exposes_diagnostic_and_retained_state() {
 fn unresolved_projection_failure_keeps_failure_diagnostic_separate_from_retained_projection_until_next_success()
  {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );
@@ -1424,7 +1424,7 @@ fn unresolved_projection_failure_keeps_failure_diagnostic_separate_from_retained
 /// 構文 grep である。実挙動（durable frame options が実際にレンダラへ渡り、
 /// `clear_before_draw` が尊重されること）は検証できない。
 ///
-/// 理由: `TuiRenderCoordinator::new_for_tests` は `renderer: None` を設定し、
+/// 理由: `TuiRenderCoordinator::new_headless` は `renderer: None` を設定し、
 /// `TuiRenderer` は具象構造体でトレイト継ぎ目を持たないため、テストから
 /// 実 option 経路を駆動して描画バイト列を観測する手段が存在しない。実 option
 /// 経路の挙動担保は、実レンダラを起動する経路（例: main.rs の実バイナリ系
@@ -1459,7 +1459,7 @@ fn source_lint_renderer_option_contract_symbols_remain_present() {
 /// バイト書き込み順（テキストフレーム → kitty オーバーレイ）は検証しない。
 ///
 /// 真の write 列順検証はコーディネータ単体では実現できない。テキストフレーム
-/// 描画は具象 `TuiRenderer`（`new_for_tests` では `None`）に流れ、オーバーレイは
+/// 描画は具象 `TuiRenderer`（`new_headless` では `None`）に流れ、オーバーレイは
 /// `overlay_writer`（`RecordingOverlayWriter` が観測可能）に流れる別シンクである。
 /// 両者を同一の順序付きログに集約する継ぎ目が存在しないため、`RecordingOverlayWriter`
 /// が記録するのはオーバーレイ／kitty バイトのみで、テキスト描画との相対順序は
@@ -1486,7 +1486,7 @@ fn source_lint_overlay_draw_call_follows_text_frame_draw_call() {
 #[test]
 fn render_workspace_emits_terminal_bell_signal_and_keeps_visible_marker() {
     let capabilities = capabilities_without_graphics();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(
+    let mut coordinator = TuiRenderCoordinator::new_headless(
         OverlayAssetStore::default(),
         OptionalGraphicsAdapter::default(),
     );

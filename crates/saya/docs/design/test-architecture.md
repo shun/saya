@@ -28,6 +28,9 @@ Layer 1 validates local logic with direct data assertions.
 
 - Examples: `screen_model`, `editor_session`, `event_loop`,
   `terminal_lifecycle`, and parser tests in `src/*.rs`.
+- Private helper contracts may live in sibling test files loaded with
+  `#[cfg(test)]` and `#[path = "..."] mod tests;`, so production files do not
+  accumulate large inline test modules.
 - Typical assertion style: compare structs, enums, messages, and small
   normalized outputs.
 - Typical failure shape: one module contract regressed.
@@ -167,10 +170,14 @@ order.
 
 1. Extract shared Layer 2 harness utilities from the current integration
    tests.
-2. Move `main`-path command-line, runtime, redraw, and shutdown scenarios onto
+2. Split large inline test modules into sibling test files by responsibility,
+   while keeping private helper tests inside the owning module boundary.
+3. Move feature-specific tests from binary orchestration modules back to the
+   owning feature or presentation module.
+4. Move `main`-path command-line, runtime, redraw, and shutdown scenarios onto
    the harness.
-3. Replace the custom binary smoke shortcut with real Layer 3 PTY tests.
-4. Keep a small number of representative PTY scenarios and push most behavior
+5. Replace the custom binary smoke shortcut with real Layer 3 PTY tests.
+6. Keep a small number of representative PTY scenarios and push most behavior
    back down to Layer 2.
 
 ## Mapping from the current suite
@@ -178,6 +185,8 @@ order.
 The existing files map into the new structure like this.
 
 - `src/*.rs` tests remain Layer 1.
+- Large `mod tests` blocks in `src/*.rs` should be split into sibling test
+  files when they cover more than one local contract.
 - Most `tests/integration_*.rs` files move toward Layer 2.
 - `tests/integration_binary_smoke.rs` is a temporary Layer 3 precursor and
   should be replaced by PTY-backed tests.

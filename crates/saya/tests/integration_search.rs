@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,7 +35,7 @@ fn launch_with_content(content: &str) -> BootstrapOutcome {
 /// `dispatch_key("/search\r")` を core へ直送して検索実行結果のみを検証する。
 #[test]
 fn search_starts_and_executes() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nsearch test\nworld\n");
@@ -54,7 +56,7 @@ fn search_starts_and_executes() {
 /// core へ直送した際のカーソル移動結果のみを検証する。
 #[test]
 fn next_previous_search_results() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("word\ntext\nword\nhello\nword\n");
@@ -81,7 +83,7 @@ fn next_previous_search_results() {
 /// (`integration_input_pipeline_e2e.rs`) が担保する。
 #[test]
 fn search_not_found_message() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nworld\n");
@@ -118,7 +120,7 @@ fn search_not_found_message() {
 
 #[test]
 fn search_navigation_failure() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("hello\nworld\n");
@@ -146,7 +148,7 @@ fn search_navigation_failure() {
 
 #[test]
 fn search_exact_word() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
@@ -162,7 +164,7 @@ fn search_exact_word() {
 
 #[test]
 fn search_asterisk() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");
@@ -177,7 +179,7 @@ fn search_asterisk() {
 
 #[test]
 fn search_hash() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let mut outcome = launch_with_content("first second first\n");

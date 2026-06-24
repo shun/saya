@@ -6,6 +6,8 @@
 //! host/application projection に限定する。詳細な editing semantics は
 //! ADR 0001 に従って `vim-core-rs` に委ねる。
 //!
+mod support;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -119,7 +121,7 @@ fn meta_lint_runtime_related_test_files_use_typescript_runtime_prefix_instead_of
 
 #[test]
 fn startup_typescript_config_reflects_options_registry_and_headless_projection() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("target.txt");
@@ -178,7 +180,7 @@ fn startup_typescript_config_reflects_options_registry_and_headless_projection()
 
 #[test]
 fn startup_typescript_config_resolves_markdown_theme_for_headless_projection() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-target.md");
@@ -258,7 +260,7 @@ fn startup_typescript_config_resolves_markdown_theme_for_headless_projection() {
 
 #[test]
 fn startup_typescript_config_keeps_markdown_projection_with_ui_and_syntax_theme() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-ui-syntax-target.md");
@@ -335,7 +337,7 @@ fn startup_typescript_config_keeps_markdown_projection_with_ui_and_syntax_theme(
 
 #[test]
 fn startup_markdown_projection_parses_repository_agents_md_headings() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("AGENTS.md");
@@ -357,7 +359,7 @@ fn startup_markdown_projection_parses_repository_agents_md_headings() {
 
 #[test]
 fn startup_typescript_config_heading_level_can_disable_inherited_bold() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-bold-false-target.md");
@@ -414,7 +416,7 @@ fn startup_typescript_config_heading_level_can_disable_inherited_bold() {
 
 #[test]
 fn startup_typescript_config_applies_heading_bold_to_heading1() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-heading1-target.md");
@@ -468,7 +470,7 @@ fn startup_typescript_config_applies_heading_bold_to_heading1() {
 
 #[test]
 fn startup_typescript_config_applies_heading_bold_to_active_raw_heading1() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("theme-active-heading1-target.md");
@@ -526,7 +528,7 @@ fn startup_typescript_config_applies_heading_bold_to_active_raw_heading1() {
 
 #[test]
 fn startup_config_failure_keeps_default_session_and_presentation_state() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("target-fallback.txt");
@@ -770,7 +772,7 @@ async fn runtime_surface_is_frozen_and_does_not_expose_registration_apis() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_callback_failure_projects_as_message_without_corrupting_session_state() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("runtime-failure.txt");
@@ -849,7 +851,7 @@ async fn runtime_callback_failure_projects_as_message_without_corrupting_session
 
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_callback_completion_requests_projection_refresh_after_host_save() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("runtime-refresh-target.txt");

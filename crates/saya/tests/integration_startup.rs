@@ -1,3 +1,5 @@
+mod support;
+
 /// 統合テスト: 起動フローの検証
 ///
 /// このファイルは `saya` の main startup and session orchestration suite
@@ -18,8 +20,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use saya::app::bootstrap::{
-    BootstrapError, BootstrapWarning, LoadedConfig, bootstrap_warning_message, launch_test_lock,
-    prepare_launch, prepare_launch_with_reader,
+    BootstrapError, BootstrapWarning, LoadedConfig, bootstrap_warning_message, prepare_launch,
+    prepare_launch_with_reader,
 };
 use saya::app::cli::{
     ConfigSource, InitialCursorPosition, InputSource, LaunchRequest, parse_launch_request,
@@ -29,6 +31,7 @@ use saya::app::startup::prepare_launch_and_start_terminal;
 use saya::presentation::screen_model::{ProjectionInput, project};
 use saya::runtime::plugin::{LazyIndex, LazyTarget, PluginCacheRoot, PluginHost};
 use saya::terminal::lifecycle::TerminalBackend;
+use support::session::launch_serial_lock;
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -135,7 +138,7 @@ fn cwd_test_lock() -> &'static Mutex<()> {
 }
 
 fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    launch_test_lock()
+    launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -501,7 +504,7 @@ fn session_guard_released_after_successful_startup_outcome_dropped() {
 #[cfg(unix)]
 #[test]
 fn repeated_start_fail_start_cycles_keep_launch_state_and_cleanup_consistent() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let hermetic = HermeticStartup::new("repeat");
@@ -635,7 +638,7 @@ fn startup_config_enables_syntax_from_typescript_option() {
 
 #[test]
 fn startup_unknown_option_warns_without_discarding_valid_options() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("unknown-option-warning-target.txt");

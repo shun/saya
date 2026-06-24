@@ -58,6 +58,10 @@ TypeScript で記述できることを重要な方向性とします。高負荷
 - 新しい依存追加は、CLI エディタとして妥当かを確認してから行う
 - 振る舞いを変える変更では、設計意図が伝わるテストかドキュメントを
   併せて更新する
+- テスト配置は `docs/testing.md` の Test placement を優先する。巨大な
+  inline `mod tests` を増やさず、private helper は所有 module の sibling
+  test file、public/binary 挙動は `tests/`、feature 固有挙動は該当
+  feature module の近くに置く。
 - 実装後の検証は、ログや UI イベントが出たことだけで完了にしない。
   変更がバッファ編集、ファイル保存、runtime state、UI の開閉や選択状態、
   設定反映などの最終状態を変えるなら、テストまたは smoke でその状態を

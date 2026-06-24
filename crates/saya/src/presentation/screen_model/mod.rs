@@ -1225,4 +1225,5 @@ use syntax_projection::*;
 use text_layout::*;
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;

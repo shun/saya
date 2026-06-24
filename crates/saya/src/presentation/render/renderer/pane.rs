@@ -83,60 +83,6 @@ pub(super) fn render_status_line(model: &ScreenModel) -> String {
     model.status_line.clone()
 }
 
-#[cfg(test)]
-pub(super) fn render_message_line(model: &ScreenModel) -> &str {
-    let message = model.message_line.as_deref().unwrap_or("");
-    if message.trim().is_empty() {
-        ""
-    } else {
-        message
-    }
-}
-
-#[cfg(test)]
-pub(super) fn draw_editor_frame<B: Backend>(
-    terminal: &mut Terminal<B>,
-    model: &ScreenModel,
-    force_full_clear: bool,
-) -> Result<(), B::Error> {
-    draw_workspace_frame(
-        terminal,
-        &WorkspaceScreenModel {
-            panes: vec![model.clone()],
-            floats: vec![],
-            active_window_id: model.window_id,
-            message_line: model.message_line.as_deref().map_or_else(
-                || {
-                    crate::core::notification_prompt::resolve_workspace_message_line(Vec::<
-                        crate::core::notification_prompt::MessageLineCandidate,
-                    >::new(
-                    ))
-                },
-                |message| {
-                    crate::core::notification_prompt::resolve_workspace_message_line(vec![
-                        crate::core::notification_prompt::MessageLineCandidate::legacy(
-                            crate::core::notification_prompt::MessageLineSource::TransientInfo,
-                            message,
-                        ),
-                    ])
-                },
-            ),
-            message_area_height: 5,
-            message_scroll_offset: 0,
-            prompt_line: None,
-            pager_prompt: None,
-            suppressed_prompt_hints: vec![],
-            bell: None,
-            command_line: model.command_cursor_col.map(|cursor_col| CommandLineModel {
-                text: model.message_line.clone().unwrap_or_default(),
-                cursor_col,
-            }),
-        },
-        force_full_clear,
-        RenderTextMode::StyledTrueColor,
-    )
-}
-
 pub(super) fn trace_redraw_diagnostic(args: std::fmt::Arguments<'_>) {
     crate::presentation::render::redraw_trace::trace_redraw_diagnostic(args);
 }

@@ -6,14 +6,13 @@ use vim_core_rs::{
 };
 
 use super::*;
+use crate::app::test_support::launch_serial_lock as session_test_lock;
 use crate::core::bridge::CoreBridge;
 use crate::core::notification_prompt::InputPromptStatus;
 use crate::features::search::capability::SearchCapabilityContract;
 use crate::features::search::query::{
     SearchMatch, SearchMatchKind, SearchQueryMode, SearchVisibleRows, SearchVisibleState,
 };
-
-use crate::support::session_guard::test_lock as session_test_lock;
 
 // ---- タスク 6.1: file name と mode を描画モデルへ投影するテスト ----
 

@@ -880,4 +880,5 @@ pub(crate) use directory::read_directory_buffer_state_with_options;
 use message_pager::MessagePagerState;
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;

@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 
@@ -285,11 +284,6 @@ impl BootstrapOutcome {
     }
 }
 
-pub fn launch_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 pub fn prepare_launch(request: LaunchRequest) -> Result<BootstrapOutcome, BootstrapError> {
     let mut stdin = std::io::stdin().lock();
     prepare_launch_with_reader(request, &mut stdin)
@@ -427,6 +421,7 @@ mod registry;
 mod startup_apply;
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;
 
 use config_resolve::*;

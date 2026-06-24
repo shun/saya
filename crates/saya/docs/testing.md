@@ -31,6 +31,82 @@ quit flows, projection, terminal behavior, and TypeScript capability surfaces
 without needing a live interactive session. Layer 3 then validates the real
 process and terminal boundary with a smaller representative suite.
 
+## Test placement
+
+Place tests next to the contract they protect. A test file should make it easy
+to tell whether a failure is local logic, feature behavior, host
+orchestration, or an executable-boundary regression.
+
+Use these placement rules for new tests and when splitting existing tests:
+
+- Put private helper tests in a sibling test file loaded from the owning module
+  with `#[cfg(test)]` and `#[path = "..."] mod tests;`. This keeps private
+  helpers private while avoiding large inline `mod tests` blocks.
+- Put feature-specific behavior tests next to the feature implementation, such
+  as `src/features/completion/*_test.rs`,
+  `src/features/dired/*_test.rs`, or `src/presentation/*_test.rs`.
+- Put public API, launch, CLI, and executable behavior tests under
+  `crates/saya/tests/`. These tests must assert public or user-visible
+  behavior rather than private implementation details.
+- Keep `app/program` tests focused on host orchestration: startup routing, input
+  dispatch order, redraw coordination, shutdown sequencing, and smoke helpers
+  that are specific to the executable path.
+- Do not add new large inline `mod tests` blocks to production files. If a test
+  module grows beyond a small local contract, split it into sibling test files
+  by responsibility.
+
+Use this pattern for a private helper contract:
+
+```rust
+// src/app/program/input_pipeline.rs
+
+fn should_enter_command_line(key: KeyInput, mode: CoreMode) -> bool {
+    matches!(key, KeyInput::Char(':') | KeyInput::Char('/'))
+        && mode == CoreMode::Normal
+}
+
+#[cfg(test)]
+#[path = "input_pipeline_test.rs"]
+mod tests;
+```
+
+```rust
+// src/app/program/input_pipeline_test.rs
+
+use super::*;
+
+#[test]
+fn colon_enters_command_line_only_in_normal_mode() {
+    assert!(should_enter_command_line(
+        KeyInput::Char(':'),
+        CoreMode::Normal,
+    ));
+    assert!(!should_enter_command_line(
+        KeyInput::Char(':'),
+        CoreMode::Insert,
+    ));
+}
+```
+
+Use integration tests for executable behavior instead:
+
+```rust
+// crates/saya/tests/integration_cli.rs
+
+#[test]
+fn sy_version_prints_package_version() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sy"))
+        .arg("--version")
+        .output()
+        .expect("sy --version should run");
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(env!("CARGO_PKG_VERSION"))
+    );
+}
+```
+
 ## Testing boundary
 
 Use this repository to prove application behavior that sits above the editing

@@ -3,12 +3,15 @@
 //! startup config の式評価と callback registry 生成が、host/application
 //! 層の boot flow で成立することを確認する。
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{StartupKeymapAction, launch_test_lock, prepare_launch};
+use saya::app::bootstrap::{StartupKeymapAction, prepare_launch};
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::runtime::plugin::{PluginCacheRoot, PluginHost, StartupPlan, StartupPlanEntry};
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -20,7 +23,7 @@ fn unique_path(name: &str) -> PathBuf {
 
 #[test]
 fn formal_boot_flow_uses_deno_core_runtime_for_expression_based_startup_config() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("target.txt");
@@ -36,14 +39,8 @@ fn formal_boot_flow_uses_deno_core_runtime_for_expression_based_startup_config()
             saya.options.tabstop = computedTabstop;
             saya.options.number = true;
             saya.keymap.set("normal", "<leader>w", saya.commands.execute(writeCurrent));
-            saya.commands.register(writeCurrent, () => {
-                return saya.commands.execute("write");
-            });
-            saya.events.on("bufferOpen", (payload) => {
-                if (payload.buffer.id > 0) {
-                    console.log(payload.buffer.id);
-                }
-            });
+            saya.commands.register(writeCurrent, () => {return saya.commands.execute("write");});
+            saya.events.on("bufferOpen", (payload) => {if (payload.buffer.id > 0) {console.log(payload.buffer.id);}});
         "#,
     )
     .expect("config file");
@@ -85,7 +82,7 @@ fn formal_boot_flow_uses_deno_core_runtime_for_expression_based_startup_config()
 
 #[test]
 fn boot_flow_merges_cached_plugin_startup_plan_headlessly() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cache_root = unique_path("plugin-cache-root");
@@ -140,7 +137,7 @@ fn boot_flow_merges_cached_plugin_startup_plan_headlessly() {
 
 #[test]
 fn boot_flow_uses_bundled_manifest_fallback_when_plugin_cache_is_missing() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cache_root = unique_path("plugin-cache-missing");

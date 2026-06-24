@@ -15,7 +15,7 @@ use crate::core::outcome::{
 use crate::core::prompt::{PromptResponseCommand, PromptResponseError};
 use crate::features::completion::session::{CompletionPosition, CompletionRange};
 
-use crate::support::session_guard::test_lock as session_test_lock;
+use crate::app::test_support::launch_serial_lock as session_test_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()

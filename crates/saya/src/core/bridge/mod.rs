@@ -1059,4 +1059,5 @@ use outcome_normalization::*;
 use session_support::*;
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;

@@ -4,12 +4,15 @@
 //! collected into the snapshot and applied through the Vim core so search
 //! highlighting persists from launch without a manual `:set hlsearch`.
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{launch_test_lock, prepare_launch};
+use saya::app::bootstrap::prepare_launch;
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::features::search::query::SearchVisibleQuery;
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -31,7 +34,7 @@ fn full_viewport_query() -> SearchVisibleQuery {
 /// hlsearch 状態が起動直後から有効化されること。
 #[test]
 fn startup_hlsearch_true_enables_core_search_highlight() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("content");
@@ -75,7 +78,7 @@ fn startup_hlsearch_true_enables_core_search_highlight() {
 /// こと。
 #[test]
 fn startup_hlsearch_default_keeps_core_search_highlight_disabled() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("content-default");

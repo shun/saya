@@ -7,6 +7,8 @@
 //! phase ownership、capability degrade、cross-environment portability に限定する。
 //! 詳細な editing semantics は ADR 0001 に従って `vim-core-rs` に委ねる。
 
+mod support;
+
 use std::io;
 
 use saya::app::cli::LaunchRequest;
@@ -23,7 +25,7 @@ use saya::presentation::overlay::effect::{
     PresentationEffectProjectorService, RuntimePresentationIntent,
 };
 use saya::presentation::overlay::optional_graphics::{
-    OptionalGraphicsAdapter, OverlayRenderResult, RecordingOverlayWriter,
+    OptionalGraphicsAdapter, OverlayRenderResult, OverlayTerminalWriter,
 };
 use saya::presentation::render::coordinator::{
     RenderFrameRequest, RenderTextMode, TuiRenderCoordinator, TuiRenderCoordinatorService,
@@ -124,7 +126,7 @@ fn architecture_compliance_guard_accepts_the_repository_dependency_set() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_interactive_input() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -244,7 +246,7 @@ async fn prepare_launch_starts_a_tui_only_broker_and_requires_probe_before_inter
 
 #[test]
 fn prepare_tui_startup_context_composes_policy_probe_and_runtime_owner_before_event_loop() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
@@ -607,8 +609,6 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
         ),
     )
     .detect();
-    let adapter = OptionalGraphicsAdapter::new_failing_for_tests();
-
     let plain_presentation = projector.project(&workspace, &runtime_intents, &plain_capabilities);
     let styled_presentation = projector.project(&workspace, &runtime_intents, &styled_capabilities);
     let monochrome_presentation =
@@ -616,8 +616,8 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
     let graphics_presentation =
         projector.project(&workspace, &runtime_intents, &graphics_capabilities);
 
-    let mut writer = RecordingOverlayWriter::default();
-    let mut coordinator = TuiRenderCoordinator::new_for_tests(store, adapter);
+    let mut writer = OverlayPayloadFailingWriter::default();
+    let mut coordinator = TuiRenderCoordinator::new_headless(store, OptionalGraphicsAdapter);
 
     let plain = coordinator
         .render_workspace(RenderFrameRequest {
@@ -692,6 +692,26 @@ fn tui_render_coordinator_keeps_text_grid_on_plain_styled_and_graphics_fallback_
         "graphics fallback may clear stale terminal images, but must not emit image payloads: {:?}",
         writer.writes
     );
+}
+
+#[derive(Debug, Default)]
+struct OverlayPayloadFailingWriter {
+    writes: Vec<Vec<u8>>,
+}
+
+impl OverlayTerminalWriter for OverlayPayloadFailingWriter {
+    fn write_overlay_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if bytes == b"\x1b_Ga=d\x1b\\" {
+            self.writes.push(bytes.to_vec());
+            Ok(())
+        } else {
+            Err("simulated overlay payload write failure".to_string())
+        }
+    }
+
+    fn set_cursor_style(&mut self, _style: ScreenCursorStyle) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// 非挙動メタゲート（ソース lint・CI 別ロール想定）。挙動は検証しない。

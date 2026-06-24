@@ -1,12 +1,14 @@
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::launch_test_lock;
 use saya::core::bridge::CoreBridge;
 use saya::core::host_actions::CoreHostActionRuntime;
 use saya::core::outcome::{
     ApplicationOutcomeState, NormalizedHostDirective, fold_normalized_outcomes,
 };
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -99,7 +101,7 @@ fn wait_for_job_status(bridge: &mut CoreBridge, runtime: &mut CoreHostActionRunt
 
 #[test]
 fn local_vfs_host_opens_file_locator_through_core_bridge() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("open.txt");
@@ -121,7 +123,7 @@ fn local_vfs_host_opens_file_locator_through_core_bridge() {
 
 #[test]
 fn local_vfs_host_opens_directory_locator_as_sorted_listing() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root_path = unique_path("directory-open");
@@ -148,7 +150,7 @@ fn local_vfs_host_opens_directory_locator_as_sorted_listing() {
 
 #[test]
 fn local_vfs_host_opens_empty_directory_as_empty_listing() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root_path = unique_path("directory-empty");
@@ -173,7 +175,7 @@ fn local_vfs_host_opens_empty_directory_as_empty_listing() {
 
 #[test]
 fn local_vfs_host_preserves_space_names_in_directory_listing() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root_path = unique_path("directory-space-names");
@@ -200,7 +202,7 @@ fn local_vfs_host_preserves_space_names_in_directory_listing() {
 
 #[test]
 fn local_vfs_host_opens_relative_directory_locator_from_current_directory() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root_path = unique_path("directory-relative-root");
@@ -231,7 +233,7 @@ fn local_vfs_host_opens_relative_directory_locator_from_current_directory() {
 
 #[test]
 fn local_vfs_host_saves_file_locator_through_core_bridge() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("save.txt");
@@ -262,7 +264,7 @@ fn local_vfs_host_saves_file_locator_through_core_bridge() {
 
 #[test]
 fn job_host_starts_process_and_reports_finished_status_to_core() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut bridge = CoreBridge::new("").expect("bridge");
@@ -278,7 +280,7 @@ fn job_host_starts_process_and_reports_finished_status_to_core() {
 
 #[test]
 fn job_host_stops_running_process_and_reports_dead_status_to_core() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut bridge = CoreBridge::new("").expect("bridge");

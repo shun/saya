@@ -4,12 +4,15 @@
 //! presentation で反映されることを確認する。fallback 起動も同じファイル内
 //! で検証する。
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{launch_test_lock, prepare_launch};
+use saya::app::bootstrap::prepare_launch;
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::presentation::screen_model::{ProjectionInput, project};
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -21,7 +24,7 @@ fn unique_path(name: &str) -> PathBuf {
 
 #[test]
 fn presentation_line_numbers_reflect_in_headless_projection_without_conflicting_with_tab_size() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("target.txt");
@@ -67,7 +70,7 @@ fn presentation_line_numbers_reflect_in_headless_projection_without_conflicting_
 
 #[test]
 fn presentation_line_numbers_falls_back_to_default_projection_when_config_is_missing() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("fallback-target.txt");

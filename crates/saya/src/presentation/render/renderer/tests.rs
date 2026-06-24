@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::app::bootstrap::prepare_launch;
 use crate::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use crate::app::session::EditorSessionState;
+use crate::app::test_support::launch_serial_lock as session_test_lock;
 use crate::core::notification_prompt::{
     BellIndication, InputPromptStatus, InputPromptView, MessageLineCandidate, MessageLineSource,
     PagerPromptView, PromptHintSuppressionReason, SuppressedPromptHint,
@@ -20,15 +21,14 @@ use crate::presentation::floating_window::{
 };
 use crate::presentation::markdown::structure::MarkdownDocumentMap;
 use crate::presentation::screen_model::{
-    ProjectionInput, ScreenLineProjection, ScreenSearchOverlay, project,
+    PaneRect, ProjectionInput, ScreenLineProjection, ScreenSearchOverlay, project,
 };
 use crate::presentation::screen_model::{
     ScreenMarkdownStyleRange, ScreenSelection, ScreenSyntaxChunk,
 };
 use crate::presentation::theme::{ThemeRegistry, ThemeTextStyleDeclaration};
 use crate::runtime::config::{StartupRegistry, StartupRegistryEntry};
-use crate::support::session_guard::test_lock as session_test_lock;
-use ratatui::backend::{CrosstermBackend, TestBackend};
+use ratatui::backend::{Backend, CrosstermBackend, TestBackend};
 use ratatui::layout::{Position, Rect};
 use ratatui::{TerminalOptions, Viewport};
 use vim_core_rs::{CoreInputRequestKind, CorePagerPromptKind};
@@ -59,6 +59,58 @@ fn unique_renderer_path(name: &str) -> PathBuf {
         .expect("time went backwards")
         .as_nanos();
     std::env::temp_dir().join(format!("saya-renderer-{name}-{nanos}"))
+}
+
+fn render_message_line(model: &ScreenModel) -> &str {
+    let message = model.message_line.as_deref().unwrap_or("");
+    if message.trim().is_empty() {
+        ""
+    } else {
+        message
+    }
+}
+
+fn draw_editor_frame<B: Backend>(
+    terminal: &mut Terminal<B>,
+    model: &ScreenModel,
+    force_full_clear: bool,
+) -> Result<(), B::Error> {
+    draw_workspace_frame(
+        terminal,
+        &WorkspaceScreenModel {
+            panes: vec![model.clone()],
+            floats: vec![],
+            active_window_id: model.window_id,
+            message_line: model.message_line.as_deref().map_or_else(
+                || {
+                    crate::core::notification_prompt::resolve_workspace_message_line(Vec::<
+                        crate::core::notification_prompt::MessageLineCandidate,
+                    >::new(
+                    ))
+                },
+                |message| {
+                    crate::core::notification_prompt::resolve_workspace_message_line(vec![
+                        crate::core::notification_prompt::MessageLineCandidate::legacy(
+                            crate::core::notification_prompt::MessageLineSource::TransientInfo,
+                            message,
+                        ),
+                    ])
+                },
+            ),
+            message_area_height: 5,
+            message_scroll_offset: 0,
+            prompt_line: None,
+            pager_prompt: None,
+            suppressed_prompt_hints: vec![],
+            bell: None,
+            command_line: model.command_cursor_col.map(|cursor_col| CommandLineModel {
+                text: model.message_line.clone().unwrap_or_default(),
+                cursor_col,
+            }),
+        },
+        force_full_clear,
+        RenderTextMode::StyledTrueColor,
+    )
 }
 
 fn screen_model_with_message(message_line: Option<&str>) -> ScreenModel {

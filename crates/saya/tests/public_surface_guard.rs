@@ -182,12 +182,12 @@ fn collect_source_guard_paths(path: &Path, paths: &mut Vec<PathBuf>) {
 }
 
 /// 非挙動メタゲート（source lint・CI 別ロール想定）。挙動は検証しない。
-/// `src/main.rs` が生の Core outcome enum を直接消費していないことをソース
+/// `src/app/program.rs` が生の Core outcome enum を直接消費していないことをソース
 /// 文字列の有無で確認する境界 lint であり、実行時の畳み込み挙動は検証しない。
 #[test]
 fn source_lint_main_loop_consumes_normalized_outcomes_without_raw_core_outcome_enums() {
-    let source = std::fs::read_to_string("src/main.rs")
-        .expect("main source should be readable from the repository root");
+    let source = std::fs::read_to_string("src/app/program.rs")
+        .expect("program source should be readable from the repository root");
 
     for raw_enum in ["CoreHostAction", "CoreEvent"] {
         assert!(
@@ -203,7 +203,7 @@ fn source_lint_main_loop_consumes_normalized_outcomes_without_raw_core_outcome_e
 #[test]
 fn source_lint_main_consume_path_wires_folded_structural_refresh_before_workspace_render() {
     let checks: &[(&str, &[&str])] = &[
-        ("src/main.rs", &["last_structural_refresh"]),
+        ("src/app/program.rs", &["last_structural_refresh"]),
         (
             "src/app/outcome_consume.rs",
             &[
@@ -303,7 +303,7 @@ fn structural_refresh_boundary_guard_names_each_checked_boundary() {
         },
         BoundaryGuard {
             boundary: "main_ui_consume_path",
-            path: "src/main.rs",
+            path: "src/app/program.rs",
             forbidden_terms: &[
                 "CoreHostAction",
                 "CoreEvent",
@@ -414,7 +414,7 @@ fn typed_message_line_migration_forbids_direct_string_overwrite_paths() {
         "src/presentation/render/coordinator.rs",
         "src/presentation/render/renderer",
         "src/presentation/render/workspace_output.rs",
-        "src/main.rs",
+        "src/app/program.rs",
     ] {
         let source = if std::path::Path::new(path).is_dir() {
             std::fs::read_dir(path)

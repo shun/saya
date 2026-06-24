@@ -8,11 +8,14 @@
 //! 旧テストは手書きパーサ専用の dead 関数 `load_and_apply_config` を呼んでおり、deno 経路の
 //! 回帰を検出できなかったため、実起動経路ベースへ移植した。
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{BootstrapWarning, launch_test_lock, prepare_launch};
+use saya::app::bootstrap::{BootstrapWarning, prepare_launch};
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -26,7 +29,7 @@ fn unique_path(name: &str) -> PathBuf {
 
 #[test]
 fn valid_config_applied_correctly() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("valid-init.ts");
@@ -61,7 +64,7 @@ fn valid_config_applied_correctly() {
 
 #[test]
 fn invalid_config_falls_back_to_defaults_with_warning() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("invalid-init.ts");
@@ -82,7 +85,7 @@ fn invalid_config_falls_back_to_defaults_with_warning() {
     assert!(
         outcome.warnings.iter().any(|warning| matches!(
             warning,
-            BootstrapWarning::ConfigEvalFailed { path, .. } if path == &config_path
+            BootstrapWarning::ConfigEvalFailed {path, ..} if path == &config_path
         )),
         "Should report an eval failure warning, got: {:?}",
         outcome.warnings
@@ -101,7 +104,7 @@ fn invalid_config_falls_back_to_defaults_with_warning() {
 
 #[test]
 fn missing_config_falls_back_to_defaults_with_warning() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let missing_path = unique_path("missing-init.ts");
@@ -116,7 +119,7 @@ fn missing_config_falls_back_to_defaults_with_warning() {
     assert!(
         outcome.warnings.iter().any(|warning| matches!(
             warning,
-            BootstrapWarning::ConfigLoadFailed { path, .. } if path == &missing_path
+            BootstrapWarning::ConfigLoadFailed {path, ..} if path == &missing_path
         )),
         "Should produce a load-failed warning for missing file, got: {:?}",
         outcome.warnings
@@ -127,7 +130,7 @@ fn missing_config_falls_back_to_defaults_with_warning() {
 
 #[test]
 fn no_config_input_uses_defaults_without_warning() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // `ConfigSource::Default` を実ホーム非依存で検証するため、`saya/init.ts` を置かない

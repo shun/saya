@@ -204,7 +204,7 @@ fn init_ts_module_transpile_rejects_import_cycles() {
 
 #[test]
 fn init_ts_module_transpile_uses_warm_cache_for_matching_sources() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");
@@ -241,7 +241,7 @@ fn init_ts_module_transpile_uses_warm_cache_for_matching_sources() {
 
 #[test]
 fn init_ts_module_transpile_cache_invalidates_when_source_changes() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");
@@ -335,7 +335,7 @@ async fn init_ts_module_can_import_local_typescript_plugin() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn init_ts_module_can_import_repository_dired_plugin() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");
@@ -400,7 +400,7 @@ async fn init_ts_module_can_import_repository_dired_plugin() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bundled_plugins_with_no_behavior_options_do_not_register_keymaps_or_events() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("explicit-config-cwd");
@@ -454,7 +454,7 @@ async fn bundled_plugins_with_no_behavior_options_do_not_register_keymaps_or_eve
 
 #[tokio::test(flavor = "current_thread")]
 async fn init_ts_module_can_import_repository_agent_plugin() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");
@@ -523,7 +523,7 @@ async fn init_ts_module_can_import_repository_agent_plugin() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn init_ts_module_can_import_repository_lsp_client_plugin() {
-    let _lock = saya::app::bootstrap::launch_test_lock()
+    let _lock = support::session::launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current_dir = unique_path("cwd");

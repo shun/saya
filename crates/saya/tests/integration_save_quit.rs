@@ -10,15 +10,18 @@
 //! host action と終了判定の整合が崩れないことを確認する。
 //! Requirements: 1.4, 1.5, 3.2, 3.3
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::MutexGuard;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{BootstrapOutcome, launch_test_lock, prepare_launch};
+use saya::app::bootstrap::{BootstrapOutcome, prepare_launch};
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::app::host_io::{SaveRequest, SaveResult, write_to_path};
 use saya::app::session::{EditorSessionState, QuitDecision};
 use saya::support::swapfile::swapfile_path_for_target;
+use support::session::launch_serial_lock;
 use vim_core_rs::CoreHostAction;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -30,7 +33,7 @@ fn unique_path(name: &str) -> PathBuf {
 }
 
 fn test_lock() -> MutexGuard<'static, ()> {
-    launch_test_lock()
+    launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -369,8 +372,8 @@ fn wq_host_coordination_saves_before_allowing_quit() {
         matches!(
             actions.as_slice(),
             [
-                CoreHostAction::Write { path, force: false, .. },
-                CoreHostAction::Quit { force: false, .. }
+                CoreHostAction::Write {path, force: false, ..},
+                CoreHostAction::Quit {force: false, ..}
             ] if path.is_empty()
         ),
         "core 側の :wq は local buffer で Write -> Quit を発行し、saya 側が save-before-quit を補完すること: {:?}",
@@ -466,8 +469,8 @@ fn x_xit_exit_queue_write_then_quit_on_dirty_buffer() {
             matches!(
                 actions.as_slice(),
                 [
-                    CoreHostAction::Write { path, force: false, .. },
-                    CoreHostAction::Quit { force: false, .. }
+                    CoreHostAction::Write {path, force: false, ..},
+                    CoreHostAction::Quit {force: false, ..}
                 ] if path.is_empty()
             ),
             "{command} は dirty buffer では Write -> Quit をキューすること: {:?}",
@@ -521,8 +524,8 @@ fn compound_write_file_then_quit_queues_write_before_quit_with_explicit_path() {
         matches!(
             actions.as_slice(),
             [
-                CoreHostAction::Write { path, force: false, .. },
-                CoreHostAction::Quit { force: false, .. }
+                CoreHostAction::Write {path, force: false, ..},
+                CoreHostAction::Quit {force: false, ..}
             ] if path == &alternate_path_string
         ),
         ":write file | quit は explicit path 付きの Write -> Quit をキューすること: {:?}",
@@ -585,8 +588,8 @@ fn compound_update_file_then_quit_on_dirty_buffer_queues_write_before_quit() {
         matches!(
             actions.as_slice(),
             [
-                CoreHostAction::Write { path, force: false, .. },
-                CoreHostAction::Quit { force: false, .. }
+                CoreHostAction::Write {path, force: false, ..},
+                CoreHostAction::Quit {force: false, ..}
             ] if path == &alternate_path_string
         ),
         "dirty local buffer の :update file | quit は Write -> Quit をキューすること: {:?}",
@@ -646,8 +649,8 @@ fn compound_update_file_then_quit_on_clean_buffer_still_preserves_write_before_q
         matches!(
             actions.as_slice(),
             [
-                CoreHostAction::Write { path, force: false, .. },
-                CoreHostAction::Quit { force: false, .. }
+                CoreHostAction::Write {path, force: false, ..},
+                CoreHostAction::Quit {force: false, ..}
             ] if path == &alternate_path_string
         ),
         "clean local buffer の :update file | quit も Write -> Quit を保つこと: {:?}",
@@ -712,8 +715,8 @@ fn non_slash_delimiter_compound_update_then_quit_keeps_forwarding_intact() {
         matches!(
             actions.as_slice(),
             [
-                CoreHostAction::Write { path, force: false, .. },
-                CoreHostAction::Quit { force: false, .. }
+                CoreHostAction::Write {path, force: false, ..},
+                CoreHostAction::Quit {force: false, ..}
             ] if path == &alternate_path_string
         ),
         "non-slash delimiter compound command 後も Write -> Quit を維持すること: {:?}",

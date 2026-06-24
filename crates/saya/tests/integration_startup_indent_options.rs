@@ -3,12 +3,15 @@
 //! These tests assert the final buffer contents so the startup option path is
 //! verified past config collection and through the Vim core editing behavior.
 
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{launch_test_lock, prepare_launch};
+use saya::app::bootstrap::prepare_launch;
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::presentation::screen_model::{ProjectionInput, project};
+use support::session::launch_serial_lock;
 
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -25,7 +28,7 @@ fn unique_path(name: &str) -> PathBuf {
 /// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_smartindent_true_indents_after_open_brace() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("smartindent-on-init.ts");
@@ -78,7 +81,7 @@ fn startup_smartindent_true_indents_after_open_brace() {
 /// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_smartindent_false_keeps_plain_newline_after_open_brace() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config_path = unique_path("smartindent-off-init.ts");
@@ -131,7 +134,7 @@ fn startup_smartindent_false_keeps_plain_newline_after_open_brace() {
 /// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_go_ftplugin_overrides_global_expandtab_for_tab_indentation() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("main").with_extension("go");
@@ -199,7 +202,7 @@ fn startup_go_ftplugin_overrides_global_expandtab_for_tab_indentation() {
 /// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_ftplugin_can_be_disabled_from_config() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("main").with_extension("go");
@@ -257,7 +260,7 @@ fn startup_ftplugin_can_be_disabled_from_config() {
 /// （integration_input_pipeline_e2e.rs）が担保する。
 #[test]
 fn startup_custom_ftplugin_definition_applies_by_extension() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("sample").with_extension("toy");
@@ -270,14 +273,10 @@ fn startup_custom_ftplugin_definition_applies_by_extension() {
             saya.options.shiftwidth = 4;
             saya.options.softtabstop = 4;
             saya.options.smartindent = true;
-            saya.ftplugin.set("toy", {
-                extensions: ["toy"],
-                options: {
-                    expandtab: false,
+            saya.ftplugin.set("toy", {extensions: ["toy"],
+                options: {expandtab: false,
                     softtabstop: 0,
-                    shiftwidth: 0,
-                },
-            });
+                    shiftwidth: 0,},});
         "#,
     )
     .expect("config file");

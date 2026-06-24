@@ -3,12 +3,15 @@
 //! startup option が host/application 層の session state と screen
 //! projection に反映されることを確認する。fallback 起動も同じファイル内
 //! で検証する。
+mod support;
+
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use saya::app::bootstrap::{BootstrapWarning, launch_test_lock, prepare_launch};
+use saya::app::bootstrap::{BootstrapWarning, prepare_launch};
 use saya::app::cli::{ConfigSource, InputSource, LaunchRequest};
 use saya::presentation::screen_model::{ProjectionInput, project};
+use support::session::launch_serial_lock;
 use vim_core_rs::CoreMode;
 
 fn unique_path(name: &str) -> PathBuf {
@@ -21,7 +24,7 @@ fn unique_path(name: &str) -> PathBuf {
 
 #[test]
 fn startup_tabstop_reflects_in_headless_boot_projection() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("target.txt");
@@ -60,7 +63,7 @@ fn startup_tabstop_reflects_in_headless_boot_projection() {
 
 #[test]
 fn startup_tab_size_falls_back_when_config_is_missing() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("fallback-target.txt");
@@ -78,7 +81,7 @@ fn startup_tab_size_falls_back_when_config_is_missing() {
     assert_eq!(outcome.initial_tab_size, 8);
     assert!(outcome.warnings.iter().any(|warning| matches!(
         warning,
-        BootstrapWarning::ConfigLoadFailed { path, .. } if path == &missing_config
+        BootstrapWarning::ConfigLoadFailed {path, ..} if path == &missing_config
     )));
 
     let session_state = outcome.editor_session_state();
@@ -99,7 +102,7 @@ fn startup_tab_size_falls_back_when_config_is_missing() {
 
 #[test]
 fn startup_unknown_option_does_not_change_tabstop_default() {
-    let _lock = launch_test_lock()
+    let _lock = launch_serial_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target_path = unique_path("unknown-option-target.txt");

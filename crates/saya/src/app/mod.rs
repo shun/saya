@@ -1,3 +1,8 @@
+mod program;
+
+pub async fn run() {
+    program::run().await;
+}
 pub mod bootstrap;
 pub mod cli;
 pub mod cli_output;
@@ -9,3 +14,6 @@ pub mod outcome_consume;
 pub mod runtime_dispatch;
 pub mod session;
 pub mod startup;
+
+#[cfg(test)]
+pub(crate) mod test_support;
