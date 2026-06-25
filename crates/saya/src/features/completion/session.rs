@@ -21,6 +21,13 @@ pub struct CompletionRange {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompletionTextEdit {
+    pub range: CompletionRange,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HostCompletionCandidate {
     pub label: String,
     #[serde(default, deserialize_with = "optional_string_from_json")]
@@ -33,6 +40,8 @@ pub struct HostCompletionCandidate {
     pub documentation: Vec<String>,
     #[serde(default, deserialize_with = "optional_string_from_json")]
     pub source: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +228,7 @@ impl From<HostCompletionCandidate> for CompletionCandidate {
             kind: value.kind,
             documentation: value.documentation,
             source: value.source,
+            metadata: value.metadata,
             replace_range: None,
         }
     }
@@ -262,6 +272,19 @@ pub fn apply_replace_range(
     let merged = format!("{prefix}{replacement_text}{suffix}");
     lines.splice(range.start.line..=range.end.line, [merged]);
     Some(lines.concat())
+}
+
+pub fn completion_text_edits_from_metadata(metadata: Option<&Value>) -> Vec<CompletionTextEdit> {
+    let Some(value) = metadata else {
+        return Vec::new();
+    };
+    let Some(edits) = value.get("additionalTextEdits").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    edits
+        .iter()
+        .filter_map(|edit| serde_json::from_value(edit.clone()).ok())
+        .collect()
 }
 
 fn default_max_visible_items() -> usize {

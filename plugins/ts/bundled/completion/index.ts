@@ -606,6 +606,7 @@ function createBundledCompletionRuntimeCommand(
         if (!label) return null;
         const textEdit = field(item, "textEdit");
         const insertText = field(item, "insertText") ?? field(textEdit, "newText") ?? label;
+        const additionalTextEdits = field(item, "additionalTextEdits");
         return {
           label,
           insertText: typeof insertText === "string" ? insertText : label,
@@ -613,6 +614,9 @@ function createBundledCompletionRuntimeCommand(
           detail: typeof field(item, "detail") === "string" ? String(field(item, "detail")) : null,
           documentation: documentation(field(item, "documentation")),
           source: "lsp",
+          metadata: {
+            additionalTextEdits: Array.isArray(additionalTextEdits) ? additionalTextEdits : [],
+          },
         };
       };
       const lspItems = (response) => {

@@ -12,6 +12,8 @@ import { wordPrefix } from "./buffer.ts";
 
 declare const saya: any;
 
+const DEFAULT_LSP_TRIGGER_CHARACTERS = [".", ":", ">", "/"];
+
 function field(value: unknown, key: string): unknown {
   return value && typeof value === "object" ? Reflect.get(value, key) : null;
 }
@@ -85,6 +87,9 @@ function normalizeCompletionItem(
       : null,
     documentation: normalizeDocumentation(field(item, "documentation")),
     source: sourceName,
+    metadata: {
+      additionalTextEdits: field(item, "additionalTextEdits"),
+    },
   };
 }
 
@@ -151,10 +156,12 @@ export function createLspCompletionSource(
   const sourceName = options.sourceName ?? "lsp";
   const optional = options.optional ?? true;
   const includeDeepCompletions = options.includeDeepCompletions ?? true;
+  const triggerCharacters = options.triggerCharacters ??
+    DEFAULT_LSP_TRIGGER_CHARACTERS;
   return {
     id: sourceName,
     minPrefixLength: options.minPrefixLength,
-    triggerCharacters: options.triggerCharacters,
+    triggerCharacters,
     __sayaBundledSource: {
       kind: "lsp",
       id: sourceName,
@@ -162,7 +169,7 @@ export function createLspCompletionSource(
       optional,
       includeDeepCompletions,
       minPrefixLength: options.minPrefixLength,
-      triggerCharacters: options.triggerCharacters,
+      triggerCharacters,
     },
     trigger(context: SayaCompletionTriggerContext): SayaCompletionQuery | null {
       const prefixInfo = wordPrefix(context.buffer);

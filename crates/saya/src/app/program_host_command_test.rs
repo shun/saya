@@ -642,6 +642,7 @@ fn runtime_typed_completion_accept_applies_replace_range_insert_text() {
                     detail: Some("macro".to_string()),
                     documentation: Vec::new(),
                     source: Some("rust-analyzer".to_string()),
+                    metadata: None,
                 },
             ],
             selected_index: 0,
@@ -697,6 +698,106 @@ fn runtime_typed_completion_accept_applies_replace_range_insert_text() {
         "println!($0);".len(),
         "typed completion confirmation should move the insert cursor to the replacement end"
     );
+}
+
+#[test]
+fn runtime_typed_completion_accept_applies_lsp_additional_text_edits() {
+    let _lock = crate::app::test_support::launch_serial_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut outcome = crate::app::bootstrap::prepare_launch(crate::app::cli::LaunchRequest {
+        input_source: crate::app::cli::InputSource::Empty,
+        config_source: crate::app::cli::ConfigSource::Default,
+        ..crate::app::cli::LaunchRequest::default()
+    })
+    .expect("launch should succeed");
+    outcome
+        .core_bridge
+        .replace_buffer_text("package main\n\nfunc main() {\n\tlog.Pri\n}\n")
+        .expect("seed buffer text");
+    outcome
+        .core_bridge
+        .dispatch_key("GkA")
+        .expect("enter insert mode at completion line end");
+    let mut floating_window_manager = FloatingWindowManager::default();
+    let mut completion_float_manager = CompletionFloatManager::default();
+
+    assert!(completion_float_manager.show_typed(
+        &mut floating_window_manager,
+        1,
+        3,
+        8,
+        CompletionShowRequest {
+            session_id: "test-session".to_string(),
+            request_id: 1,
+            replace_range: crate::features::completion::session::CompletionRange {
+                start: crate::features::completion::session::CompletionPosition {
+                    line: 3,
+                    character: 5,
+                },
+                end: crate::features::completion::session::CompletionPosition {
+                    line: 3,
+                    character: 8,
+                },
+            },
+            candidates: vec![
+                crate::features::completion::session::HostCompletionCandidate {
+                    label: "Printf".to_string(),
+                    insert_text: Some("Printf".to_string()),
+                    kind: Some("Function".to_string()),
+                    detail: Some("func(format string, v ...any)".to_string()),
+                    documentation: Vec::new(),
+                    source: Some("lsp".to_string()),
+                    metadata: Some(serde_json::json!({
+                        "additionalTextEdits": [{
+                            "range": {
+                                "start": { "line": 2, "character": 0 },
+                                "end": { "line": 2, "character": 0 }
+                            },
+                            "newText": "import \"log\"\n\n"
+                        }]
+                    })),
+                },
+            ],
+            selected_index: 0,
+            max_visible_items: 8,
+            documentation_max_width: 72,
+            documentation_max_height: 12,
+            keys: Some(
+                crate::features::completion::session::CompletionKeyBindingsRequest {
+                    confirm: Some(vec!["<Enter>".to_string()]),
+                    close: None,
+                    next: None,
+                    previous: None,
+                    page_next: None,
+                    page_previous: None,
+                }
+            ),
+        },
+    ));
+    let active_window_id = outcome
+        .core_bridge
+        .light_snapshot()
+        .active_window_id()
+        .unwrap_or(1);
+    assert!(matches!(
+        handle_completion_float_key(
+            &mut completion_float_manager,
+            &mut floating_window_manager,
+            &mut outcome.core_bridge,
+            &KeyInput::Enter,
+            active_window_id,
+        ),
+        Some(FloatingWindowKeyHandling::Closed { .. })
+    ));
+    assert_eq!(
+        outcome.core_bridge.buffer_text(),
+        "package main\n\nimport \"log\"\n\nfunc main() {\n\tlog.Printf\n}\n"
+    );
+    let snapshot = outcome.core_bridge.light_snapshot();
+    assert_eq!(snapshot.mode, vim_core_rs::CoreMode::Insert);
+    assert_eq!(snapshot.cursor_row, 5);
+    assert_eq!(snapshot.cursor_col, "\tlog.Printf".len());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -995,6 +1096,91 @@ async fn startup_completion_auto_trigger_opens_menu_from_buffer_changed_event() 
             )
         }),
         "bufferChanged auto trigger should close the stale menu when the prefix is too short"
+    );
+
+    std::fs::remove_file(target_path).expect("cleanup target");
+    std::fs::remove_file(config_path).expect("cleanup config");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_completion_auto_trigger_opens_menu_from_trigger_character_without_prefix() {
+    let _lock = crate::app::test_support::launch_serial_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let target_path = unique_path("completion-auto-trigger-char-target").with_extension("txt");
+    let config_path = unique_path("completion-auto-trigger-char-init").with_extension("ts");
+    let completion_path =
+        crate::support::paths::dev_ts_plugins_dir().join("bundled/completion/index.ts");
+    std::fs::write(&target_path, "fmt\nPrintln\n").expect("target file");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                import {{ createBufferWordSource, setupSayaCompletion }} from "{}";
+                setupSayaCompletion({{
+                    key: "<C-x>",
+                    autoTrigger: true,
+                    autoTriggerDelayMs: 0,
+                    minPrefixLength: 2,
+                    sourceTimeoutMs: 0,
+                    sources: [createBufferWordSource({{ triggerCharacters: ["."] }})],
+                }});
+            "#,
+            completion_path.to_string_lossy()
+        ),
+    )
+    .expect("config file");
+
+    let mut outcome = crate::app::bootstrap::prepare_launch(crate::app::cli::LaunchRequest {
+        input_source: crate::app::cli::InputSource::File(target_path.clone()),
+        config_source: crate::app::cli::ConfigSource::File(config_path.clone()),
+        ..crate::app::cli::LaunchRequest::default()
+    })
+    .expect("launch should succeed");
+    let mut session_state = outcome.editor_session_state();
+    let mut runtime_session = RuntimeSessionOwner::spawn(outcome.callback_registry.clone())
+        .expect("runtime session should initialize");
+    let mut floating_window_manager = FloatingWindowManager::default();
+    let mut completion_float_manager = CompletionFloatManager::default();
+    let mut lsp_diagnostic_store = LspDiagnosticStore::default();
+    let mut terminal_float_manager = TerminalFloatManager::default();
+    let mut panel_manager = PanelManager::default();
+    let mut transient_msg = None;
+    let mut need_redraw = false;
+    let mut runtime_presentation_intents = Vec::new();
+
+    outcome
+        .core_bridge
+        .dispatch_key("A.")
+        .expect("type trigger");
+    let shutdown = dispatch_buffer_changed_with_runtime(
+        Some(&mut runtime_session),
+        &mut outcome,
+        &mut session_state,
+        &mut transient_msg,
+        &mut need_redraw,
+        &mut runtime_presentation_intents,
+        &mut floating_window_manager,
+        &mut completion_float_manager,
+        &mut lsp_diagnostic_store,
+        &mut terminal_float_manager,
+        &mut panel_manager,
+        None,
+    )
+    .await;
+    assert_eq!(shutdown, None);
+    assert_eq!(
+        transient_msg, None,
+        "trigger-character auto completion must not surface runtime callback errors"
+    );
+    assert!(
+        floating_window_manager.windows().iter().any(|window| {
+            matches!(
+                window.content,
+                crate::presentation::floating_window::FloatingContentRef::CompletionMenu { .. }
+            )
+        }),
+        "bufferChanged auto trigger should open a completion menu after a trigger character even when the word prefix is empty"
     );
 
     std::fs::remove_file(target_path).expect("cleanup target");

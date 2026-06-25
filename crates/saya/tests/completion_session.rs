@@ -24,6 +24,7 @@ fn candidate(label: &str, insert_text: &str) -> HostCompletionCandidate {
         detail: None,
         documentation: Vec::new(),
         source: Some("test".to_string()),
+        metadata: None,
     }
 }
 

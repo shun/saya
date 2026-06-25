@@ -27,6 +27,7 @@ pub struct CompletionCandidate {
     pub kind: Option<String>,
     pub documentation: Vec<String>,
     pub source: Option<String>,
+    pub metadata: Option<serde_json::Value>,
     pub replace_range: Option<CompletionRange>,
 }
 
@@ -399,6 +400,7 @@ impl CompletionFloatManager {
                         kind: None,
                         documentation: Vec::new(),
                         source: None,
+                        metadata: None,
                         replace_range: None,
                     });
                 self.close_menu(floats, menu_id, restore_window_id);

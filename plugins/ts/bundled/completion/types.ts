@@ -29,6 +29,7 @@ export interface SayaCompletionCandidate {
   detail?: string | null;
   documentation?: string[];
   source?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface SayaCompletionTriggerContext {

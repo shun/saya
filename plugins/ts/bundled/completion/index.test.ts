@@ -1006,6 +1006,59 @@ Deno.test("startup-safe LSP source filters candidates by current prefix", async 
   }
 });
 
+Deno.test("startup-safe LSP source defaults to selector trigger characters", async () => {
+  const fake = installSayaFake({
+    method: "textDocument/completion",
+    result: {
+      items: [
+        { label: "Print", kind: 3 },
+        { label: "Printf", kind: 3 },
+        { label: "Println", kind: 3 },
+      ],
+    },
+  }, {
+    cursorCol: 4,
+    currentLine: "fmt.",
+    text: "fmt.\n",
+  });
+
+  await setupSayaCompletion({
+    autoTrigger: true,
+    autoTriggerDelayMs: 0,
+    minPrefixLength: 2,
+    sources: [createLspCompletionSource({ minPrefixLength: 2 })],
+    sourceTimeoutMs: 0,
+  });
+  executeRegisteredCommands(fake, {
+    method: "textDocument/completion",
+    result: {
+      items: [
+        { label: "Print", kind: 3 },
+        { label: "Printf", kind: 3 },
+        { label: "Println", kind: 3 },
+      ],
+    },
+  });
+
+  const handler = fake.events.get("bufferChanged");
+  if (!handler) throw new Error("expected bufferChanged subscription");
+  await handler({
+    buffer: {
+      cursorCol: 4,
+      currentLine: "fmt.",
+    },
+  });
+
+  if (fake.shown.length !== 1) {
+    throw new Error(
+      `LSP trigger character should bypass min prefix length, got ${fake.shown.length} menus`,
+    );
+  }
+  if (!fake.executed.includes("lsp.completion")) {
+    throw new Error("expected LSP completion command to be executed");
+  }
+});
+
 Deno.test("LSP source can hide deep completion candidates", async () => {
   const fake = installSayaFake({
     method: "textDocument/completion",

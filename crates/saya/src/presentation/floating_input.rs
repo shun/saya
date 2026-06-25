@@ -8,6 +8,7 @@
 
 use crate::app::session::EditorSessionState;
 use crate::features::completion::float::{CompletionFloatInputOutcome, CompletionFloatManager};
+use crate::features::completion::session::completion_text_edits_from_metadata;
 use crate::input::router::{EditorIntent, KeyInput, NavigationKey, resolve_intent};
 use crate::presentation::floating_window::{
     FloatingInputOutcome, FloatingLifecycleEvent, FloatingMouseOutcome, FloatingWindowId,
@@ -120,7 +121,13 @@ pub fn handle_completion_float_key(
             let insert_text = candidate.insert_text();
             if !insert_text.is_empty() {
                 let result = if let Some(replace_range) = candidate.replace_range.as_ref() {
-                    core_bridge.apply_completion_replace_range(replace_range, insert_text)
+                    let additional_text_edits =
+                        completion_text_edits_from_metadata(candidate.metadata.as_ref());
+                    core_bridge.apply_completion_replace_range_with_additional_text_edits(
+                        replace_range,
+                        insert_text,
+                        &additional_text_edits,
+                    )
                 } else {
                     core_bridge.dispatch_key(insert_text).map(|_| ())
                 };

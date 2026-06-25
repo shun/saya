@@ -17,7 +17,9 @@ use crate::core::outcome::{
     normalize_core_event, normalize_host_action,
 };
 use crate::core::prompt::{PromptResponseCommand, PromptResponseError, PromptResponseRejection};
-use crate::features::completion::session::{CompletionRange, apply_replace_range};
+use crate::features::completion::session::{
+    CompletionPosition, CompletionRange, CompletionTextEdit, apply_replace_range,
+};
 use crate::features::search::capability::SearchCapabilityContract;
 use crate::features::search::query::{
     SearchMatch, SearchMatchKind, SearchQueryMode, SearchStateError, SearchVisibleQuery,
@@ -572,33 +574,62 @@ impl CoreBridge {
         range: &CompletionRange,
         replacement_text: &str,
     ) -> Result<(), CoreSessionError> {
+        self.apply_completion_replace_range_with_additional_text_edits(range, replacement_text, &[])
+    }
+
+    pub fn apply_completion_replace_range_with_additional_text_edits(
+        &mut self,
+        range: &CompletionRange,
+        replacement_text: &str,
+        additional_text_edits: &[CompletionTextEdit],
+    ) -> Result<(), CoreSessionError> {
         let before = self.buffer_text();
-        let Some(after) = apply_replace_range(&before, range, replacement_text) else {
-            log::debug!(
-                "[core_bridge] completion replace range rejected: start=({}:{}), end=({}:{}), replacement_len={}, text_len={}",
-                range.start.line,
-                range.start.character,
-                range.end.line,
-                range.end.character,
-                replacement_text.len(),
-                before.len()
-            );
-            return Err(CoreSessionError::CommandFailed(
-                vim_core_rs::CoreCommandError::OperationFailed { reason_code: 1 },
-            ));
+        let main_edit = CompletionTextEdit {
+            range: range.clone(),
+            new_text: replacement_text.to_string(),
         };
+        let mut edits = additional_text_edits.to_vec();
+        edits.push(main_edit);
+        edits.sort_by(|left, right| {
+            edit_start_key(&right.range)
+                .cmp(&edit_start_key(&left.range))
+                .then_with(|| edit_end_key(&right.range).cmp(&edit_end_key(&left.range)))
+        });
+        let mut after = before.clone();
+        for edit in &edits {
+            let Some(next) = apply_replace_range(&after, &edit.range, &edit.new_text) else {
+                log::debug!(
+                    "[core_bridge] completion text edit rejected: start=({}:{}), end=({}:{}), replacement_len={}, text_len={}",
+                    edit.range.start.line,
+                    edit.range.start.character,
+                    edit.range.end.line,
+                    edit.range.end.character,
+                    edit.new_text.len(),
+                    before.len()
+                );
+                return Err(CoreSessionError::CommandFailed(
+                    vim_core_rs::CoreCommandError::OperationFailed { reason_code: 1 },
+                ));
+            };
+            after = next;
+        }
         log::debug!(
-            "[core_bridge] applying completion replace range: start=({}:{}), end=({}:{}), replacement_len={}, before_len={}, after_len={}",
+            "[core_bridge] applying completion replace range: start=({}:{}), end=({}:{}), replacement_len={}, additional_edits={}, before_len={}, after_len={}",
             range.start.line,
             range.start.character,
             range.end.line,
             range.end.character,
             replacement_text.len(),
+            additional_text_edits.len(),
             before.len(),
             after.len()
         );
         self.replace_buffer_text_inner(&after, false)?;
-        let (cursor_row, cursor_col) = completion_replacement_end(range, replacement_text);
+        let (cursor_row, cursor_col) = adjust_completion_cursor_for_additional_text_edits(
+            completion_replacement_end(range, replacement_text),
+            range,
+            additional_text_edits,
+        );
         let cursor = self
             .session
             .execute_ex_command(&format!(
@@ -1050,6 +1081,65 @@ impl CoreBridge {
         );
         syntax
     }
+}
+
+fn edit_start_key(range: &CompletionRange) -> (usize, usize) {
+    (range.start.line, range.start.character)
+}
+
+fn edit_end_key(range: &CompletionRange) -> (usize, usize) {
+    (range.end.line, range.end.character)
+}
+
+fn position_leq(left: &CompletionPosition, right: &CompletionPosition) -> bool {
+    (left.line, left.character) <= (right.line, right.character)
+}
+
+fn text_line_delta(range: &CompletionRange, replacement_text: &str) -> isize {
+    replacement_text.matches('\n').count() as isize
+        - range.end.line.saturating_sub(range.start.line) as isize
+}
+
+fn single_line_character_delta(range: &CompletionRange, replacement_text: &str) -> isize {
+    if range.start.line != range.end.line || replacement_text.contains('\n') {
+        return 0;
+    }
+    replacement_text.len() as isize
+        - range.end.character.saturating_sub(range.start.character) as isize
+}
+
+fn add_signed(value: usize, delta: isize) -> usize {
+    if delta.is_negative() {
+        value.saturating_sub(delta.unsigned_abs())
+    } else {
+        value.saturating_add(delta as usize)
+    }
+}
+
+fn adjust_completion_cursor_for_additional_text_edits(
+    cursor: (usize, usize),
+    main_range: &CompletionRange,
+    additional_text_edits: &[CompletionTextEdit],
+) -> (usize, usize) {
+    let mut row_delta = 0isize;
+    let mut col_delta = 0isize;
+    for edit in additional_text_edits {
+        if !position_leq(&edit.range.end, &main_range.start) {
+            continue;
+        }
+        let line_delta = text_line_delta(&edit.range, &edit.new_text);
+        row_delta += line_delta;
+        if line_delta == 0 && edit.range.end.line == main_range.start.line {
+            col_delta += single_line_character_delta(&edit.range, &edit.new_text);
+        }
+    }
+    let row = add_signed(cursor.0, row_delta);
+    let col = if row_delta == 0 {
+        add_signed(cursor.1, col_delta)
+    } else {
+        cursor.1
+    };
+    (row, col)
 }
 
 mod outcome_normalization;

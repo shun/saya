@@ -23,6 +23,7 @@ fn request() -> CompletionMenuFloatRequest {
                 kind: Some("Function".to_string()),
                 documentation: vec!["Prints to stdout.".to_string()],
                 source: None,
+                metadata: None,
                 replace_range: None,
             },
             CompletionCandidate {
@@ -32,6 +33,7 @@ fn request() -> CompletionMenuFloatRequest {
                 kind: Some("Function".to_string()),
                 documentation: vec!["Prints without a newline.".to_string()],
                 source: None,
+                metadata: None,
                 replace_range: None,
             },
             CompletionCandidate {
@@ -41,6 +43,7 @@ fn request() -> CompletionMenuFloatRequest {
                 kind: Some("Module".to_string()),
                 documentation: vec!["Process control APIs.".to_string()],
                 source: None,
+                metadata: None,
                 replace_range: None,
             },
         ],

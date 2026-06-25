@@ -943,6 +943,7 @@ declare global {
         detail?: string | null;
         documentation?: string[];
         source?: string | null;
+        metadata?: Record<string, unknown> | null;
     }
 
     interface SayaCompletionKeyBindings {

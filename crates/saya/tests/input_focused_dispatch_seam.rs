@@ -86,6 +86,7 @@ fn completion_request() -> CompletionMenuFloatRequest {
                 kind: None,
                 documentation: vec!["first".to_string()],
                 source: None,
+                metadata: None,
                 replace_range: None,
             },
             CompletionCandidate {
@@ -95,6 +96,7 @@ fn completion_request() -> CompletionMenuFloatRequest {
                 kind: None,
                 documentation: vec!["second".to_string()],
                 source: None,
+                metadata: None,
                 replace_range: None,
             },
         ],

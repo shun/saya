@@ -13,7 +13,9 @@ use crate::core::outcome::{
     OutcomeOrigin, PromptInputTransition, PromptResponseDisposition, fold_normalized_outcomes,
 };
 use crate::core::prompt::{PromptResponseCommand, PromptResponseError};
-use crate::features::completion::session::{CompletionPosition, CompletionRange};
+use crate::features::completion::session::{
+    CompletionPosition, CompletionRange, CompletionTextEdit,
+};
 
 use crate::app::test_support::launch_serial_lock as session_test_lock;
 
@@ -1332,6 +1334,56 @@ fn completion_replace_range_moves_insert_cursor_to_replacement_end() {
         snapshot.cursor_col, 4,
         "accepted completion should leave the insert cursor after the inserted text"
     );
+}
+
+#[test]
+fn completion_replace_range_applies_additional_text_edits_before_cursor() {
+    let _lock = session_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut bridge = CoreBridge::new("package main\n\nfunc main() {\n\tlog.Pri\n}\n")
+        .expect("core bridge should initialize");
+    bridge
+        .dispatch_key("GkA")
+        .expect("insert mode at completion line end");
+    bridge
+        .apply_completion_replace_range_with_additional_text_edits(
+            &CompletionRange {
+                start: CompletionPosition {
+                    line: 3,
+                    character: 5,
+                },
+                end: CompletionPosition {
+                    line: 3,
+                    character: 8,
+                },
+            },
+            "Printf",
+            &[CompletionTextEdit {
+                range: CompletionRange {
+                    start: CompletionPosition {
+                        line: 2,
+                        character: 0,
+                    },
+                    end: CompletionPosition {
+                        line: 2,
+                        character: 0,
+                    },
+                },
+                new_text: "import \"log\"\n\n".to_string(),
+            }],
+        )
+        .expect("completion replacement and import edit should apply");
+
+    let snapshot = bridge.snapshot();
+    assert_eq!(
+        snapshot.text,
+        "package main\n\nimport \"log\"\n\nfunc main() {\n\tlog.Printf\n}\n"
+    );
+    assert_eq!(snapshot.mode, CoreMode::Insert);
+    assert_eq!(snapshot.cursor_row, 5);
+    assert_eq!(snapshot.cursor_col, "\tlog.Printf".len());
 }
 
 #[test]
